@@ -1,0 +1,23 @@
+[Unit]
+Description=Proprio AI Agent Orchestrator
+Requires=proprio-db.service
+After=proprio-db.service
+
+[Container]
+Image=proprio-local
+ContainerName=proprio
+Pod=proprio.pod
+Volume=%h/.local/share/proprio:/proprio:Z
+Environment=HOST=0.0.0.0
+Environment=PROPRIO_HOME=/proprio
+Environment=PROPRIO_DEPLOYMENT_MODE=authenticated
+Environment=PROPRIO_DEPLOYMENT_EXPOSURE=private
+Environment=PROPRIO_PUBLIC_URL=http://localhost:3100
+EnvironmentFile=%h/.config/containers/systemd/proprio.env
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

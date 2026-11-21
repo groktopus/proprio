@@ -1,0 +1,14 @@
+{
+  "name": "proprio",
+  "version": "0.1.0",
+  "description": "Review your team, delegate work and retrieve durable results in Proprio.",
+  "author": {
+    "name": "Proprio",
+    "url": "https://paperclip.ing"
+  },
+  "homepage": "https://paperclip.ing",
+  "repository": "https://github.com/groktopus/proprio",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

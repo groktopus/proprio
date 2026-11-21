@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant User
+    participant Proprio
+    participant Vault
+    participant Supabase
+    User->>Proprio: Select Supabase method and agent access
+    alt Hosted MCP browser sign-in
+        Proprio->>Supabase: Read protected resource and issuer metadata
+        Proprio->>Supabase: Register instance OAuth client
+        Proprio->>User: Open authorization URL
+        User->>Supabase: Choose organization and consent
+        Supabase->>Proprio: Instance callback with authorization code
+        Proprio->>Supabase: Exchange code with PKCE
+    else Personal access token
+        User->>Proprio: Enter token and optional or required project reference
+    end
+    Proprio->>Vault: Store selected grant credential
+    Proprio->>Supabase: MCP discovery or native project probe
+    User->>Proprio: Set action permissions
+    Proprio->>Proprio: Authorize agent run and selected grant
+    Proprio->>Vault: Resolve selected invocation credential
+    Proprio->>Supabase: Invoke permitted action
+    Proprio->>Proprio: Record bounded result and audit

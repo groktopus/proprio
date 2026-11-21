@@ -1,0 +1,26 @@
+{
+  "name": "proprio",
+  "version": "0.1.0",
+  "description": "Review your team, delegate work and retrieve durable results in Proprio.",
+  "author": {
+    "name": "Proprio",
+    "url": "https://paperclip.ing"
+  },
+  "homepage": "https://paperclip.ing",
+  "repository": "https://github.com/groktopus/proprio",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Proprio",
+    "shortDescription": "Your persistent team behind your assistant.",
+    "longDescription": "Use your Proprio team as yourself. Review tasks, delegate work to agents, add feedback and retrieve documents. Delegation can start autonomous work using your team's configured execution capacity and budget.",
+    "developerName": "Proprio",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Review my Proprio team and show what needs my attention."
+  }
+}

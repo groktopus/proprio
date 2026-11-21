@@ -1,0 +1,370 @@
+# Docker Quickstart
+
+Run Proprio in Docker without installing Node or pnpm locally.
+
+All commands below assume you are in the **project root** (the directory containing `package.json`), not inside `docker/`.
+
+## Building the image
+
+```sh
+docker build -t proprio-local .
+```
+
+The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
+
+Build arguments:
+
+| Arg | Default | Purpose |
+|-----|---------|---------|
+| `USER_UID` | `1000` | UID for the container `node` user (match your host UID to avoid permission issues on bind mounts) |
+| `USER_GID` | `1000` | GID for the container `node` group |
+| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh the CLI-install layer; CI supplies the current ISO week |
+| `PROPRIO_BUILD_VERSION` | empty | Runtime version when Git metadata is unavailable |
+| `PROPRIO_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
+| `PROPRIO_RUNNER_EXPECT_INPUTS_DIGEST` | empty | Inputs digest of the published Runner image a build was given as `runner-artifacts`; the build fails on any other Runner. Leave it empty for a build that makes its own Runner |
+
+Changing the build version or commit preserves the CLI-install cache. The
+tool layer refreshes when its weekly epoch, base image, installation command,
+or earlier build inputs change. Local builds can set a new epoch explicitly
+to refresh tools without clearing the entire build cache.
+
+```sh
+docker build -t proprio-local \
+  --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
+```
+
+The image starts the server from a runtime bundle, `server/dist-runtime/index.mjs`,
+with plain `node`. The build creates it from the server's `tsc` output with
+`pnpm --filter @groktopus/server build:runtime` (`server/scripts/bundle-runtime.mjs`),
+compiling in the workspace packages that otherwise load as TypeScript source.
+This avoids transpiling them through the tsx loader on every boot. To check a
+build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
+PR CI runs the same check after `pnpm build`.
+
+## Image source
+
+Proprio does not publish or promote images for this bootstrap. Build from this
+checkout, and do not substitute a container image from a different project.
+
+## One-liner (build + run)
+
+```sh
+docker build -t proprio-local . && \
+docker run --name proprio \
+  -p 3100:3100 \
+  -e HOST=0.0.0.0 \
+  -e PROPRIO_HOME=/proprio \
+  -e BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
+  -e PROPRIO_TOOL_ACTION_SIGNING_SECRET=$(openssl rand -hex 32) \
+  -v "$(pwd)/data/docker-proprio:/proprio" \
+  proprio-local
+```
+
+Open: `http://localhost:3100`
+
+Data persistence:
+
+- Embedded PostgreSQL data
+- uploaded assets
+- local secrets key
+- local agent workspace data
+
+All persisted under your bind mount (`./data/docker-proprio` in the example above).
+
+## Docker Compose
+
+### Persistent signing secrets
+
+Before the first launch, generate two independent values with `openssl rand -hex 32`
+and save them in `docker/.env`. Keep any existing deployment's values unchanged:
+
+```dotenv
+BETTER_AUTH_SECRET=<session-signing-secret>
+PROPRIO_TOOL_ACTION_SIGNING_SECRET=<tool-action-signing-secret>
+```
+
+Restrict this file to its owner (`chmod 600 docker/.env`) and keep it out of version
+control. Compose reads it for both commands below. Reuse the values on every
+restart. Rotate the tool-action secret only after outstanding approvals are
+resolved, because pending signatures use the previous value.
+
+### Quickstart (embedded SQLite)
+
+Single container, no external database. Data persists via a bind mount.
+
+```sh
+docker compose -f docker/docker-compose.quickstart.yml up --build
+```
+
+Defaults:
+
+- host port: `3100`
+- persistent data dir: `./data/docker-proprio`
+
+Optional overrides:
+
+```sh
+PROPRIO_PORT=3200 PROPRIO_DATA_DIR=../data/pc \
+  docker compose -f docker/docker-compose.quickstart.yml up --build
+```
+
+**Note:** `PROPRIO_DATA_DIR` is resolved relative to the compose file (`docker/`), so `../data/pc` maps to `data/pc` in the project root.
+
+If you change host port or use a non-local domain, set `PROPRIO_PUBLIC_URL` to the external URL you will use in browser/auth flows.
+
+Pass `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` to enable local adapter runs.
+
+### Full stack (with PostgreSQL)
+
+Proprio server + PostgreSQL 17. The database is health-checked before the server starts.
+
+```sh
+docker compose -f docker/docker-compose.yml up --build
+```
+
+PostgreSQL data persists in a named Docker volume (`pgdata`). Proprio data persists in `proprio-data`.
+
+Both Compose files pass `PROPRIO_TOOL_ACTION_SIGNING_SECRET` to the server.
+When configured, keep it independent from `BETTER_AUTH_SECRET`. When unset,
+the server derives a separate signing key from its persisted secrets master key.
+Keep that key with database backups, and share the signing key or master key
+across processes serving the same instance. Approvals fail closed if valid key
+material cannot be loaded; rotating it can invalidate approvals and retry matching.
+
+### Untrusted PR review
+
+Isolated container for reviewing untrusted pull requests with Codex or Claude, without exposing your host machine. See `doc/UNTRUSTED-PR-REVIEW.md` for the full workflow.
+
+```sh
+docker compose -f docker/docker-compose.untrusted-review.yml build
+docker compose -f docker/docker-compose.untrusted-review.yml run --rm --service-ports review
+```
+
+## Authenticated Compose (Single Public URL)
+
+For authenticated deployments, set one canonical public URL and let Proprio derive auth/callback defaults:
+
+```yaml
+services:
+  proprio:
+    environment:
+      PROPRIO_DEPLOYMENT_MODE: authenticated
+      PROPRIO_DEPLOYMENT_EXPOSURE: private
+      PROPRIO_PUBLIC_URL: https://desk.koker.net
+```
+
+`PROPRIO_PUBLIC_URL` is used as the primary source for:
+
+- auth public base URL
+- Better Auth base URL defaults
+- bootstrap invite URL defaults
+- hostname allowlist defaults (hostname extracted from URL)
+
+For fresh `authenticated/private` Docker or appliance-style installs, the first
+admin can now be claimed entirely from the browser after sign-in. Open the
+Proprio URL, sign in or create an account, then choose `Claim this instance`
+on the setup screen. This browser claim is disabled for `authenticated/public`;
+public deployments should run the high-entropy CLI invite fallback instead:
+
+```sh
+pnpm proprio auth bootstrap-ceo
+```
+
+Granular overrides remain available if needed (`PROPRIO_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `PROPRIO_ALLOWED_HOSTNAMES`).
+
+Set `PROPRIO_ALLOWED_HOSTNAMES` explicitly only when you need additional hostnames beyond the public URL host (for example Tailscale/LAN aliases or multiple private hostnames).
+
+### Optional Vercel Connect credentials
+
+Vercel Connect's backend integration is retained for controlled testing and
+existing Vercel-backed connections, but its new-connection UI is currently
+withheld from **Apps → Browse**. Setting
+`PROPRIO_VERCEL_CONNECT_ENABLED=true` does not expose a customer-facing setup
+entry. Native provider setup screens remain unchanged. Vercel-hosted deployments use the
+workload OIDC token Vercel injects. Other hosted and self-hosted deployments
+can provide `PROPRIO_VERCEL_CONNECT_ACCESS_TOKEN` as a deployment bootstrap
+secret only when that token type is accepted by the live Connect API:
+
+```yaml
+services:
+  proprio:
+    environment:
+      PROPRIO_VERCEL_CONNECT_ENABLED: "true"
+      PROPRIO_VERCEL_CONNECT_ACCESS_TOKEN: ${PROPRIO_VERCEL_CONNECT_ACCESS_TOKEN}
+```
+
+Do not save that access token in a company secret or connection config. It is
+instance bootstrap authority for the operator-selected Vercel account. A token's
+long expiry and broad Vercel scope do not prove Connect compatibility; validate
+it with connector metadata before rollout. Workload OIDC takes precedence when
+both authorities are present. Turning the feature flag off hides new
+Vercel-backed setup; existing connections keep resolving while workload OIDC or
+the bootstrap token remains available. Missing or invalid authority fails
+closed. See the [Vercel Connect operator guide](./connections/VERCEL-CONNECT.md).
+
+## Claude + Codex Local Adapters in Docker
+
+The image pre-installs:
+
+- `claude` (Anthropic Claude Code CLI)
+- `codex` (OpenAI Codex CLI)
+- `python3` (used to run local subscription sign-in in a pseudo-terminal)
+
+Start the container, then open **Apps → Connections** to connect a Claude or
+Codex subscription in your browser. You can also enter a provider API key there.
+You do not run a shell command or configure a CLI home.
+
+```sh
+docker run --name proprio \
+  -p 3100:3100 \
+  -e HOST=0.0.0.0 \
+  -e PROPRIO_HOME=/proprio \
+  -v "$(pwd)/data/docker-proprio:/proprio" \
+  proprio-local
+```
+
+Notes:
+
+- The image provides the CLI and Python prerequisites for local subscription sign-in.
+- Adapter environment checks in Proprio surface missing authentication or CLI prerequisites.
+
+## Podman Quadlet (systemd)
+
+The `docker/quadlet/` directory contains unit files to run Proprio + PostgreSQL as systemd services via Podman Quadlet.
+
+| File | Purpose |
+|------|---------|
+| `docker/quadlet/proprio.pod` | Pod definition — groups containers into a shared network namespace |
+| `docker/quadlet/proprio.container` | Proprio server — joins the pod, connects to Postgres at `127.0.0.1` |
+| `docker/quadlet/proprio-db.container` | PostgreSQL 17 — joins the pod, health-checked |
+
+### Setup
+
+1. Build the image (see above).
+
+2. Copy quadlet files to your systemd directory:
+
+   ```sh
+   # Rootless (recommended)
+   cp docker/quadlet/*.pod docker/quadlet/*.container \
+     ~/.config/containers/systemd/
+
+   # Or rootful
+   sudo cp docker/quadlet/*.pod docker/quadlet/*.container \
+     /etc/containers/systemd/
+   ```
+
+3. Create a secrets env file (keep out of version control):
+
+   ```sh
+   cat > ~/.config/containers/systemd/proprio.env <<EOL
+   BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+   PROPRIO_TOOL_ACTION_SIGNING_SECRET=$(openssl rand -hex 32)
+   POSTGRES_USER=proprio
+   POSTGRES_PASSWORD=proprio
+   POSTGRES_DB=proprio
+   DATABASE_URL=postgres://proprio:proprio@127.0.0.1:5432/proprio
+   # OPENAI_API_KEY=sk-...
+   # ANTHROPIC_API_KEY=sk-...
+   EOL
+   ```
+
+4. Create the data directory and start:
+
+   ```sh
+   mkdir -p ~/.local/share/proprio
+   systemctl --user daemon-reload
+   systemctl --user start proprio-pod
+   ```
+
+### Quadlet management
+
+```sh
+journalctl --user -u proprio -f        # App logs
+journalctl --user -u proprio-db -f     # DB logs
+systemctl --user status proprio-pod    # Pod status
+systemctl --user restart proprio-pod   # Restart all
+systemctl --user stop proprio-pod      # Stop all
+```
+
+### Quadlet notes
+
+- **First boot**: Unlike Docker Compose's `condition: service_healthy`, Quadlet's `After=` only waits for the DB unit to *start*, not for PostgreSQL to be ready. On a cold first boot you may see one or two restart attempts in `journalctl --user -u proprio` while PostgreSQL initialises — this is expected and resolves automatically via `Restart=on-failure`.
+- Containers in a pod share `localhost`, so Proprio reaches Postgres at `127.0.0.1:5432`.
+- PostgreSQL data persists in the `proprio-pgdata` named volume.
+- Proprio data persists at `~/.local/share/proprio`.
+- For rootful quadlet deployment, remove `%h` prefixes and use absolute paths.
+
+## Onboard Smoke Test (Ubuntu + npm only)
+
+Use this when you want to mimic a fresh machine that only has Ubuntu + npm and verify:
+
+- `pnpm proprio onboard --yes` completes
+- the server binds to `0.0.0.0:3100` so host access works
+- onboard/run banners and startup logs are visible in your terminal
+
+Build + run:
+
+```sh
+./scripts/docker-onboard-smoke.sh
+```
+
+Open: `http://localhost:3131` (default smoke host port)
+
+Useful overrides:
+
+```sh
+HOST_PORT=3200 PROPRIO_VERSION=latest ./scripts/docker-onboard-smoke.sh
+PROPRIO_DEPLOYMENT_MODE=authenticated PROPRIO_DEPLOYMENT_EXPOSURE=private ./scripts/docker-onboard-smoke.sh
+SMOKE_DETACH=true SMOKE_METADATA_FILE=/tmp/proprio-smoke.env PROPRIO_VERSION=latest ./scripts/docker-onboard-smoke.sh
+```
+
+Notes:
+
+- Persistent data is mounted at `./data/docker-onboard-smoke` by default.
+- Container runtime user id defaults to your local `id -u` so the mounted data dir stays writable while avoiding root runtime.
+- Smoke script defaults to `authenticated/private` mode so `HOST=0.0.0.0` can be exposed to the host.
+- Smoke script defaults host port to `3131` to avoid conflicts with local Proprio on `3100`.
+- Smoke script also defaults `PROPRIO_PUBLIC_URL` to `http://localhost:<HOST_PORT>` so bootstrap invite URLs and auth callbacks use the reachable host port instead of the container's internal `3100`.
+- In authenticated mode, the smoke script defaults `SMOKE_AUTO_BOOTSTRAP=true` and drives the real bootstrap path automatically: it signs up a real user, runs `proprio auth bootstrap-ceo` inside the container to mint a real bootstrap invite, accepts that invite over HTTP, and verifies board session access.
+- Run the script in the foreground to watch the onboarding flow; stop with `Ctrl+C` after validation.
+- Set `SMOKE_DETACH=true` to leave the container running for automation and optionally write shell-ready metadata to `SMOKE_METADATA_FILE`.
+- Set `SMOKE_CONTAINER_NAME` to fix the container's name up front. Automation that has to collect diagnostics when the script *fails* needs a name it already knows, rather than one it can only read back out of a successful run. Defaults to the image name.
+- The container's logs are dumped to `SMOKE_LOG_FILE` (default `$TMPDIR/<container name>.log`) before the script tears the container down, so a run that never became ready still leaves its logs behind.
+- The image definition is in `docker/Dockerfile.onboard-smoke`.
+
+## General Notes
+
+- The `docker-entrypoint.sh` adjusts the container `node` user UID/GID at startup to match the values passed via `USER_UID`/`USER_GID`, avoiding permission issues on bind-mounted volumes.
+- Before it drops privileges, the entrypoint makes sure `PROPRIO_HOME` is owned by the `node` user. Each boot checks only the home directory and its first three levels. The first boot (and any boot after a UID/GID change) also checks the full tree, and then writes `PROPRIO_HOME/.proprio-ownership-verified`. While that marker is current, later boots skip the full-tree walk, which can take minutes on homes with many files. A mismatch triggers a recursive `chown`. If files deep in the tree get the wrong owner (for example, after a restore as root), delete the marker and restart to force a full check. If a check fails (for example, with an I/O error), the entrypoint does not write the marker, so the next boot checks again.
+- The entrypoint writes timestamped lines when it starts, around the full ownership check or any repair (with the duration), and just before it starts the server, so you can measure the pre-start time from the container log.
+- Proprio data persists via Docker volumes/bind mounts (compose) or at `~/.local/share/proprio` (quadlet).
+
+## Native Runner build cache
+
+The image compiles the native Runner once, in the `runner-artifacts-runnerd`
+stage, with the package-owned Rust compiler, the release profile and locked
+Cargo dependencies. That stage reads only the files Cargo reads.
+
+Ordinary server, UI or Runner TypeScript changes can reuse the entire native
+build through the existing registry cache (`mode=max`). A change to Rust
+source, embedded protocol inputs, a dependency manifest, the Cargo lockfile or
+the compiler compiles the daemon and its dependencies again. Each platform
+gets its own native build; no cross-architecture binary is reused. No
+additional GitHub Actions cache is created.
+
+The `runner-artifacts-build` stage takes the build commit as an argument, so
+every stamped build runs it: the frozen install, the Runner's TypeScript
+build and the provider pack. Cargo finds the compiled daemon current there.
+
+Cloud builds import one registry cache: the first available full-SHA cache in
+the current commit's ten-entry first-parent ancestry, with the legacy cache
+as a final fallback. Each build still exports its own SHA cache with
+`mode=max`. In fresh-builder checks, importing several historical manifests
+missed native layers that a single matching manifest reused. The selector
+inspects metadata after Docker login, stops at the first available cache, and
+permits a cold build if no cache can be read.
+
+Rust input file times are normalized in both stages so fresh checkouts do not
+force Cargo to rebuild unchanged source. The application build runs no Cargo
+command. Cache misses only cost compilation time.

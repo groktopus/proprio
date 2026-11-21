@@ -1,0 +1,104 @@
+import path from "node:path";
+import { defineConfig } from "@playwright/test";
+import {
+  runnerE2EWebServerCommand,
+  runnerE2EWebServerGracefulShutdown,
+} from "./web-server-command.js";
+
+function required(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+const port = Number(required("PROPRIO_RUNNER_E2E_PORT"));
+const temporaryRoot = required("PROPRIO_RUNNER_E2E_TEMP_ROOT");
+const privateDir = required("PROPRIO_RUNNER_E2E_PRIVATE_DIR");
+const proprioHome = required("PROPRIO_HOME");
+const configPath = required("PROPRIO_CONFIG");
+const baseURL = `http://127.0.0.1:${port}`;
+const playwrightChannel = process.env.PROPRIO_PLAYWRIGHT_CHANNEL?.trim();
+const chromiumExecutable =
+  process.env.PROPRIO_RUNNER_E2E_CHROMIUM_EXECUTABLE?.trim();
+if (playwrightChannel && chromiumExecutable) {
+  throw new Error(
+    "PROPRIO_PLAYWRIGHT_CHANNEL and PROPRIO_RUNNER_E2E_CHROMIUM_EXECUTABLE are mutually exclusive",
+  );
+}
+if (chromiumExecutable && !path.isAbsolute(chromiumExecutable)) {
+  throw new Error(
+    "PROPRIO_RUNNER_E2E_CHROMIUM_EXECUTABLE must be an absolute path",
+  );
+}
+required("PROPRIO_INSTANCE_ID");
+required("PROPRIO_AGENT_JWT_SECRET");
+required("PROPRIO_DECISION_SIGNING_SECRET");
+required("PROPRIO_TOOL_ACTION_SIGNING_SECRET");
+required("BETTER_AUTH_SECRET");
+if (
+  !proprioHome.startsWith(`${temporaryRoot}${path.sep}`) ||
+  !configPath.startsWith(`${temporaryRoot}${path.sep}`)
+) {
+  throw new Error("Proprio server paths escape the isolated temporary root");
+}
+const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+
+export default defineConfig({
+  testDir: ".",
+  testMatch: process.env.PROPRIO_RUNNER_E2E_INSTALLED_STARTUP_ONLY === "1" ? "installed-startup.spec.ts" : "runner.spec.ts",
+  timeout: Number(process.env.PROPRIO_RUNNER_E2E_TEST_TIMEOUT_MS ?? 600_000),
+  expect: { timeout: 30_000 },
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  use: {
+    baseURL,
+    browserName: "chromium",
+    ...(playwrightChannel ? { channel: playwrightChannel } : {}),
+    ...(chromiumExecutable
+      ? { launchOptions: { executablePath: chromiumExecutable } }
+      : {}),
+    headless: true,
+    actionTimeout: 30_000,
+    navigationTimeout: 30_000,
+    screenshot: process.env.PROPRIO_RUNNER_E2E_PUBLIC_MCP === "1" ? "off" : "only-on-failure",
+    // Keep DOM snapshots and network, but not the trace's own screencast: a
+    // long chat attempt with a live run indicator streamed thousands of JPEG
+    // frames (incompressible), pushing failure evidence past the 256 MB private
+    // allowance so no evidence survived. The retained failure video still
+    // records the visual timeline.
+    trace: process.env.PROPRIO_RUNNER_E2E_PUBLIC_MCP === "1" ? "off" : { mode: "retain-on-failure", screenshots: false },
+    // A developer-supplied system Chromium keeps the local smoke loop
+    // installation-free; CI's managed browser retains failure video as usual.
+    video: chromiumExecutable || process.env.PROPRIO_RUNNER_E2E_PUBLIC_MCP === "1" ? "off" : "retain-on-failure",
+  },
+  webServer: {
+    // Do not put an env object here: Playwright serializes webServer config in
+    // blob reports. The wrapper inherits the test process and strips provider
+    // keys before spawning the real Proprio process.
+    command: runnerE2EWebServerCommand(repositoryRoot),
+    gracefulShutdown: { ...runnerE2EWebServerGracefulShutdown,
+      ...(JSON.parse(process.env.PROPRIO_RUNNER_E2E_EXECUTION_IDS ?? "[]").some((id: string) => id.startsWith("rolling-web-deployment.")) ? { timeout: 105_000 } : {}),
+    },
+    url: `${baseURL}/api/health`,
+    reuseExistingServer: false,
+    // Fresh databases apply the complete migration history before health is ready.
+    timeout: 300_000,
+    stdout: "pipe",
+    stderr: "pipe",
+  },
+  outputDir: path.join(privateDir, "playwright-output"),
+  reporter: process.env.PROPRIO_RUNNER_E2E_PRIVATE_PREFLIGHT && process.env.PROPRIO_CHAT_COMPLETION_TESTOPS === "v1" ? [
+    ["list"],
+    ["json", { outputFile: path.join(privateDir, "framework-report.json") }],
+    ["junit", { outputFile: path.join(privateDir, "junit.xml") }],
+  ] : [
+    ["list"],
+    ["blob", { outputDir: path.join(privateDir, "blob-report") }],
+    ["junit", { outputFile: path.join(privateDir, "junit.xml") }],
+    [
+      "html",
+      { open: "never", outputFolder: path.join(privateDir, "html-report") },
+    ],
+  ],
+});

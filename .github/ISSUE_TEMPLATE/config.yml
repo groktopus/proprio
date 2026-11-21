@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Stability and scope
+    url: https://github.com/groktopus/proprio/blob/main/STABILITY.md
+    about: Check the cleanup sprint scope before proposing work

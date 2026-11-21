@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "proprio",
+  "version": "0.1.0",
+  "description": "Review your team, delegate work and retrieve durable results in Proprio.",
+  "author": {
+    "name": "Proprio",
+    "url": "https://github.com/groktopus/proprio"
+  },
+  "homepage": "https://github.com/groktopus/proprio",
+  "repository": "https://github.com/groktopus/proprio",
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Proprio",
+        "shortDescription": "Your persistent team behind your assistant.",
+        "longDescription": "Use your Proprio team as yourself. Review tasks, delegate work to agents, add feedback and retrieve documents. Delegation can start autonomous work using your team's configured execution capacity and budget.",
+        "developerName": "Proprio",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": "Review my Proprio team and show what needs my attention."
+      }
+    }
+  }
+}

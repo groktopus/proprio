@@ -1,0 +1,426 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  collectInternalDependencyProblems,
+  createManifestLookupKey,
+  fetchRegistryJson,
+  isCanaryVersion,
+  isPrereleaseVersion,
+  verifyPackageRegistryProblems,
+  verifyPackageRegistryState,
+  compareCanaryVersions,
+} from "./verify-release-registry-state.mjs";
+
+test("isCanaryVersion matches release canaries", () => {
+  assert.equal(isCanaryVersion("2026.427.0-canary.3"), true);
+  assert.equal(isCanaryVersion("2026.427.0"), false);
+});
+
+test("isPrereleaseVersion matches canary and nightly versions", () => {
+  assert.equal(isPrereleaseVersion("2026.427.0-canary.3"), true);
+  assert.equal(isPrereleaseVersion("2026.427.0-nightly.0"), true);
+  assert.equal(isPrereleaseVersion("2026.427.0-beta.2"), true);
+  assert.equal(isPrereleaseVersion("2026.427.0"), false);
+});
+
+test("collectInternalDependencyProblems flags missing internal versions", () => {
+  const manifest = {
+    dependencies: {
+      "@groktopus/plugin-sdk": "2026.425.0-canary.5",
+      e2b: "^2.19.0",
+    },
+  };
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-sdk",
+      {
+        versions: {
+          "2026.427.0-canary.3": {},
+        },
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    collectInternalDependencyProblems(manifest, packageDocsByName),
+    ["dependencies requires @groktopus/plugin-sdk@2026.425.0-canary.5, but npm does not expose that version"],
+  );
+});
+
+test("collectInternalDependencyProblems accepts version-specific manifests when the root document is stale", () => {
+  const manifest = {
+    dependencies: {
+      "@groktopus/plugin-sdk": "2026.425.0-canary.5",
+    },
+  };
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-sdk",
+      {
+        versions: {},
+      },
+    ],
+  ]);
+  const packageManifestsByKey = new Map([
+    [
+      createManifestLookupKey("@groktopus/plugin-sdk", "2026.425.0-canary.5"),
+      { name: "@groktopus/plugin-sdk", version: "2026.425.0-canary.5" },
+    ],
+  ]);
+
+  assert.deepEqual(
+    collectInternalDependencyProblems(manifest, packageDocsByName, packageManifestsByKey),
+    [],
+  );
+});
+
+test("collectInternalDependencyProblems ignores peer dependency range specifiers", () => {
+  const manifest = {
+    peerDependencies: {
+      "@groktopus/server": "^2026.430.0-canary.0",
+    },
+  };
+
+  assert.deepEqual(
+    collectInternalDependencyProblems(manifest, new Map()),
+    [],
+  );
+});
+
+test("collectInternalDependencyProblems reports unfetched transitive dependency metadata neutrally", () => {
+  const manifest = {
+    optionalDependencies: {
+      "@groktopus/browser": "2026.430.0-canary.0",
+    },
+  };
+
+  assert.deepEqual(
+    collectInternalDependencyProblems(manifest, new Map()),
+    [
+      "optionalDependencies requires @groktopus/browser@2026.430.0-canary.0, but npm publication metadata was not fetched for that dependency",
+    ],
+  );
+});
+
+test("verifyPackageRegistryState tolerates a stale root versions map when dist-tags and direct manifests are correct", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/ui",
+      {
+        "dist-tags": {
+          canary: "2026.430.0-canary.0",
+          latest: "2026.430.0",
+        },
+        versions: {},
+      },
+    ],
+    [
+      "@groktopus/shared",
+      {
+        versions: {},
+      },
+    ],
+  ]);
+  const packageManifestsByKey = new Map([
+    [
+      createManifestLookupKey("@groktopus/ui", "2026.430.0-canary.0"),
+      {
+        name: "@groktopus/ui",
+        version: "2026.430.0-canary.0",
+        dependencies: {
+          "@groktopus/shared": "2026.430.0-canary.0",
+        },
+      },
+    ],
+    [
+      createManifestLookupKey("@groktopus/shared", "2026.430.0-canary.0"),
+      {
+        name: "@groktopus/shared",
+        version: "2026.430.0-canary.0",
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    verifyPackageRegistryState({
+      packageName: "@groktopus/ui",
+      packageDoc: packageDocsByName.get("@groktopus/ui"),
+      packageDocsByName,
+      packageManifestsByKey,
+      channel: "canary",
+      distTag: "canary",
+      targetVersion: "2026.430.0-canary.0",
+      allowCanaryLatest: false,
+    }),
+    [],
+  );
+});
+
+test("verifyPackageRegistryState fails when canary latest is left in place by default", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-e2b",
+      {
+        "dist-tags": {
+          latest: "2026.425.0-canary.5",
+          canary: "2026.427.0-canary.3",
+        },
+        versions: {
+          "2026.425.0-canary.5": {
+            dependencies: {
+              "@groktopus/plugin-sdk": "2026.425.0-canary.5",
+            },
+          },
+          "2026.427.0-canary.3": {
+            dependencies: {
+              "@groktopus/plugin-sdk": "2026.427.0-canary.3",
+            },
+          },
+        },
+      },
+    ],
+    [
+      "@groktopus/plugin-sdk",
+      {
+        versions: {
+          "2026.427.0-canary.3": {},
+        },
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    verifyPackageRegistryState({
+      packageName: "@groktopus/plugin-e2b",
+      packageDoc: packageDocsByName.get("@groktopus/plugin-e2b"),
+      packageDocsByName,
+      channel: "canary",
+      distTag: "canary",
+      targetVersion: "2026.427.0-canary.3",
+      allowCanaryLatest: false,
+    }),
+    [
+      "@groktopus/plugin-e2b: latest dist-tag still resolves to prerelease 2026.425.0-canary.5; if that state is intentional, rerun the verification script directly with --allow-canary-latest",
+      "@groktopus/plugin-e2b@2026.425.0-canary.5 via latest: dependencies requires @groktopus/plugin-sdk@2026.425.0-canary.5, but npm does not expose that version",
+    ],
+  );
+});
+
+test("verifyPackageRegistryProblems marks canary latest drift as non-retriable", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-e2b",
+      {
+        "dist-tags": {
+          latest: "2026.425.0-canary.5",
+          canary: "2026.427.0-canary.3",
+        },
+        versions: {
+          "2026.427.0-canary.3": {},
+        },
+      },
+    ],
+  ]);
+
+  const problems = verifyPackageRegistryProblems({
+    packageName: "@groktopus/plugin-e2b",
+    packageDoc: packageDocsByName.get("@groktopus/plugin-e2b"),
+    packageDocsByName,
+    channel: "canary",
+    distTag: "canary",
+    targetVersion: "2026.427.0-canary.3",
+    allowCanaryLatest: false,
+  });
+
+  assert.equal(problems[0]?.retriable, false);
+  assert.match(problems[0]?.message ?? "", /latest dist-tag still resolves to prerelease/);
+});
+
+test("verifyPackageRegistryProblems accepts the nightly channel and flags nightly latest drift", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-e2b",
+      {
+        "dist-tags": {
+          latest: "2026.425.0-nightly.1",
+          nightly: "2026.427.0-nightly.0",
+        },
+        versions: {
+          "2026.427.0-nightly.0": {},
+        },
+      },
+    ],
+  ]);
+
+  const problems = verifyPackageRegistryProblems({
+    packageName: "@groktopus/plugin-e2b",
+    packageDoc: packageDocsByName.get("@groktopus/plugin-e2b"),
+    packageDocsByName,
+    channel: "nightly",
+    distTag: "nightly",
+    targetVersion: "2026.427.0-nightly.0",
+    allowCanaryLatest: false,
+  });
+
+  assert.equal(problems[0]?.retriable, false);
+  assert.match(problems[0]?.message ?? "", /latest dist-tag still resolves to prerelease 2026\.425\.0-nightly\.1/);
+});
+
+test("verifyPackageRegistryState allows intentional canary latest but still checks dependencies", () => {
+  const packageDocsByName = new Map([
+    [
+      "proprio",
+      {
+        "dist-tags": {
+          latest: "2026.427.0-canary.3",
+          canary: "2026.427.0-canary.3",
+        },
+        versions: {
+          "2026.427.0-canary.3": {
+            dependencies: {
+              "@groktopus/server": "2026.427.0-canary.3",
+            },
+          },
+        },
+      },
+    ],
+    [
+      "@groktopus/server",
+      {
+        versions: {
+          "2026.427.0-canary.3": {},
+        },
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    verifyPackageRegistryState({
+      packageName: "proprio",
+      packageDoc: packageDocsByName.get("proprio"),
+      packageDocsByName,
+      channel: "canary",
+      distTag: "canary",
+      targetVersion: "2026.427.0-canary.3",
+      allowCanaryLatest: true,
+    }),
+    [],
+  );
+});
+
+test("verifyPackageRegistryState still fails when the dist-tag is stale", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/ui",
+      {
+        "dist-tags": {
+          canary: "2026.429.0-canary.2",
+        },
+        versions: {},
+      },
+    ],
+  ]);
+  const packageManifestsByKey = new Map([
+    [
+      createManifestLookupKey("@groktopus/ui", "2026.430.0-canary.0"),
+      {
+        name: "@groktopus/ui",
+        version: "2026.430.0-canary.0",
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    verifyPackageRegistryState({
+      packageName: "@groktopus/ui",
+      packageDoc: packageDocsByName.get("@groktopus/ui"),
+      packageDocsByName,
+      packageManifestsByKey,
+      channel: "canary",
+      distTag: "canary",
+      targetVersion: "2026.430.0-canary.0",
+      allowCanaryLatest: false,
+    }),
+    ["@groktopus/ui: dist-tag canary resolves to 2026.429.0-canary.2, expected 2026.430.0-canary.0"],
+  );
+});
+
+test("verifyPackageRegistryState ignores internal peer dependency ranges", () => {
+  const packageDocsByName = new Map([
+    [
+      "@groktopus/plugin-sdk",
+      {
+        "dist-tags": {
+          canary: "2026.430.0-canary.0",
+        },
+        versions: {
+          "2026.430.0-canary.0": {
+            peerDependencies: {
+              "@groktopus/server": "^2026.430.0-canary.0",
+            },
+          },
+        },
+      },
+    ],
+  ]);
+
+  assert.deepEqual(
+    verifyPackageRegistryState({
+      packageName: "@groktopus/plugin-sdk",
+      packageDoc: packageDocsByName.get("@groktopus/plugin-sdk"),
+      packageDocsByName,
+      channel: "canary",
+      distTag: "canary",
+      targetVersion: "2026.430.0-canary.0",
+      allowCanaryLatest: false,
+    }),
+    [],
+  );
+});
+
+test("fetchRegistryJson times out hung requests", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (_url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => reject(new DOMException("The operation was aborted.", "AbortError")),
+        { once: true },
+      );
+    });
+
+  try {
+    await assert.rejects(
+      fetchRegistryJson(new URL("https://registry.npmjs.org/@proprio%2Fui"), { timeoutMs: 1 }),
+      /timed out/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a finalizing canary accepts a dist-tag that a newer canary already moved, and nothing older or foreign", () => {
+  const check = (canaryTag, allowNewerCanary, channel = "canary") => {
+    const packageDoc = { "dist-tags": { latest: "2026.1110.0", canary: canaryTag }, versions: { "2026.1116.0-canary.21800": {} } };
+    return verifyPackageRegistryProblems({
+      packageName: "@groktopus/shared", packageDoc, packageDocsByName: new Map([["@groktopus/shared", packageDoc]]),
+      channel, distTag: "canary", targetVersion: "2026.1116.0-canary.21800", allowCanaryLatest: false, allowNewerCanary,
+    }).map((problem) => problem.message);
+  };
+  assert.deepEqual(check("2026.1116.0-canary.21800", true), []);
+  assert.deepEqual(check("2026.1116.0-canary.21805", true), []);
+  assert.deepEqual(check("2026.1117.0-canary.21803", true), []);
+  assert.match(check("2026.1116.0-canary.21805", false)[0], /resolves to 2026\.1116\.0-canary\.21805, expected/);
+  assert.match(check("2026.1116.0-canary.21799", true)[0], /resolves to 2026\.1116\.0-canary\.21799, expected/);
+  assert.match(check("2026.1116.0-nightly.3", true)[0], /resolves to 2026\.1116\.0-nightly\.3, expected/);
+  assert.match(check(undefined, true)[0], /resolves to <missing>/);
+});
+
+test("canary versions compare by base version, then canary number", () => {
+  assert.equal(compareCanaryVersions("2026.1116.0-canary.9", "2026.1116.0-canary.21800"), -1);
+  assert.equal(compareCanaryVersions("2026.1117.0-canary.1", "2026.1116.0-canary.21800"), 1);
+  assert.equal(compareCanaryVersions("2026.1116.0-canary.7", "2026.1116.0-canary.7"), 0);
+  assert.equal(compareCanaryVersions("2026.1116.0-nightly.7", "2026.1116.0-canary.7"), null);
+});

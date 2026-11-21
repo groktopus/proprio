@@ -1,0 +1,55 @@
+{
+  "schema": "proprio.native-completion-terminal-carrier.fixture.v1",
+  "cases": [
+    {
+      "name": "proprio_finish",
+      "providerInput": {
+        "item": {
+          "id": "terminal-call",
+          "type": "tool_call",
+          "name": "proprio_finish",
+          "status": "inProgress",
+          "arguments": {
+            "secret": "not-for-the-log"
+          }
+        }
+      },
+      "normalizedPayload": {
+        "provider": "codex",
+        "itemId": "terminal-call",
+        "kind": "tool_call",
+        "status": "running",
+        "channel": "detail",
+        "text": null,
+        "item": {
+          "name": "proprio_finish"
+        }
+      }
+    },
+    {
+      "name": "proprio_block",
+      "providerInput": {
+        "item": {
+          "id": "terminal-call",
+          "type": "tool_call",
+          "name": "proprio_block",
+          "status": "inProgress",
+          "arguments": {
+            "secret": "not-for-the-log"
+          }
+        }
+      },
+      "normalizedPayload": {
+        "provider": "codex",
+        "itemId": "terminal-call",
+        "kind": "tool_call",
+        "status": "running",
+        "channel": "detail",
+        "text": null,
+        "item": {
+          "name": "proprio_block"
+        }
+      }
+    }
+  ]
+}

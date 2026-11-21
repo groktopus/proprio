@@ -1,0 +1,80 @@
+import { describe, it, expect } from "vitest";
+import { buildCiliumNetworkPolicyManifest as buildRawCiliumNetworkPolicyManifest, type BuildCiliumNetworkPolicyInput } from "../../src/cilium-network-policy.js";
+import type { CiliumNetworkPolicyView } from "./manifest-views.js";
+
+const buildCiliumNetworkPolicyManifest = (input: BuildCiliumNetworkPolicyInput) =>
+  buildRawCiliumNetworkPolicyManifest(input) as unknown as CiliumNetworkPolicyView;
+
+describe("buildCiliumNetworkPolicyManifest", () => {
+  const baseInput = {
+    namespace: "proprio-acme",
+    proprioServerNamespace: "proprio",
+    egressAllowFqdns: ["api.anthropic.com"],
+    egressAllowCidrs: [] as string[],
+  };
+
+  it("returns a CiliumNetworkPolicy with the correct apiVersion and kind", () => {
+    const cnp = buildCiliumNetworkPolicyManifest(baseInput);
+    expect(cnp.apiVersion).toBe("cilium.io/v2");
+    expect(cnp.kind).toBe("CiliumNetworkPolicy");
+  });
+
+  it("targets agent pods by role label", () => {
+    const cnp = buildCiliumNetworkPolicyManifest(baseInput);
+    expect(cnp.spec.endpointSelector.matchLabels["proprio.io/role"]).toBe("agent");
+  });
+
+  it("includes an FQDN allow rule for each adapter FQDN", () => {
+    const cnp = buildCiliumNetworkPolicyManifest({
+      ...baseInput,
+      egressAllowFqdns: ["api.anthropic.com", "api.openai.com"],
+    });
+    const fqdnRule = cnp.spec.egress.find((e: { toFQDNs?: { matchName: string }[] }) => e.toFQDNs);
+    expect(fqdnRule).toBeDefined();
+    expect(fqdnRule!.toFQDNs!.map((f: { matchName: string }) => f.matchName).sort()).toEqual([
+      "api.anthropic.com",
+      "api.openai.com",
+    ]);
+  });
+
+  it("permits DNS to kube-dns explicitly so FQDN resolution can happen", () => {
+    const cnp = buildCiliumNetworkPolicyManifest(baseInput);
+    const dnsRule = cnp.spec.egress.find((e: { toPorts?: { ports: { port: string }[] }[] }) =>
+      e.toPorts?.some((tp) => tp.ports.some((p) => p.port === "53")),
+    );
+    expect(dnsRule).toBeDefined();
+  });
+
+  it("includes a rule for proprio-server callback", () => {
+    const cnp = buildCiliumNetworkPolicyManifest(baseInput);
+    const cb = cnp.spec.egress.find((e: { toEndpoints?: { matchLabels: Record<string, string> }[] }) =>
+      e.toEndpoints?.some((ep) => ep.matchLabels.app === "proprio-server"),
+    );
+    expect(cb).toBeDefined();
+  });
+
+  it("includes user-supplied CIDRs in toCIDRSet rule", () => {
+    const cnp = buildCiliumNetworkPolicyManifest({
+      ...baseInput,
+      egressAllowCidrs: ["10.0.0.0/8"],
+    });
+    const cidrRule = cnp.spec.egress.find((e: { toCIDRSet?: { cidr: string }[] }) => e.toCIDRSet);
+    expect(cidrRule?.toCIDRSet?.[0]?.cidr).toBe("10.0.0.0/8");
+  });
+
+  it("targets only the granted run when building a scoped policy", () => {
+    const cnp = buildCiliumNetworkPolicyManifest({
+      ...baseInput,
+      name: "pc-run-egress",
+      endpointSelector: { "proprio.io/run-id": "run-123" },
+      includeBaseRules: false,
+      ownerReferences: [{ apiVersion: "batch/v1", kind: "Job", name: "pc-run", uid: "uid-1" }],
+      egressAllowFqdns: ["github.com", "pypi.org"],
+    });
+
+    expect(cnp.metadata.name).toBe("pc-run-egress");
+    expect(cnp.metadata.ownerReferences).toHaveLength(1);
+    expect(cnp.spec.endpointSelector.matchLabels).toEqual({ "proprio.io/run-id": "run-123" });
+    expect(cnp.spec.egress).toHaveLength(1);
+  });
+});

@@ -1,0 +1,383 @@
+{
+  "schemaVersion": 1,
+  "rows": [
+    {
+      "id": "mcp:proprioMe",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioMe",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L290:propriome",
+      "primaryDisposition": "control_plane_owned",
+      "semanticOperation": "injected_actor_context",
+      "expectedMockState": "runtime_decision_record"
+    },
+    {
+      "id": "mcp:proprioInboxLite",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioInboxLite",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L296:proprioinboxlite",
+      "primaryDisposition": "control_plane_owned",
+      "semanticOperation": "runner_work_selection",
+      "expectedMockState": "runtime_decision_record"
+    },
+    {
+      "id": "mcp:proprioListAgents",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListAgents",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L302:propriolistagents",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "list_agents",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListSkills",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListSkills",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L308:propriolistskills",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "list_company_skills",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetAgent",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetAgent",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L314:propriogetagent",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_agent",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListIssues",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListIssues",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L323:propriolistissues",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "search_tasks",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetIssue",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetIssue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L338:propriogetissue",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "get_task_context",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetHeartbeatContext",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetHeartbeatContext",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L344:propriogetheartbeatcontext",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "get_task_context",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListComments",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListComments",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L353:propriolistcomments",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "get_task_history",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetComment",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetComment",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L366:propriogetcomment",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "get_task_history",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListIssueApprovals",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListIssueApprovals",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L373:propriolistissueapprovals",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "get_task_context",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListDocuments",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListDocuments",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L379:propriolistdocuments",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "list_documents",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetDocument",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetDocument",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L385:propriogetdocument",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "read_document",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListDocumentRevisions",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListDocumentRevisions",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L392:propriolistdocumentrevisions",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "list_document_revisions",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListProjects",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListProjects",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L402:propriolistprojects",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "list_projects",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetProject",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetProject",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L408:propriogetproject",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_project",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetIssueWorkspaceRuntime",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetIssueWorkspaceRuntime",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L417:propriogetissueworkspaceruntime",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_workspace_runtime",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioControlIssueWorkspaceServices",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioControlIssueWorkspaceServices",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L423:propriocontrolissueworkspaceservices",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "control_workspace_service",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioWaitForIssueWorkspaceService",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioWaitForIssueWorkspaceService",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L440:propriowaitforissueworkspaceservice",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "wait_for_workspace_service",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListGoals",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListGoals",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L466:propriolistgoals",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "list_goals",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetGoal",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetGoal",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L472:propriogetgoal",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_goal",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListApprovals",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListApprovals",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L478:propriolistapprovals",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "list_approvals",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioCreateApproval",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioCreateApproval",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L487:propriocreateapproval",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "request_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetApproval",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetApproval",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L496:propriogetapproval",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioGetApprovalIssues",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioGetApprovalIssues",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L502:propriogetapprovalissues",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_approval_context",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioListApprovalComments",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioListApprovalComments",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L508:propriolistapprovalcomments",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "get_approval_context",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioCreateIssue",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioCreateIssue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L514:propriocreateissue",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "create_task",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioUpdateIssue",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioUpdateIssue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L521:proprioupdateissue",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "semantic_task_disposition",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioCheckoutIssue",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioCheckoutIssue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L528:propriocheckoutissue",
+      "primaryDisposition": "control_plane_owned",
+      "semanticOperation": "atomic_checkout",
+      "expectedMockState": "runtime_decision_record"
+    },
+    {
+      "id": "mcp:proprioReleaseIssue",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioReleaseIssue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L540:proprioreleaseissue",
+      "primaryDisposition": "control_plane_owned",
+      "semanticOperation": "runtime_release",
+      "expectedMockState": "runtime_decision_record"
+    },
+    {
+      "id": "mcp:proprioAddComment",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioAddComment",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L546:proprioaddcomment",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "report_progress",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioSuggestTasks",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioSuggestTasks",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L553:propriosuggesttasks",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "request_human_input",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioAskUserQuestions",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioAskUserQuestions",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L565:proprioaskuserquestions",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "request_human_input",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioRequestConfirmation",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioRequestConfirmation",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L577:propriorequestconfirmation",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "request_human_input",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioRequestCheckboxConfirmation",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioRequestCheckboxConfirmation",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L589:propriorequestcheckboxconfirmation",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "request_human_input",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioUpsertIssueDocument",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioUpsertIssueDocument",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L601:proprioupsertissuedocument",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "write_document",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioRestoreIssueDocumentRevision",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioRestoreIssueDocumentRevision",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L612:propriorestoreissuedocumentrevision",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "restore_document_revision",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioLinkIssueApproval",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioLinkIssueApproval",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L627:propriolinkissueapproval",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "link_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioUnlinkIssueApproval",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioUnlinkIssueApproval",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L636:propriounlinkissueapproval",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "unlink_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioApprovalDecision",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioApprovalDecision",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L646:proprioapprovaldecision",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "decide_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioAddApprovalComment",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioAddApprovalComment",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L668:proprioaddapprovalcomment",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "comment_on_approval",
+      "expectedMockState": "operation_result"
+    },
+    {
+      "id": "mcp:proprioApiRequest",
+      "kind": "legacy_mcp_tool",
+      "name": "proprioApiRequest",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts#L677:proprioapirequest",
+      "primaryDisposition": "optional_agent_tool",
+      "semanticOperation": "test_only_api_escape_hatch",
+      "expectedMockState": "operation_result"
+    }
+  ]
+}

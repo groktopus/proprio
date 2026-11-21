@@ -1,0 +1,26 @@
+[Unit]
+Description=Proprio Tailscale HTTPS broker
+After=tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+User=proprio-tsbroker
+Group=proprio-tsbroker-sock
+EnvironmentFile=/etc/proprio/tailscale-https-broker.env
+ExecStart=/usr/bin/node /opt/proprio/packages/tailscale-https-broker/dist/main.js
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RuntimeDirectory=proprio-tailscale-broker
+RuntimeDirectoryMode=0750
+StateDirectory=proprio-tailscale-broker
+StateDirectoryMode=0700
+LogsDirectory=proprio-tailscale-broker
+LogsDirectoryMode=0700
+ReadWritePaths=/run/proprio-tailscale-broker /var/lib/proprio-tailscale-broker /var/log/proprio-tailscale-broker
+
+[Install]
+WantedBy=multi-user.target
