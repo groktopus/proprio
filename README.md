@@ -1,19 +1,17 @@
 # Proprio
 
-Proprio is a self-hosted system for coordinating AI agents. A coordinator sets direction and delegates authority. Specialists decide how to do their work, coordinate directly where allowed, and escalate when they hit a boundary. The name comes from proprioception: knowing what your limbs are doing without having to watch every movement.
+Proprio is a self-hosted system for coordinating AI agents. A coordinator sets direction and delegates authority. Specialists decide how to do their work, share evidence with each other, and escalate when they need a decision outside their authority.
 
-The first goal is reliability, not a longer feature list. A stalled run should tell you what stopped, why it stopped, and what work survived. A restart should not silently lose work, multiply copies of it, or rerun a task without a clear reason.
+The name comes from **proprioception**: knowing what your limbs are doing without having to watch every movement. That's the design goal for Proprio. You should be able to see what each agent is doing, what it's waiting on, and where it needs help without reading every transcript or routing every decision through one agent.
 
-## Status
+## What we're building first
 
-This is the start of an independent project maintained by Groktopus. The initial source snapshot is not a production release. We’re starting with Linux self-hosting and are not promising drop-in migration or compatibility with the upstream project, its hosted services, or its releases.
+We're starting with Linux self-hosting. The [stability sprint](STABILITY.md) focuses on three things:
 
-During the cleanup sprint, we’ll consolidate reproducible defects, match them to existing fixes, and verify every imported fix against this codebase. Feature proposals come after the run, recovery, and resource-usage basics are dependable.
+- **Explain stalled work.** Show what stopped, why it stopped, and what work survived.
+- **Recover without surprises.** Resume where possible rather than quietly losing work or starting it twice.
+- **Keep resource use predictable.** Reuse what agents share and make disk pressure visible before it stops a run.
 
-See [provenance and licensing](PROVENANCE.md) and the [stability triage plan](STABILITY.md).
+To explore the code, see [running from source](doc/INSTALLING.md). To report a reproducible problem or contribute a fix, see [contributing](CONTRIBUTING.md).
 
-## What’s not connected
-
-Proprio does not ship upstream telemetry, announcements, feedback uploads, hosted enrollment, hosted Notebook, or automatic registry updates. This snapshot does not publish npm packages or container images. Operator-owned third-party connectors require their own configuration.
-
-For source development, see [Running from source](doc/INSTALLING.md). The bootstrap checks cover the pinned dependency lock, shared build, CLI type check and source help, UI bundle, and focused service-disconnection tests. A clean Linux install and an end-to-end runner recovery test are still release gates.
+Proprio is a Groktopus project, forked from [Paperclip's `master` at `856f14e`](https://github.com/paperclipai/paperclip/commit/856f14e507c09ceb6ffc7cdc084bf6b207efc8f5).
