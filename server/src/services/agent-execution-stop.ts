@@ -1,3 +1,4 @@
+import { runHasPendingStop } from "../agent-run-cancellation.js";
 import { readProcessStartedAt } from "./hot-restart.js";
 import { readLeaseReleaseDeferral } from "./environment-lease-release-deferral.js";
 import { runUsedConversationAdapter } from "./conversation-continuation.js";
@@ -41,7 +42,7 @@ export async function agentExecutionStopBlocker(db: Db, agentIds: string[]): Pro
   }
   for (const run of runs) {
     if (run.runtimeMode === "legacy" &&
-        (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "requested")
+        runHasPendingStop(run))
       return "provider_stop_unconfirmed";
     if (!["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) return "run_not_terminal";
     if (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return "run_controller_lease_held";

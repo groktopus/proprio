@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import type { AdapterExecutionContext } from "@groktopus/adapter-utils";
 import { createPromptContextFixture } from "@groktopus/adapter-utils/test-fixtures/prompt-context";
@@ -940,6 +942,64 @@ describe("Hermes Gateway operator Stop", () => {
     expect(result.resultJson?.executionCancellation).toBeUndefined();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
   });
+
+  it("keeps completion received through SSE while its log write and Stop race", async () => {
+    const { abort, ctx } = makeStopContext();
+    let releaseLog!: () => void;
+    let received!: () => void;
+    const receivedEvent = new Promise<void>(resolve => { received = resolve; });
+    const logGate = new Promise<void>(resolve => { releaseLog = resolve; });
+    ctx.onLog = vi.fn(async (_stream, chunk) => {
+      if (chunk.includes("event=run.completed")) { received(); await logGate; }
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/runs") return json({ run_id: "hermes-123" });
+      if (path.endsWith("/events")) return new Response('event: run.completed\ndata: {"status":"completed","output":"SSE reply"}\n\n',
+        { headers: { "Content-Type": "text/event-stream" } });
+      throw new Error("gateway unavailable after completion");
+    }));
+    try {
+      const execution = execute(ctx);
+      await receivedEvent;
+      abort.abort();
+      expect(await execution).toMatchObject({ exitCode: 0, completionObserved: true, resultJson: { output: "SSE reply" } });
+    } finally { releaseLog(); }
+  });
+
+  it.each(["stop", "status"] as const)("closes a real stalled HTTP %s connection at the Stop deadline", async phase => {
+    vi.unstubAllGlobals();
+    const { abort, ctx } = makeStopContext();
+    let observeEvents!: () => void;
+    const events = new Promise<void>(resolve => { observeEvents = resolve; });
+    let closed = false, stopRequests = 0, creates = 0;
+    const server = createServer((request, response) => {
+      const jsonResponse = (value: unknown) => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
+      if (request.method === "POST" && request.url === "/v1/runs") { creates++; jsonResponse({ run_id: "hermes-123" }); }
+      else if (request.url?.endsWith("/events")) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" }); response.write(": waiting\n\n"); observeEvents();
+      } else if (request.url?.endsWith("/stop")) {
+        stopRequests++;
+        if (phase === "stop") request.socket.once("close", () => { closed = true; });
+        else jsonResponse({ status: "stopping" });
+      } else if (phase === "status") request.socket.once("close", () => { closed = true; });
+      else jsonResponse({ status: "running" });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    ctx.config.apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const execution = execute(ctx);
+      await events;
+      abort.abort();
+      expect(await execution).toMatchObject({ errorCode: "hermes_gateway_cancelled", resultJson: { status: "unconfirmed" } });
+      await vi.waitFor(() => expect(closed).toBe(true), { timeout: 2000 });
+      expect(creates).toBe(1);
+      expect(stopRequests).toBe(1);
+    } finally {
+      abort.abort(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, STOP_GRACE_MS + 10_000);
 
   it("shares one remote Stop when a timeout races with an operator request", async () => {
     vi.useFakeTimers();

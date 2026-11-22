@@ -1,3 +1,4 @@
+import { runHasPendingStop } from "../../agent-run-cancellation.js";
 import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { providerFailureFromError } from "../../vendor/proprio-runner/index.js";
@@ -455,6 +456,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
       outcome = latestRun.status;
     } else if (signal.aborted && !(adapterResult.completionObserved === true &&
+      runHasPendingStop(latestRun) && !(signal.reason instanceof LegacyControllerLeaseLostError) &&
       adapterResult.exitCode === 0 && !adapterResult.errorMessage && !adapterResult.signal && !adapterResult.timedOut)) {
       outcome = "cancelled";
     } else if (adapterResult.nativeFinalization) {
@@ -679,6 +681,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               ? parseObject(latestRun?.resultJson)
               : {}),
             ...parseObject(adapterResult.resultJson),
+            ...(adapterResult.completionObserved ? { completionObserved: true } : {}),
             ...(adapterResult.executionRecovery
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),
@@ -838,13 +841,6 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
       const livenessRun = finalizedRun;
       await measureRunPhase("completion.summary", () => refreshContinuationSummaryForRun(livenessRun, agent));
-      // A completed result is distinct from physical termination. Keep the
-      // execution lock and do not queue follow-up work while Stop lacks proof.
-      if (outcome === "succeeded" && parseObject(livenessRun.resultJson?.executionCancellation).state === "requested") {
-        await persistSessionState(livenessRun);
-        await settleAgent();
-        return;
-      }
       if (await pendingCaseHandoffForRun(db, livenessRun.id, livenessRun.companyId)) {
         // The returning agent must resume its own settled session with the
         // configuration metadata used for this run. Persist before release,
@@ -992,6 +988,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           "stderr",
           `[proprio] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
         );
+      }
+      // A completed result is distinct from physical termination. Keep the
+      // execution lock and do not queue follow-up work while Stop lacks proof.
+      if (outcome === "succeeded" && runHasPendingStop(livenessRun)) {
+        await persistSessionState(livenessRun);
+        await settleAgent();
+        return;
       }
       if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
         const policy = parseMaxTurnContinuationPolicy(agent);

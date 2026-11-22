@@ -665,7 +665,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     expect(finalizedAfterRecovery).toEqual([true]);
   });
 
-  it.each(["successful", "missing evidence", "failed", "timed out", "durable Stop"] as const)(
+  it.each(["successful", "missing evidence", "failed", "timed out", "durable Stop", "lease loss"] as const)(
     "settles an observed completion during Stop only with success and no prior terminal outcome (%s)", async variant => {
       const f = await fixture();
       Object.assign(f.input.adapterResult, {
@@ -673,7 +673,8 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
         completionObserved: variant === "missing evidence" ? undefined : true,
         timedOut: variant === "timed out",
       });
-      f.controller.abort();
+      await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, f.run.id));
+      f.controller.abort(variant === "lease loss" ? new LegacyControllerLeaseLostError("renewal_deadline") : undefined);
       if (variant === "durable Stop") {
         await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: { winner: "Stop" } })
           .where(eq(heartbeatRuns.id, f.run.id));

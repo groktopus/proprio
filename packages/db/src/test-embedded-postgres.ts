@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -6,7 +5,6 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { applyPendingMigrations, closeRegisteredClients, ensurePostgresDatabase } from "./client.js";
 import {
   createEmbeddedPostgresLogBuffer,
@@ -177,14 +175,8 @@ function databaseConnectionStringFor(port: number): string {
 }
 
 async function cleanupEmbeddedPostgresTestDirs(dataDir: string): Promise<void> {
-  if (process.platform !== "win32") {
-    try {
-      await promisify(execFile)("/bin/rm", ["-rf", "--", dataDir], { maxBuffer: 64 * 1024 });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
+  // This directory belongs to the stopped fixture. Remove it directly rather
+  // than waiting on an additional child-process lifecycle during teardown.
   await fs.promises.rm(dataDir, { recursive: true, force: true });
 }
 

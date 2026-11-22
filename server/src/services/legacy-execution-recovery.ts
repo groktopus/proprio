@@ -1,3 +1,4 @@
+import { runHasPendingStop } from "../agent-run-cancellation.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { notifyNativeStatusReassessment } from "./native-status-reassessment-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
@@ -63,7 +64,7 @@ export function legacyExecutionNeedsReconciliation(
     & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "controllerBootId" | "controllerProcess">>,
 ): boolean {
   if (run.runtimeMode === "legacy" && run.status === "succeeded" &&
-      (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "requested") return true;
+      runHasPendingStop(run)) return true;
   if (
     run.runtimeMode === "native" ||
     !["failed", "timed_out", "interrupted", "cancelled"].includes(run.status)
@@ -265,7 +266,7 @@ export async function terminalizeLegacyExecution(input: {
     const needsRecovery = input.recordRestoreFailureOnly
       ? retainedLeaseIds.length > 0 || hasRequiredWorkspaceRecovery(updated.resultJson)
       : !input.reconcileIfNeeded || await legacyExecutionNeedsReconciliationWithEvidence(tx as unknown as Db, updated);
-    if (!needsRecovery) return updated;
+    if (!needsRecovery || runHasPendingStop(updated)) return updated;
     if (!input.recordRestoreFailureOnly && task && (task.executionRunId === run.id || task.checkoutRunId === run.id)) {
       await notifyNativeStatusReassessment(tx, { companyId: task.companyId, issueId: task.id });
     }

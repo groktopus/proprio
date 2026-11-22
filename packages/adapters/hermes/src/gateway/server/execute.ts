@@ -56,6 +56,7 @@ type ExecutionState = {
   outputChunks: string[];
   lastEventName: string | null;
   terminal: TerminalState | null;
+  receivedCompletion: TerminalState | null;
   resolveTerminal: (state: TerminalState) => void;
   terminalPromise: Promise<TerminalState>;
 };
@@ -525,6 +526,7 @@ function createExecutionState(runId: string): ExecutionState {
     outputChunks: [],
     lastEventName: null,
     terminal: null,
+    receivedCompletion: null,
     resolveTerminal,
     terminalPromise,
   };
@@ -567,6 +569,12 @@ async function handleEvent(
   state.lastEventName = eventName;
   const delta = asString(record?.delta, "") || asString(record?.text_delta, "");
   const sanitizedDelta = eventName === "message.delta" && delta ? redactText(delta) : null;
+  const status = extractStatus(parsed) ?? (eventName?.startsWith("run.") ? eventName.slice(4) : null);
+  // Preserve received evidence independently of a potentially slow log sink.
+  const terminal = status && TERMINAL_STATUSES.has(status) ? {
+    runId: state.runId, status, eventName, payload: record, output: extractOutput(parsed),
+  } : null;
+  if (terminal?.status === "completed") state.receivedCompletion = terminal;
   const redacted = redactForLog(parsed, [], 0, redactText);
   const eventData = sanitizedDelta !== null
     ? JSON.stringify({ delta: sanitizedDelta })
@@ -580,16 +588,7 @@ async function handleEvent(
     state.outputChunks.push(sanitizedDelta);
   }
 
-  const status = extractStatus(parsed) ?? (eventName?.startsWith("run.") ? eventName.slice(4) : null);
-  if (status && TERMINAL_STATUSES.has(status)) {
-    markTerminal(state, {
-      runId: state.runId,
-      status,
-      eventName,
-      payload: record,
-      output: extractOutput(parsed),
-    });
-  }
+  if (terminal) markTerminal(state, terminal);
 }
 
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -1125,17 +1124,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ctx.signal?.removeEventListener("abort", onOperatorStop);
     controller.abort();
   }
-  const mapTerminal = (terminal: TerminalState) => mapFinalResultForTest({
-    terminal, outputChunks: state.outputChunks, sessionKey, strategy, redactText,
+  const mapTerminal = (terminal: TerminalState): AdapterExecutionResult => ({
+    ...mapFinalResultForTest({ terminal, outputChunks: state.outputChunks, sessionKey, strategy, redactText }),
+    ...(terminal.status === "completed" ? { completionObserved: true } : {}),
   });
   if (typeof outcome !== "string") return mapTerminal(outcome);
 
   const finalStatus = await stopRunAndObserve({ ctx, baseUrl, headers: runHeaders, runId, redactText });
   const status = extractStatus(finalStatus);
   if (outcome === "operator_stop" || ctx.signal?.aborted) {
-    if (status === "completed") {
-      return { ...mapTerminal({ runId, status, payload: finalStatus, output: extractOutput(finalStatus) }), completionObserved: true };
-    }
+    const completion = state.receivedCompletion ?? (status === "completed"
+      ? { runId, status, payload: finalStatus, output: extractOutput(finalStatus) } : null);
+    if (completion) return mapTerminal(completion);
     // Hermes versions can mark an asyncio wrapper cancelled before its worker
     // exits. A terminal cancellation status is not a physical stop receipt.
     return operatorCancelled({ ...cancellationContext, runId, terminalStatus: status ?? undefined });

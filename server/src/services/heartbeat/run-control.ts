@@ -1,3 +1,4 @@
+import { runHasPendingStop } from "../../agent-run-cancellation.js";
 import { writeDeferredExecutionWait } from "../deferred-execution-wait.js";
 import type { DeferredReceiptRecoveryOptions } from "../deferred-execution-notifications.js";
 import { observeStoppedWorkspaceRecovery } from "../workspace-recovery.js";
@@ -1022,14 +1023,17 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   ) {
     try {
       const [source] = await db.select({
+        runtimeMode: heartbeatRuns.runtimeMode,
         errorCode: heartbeatRuns.errorCode,
         livenessState: heartbeatRuns.livenessState,
         resultJson: sql<Record<string, unknown>>`jsonb_build_object(
-          'configurationIncomplete', ${heartbeatRuns.resultJson}->'configurationIncomplete'
+          'configurationIncomplete', ${heartbeatRuns.resultJson}->'configurationIncomplete',
+          'executionCancellation', ${heartbeatRuns.resultJson}->'executionCancellation'
         )`,
       }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
       ));
+      if (source?.runtimeMode === "legacy" && runHasPendingStop(source)) return;
       const sourceHandoff = await pendingCaseHandoffForRun(db, run.id, run.companyId);
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
         companyId: run.companyId,

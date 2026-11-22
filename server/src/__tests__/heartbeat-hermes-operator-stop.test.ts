@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { expect, it, vi } from "vitest";
-import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues } from "@groktopus/db";
+import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, issueComments } from "@groktopus/db";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
@@ -63,7 +63,7 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     }
     if (method === "GET" && url.pathname === `/v1/runs/${remoteRunId}`) {
       if (remoteStopCalled) remoteCancellationObserved = true;
-      return json({ run_id: remoteRunId, status: remoteStopCalled ? remoteStatus : "running" });
+      return json({ run_id: remoteRunId, status: remoteStopCalled ? remoteStatus : "running", output: remoteStatus === "completed" ? "The completed reply" : undefined });
     }
     throw new Error(`Unexpected fake gateway fetch: ${method} ${url.pathname}`);
   }));
@@ -79,7 +79,7 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
       adapterType: "hermes_gateway", adapterConfig: { apiBaseUrl: "https://hermes-fixture.test", apiKey: "fixture-only-token", timeoutSec: 30 },
       runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
     const [issue] = await db.insert(issues).values({ companyId, title: "Trusted synthetic Stop fixture",
-      status: "todo", assigneeAgentId: agentId }).returning();
+      status: "todo", assigneeAgentId: agentId, workMode: "conversation", conversationAgentId: agentId, conversationUserId: person, conversationState: "active" }).returning();
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -94,6 +94,7 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
       requestedByActorType: "system", payload: { issueId: issue.id } });
     if (!run) throw new Error("Wake was not accepted");
     await vi.waitFor(() => expect(observedEventSubscription).toBe(true), { timeout: 10_000 });
+    await db.update(issues).set({ checkoutRunId: run.id }).where(eq(issues.id, issue.id));
     const stop = await request(app).post(`/api/heartbeat-runs/${run.id}/cancel`).send({});
     expect(stop.status, JSON.stringify(stop.body)).toBe(409);
     expect(stop.body.error).toContain("provider termination could not be verified");
@@ -104,6 +105,12 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
       { method: "POST", path: `/v1/runs/${remoteRunId}/stop`, redirect: "error" },
     ]);
     expect(remoteCancellationObserved).toBe(true);
+    const [task] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(task).toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+    if (remoteStatus === "completed") {
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id));
+      expect(comments).toEqual(expect.arrayContaining([expect.objectContaining({ body: "The completed reply", authorAgentId: agentId })]));
+    }
     expect(stored?.status).toBe(remoteStatus === "completed" ? "succeeded" : "cancelled");
     expect(stored?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
     expect(stored?.resultJson?.conversationContinuation).toBeUndefined();
