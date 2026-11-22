@@ -150,10 +150,10 @@ export async function deleteCompany(db: Db, id: string) {
         await tx.delete(issues).where(eq(issues.companyId, id));
         await tx.delete(companyLogos).where(eq(companyLogos.companyId, id));
         await tx.delete(assets).where(eq(assets.companyId, id));
-        await tx.delete(goals).where(eq(goals.companyId, id));
         await requestRestorePointDeletion(tx, { companyId: id });
         await tx.delete(executionWorkspaces).where(eq(executionWorkspaces.companyId, id));
         await tx.delete(projects).where(eq(projects.companyId, id));
+        await tx.delete(goals).where(eq(goals.companyId, id));
         await agentLifecycleCompanyDeletion.deleteCompanyData(tx, id);
         await notifyToolConnectionHealth(tx, id);
         const rows = await tx
