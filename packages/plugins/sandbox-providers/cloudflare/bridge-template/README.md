@@ -48,3 +48,17 @@ After deploy, configure Proprio with:
 - `reuseLease: true` should only be used together with `keepAlive: true`
 - `.workers.dev` is fine for bridge HTTP traffic, but preview/wildcard host flows are intentionally out of scope here
 - keep the Docker image aligned with the installed `@cloudflare/sandbox` version
+
+## SDK migration status
+
+This template currently uses the SDK 0.7 API. The shared provider lock retains
+0.7.21. Do not update only the SDK to 1.x: it removes the Sandbox class and
+requires a provider-owned Durable Object and a different container setup.
+[Issue #36](https://github.com/groktopus/proprio/issues/36) tracks the SDK/image
+upgrade and staging checks. Dependabot major SDK updates are deferred until
+that work is ready. Other dependency updates continue.
+
+[Cloudflare recommends](https://developers.cloudflare.com/sandbox/sdk/migrate/)
+upgrading older applications to SDK and image 0.12.14 before moving to 1.0. Its
+0.x bug and security support ends on 2026-12-31. The deployed-class switch to
+the new scheduling policy is one-way, so rehearse it on a staging Worker.

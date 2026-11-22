@@ -14,6 +14,10 @@ updates:
     directory: "/scripts/typecheck-sandbox-providers"
     schedule:
       interval: weekly
+    # SDK 1.x needs a separate bridge and image migration. See #36.
+    ignore:
+      - dependency-name: "@cloudflare/sandbox"
+        update-types: ["version-update:semver-major"]
     groups:
       sandbox-providers:
         patterns:
