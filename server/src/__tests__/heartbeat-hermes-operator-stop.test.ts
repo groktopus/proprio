@@ -14,6 +14,7 @@ import { heartbeatService } from "../services/heartbeat.ts";
 import { agentRoutes } from "../routes/agents.ts";
 import { agentExecutionsHaveStopped } from "../services/agent-execution-stop.js";
 import { legacyExecutionNeedsReconciliation } from "../services/legacy-execution-recovery.js";
+import { issueService } from "../services/issues.js";
 import { errorHandler } from "../middleware/index.ts";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -116,6 +117,12 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     expect(stored?.resultJson?.conversationContinuation).toBeUndefined();
     expect(legacyExecutionNeedsReconciliation(stored!)).toBe(true);
     expect(await agentExecutionsHaveStopped(db, [agentId])).toBe(false);
+    await expect(issueService(db).addComment(issue.id, "ordinary revoked write", { agentId, runId: run.id }))
+      .rejects.toThrow("cannot post a reply");
+    await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0])
+      .toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+    expect(calls.filter(call => call.method === "POST" && call.path === "/v1/runs")).toHaveLength(1);
   } finally {
     // A failed assertion must not strand the synthetic agent until its timeout.
     cleaningUp = true;
