@@ -3,9 +3,6 @@ import { sql, type SQLWrapper } from "drizzle-orm";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect, "status" | "startedAt" | "finishedAt" | "runtimeMode" | "errorCode" | "error" | "resultJson">;
 const SOURCES = ["operator", "queued_message", "shutdown", "provider", "transport", "control_plane", "controller_lease", "unknown"] as const;
-/** An obsolete Agent Chat delivery was skipped before any provider dispatch. */
-export const CHAT_COMPLETION_SUPERSEDED = "chat_completion_superseded";
-
 export type CancellationSource = typeof SOURCES[number];
 export interface RunCancellation {
   source: CancellationSource;

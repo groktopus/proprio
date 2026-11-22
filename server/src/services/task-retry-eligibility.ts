@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
-import { CHAT_COMPLETION_SUPERSEDED } from "./run-cancellation.js";
+import { CHAT_COMPLETION_SUPERSEDED } from "./chat-completion-delivery.js";
 import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@groktopus/db";
 
 const UNSTARTED_SUPERSEDED_RUN_CODES = ["recovery_no_longer_needed", "issue_closed_before_start", "issue_execution_lock_changed"];
@@ -8,10 +8,10 @@ export function taskAttemptCondition(run: { status: SQL | typeof heartbeatRuns.s
   errorCode: SQL | typeof heartbeatRuns.errorCode } = heartbeatRuns) {
   // Chat completion can be superseded after the scheduler records startedAt
   // but before provider dispatch. It must not eclipse real attempts or own Retry.
-  return sql`not (${run.status} = 'cancelled' and (
-    coalesce(${run.errorCode}, '') = ${CHAT_COMPLETION_SUPERSEDED}
-    or (${run.startedAt} is null and coalesce(${run.errorCode}, '') in (
-      ${sql.join(UNSTARTED_SUPERSEDED_RUN_CODES.map(code => sql`${code}`), sql`, `)}))))`;
+  return sql`coalesce(${run.errorCode}, '') <> ${CHAT_COMPLETION_SUPERSEDED}
+    and not (${run.status} = 'cancelled' and ${run.startedAt} is null
+      and coalesce(${run.errorCode}, '') in (
+        ${sql.join(UNSTARTED_SUPERSEDED_RUN_CODES.map(code => sql`${code}`), sql`, `)}))`;
 }
 
 export function liveExecutionOwnerCondition(companyId: string, issueId: SQL | string) {

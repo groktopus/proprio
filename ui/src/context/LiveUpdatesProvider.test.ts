@@ -1914,6 +1914,11 @@ describe("LiveUpdatesProvider run lifecycle toasts", () => {
     ).toBe("Agent couldn't start this chat");
   });
 
+  it.each(["succeeded", "cancelled"])("suppresses a %s scheduler-only chat supersession toast", status => {
+    expect(__liveUpdatesTestUtils.buildRunStatusToast({ status, runId: "obsolete", agentId: "agent-1",
+      errorCode: "chat_completion_superseded" }, () => "Agent")).toBeNull();
+  });
+
   it("keeps non-chat and genuine runtime failures on the ordinary error path", () => {
     expect(
       __liveUpdatesTestUtils.buildRunStatusToast(

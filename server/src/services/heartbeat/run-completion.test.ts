@@ -990,16 +990,16 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     );
 
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.wake.id));
-    expect(await read(old.id)).toMatchObject({ status: "cancelled", error: null, errorCode: "chat_completion_superseded",
-      issueCommentStatus: "not_applicable", resultJson: { cancellation: { source: "control_plane", expected: true },
-        executionCancellation: { state: "acknowledged" } } });
+    expect(await read(old.id)).toMatchObject({ status: "succeeded", error: null, errorCode: "chat_completion_superseded",
+      issueCommentStatus: "not_applicable", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+    expect((await read(old.id)).resultJson).not.toHaveProperty("executionCancellation");
     expect(wake).toMatchObject({ status: "skipped", error: null });
     expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, old.id), taskAttemptCondition()))).toEqual([]);
     expect(f.deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
     expect(f.deps.scheduleInteractionContinuationInfrastructureRetryIfEligible).not.toHaveBeenCalled();
     expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(expect.objectContaining({ id: old.id }),
       { suppressImmediateRecovery: true });
-    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(agentId, "cancelled");
+    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(agentId, "superseded", null, { supersededCreatedAt: old.createdAt });
     const [currentChat] = await db.select().from(issues).where(eq(issues.id, chat.id));
     expect(currentChat).toEqual(chat);
     expect(await read(replacement.id)).toMatchObject({ status: "queued" });

@@ -16,6 +16,7 @@ import {
   recordIssueDetailReadiness,
 } from "@/lib/issue-detail-performance";
 import { hasWorkspaceRestoreFailure } from "@groktopus/shared";
+import { isSupersededChatCompletion } from "@/lib/run-status-presentation";
 import { workspaceRestoreMarkerDetail } from "@/lib/workspace-restore-marker";
 import { credentialAccessNotice } from "@/lib/credential-access-notice";
 import type { ActivityEvent, Issue, IssueQueuedCommentQueue, TaskBrowser } from "@groktopus/shared";
@@ -1671,6 +1672,11 @@ export function TaskChatThread(props: TaskChatThreadProps) {
         settledRunIds.add(source.id);
         continue;
       }
+      // Scheduler-only settlement must not render a turn or status marker.
+      if (isSupersededChatCompletion(meta?.errorCode)) {
+        settledRunIds.add(source.id);
+        continue;
+      }
       // /new is represented by its durable comment boundary, not an empty
       // model response or a completed-run notice.
       if (meta?.resultJson?.conversationReset === true) { settledRunIds.add(source.id); continue; }
@@ -1680,7 +1686,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       if (
         source.status === "cancelled" &&
         entries.length === 0 &&
-        (meta?.errorCode === "chat_completion_superseded" || meta?.errorCode === "issue_not_in_progress" ||
+        (meta?.errorCode === "issue_not_in_progress" ||
           (meta?.errorCode === "issue_terminal_status" && !meta.startedAt))
       ) {
         settledRunIds.add(source.id);

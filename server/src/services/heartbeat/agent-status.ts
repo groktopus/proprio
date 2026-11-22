@@ -2,7 +2,8 @@ import { notifyStrandedAgentStatus } from "../live-run-recovery-notifications.js
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { agents, heartbeatRuns, type Db } from "@groktopus/db";
-import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { CHAT_COMPLETION_SUPERSEDED } from "../chat-completion-delivery.js";
 import { trackAgentFirstHeartbeat } from "@groktopus/shared/telemetry";
 import { getTelemetryClient } from "../../telemetry.js";
 import { resolveTelemetryPerson, withTelemetryActor } from "../../telemetry-company-scope.js";
@@ -10,7 +11,7 @@ import { logActivity, publishActivity, type ActivityPublication } from "../activ
 import { publishLiveEvent } from "../live-events.js";
 import { finishedIdleRun, finishedIdleWake, finishedFailedIdleLease } from "../idle-work-proof.js";
 
-type Outcome = "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out";
+type Outcome = "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out" | "superseded";
 
 const RECONCILIATION_GRACE_MS = 5 * 60_000;
 const RECONCILIATION_BATCH_SIZE = 25;
@@ -85,11 +86,20 @@ export function settledHeartbeat(now: Date) {
 }
 
 export function createHeartbeatAgentStatus(db: Db) {
+  function latestRealOutcome(tx: Pick<Db, "select">, companyId: string, agentId: string) {
+    return tx.select({ status: heartbeatRuns.status, error: heartbeatRuns.error, finishedAt: heartbeatRuns.finishedAt }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out", "cancelled", "interrupted"]),
+        sql`coalesce(${heartbeatRuns.errorCode}, '') <> ${CHAT_COMPLETION_SUPERSEDED}`))
+      .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1)
+      .then(([run]) => run);
+  }
+
   async function finalizeAgentStatus(
     agentId: string,
     outcome: Outcome,
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean; supersededCreatedAt?: Date },
   ) {
     const result = await db.transaction(async (tx) => {
       const [existing] = await tx.select().from(agents)
@@ -100,19 +110,26 @@ export function createHeartbeatAgentStatus(db: Db) {
         eq(heartbeatRuns.companyId, existing.companyId),
         eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running"),
       )).limit(1);
-      const nextStatus = running ? "running" : settledStatus(outcome, options?.keepIdleOnFailure);
+      // A skipped completion did no agent work. Resolve from the last real
+      // outcome under the same agent lock, not from this scheduler receipt.
+      const lastRun = !running && outcome === "superseded" ? await latestRealOutcome(tx, existing.companyId, agentId) : undefined;
+      if (outcome === "superseded" && existing.status !== "running" &&
+          (existing.status === "error" || running || !lastRun?.finishedAt ||
+            !options?.supersededCreatedAt || lastRun.finishedAt < options.supersededCreatedAt)) return null;
+      const nextStatus = running ? "running" : settledStatus(
+        outcome === "superseded" ? lastRun?.status : outcome, options?.keepIdleOnFailure);
       const now = new Date();
       await notifyStrandedAgentStatus(tx, { companyId: existing.companyId, agentId });
       await notifyAttentionRetentionWork(tx, { companyId: existing.companyId, sourceKind: "agent_error_alert" });
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
       const [updated] = await tx.update(agents).set({
         status: nextStatus,
-        errorReason: nextStatus === "error" ? errorReason(failureReason) : null,
-        lastHeartbeatAt: now,
+        errorReason: nextStatus === "error" ? errorReason(outcome === "superseded" ? lastRun?.error : failureReason) : null,
+        lastHeartbeatAt: outcome === "superseded" ? existing.lastHeartbeatAt : now,
         updatedAt: now,
       }).where(and(eq(agents.id, agentId), eq(agents.companyId, existing.companyId),
         eq(agents.lifecycleState, "ready"))).returning();
-      return { updated, isFirstHeartbeat: options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt };
+      return { updated, isFirstHeartbeat: outcome !== "superseded" && (options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt) };
     });
     if (!result?.updated) return;
     if (result.isFirstHeartbeat) {
@@ -157,10 +174,7 @@ export function createHeartbeatAgentStatus(db: Db) {
           lte(agents.updatedAt, cutoff), settledAgentWorkCondition(liveRunIds(), now),
         ));
         if (!current) return null;
-        const [lastRun] = await tx.select({ status: heartbeatRuns.status, error: heartbeatRuns.error })
-          .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, candidate.companyId),
-            eq(heartbeatRuns.agentId, candidate.id)))
-          .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+        const lastRun = await latestRealOutcome(tx, candidate.companyId, candidate.id);
         const nextStatus = settledStatus(lastRun?.status);
         await notifyAttentionRetentionWork(tx, { companyId: candidate.companyId, sourceKind: "agent_error_alert" });
         // Settling the agent's runs records a heartbeat, as finalizeAgentStatus

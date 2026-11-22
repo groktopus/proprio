@@ -6,10 +6,11 @@ import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, ch
   heartbeatRunEvents, heartbeatRuns, issueComments, issueDocuments, issueThreadInteractions, issues, type Db } from "@groktopus/db";
 import { extractIssueReferenceMatches } from "@groktopus/shared";
 import { appendHeartbeatRunEventBatch } from "./heartbeat-run-events.js";
-import { CHAT_COMPLETION_SUPERSEDED } from "./run-cancellation.js";
 import { conflict, forbidden, notFound } from "../errors.js";
 
 export const CHAT_COMPLETION_WAKE_REASON = "chat_task_completed";
+/** Durable receipt of an obsolete completion fenced before provider dispatch. */
+export const CHAT_COMPLETION_SUPERSEDED = "chat_completion_superseded";
 
 /** Only the turn preparation fence emits this; publication keeps its own failure contract. */
 export class ChatCompletionSupersededBeforeDispatch extends Error {
