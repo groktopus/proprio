@@ -9,6 +9,26 @@ import { appendHeartbeatRunEventBatch } from "./heartbeat-run-events.js";
 import { conflict, forbidden, notFound } from "../errors.js";
 
 export const CHAT_COMPLETION_WAKE_REASON = "chat_task_completed";
+const CHAT_COMPLETION_WAKE_ACTOR = "chat_completion_delivery";
+/** Only the queue claim writes this receipt; it changes the agent projection, not execution ownership. */
+export const CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY = "chatCompletionPreflight";
+
+export function isChatCompletionWakeReceipt(wake: Pick<typeof agentWakeupRequests.$inferSelect,
+  "reason" | "source" | "triggerDetail" | "requestedByActorType" | "requestedByActorId"> | undefined) {
+  return wake?.reason === CHAT_COMPLETION_WAKE_REASON && wake.source === "automation" &&
+    wake.triggerDetail === "system" && wake.requestedByActorType === "system" &&
+    wake.requestedByActorId === CHAT_COMPLETION_WAKE_ACTOR;
+}
+/** Durable receipt of an obsolete completion fenced before provider dispatch. */
+export const CHAT_COMPLETION_SUPERSEDED = "chat_completion_superseded";
+
+/** Only the turn preparation fence emits this; publication keeps its own failure contract. */
+export class ChatCompletionSupersededBeforeDispatch extends Error {
+  constructor() {
+    super(CHAT_COMPLETION_SUPERSEDED);
+  }
+}
+
 /** Run event: the conversation agent read its handed-off task after it was done. */
 export const COMPLETED_HANDOFF_READ_EVENT = "chat_handoff.completed_read";
 const MAX_ATTEMPTS = 5;
@@ -229,9 +249,14 @@ export async function settleReportedChatCompletions(tx: Connection, input: { com
 export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> {
   const issueId = run.contextSnapshot?.issueId;
   if (typeof issueId !== "string") return run;
+  const completionPreflight = run.runnerProfileJson?.[CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY] === true;
   return db.transaction(async tx => {
     const [source] = await tx.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).for("update");
-    if (!source) return run;
+    if (!source) {
+      // A bound system wake for a removed conversation has no one to tell.
+      if (completionPreflight) throw new ChatCompletionSupersededBeforeDispatch();
+      return run;
+    }
     if (source.originKind === "onboarding_first_task" && run.contextSnapshot?.wakeReason === "issue_children_completed") {
       const children = await tx.select().from(issues).where(and(eq(issues.companyId, run.companyId), eq(issues.parentId, source.id), eq(issues.status, "done"))).orderBy(issues.createdAt).limit(20);
       const contextSnapshot = { ...run.contextSnapshot, onboardingCompletion: true,
@@ -242,7 +267,7 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
     const initialIds = ids(run);
     // Only completion wakes absorb pending events; ordinary user turns retain their existing input.
     if (initialIds.length === 0 && run.contextSnapshot?.wakeReason !== CHAT_COMPLETION_WAKE_REASON) return run;
-    if (run.contextSnapshot?.conversationSessionGeneration !== source.conversationSessionGeneration) throw new Error("chat_completion_superseded");
+    if (run.contextSnapshot?.conversationSessionGeneration !== source.conversationSessionGeneration) throw new ChatCompletionSupersededBeforeDispatch();
     const rows = await tx.select({ delivery: deliveries }).from(deliveries).innerJoin(handoffs, eq(handoffs.taskId, deliveries.taskId))
       .where(and(eq(deliveries.companyId, run.companyId), eq(handoffs.conversationId, issueId),
         eq(handoffs.agentId, run.agentId), eq(handoffs.sessionGeneration, source.conversationSessionGeneration),
@@ -270,10 +295,18 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
       await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
       return { ...run, contextSnapshot };
     }
-    if (accepted.length === 0) throw new Error("chat_completion_superseded");
+    if (accepted.length === 0) throw new ChatCompletionSupersededBeforeDispatch();
     const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates };
-    await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
-    return { ...run, contextSnapshot };
+    if (!completionPreflight) {
+      await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
+      return { ...run, contextSnapshot };
+    }
+    // An actual delivery has been admitted. From this commit the run counts
+    // as a sibling in agent status, just like other accepted turns.
+    const [admitted] = await tx.update(heartbeatRuns).set({ contextSnapshot,
+      runnerProfileJson: sql`${heartbeatRuns.runnerProfileJson} - ${CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY}::text`,
+    }).where(eq(heartbeatRuns.id, run.id)).returning({ runnerProfileJson: heartbeatRuns.runnerProfileJson });
+    return { ...run, contextSnapshot, runnerProfileJson: admitted?.runnerProfileJson ?? run.runnerProfileJson };
   });
 }
 
@@ -414,7 +447,7 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
       }
       const run = await heartbeat.wakeup(row.handoff.agentId, {
         source: "automation", triggerDetail: "system", reason: CHAT_COMPLETION_WAKE_REASON, idempotencyKey: key, allowRunCoalescing: false,
-        requestedByActorType: "system", requestedByActorId: "chat_completion_delivery",
+        requestedByActorType: "system", requestedByActorId: CHAT_COMPLETION_WAKE_ACTOR,
         payload: { issueId: row.handoff.conversationId, chatCompletionDeliveryIds: [id] },
         contextSnapshot: { issueId: row.handoff.conversationId, taskId: row.handoff.conversationId,
           wakeReason: CHAT_COMPLETION_WAKE_REASON, chatCompletionDeliveryIds: [id], conversationSessionGeneration: row.handoff.sessionGeneration },

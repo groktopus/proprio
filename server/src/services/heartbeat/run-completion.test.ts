@@ -16,7 +16,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { createNativeRunLogCoverageVerifier, formatNativeRunLogEvent } from "../native-runtime/native-run-log-export.js";
 import type { Db } from "@groktopus/db";
-import { activityLog, agents, agentWakeupRequests, approvals, issueApprovals, budgetReservations, caseHandoffs, cases, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, issueThreadInteractions, nativeRunFinalizations } from "@groktopus/db";
+import { activityLog, agents, agentWakeupRequests, approvals, issueApprovals, budgetReservations, caseHandoffs, cases, chatCompletionDeliveries, chatTaskHandoffs, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, issueThreadInteractions, nativeRunFinalizations } from "@groktopus/db";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -53,6 +53,8 @@ import { hasAcknowledgedNativeReassignmentStopIntent } from "../acknowledged-nat
 import { questionResponseDeliveryService } from "../question-response-delivery.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { heartbeatService } from "../heartbeat.js";
+import { taskAttemptCondition } from "../task-retry-eligibility.js";
+import { CHAT_COMPLETION_WAKE_REASON, ChatCompletionSupersededBeforeDispatch, prepareChatCompletionTurn } from "../chat-completion-delivery.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
@@ -959,6 +961,86 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     const events = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, f.run.id),
       eq(heartbeatRunEvents.eventType, "error")));
     expect(events.map(event => event.message)).toEqual([STORAGE_UNAVAILABLE_HELD_MESSAGE]);
+  });
+
+  it.each(["reset", "retargeted"] as const)("quietly skips a superseded chat completion (%s)", async reason => {
+    const f = await fixture({ executionStage: "preparing", startedAt: new Date() });
+    const companyId = f.run.companyId, agentId = f.agent.id;
+    const [chat] = await db.insert(issues).values({ companyId, title: "Agent Chat", conversationAgentId: agentId, assigneeAgentId: agentId,
+      conversationUserId: "local-board", conversationState: "active", status: "in_progress", conversationSessionGeneration: reason === "reset" ? 2 : 1 }).returning();
+    const [task] = await db.insert(issues).values({ companyId, title: "Finished task", status: "done", statusVersion: 1 }).returning();
+    await db.insert(chatTaskHandoffs).values({ companyId, taskId: task.id, conversationId: chat.id,
+      agentId, sessionGeneration: chat.conversationSessionGeneration });
+    const [newWake] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation",
+      reason: CHAT_COMPLETION_WAKE_REASON, status: "queued", payload: { issueId: chat.id } }).returning();
+    const [replacement] = await db.insert(heartbeatRuns).values({ companyId, agentId, issueId: chat.id, status: "queued",
+      wakeupRequestId: newWake.id }).returning();
+    await db.update(agentWakeupRequests).set({ runId: replacement.id }).where(eq(agentWakeupRequests.id, newWake.id));
+    const [delivery] = await db.insert(chatCompletionDeliveries).values({ companyId, taskId: task.id, statusVersion: 1,
+      status: "queued", targetRunId: replacement.id }).returning();
+    const contextSnapshot = { issueId: chat.id, wakeReason: CHAT_COMPLETION_WAKE_REASON,
+      conversationSessionGeneration: chat.conversationSessionGeneration, chatCompletionDeliveryIds: [delivery.id] };
+    const [old] = await db.update(heartbeatRuns).set({ issueId: chat.id,
+      contextSnapshot: { ...contextSnapshot, conversationSessionGeneration: 1 } })
+      .where(eq(heartbeatRuns.id, f.run.id)).returning();
+
+    await prepareChatCompletionTurn(db, old).then(
+      () => { throw new Error("Expected obsolete delivery to be fenced"); },
+      error => f.completion.failRunSetup({ ...f.setup(error), run: old }),
+    );
+
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.wake.id));
+    expect(await read(old.id)).toMatchObject({ status: "succeeded", error: null, errorCode: "chat_completion_superseded",
+      issueCommentStatus: "not_applicable", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+    expect((await read(old.id)).resultJson).not.toHaveProperty("executionCancellation");
+    expect(wake).toMatchObject({ status: "skipped", error: null });
+    expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, old.id), taskAttemptCondition()))).toEqual([]);
+    expect(f.deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
+    expect(f.deps.scheduleInteractionContinuationInfrastructureRetryIfEligible).not.toHaveBeenCalled();
+    expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(expect.objectContaining({ id: old.id }),
+      { suppressImmediateRecovery: true });
+    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(agentId, "superseded");
+    const [currentChat] = await db.select().from(issues).where(eq(issues.id, chat.id));
+    expect(currentChat).toEqual(chat);
+    expect(await read(replacement.id)).toMatchObject({ status: "queued" });
+    const [replacementWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, newWake.id));
+    expect(replacementWake).toMatchObject({ status: "queued", runId: replacement.id });
+    const [currentDelivery] = await db.select().from(chatCompletionDeliveries).where(eq(chatCompletionDeliveries.id, delivery.id));
+    expect(currentDelivery).toEqual(delivery);
+    expect((await prepareChatCompletionTurn(db, { ...replacement, contextSnapshot })).contextSnapshot).toMatchObject({
+      chatCompletionDeliveryIds: [delivery.id], chatCompletionUpdates: [expect.objectContaining({ id: task.id, status: "done" })],
+    });
+    expect(await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, old.id),
+      eq(heartbeatRunEvents.eventType, "error")))).toEqual([]);
+  });
+
+  it("preserves a durable operator Stop claimed before quiet chat supersession", async () => {
+    const f = await fixture({ executionStage: "preparing", startedAt: new Date(),
+      contextSnapshot: { wakeReason: CHAT_COMPLETION_WAKE_REASON } });
+    const stop = {
+      cancelledByActorType: "user", cancelledByUserId: "board-user",
+      executionCancellation: { state: "requested", requestedAt: new Date().toISOString() },
+    };
+    // The owner had loaded a still-running run before Stop. No in-memory abort
+    // has arrived, but the database now owns the authoritative Stop intent.
+    const setup = f.setup(new ChatCompletionSupersededBeforeDispatch());
+    expect(setup.signal.aborted).toBe(false);
+    await db.update(heartbeatRuns).set({ resultJson: stop }).where(eq(heartbeatRuns.id, f.run.id));
+    await f.completion.failRunSetup(setup);
+    expect(await read(f.run.id)).toMatchObject({ status: "running", resultJson: stop });
+    expect(f.deps.setWakeupStatus).not.toHaveBeenCalled();
+    expect(f.deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect(f.deps.finalizeAgentStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps a real setup failure visible even if its text matches chat supersession", async () => {
+    const f = await fixture({ contextSnapshot: { wakeReason: CHAT_COMPLETION_WAKE_REASON } });
+    await f.completion.failRunSetup(f.setup(new Error("chat_completion_superseded")));
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.wake.id));
+    expect(await read(f.run.id)).toMatchObject({ status: "failed", errorCode: "setup_failed",
+      error: "chat_completion_superseded" });
+    expect(wake).toMatchObject({ status: "failed" });
+    expect(await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, f.run.id), taskAttemptCondition()))).toHaveLength(1);
   });
 
   it.each(["execution", "setup"] as const)("names the nested cause of a generic %s failure and keeps SQL text off the board", async phase => {

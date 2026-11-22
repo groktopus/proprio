@@ -47,6 +47,13 @@ describe("task chat status relevance", () => {
     }
   });
 
+  it.each(["cancelled", "succeeded"])("ignores a newer %s superseded completion without hiding a real failure", status => {
+    const skipped = { ...nextRun, status, errorCode: "chat_completion_superseded" };
+    const policy = taskChatStatusRelevance("blocked", [oldRun, skipped]);
+    expect(policy.isHistoricalRun("old")).toBe(false);
+    expect(policy.isHistoricalRun("next")).toBe(true);
+  });
+
   it("hides earlier observations of a wait and clears the latest wait after work starts", () => {
     const wait = { ...oldRun, status: "cancelled", startedAt: null, errorCode: "execution_reconciliation_required" };
     const newerWait = { ...wait, id: "newer-wait", createdAt: "2025-01-01T10:00:30Z" };

@@ -1,10 +1,16 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
+import {
+  createBufferedTextFileWriter,
+  formatDatabaseBackupResult,
+  runDatabaseBackup,
+  runDatabaseRestore,
+} from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
@@ -30,13 +36,37 @@ async function createTempDatabase(): Promise<string> {
   return db.connectionString;
 }
 
-async function createSiblingDatabase(connectionString: string, databaseName: string): Promise<string> {
+async function createSiblingDatabase(connectionString: string, prefix: string): Promise<string> {
+  const targetUrl = new URL(connectionString);
   const adminUrl = new URL(connectionString);
   adminUrl.pathname = "/postgres";
-  await ensurePostgresDatabase(adminUrl.toString(), databaseName);
-  const targetUrl = new URL(connectionString);
-  targetUrl.pathname = `/${databaseName}`;
+  const name = `${prefix.slice(0, 30)}_${randomUUID().replaceAll("-", "")}`;
+  if (await ensurePostgresDatabase(adminUrl.toString(), name) !== "created") {
+    throw new Error("Expected a fresh disposable restore database");
+  }
+  cleanups.push(async () => {
+    const admin = postgres(adminUrl.toString(), { max: 1, connect_timeout: 5 });
+    try {
+      await admin`DROP DATABASE ${admin(name)}`;
+    } finally {
+      await admin.end();
+    }
+  });
+  targetUrl.pathname = `/${name}`;
   return targetUrl.toString();
+}
+
+async function restoreWithJavaScript(connectionString: string, backupFile: string, tempDir: string): Promise<void> {
+  const unavailablePsql = path.join(tempDir, "unavailable-psql");
+  fs.writeFileSync(unavailablePsql, "#!/bin/sh\ncat >/dev/null\nexit 1\n", { mode: 0o700 });
+  const previous = process.env.PROPRIO_PSQL_PATH;
+  process.env.PROPRIO_PSQL_PATH = unavailablePsql;
+  try {
+    await runDatabaseRestore({ connectionString, backupFile });
+  } finally {
+    if (previous === undefined) delete process.env.PROPRIO_PSQL_PATH;
+    else process.env.PROPRIO_PSQL_PATH = previous;
+  }
 }
 
 afterEach(async () => {
@@ -76,6 +106,50 @@ describe("createBufferedTextFileWriter", () => {
 });
 
 describeEmbeddedPostgres("runDatabaseBackup", () => {
+  it.each(["pg_dump", "fallback", "transforms"] as const)("reports database backup provenance for %s", async (mode) => {
+    const connectionString = await createTempDatabase();
+    const backupDir = createTempDir("proprio-backup-provenance-");
+    const executable = path.join(backupDir, "pg-dump-fixture");
+    const privateDiagnostic = "postgres://fixture:do-not-include@database.invalid/proprio";
+    const fixtureDump = "SELECT 42;\n";
+    fs.writeFileSync(executable, mode === "pg_dump"
+      ? "#!/bin/sh\nprintf 'SELECT 42;\\n'\n"
+      : `#!/bin/sh\nprintf '%s\\n' '${privateDiagnostic}' >&2\nexit 1\n`,
+    { mode: 0o700 });
+    const previous = process.env.PROPRIO_PG_DUMP_PATH;
+    process.env.PROPRIO_PG_DUMP_PATH = executable;
+    try {
+      const result = await runDatabaseBackup({
+        connectionString,
+        backupDir,
+        retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+        ...(mode === "transforms" ? { excludeTables: ["fixture_excluded_table"] } : {}),
+      });
+      const dump = gunzipSync(fs.readFileSync(result.backupFile)).toString();
+      const summary = formatDatabaseBackupResult(result);
+      if (mode === "pg_dump") {
+        expect(result).toMatchObject({ engine: "pg_dump", fallbackReason: null });
+        expect(summary).toContain("pg_dump");
+        expect(dump).toBe(fixtureDump);
+      } else {
+        expect(result).toMatchObject({
+          engine: "javascript",
+          fallbackReason: mode === "fallback" ? "pg_dump_failed" : null,
+        });
+        if (mode === "fallback") expect(summary).toContain("JavaScript fallback");
+        else expect(summary).not.toContain("warning");
+        expect(dump).toContain("-- Proprio database backup");
+      }
+      expect(result).not.toHaveProperty("warning");
+      expect(JSON.stringify(result)).not.toContain(privateDiagnostic);
+      expect(summary).not.toContain(privateDiagnostic);
+      expect(dump).not.toContain(privateDiagnostic);
+    } finally {
+      if (previous === undefined) delete process.env.PROPRIO_PG_DUMP_PATH;
+      else process.env.PROPRIO_PG_DUMP_PATH = previous;
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it("preserves a post-pg_dump verification error without falling back or pruning", async () => {
     const connectionString = await createTempDatabase();
     const backupDir = createTempDir("checkpoint-pg-dump-");
@@ -124,6 +198,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         INSERT INTO identity_fixture.records (value) VALUES ('one'), ('two');
       `);
       const backup = await runDatabaseBackup({ connectionString: source, backupDir: createTempDir("identity-backup-"), backupEngine: "javascript", retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 } });
+      expect(backup).toMatchObject({ engine: "javascript", fallbackReason: null });
       await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
       expect(await targetSql`SELECT id::text, default_id, value FROM identity_fixture.records ORDER BY id`)
         .toEqual([{ id: "7", default_id: 1, value: "one" }, { id: "9", default_id: 2, value: "two" }]);
@@ -619,9 +694,38 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     60_000,
   );
 
-  it(
-    "restores legacy public-only backups without migration history",
-    async () => {
+  it("preserves text line endings during JavaScript backup replay", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "text_restore_target");
+    const backupDir = createTempDir("proprio-restore-line-endings-");
+    const sourceSql = postgres(source, { max: 1 });
+    const targetSql = postgres(target, { max: 1 });
+
+    try {
+      const payload = "before\rafter\r\n雪\nend";
+      const largePayload = "雪𐍈".repeat(20_000);
+      await sourceSql`CREATE TABLE public.text_fixture (id int PRIMARY KEY, payload text NOT NULL)`;
+      await sourceSql`INSERT INTO public.text_fixture VALUES (1, ${payload}), (2, ${largePayload})`;
+      const { backupFile } = await runDatabaseBackup({
+        connectionString: source,
+        backupDir,
+        backupEngine: "javascript",
+        retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 },
+      });
+
+      await restoreWithJavaScript(target, backupFile, backupDir);
+      const rows = await targetSql<{ payload: string }[]>`SELECT payload FROM public.text_fixture ORDER BY id`;
+      expect(rows[0]?.payload).toBe(payload);
+      expect(rows[1]?.payload).toBe(largePayload);
+    } finally {
+      await sourceSql.end();
+      await targetSql.end();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it.each([{ newline: "\n", label: "LF" }, { newline: "\r\n", label: "CRLF" }])(
+    "restores legacy public-only $label backups without migration history",
+    async ({ newline }) => {
       const restoreConnectionString = await createTempDatabase();
       const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
       const backupDir = createTempDir("proprio-db-restore-manual-");
@@ -643,14 +747,11 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
             "-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
             "COMMIT;",
             "-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
-          ].join("\n"),
+          ].join(newline),
           "utf8",
         );
 
-        await runDatabaseRestore({
-          connectionString: restoreConnectionString,
-          backupFile,
-        });
+        await restoreWithJavaScript(restoreConnectionString, backupFile, backupDir);
 
         const rows = await restoreSql.unsafe<{ payload: string }[]>(`
           SELECT payload

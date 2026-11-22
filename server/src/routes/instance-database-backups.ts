@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { BackupRetentionPolicy, RunDatabaseBackupResult } from "@groktopus/db";
+import { databaseBackupWarning, type BackupRetentionPolicy, type RunDatabaseBackupResult } from "@groktopus/db";
 import { forbidden } from "../errors.js";
 import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { assertInstanceAdmin } from "./authz.js";
@@ -34,7 +34,7 @@ export function instanceDatabaseBackupRoutes(service: InstanceDatabaseBackupServ
       });
     }
     const result = await service.runManualBackup();
-    res.status(201).json(result);
+    res.status(201).json({ ...result, warning: databaseBackupWarning(result.fallbackReason) });
   });
 
   return router;

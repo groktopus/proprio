@@ -26,7 +26,7 @@ async function validArchive(options: Parameters<typeof runDatabaseBackup>[0]) {
   const bytes = gzipSync("CREATE TABLE fixture (id integer);\n");
   await writeFile(backupFile, bytes);
   await options.verifyBeforePrune?.(backupFile);
-  return { backupFile, sizeBytes: bytes.length, prunedCount: 0 };
+  return { backupFile, sizeBytes: bytes.length, prunedCount: 0, engine: "pg_dump" as const, fallbackReason: null };
 }
 beforeEach(async () => {
   directory = await mkdtemp(path.join(os.tmpdir(), "backup-owner-"));
@@ -35,6 +35,22 @@ beforeEach(async () => {
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
 describe("database backup owner", () => {
+  it("retains safe fallback provenance in the scheduled success log and receipt", async () => {
+    const provenance = {
+      engine: "javascript" as const,
+      fallbackReason: "pg_dump_failed" as const,
+    };
+    vi.mocked(runDatabaseBackup).mockImplementationOnce(async options => ({ ...await validArchive(options), ...provenance }));
+
+    const result = await owner()("scheduled");
+    expect(result).toMatchObject(provenance);
+    expect(result).not.toHaveProperty("warning");
+    expect(logger.info).toHaveBeenLastCalledWith(
+      expect.objectContaining({ engine: provenance.engine, fallbackReason: provenance.fallbackReason }),
+      expect.stringContaining("The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features."),
+    );
+  });
+
   it("marks before retention access and retains the marker until a verified wake backup", async () => {
     const run = owner(async () => {
       expect(await readFile(idleBackupWakeMarker(directory), "utf8")).toContain("restarts");

@@ -20,13 +20,18 @@ function createApp(actor: Record<string, unknown>, service: InstanceDatabaseBack
   return app;
 }
 
-function createBackupService(overrides: Partial<InstanceDatabaseBackupService> = {}): InstanceDatabaseBackupService {
+function createBackupService(
+  overrides: Partial<InstanceDatabaseBackupService> = {},
+  fallbackReason: "pg_dump_failed" | null = "pg_dump_failed",
+): InstanceDatabaseBackupService {
   return {
     runManualBackup: vi.fn().mockResolvedValue({
       trigger: "manual",
       backupFile: "/tmp/proprio-20260416.sql.gz",
       sizeBytes: 1234,
       prunedCount: 2,
+      engine: fallbackReason ? "javascript" : "pg_dump",
+      fallbackReason,
       backupDir: "/tmp",
       retention: {
         dailyDays: 7,
@@ -63,6 +68,9 @@ describe("instance database backup routes", () => {
       backupFile: "/tmp/proprio-20260416.sql.gz",
       sizeBytes: 1234,
       prunedCount: 2,
+      engine: "javascript",
+      fallbackReason: "pg_dump_failed",
+      warning: "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.",
       backupDir: "/tmp",
       retention: {
         dailyDays: 7,
@@ -75,8 +83,8 @@ describe("instance database backup routes", () => {
     });
   });
 
-  it("allows local implicit board access", async () => {
-    const service = createBackupService();
+  it("allows local implicit board access and does not warn without fallback", async () => {
+    const service = createBackupService({}, null);
     const app = createApp(
       {
         type: "board",
@@ -87,8 +95,9 @@ describe("instance database backup routes", () => {
       service,
     );
 
-    await request(app).post("/api/instance/database-backups").send({}).expect(201);
+    const res = await request(app).post("/api/instance/database-backups").send({}).expect(201);
 
+    expect(res.body).toMatchObject({ engine: "pg_dump", fallbackReason: null, warning: null });
     expect(service.runManualBackup).toHaveBeenCalledTimes(1);
   });
 

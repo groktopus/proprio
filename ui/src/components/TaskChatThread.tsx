@@ -16,6 +16,7 @@ import {
   recordIssueDetailReadiness,
 } from "@/lib/issue-detail-performance";
 import { hasWorkspaceRestoreFailure } from "@groktopus/shared";
+import { isSupersededChatCompletion } from "@/lib/run-status-presentation";
 import { workspaceRestoreMarkerDetail } from "@/lib/workspace-restore-marker";
 import { credentialAccessNotice } from "@/lib/credential-access-notice";
 import type { ActivityEvent, Issue, IssueQueuedCommentQueue, TaskBrowser } from "@groktopus/shared";
@@ -1668,6 +1669,11 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       // A workspace admission attempt never started provider work. Its live
       // successor owns the waiting indicator; retain this attempt in the run log.
       if (source.status === "cancelled" && (meta?.errorCode === "workspace_busy" || meta?.errorCode === "agent_directory_busy")) {
+        settledRunIds.add(source.id);
+        continue;
+      }
+      // Scheduler-only settlement must not render a turn or status marker.
+      if (isSupersededChatCompletion(meta?.errorCode)) {
         settledRunIds.add(source.id);
         continue;
       }
