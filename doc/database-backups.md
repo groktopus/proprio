@@ -37,6 +37,26 @@ the `pg_dump` backup path failed and the JavaScript fallback completed, the rece
 all PostgreSQL features. It does not include the dump command's error output.
 This metadata is not a restore verification.
 
+JavaScript backups read catalog definitions and rows in one repeatable-read,
+read-only transaction. They hold table read locks while capturing the source, so
+concurrent row updates cannot pair old data with new constraints. Ordinary-table
+CHECK and exclusion constraints are rebuilt after data loading. Inheritance and
+partition topology remain outside this serializer's supported scope.
+
+Constraint parsing uses a catalog-only search path and normalized string-literal
+settings. During restore, routines without their own search path temporarily use
+the source's resolved schema path so nested function calls can validate rows.
+The serializer then removes only those temporary routine settings. Explicit
+routine search paths and CHECK validation states are preserved.
+
+Data transforms must remain compatible with the restored rules. A nullification
+that violates a validated CHECK fails with
+`backup_transform_constraint_conflict` before publishing or pruning an archive.
+A nullification of stored rows that touches an exclusion constraint, including its expression
+dependencies, is rejected because its validity cannot be certified by this
+transform. Use compatible transforms or a full backup. NOT VALID CHECKs retain
+their original status and can keep pre-existing invalid rows.
+
 Environment overrides:
 
 - `PROPRIO_DB_BACKUP_ENABLED=true|false`

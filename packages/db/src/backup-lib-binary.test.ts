@@ -21,6 +21,7 @@ vi.mock("postgres", () => ({
       return [];
     };
     return Object.assign(sql, {
+      begin: (_options: string, callback: (tx: typeof sql) => Promise<unknown>) => callback(sql),
       end: transport.end,
       unsafe: (query: string) => query.startsWith("SELECT count(*)") ? Promise.resolve([{ n: transport.rows.length }])
         : query.startsWith("SELECT ") && query.includes('FROM "public"."binary_fixture"')
