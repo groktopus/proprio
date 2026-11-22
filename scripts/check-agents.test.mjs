@@ -100,7 +100,8 @@ test("resolves root-relative links against the checkout instead of the host", ()
     const guide = path.join(root, "nested", "AGENTS.md");
     writeFileSync(guide, "[root](/target.md)\n");
     assert.deepEqual(validateAgentsFile(guide, root), []);
-    writeFileSync(guide, `[host](${root}/target.md)\n`);
+    const hostTarget = "/" + path.relative(path.parse(root).root, path.join(root, "target.md")).split(path.sep).join("/");
+    writeFileSync(guide, `[host](${hostTarget})\n`);
     assert.equal(validateAgentsFile(guide, root).length, 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
