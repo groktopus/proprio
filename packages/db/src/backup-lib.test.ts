@@ -136,6 +136,109 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     }
   }, 30_000);
 
+  it("restores ordinary-table CHECK and exclusion constraints from JavaScript backups", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "constraint_restore_target");
+    const sourceSql = postgres(source, { max: 1, onnotice: () => {} });
+    const targetSql = postgres(target, { max: 1, onnotice: () => {} });
+    const readConstraints = (sql: typeof sourceSql) => sql.begin(async (tx) => {
+      await tx`SET LOCAL search_path = pg_catalog`;
+      return tx<{ name: string; type: string; validated: boolean; definition: string }[]>`
+        SELECT conname AS name, contype::text AS type, convalidated AS validated,
+               pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+        WHERE conrelid = 'booking.reservations'::regclass AND contype IN ('c', 'x')
+        ORDER BY conname
+      `;
+    });
+    try {
+      await sourceSql.unsafe(`
+        CREATE SCHEMA booking;
+        CREATE FUNCTION booking.allowed_state(value text) RETURNS boolean
+          LANGUAGE sql IMMUTABLE AS $$ SELECT value IN ('active', 'held') $$;
+        CREATE TABLE booking.reservations (
+          id integer PRIMARY KEY,
+          state text NOT NULL,
+          slot int4range NOT NULL,
+          CONSTRAINT reservation_state_check CHECK (booking.allowed_state(state)),
+          CONSTRAINT reservation_slot_excl EXCLUDE USING gist (slot WITH &&)
+        );
+        INSERT INTO booking.reservations VALUES (1, 'active', int4range(1, 5));
+        ALTER TABLE booking.reservations
+          ADD CONSTRAINT reservation_id_check CHECK (id > 1) NOT VALID;
+        CREATE FUNCTION booking.replay_path_probe() RETURNS trigger
+          LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+        CREATE TRIGGER replay_path_probe BEFORE INSERT ON booking.reservations
+          FOR EACH ROW EXECUTE FUNCTION booking.replay_path_probe();
+        CREATE TABLE booking.inheritance_parent (
+          id integer CONSTRAINT inheritance_parent_guard CHECK (id > 0)
+        );
+        CREATE TABLE booking.inheritance_child (
+          CONSTRAINT inheritance_child_guard CHECK (id < 10)
+        ) INHERITS (booking.inheritance_parent);
+        CREATE TABLE booking.partition_parent (
+          id integer CONSTRAINT partition_parent_guard CHECK (id > 0)
+        ) PARTITION BY RANGE (id);
+        CREATE TABLE booking.partition_child PARTITION OF booking.partition_parent
+          (CONSTRAINT partition_child_guard CHECK (id < 10))
+          FOR VALUES FROM (0) TO (10);
+      `);
+      const sourceName = new URL(source).pathname.slice(1);
+      await sourceSql`ALTER DATABASE ${sourceSql(sourceName)} SET search_path = booking, public`;
+
+      // Trusted fixture: make unqualified replay of the built-in integer >
+      // operator resolve differently from the source. Keep booking in the path
+      // for the unqualified trigger function emitted after the constraints.
+      await targetSql.unsafe(`
+        CREATE SCHEMA shadow;
+        CREATE FUNCTION shadow.always_true(a integer, b integer) RETURNS boolean
+          LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+        CREATE OPERATOR shadow.> (
+          FUNCTION = shadow.always_true, LEFTARG = integer, RIGHTARG = integer
+        );
+      `);
+      const targetName = new URL(target).pathname.slice(1);
+      await targetSql`ALTER DATABASE ${targetSql(targetName)} SET search_path = shadow, pg_catalog, booking, public`;
+
+      const original = await readConstraints(sourceSql);
+      expect(original.map(({ name, type, validated }) => ({ name, type, validated }))).toEqual([
+        { name: "reservation_id_check", type: "c", validated: false },
+        { name: "reservation_slot_excl", type: "x", validated: true },
+        { name: "reservation_state_check", type: "c", validated: true },
+      ]);
+
+      const backup = await runDatabaseBackup({
+        connectionString: source,
+        backupDir: createTempDir("constraint-backup-"),
+        backupEngine: "javascript",
+        retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      });
+      await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
+
+      expect(await readConstraints(targetSql)).toEqual(original);
+      // The current serializer flattens these tables; this slice must not
+      // claim or attempt to reconstruct their topology-dependent constraints.
+      const dump = gunzipSync(fs.readFileSync(backup.backupFile)).toString("utf8");
+      expect(dump).not.toMatch(/(?:inheritance|partition)_(?:parent|child)_guard/);
+      expect(dump).toContain("EXECUTE FUNCTION replay_path_probe()");
+      expect(await targetSql`SELECT tgname FROM pg_trigger WHERE tgrelid = 'booking.reservations'::regclass AND NOT tgisinternal`)
+        .toEqual([{ tgname: "replay_path_probe" }]);
+      expect(await targetSql`SELECT id, state FROM booking.reservations`).toEqual([{ id: 1, state: "active" }]);
+      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'blocked', int4range(10, 15))`)
+        .rejects.toMatchObject({ code: "23514", constraint_name: "reservation_state_check" });
+      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'held', int4range(3, 8))`)
+        .rejects.toMatchObject({ code: "23P01", constraint_name: "reservation_slot_excl" });
+      await expect(targetSql`ALTER TABLE booking.reservations VALIDATE CONSTRAINT reservation_id_check`)
+        .rejects.toMatchObject({ code: "23514", constraint_name: "reservation_id_check" });
+      await targetSql`UPDATE booking.reservations SET id = 2 WHERE id = 1`;
+      await targetSql`ALTER TABLE booking.reservations VALIDATE CONSTRAINT reservation_id_check`;
+      expect((await readConstraints(targetSql)).find((c) => c.name === "reservation_id_check")?.validated).toBe(true);
+    } finally {
+      await sourceSql.end();
+      await targetSql.end();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it(
     "keeps the newest backup for each retained calendar month",
     async () => {

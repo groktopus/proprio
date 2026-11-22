@@ -1017,6 +1017,56 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       emit("");
     }
 
+    // Restore CHECK and exclusion constraints after loading data. In particular,
+    // a NOT VALID check can have pre-existing rows that it would reject on insert.
+    // Let Postgres qualify non-catalog objects rather than relying on the
+    // restoring session's search_path.
+    const checkAndExclusionConstraints = await sql.begin(async (tx) => {
+      await tx`SET LOCAL search_path = pg_catalog`;
+      return tx<{
+        constraint_name: string;
+        schema_name: string;
+        tablename: string;
+        definition: string;
+      }[]>`
+        SELECT c.conname AS constraint_name, n.nspname AS schema_name, t.relname AS tablename,
+               pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE c.contype IN ('c', 'x')
+          AND c.conislocal
+          AND c.conparentid = 0
+          AND t.relkind = 'r'
+          AND NOT t.relispartition
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_inherits i WHERE i.inhrelid = t.oid OR i.inhparent = t.oid
+          )
+          AND ${tx.unsafe(nonSystemSchemaPredicate("n.nspname"))}
+        ORDER BY n.nspname, t.relname, c.conname
+      `;
+    });
+    // The JavaScript serializer does not rebuild inheritance or partition
+    // topology. Do not change those tables' current behavior in this slice.
+    const ordinaryTableConstraints = checkAndExclusionConstraints.filter(
+      (constraint) => includedTableNames.has(tableKey(constraint.schema_name, constraint.tablename)),
+    );
+    if (ordinaryTableConstraints.length > 0) {
+      emit("-- Check and exclusion constraints");
+      // Replay in the same catalog-only path used for deparsing, so unqualified
+      // built-ins cannot bind differently. Save and restore the exact preceding
+      // setting with a transaction-local, restore-private configuration key.
+      emitStatement("SELECT pg_catalog.set_config('proprio.restore_constraint_saved_search_path', pg_catalog.current_setting('search_path'), true);");
+      emitStatement("SET LOCAL search_path = pg_catalog;");
+      for (const constraint of ordinaryTableConstraints) {
+        emitStatement(
+          `ALTER TABLE ${quoteQualifiedName(constraint.schema_name, constraint.tablename)} ADD CONSTRAINT ${quoteIdentifier(constraint.constraint_name)} ${constraint.definition};`,
+        );
+      }
+      emitStatement("SELECT pg_catalog.set_config('search_path', pg_catalog.current_setting('proprio.restore_constraint_saved_search_path'), true);");
+      emit("");
+    }
+
     const allTriggers = await sql<{
       schema_name: string;
       tablename: string;
