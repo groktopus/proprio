@@ -112,7 +112,7 @@ Key Perforce CL fields:
 
 ### 3. Wait for pending checks
 
-Before analyzing, ensure all status checks have completed. If any checks are `PENDING` or `IN_PROGRESS` (GitHub) / `running` or `pending` (GitLab), poll every 30 seconds until all checks reach a terminal state.
+Before analyzing, identify the applicable CI gates and required platform checks. Optional automated-review checks do not become merge gates merely because they appear in the rollup. Record them separately. For applicable checks, if any are `PENDING` or `IN_PROGRESS` (GitHub) / `running` or `pending` (GitLab), poll every 30 seconds until those checks reach a terminal state.
 
 **GitHub:** poll `statusCheckRollup` from `gh pr view`.
 
@@ -124,99 +124,17 @@ Pipeline statuses: `running`, `pending`, `success`, `failed`, `canceled`, `skipp
 
 **Perforce:** Perforce doesn't have built-in CI checks natively. If the team uses a review tool (Swarm, etc.) or an external CI triggered by shelve events, check the relevant system. Otherwise, proceed to analysis immediately.
 
-### 4. Require a fresh Greptile review for the current head
+### 4. Review evidence at the current head
 
-For GitHub PRs, do not treat an existing Greptile review, comment, or summary as current unless it is tied to the PR's exact current `headRefOid`. This is especially important after pushing a new commit to an existing PR: a Greptile review on an older commit is stale, even if the PR still has a Greptile comment or prior review.
+Greptile is optional. Do not require its installation, a check-run, or a score.
+Record the current head SHA and review the change under `CONTRIBUTING.md`.
+A maintainer may record a self-review, clearly identified as such.
 
-Fetch the current head SHA immediately before the Greptile gate:
-
-```bash
-HEAD_SHA=$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)
-```
-
-Then inspect check-runs for that commit and require a completed Greptile run:
-
-```bash
-OWNER_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-GREPTILE_CHECKS=$(gh api "repos/$OWNER_REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-  --jq '[.check_runs[] | select(.name | test("greptile"; "i"))]')
-
-# A run only counts as a valid fresh pass when it has completed AND concluded cleanly.
-# GitHub check-run conclusions: success, neutral, skipped, failure, timed_out,
-# cancelled, action_required, stale. Treat success/neutral as clean;
-# everything else (especially failure and action_required) must block.
-FRESH_GREPTILE_COMPLETED=$(echo "$GREPTILE_CHECKS" \
-  | jq '[.[] | select(.status == "completed")] | length')
-FRESH_GREPTILE_CLEAN=$(echo "$GREPTILE_CHECKS" \
-  | jq '[.[] | select(.status == "completed" and (.conclusion | IN("success","neutral")))] | length')
-FRESH_GREPTILE_BLOCKING=$(echo "$GREPTILE_CHECKS" \
-  | jq '[.[] | select(.status == "completed" and ((.conclusion | IN("success","neutral")) | not))] | length')
-
-if [ "$FRESH_GREPTILE_COMPLETED" = "0" ]; then
-  echo "Blocked: no completed Greptile review/check is tied to current PR head $HEAD_SHA."
-  echo "Request a fresh Greptile review against this head before marking the PR check done."
-  echo "Suggested trigger: gh pr comment <PR_NUMBER> --body \"@greptile review\""
-  exit 1
-fi
-
-if [ "$FRESH_GREPTILE_BLOCKING" != "0" ] || [ "$FRESH_GREPTILE_CLEAN" = "0" ]; then
-  echo "Blocked: Greptile completed on head $HEAD_SHA but did not conclude clean"
-  echo "(conclusion was failure/action_required/timed_out/cancelled/stale, or no clean run exists)."
-  echo "Address the findings, push, and re-run Greptile until it concludes success/clean on the new head."
-  exit 1
-fi
-```
-
-If a Greptile check exists for the current head but is still pending or in progress, wait for it with the same polling pattern used by `greploop` rather than proceeding from older review material. If no Greptile check appears for the current head after a reasonable wait, report the PR as blocked on a fresh Greptile review for `HEAD_SHA` and stop. Do not mark the check complete from PR comments, PR reviews, or Greptile summaries that cannot be associated with the current head SHA.
-
-For GitLab installations with Greptile integration, apply the same freshness rule against the MR's current head SHA:
-
-```bash
-# 1. Get the MR's current head SHA
-MR_SHA=$(glab mr view <MR_IID> --output json | jq -r '.sha // .diff_refs.head_sha')
-
-# 2. Find the latest pipeline for that EXACT sha, then the Greptile job within it.
-LATEST_PIPELINE_ID=$(glab api "projects/:fullpath/merge_requests/<MR_IID>/pipelines" \
-  | jq -r --arg sha "$MR_SHA" '[.[] | select(.sha == $sha)] | sort_by(.id) | last | .id // empty')
-
-if [ -n "$LATEST_PIPELINE_ID" ]; then
-  GREPTILE_JOBS=$(glab api "projects/:fullpath/pipelines/$LATEST_PIPELINE_ID/jobs" \
-    | jq --arg sha "$MR_SHA" '[.[] | select(.name | test("greptile"; "i"))
-        | {name, status, pipeline_sha: $sha}]')
-else
-  GREPTILE_JOBS='[]'
-fi
-
-GREPTILE_JOB_SUCCESS=$(echo "$GREPTILE_JOBS" \
-  | jq '[.[] | select(.status == "success")] | length')
-GREPTILE_JOB_BLOCKING=$(echo "$GREPTILE_JOBS" \
-  | jq '[.[] | select(.status != "success")] | length')
-
-# 3. If Greptile integrates via MR notes instead of a CI job, require the newest
-#    Greptile note to reference the current head sha and report a clean review.
-GREPTILE_NOTES=$(glab api "projects/:fullpath/merge_requests/<MR_IID>/discussions?per_page=100" \
-  | jq --arg sha "$MR_SHA" '[.[].notes[]
-      | select(.author.username | test("greptile"; "i"))]
-      | sort_by(.updated_at // .created_at)')
-GREPTILE_NOTE_CLEAN=$(echo "$GREPTILE_NOTES" \
-  | jq --arg sha "$MR_SHA" 'if length == 0 then 0
-      elif ((last.body // "") | contains($sha) and test("Confidence Score:[[:space:]]*5/5|Confidence:[[:space:]]*5/5|\\b5/5\\b"; "i") and (test("Prompt To Fix|blocking issue|failed|action required"; "i") | not)) then 1
-      else 0 end')
-
-if [ "$GREPTILE_JOB_SUCCESS" = "0" ] && [ "$GREPTILE_NOTE_CLEAN" = "0" ]; then
-  echo "Blocked: no successful Greptile job or completed-clean current-head Greptile note is tied to MR head $MR_SHA."
-  exit 1
-fi
-
-if [ "$GREPTILE_JOB_BLOCKING" != "0" ]; then
-  echo "Blocked: at least one Greptile job for MR head $MR_SHA did not succeed."
-  exit 1
-fi
-```
-
-Block completion if, for `MR_SHA`, there is (a) no Greptile job or note at all (missing), (b) the newest Greptile job/note is tied to a different sha (stale), or (c) the Greptile job status is not `success`. A completed Greptile result for a different SHA is stale and must block completion.
-
-For Perforce installations with Greptile integration, apply the same rule using the CL's current shelved-revision identity and the Greptile webhook/review artifact tied to it; a Greptile result for an earlier shelf is stale and must block completion.
+When an automated reviewer is available, inspect its current-head findings and
+address them. Older reviews are background evidence, not approval of new edits.
+Missing or unavailable optional review does not block a PR. Record the outage
+and its evidence; never report it as a clean review. Required platform review
+rules and applicable CI typecheck, build, and test checks still apply.
 
 ### 5. Analyze the PR/MR
 

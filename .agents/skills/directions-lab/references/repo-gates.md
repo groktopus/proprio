@@ -258,7 +258,7 @@ A diff touching `pnpm-lock.yaml` fails unless the author is `github-actions[bot]
 
 ## 6. Greptile and the `rules/*.mdc` files
 
-- Greptile must score 5/5 with no open P2+, recommendations or follow-ups (`CONTRIBUTING.md:126-134`);
+- Greptile is optional; no score or check-run is required. When available,
   it reads rules through `.greptile/files.json` and `.greptile/rules.md` (`rules/README.md:15-19`).
 - No rule's `globs` covers `ui/` or `ui/storybook/` (scoped rules cover `server/`, `packages/db`,
   adapters, adapter-utils, plugins, runner). Only the three `alwaysApply: true` rules apply to a lab PR:
@@ -352,4 +352,4 @@ pnpm build-storybook
   `package.json` script; no file crossing 1,000 lines; no code comments; no committed screenshots or
   generated files.
 - Body: five `##` sections with content, path A link or path B with 3 filled feature-request labels,
-  checked dedup checkbox, concrete `Model Used`. Then Greptile 5/5 and maintainer approval.
+  checked dedup checkbox, concrete `Model Used`. Then current-head maintainer review and applicable CI checks.

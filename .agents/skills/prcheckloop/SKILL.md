@@ -3,7 +3,7 @@ name: prcheckloop
 description: >
   Iterate on a GitHub PR until latest-head checks are green or a precise blocker
   is named. Use when a PR still has failing or pending checks after review fixes,
-  including after greploop.
+  including after optional automated review.
 ---
 
 # PRCheckloop
@@ -16,6 +16,11 @@ Get a GitHub PR to a fully green check state, or exit with a concrete blocker.
 - Focus on checks for the latest PR head SHA, not old commits.
 - Focus on CI/status checks, not review comments or PR template cleanup.
 - If the user also wants review-comment cleanup, pair this with `check-pr`.
+
+Optional automated-review checks, including Greptile, are not required CI gates.
+Record their findings or service outage separately under CONTRIBUTING.md. Do not
+wait for an optional score or treat an unavailable review as a passing check.
+Apply the loop below to applicable CI and required platform checks.
 
 ## Inputs
 
@@ -202,5 +207,5 @@ When the skill completes, report:
 
 - This skill is intentionally narrower than `check-pr`: it is a repair loop for
   PR checks.
-- This skill complements `greploop`: Greptile can be perfect while CI is still
-  red.
+- Optional automated review does not replace CI. Missing or unavailable review
+  is not a clean review; follow CONTRIBUTING.md for the current-head record.

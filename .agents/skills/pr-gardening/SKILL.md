@@ -66,7 +66,7 @@ For every candidate, the script re-fetches the current head SHA and records:
 
 - open/draft state and mergeability/conflicts;
 - `statusCheckRollup` check-run and legacy status inventory;
-- a completed Greptile check-run on the exact head, clean only for `success` or `neutral`;
+- optional Greptile evidence on the exact head, for reporting only;
 - `reviewDecision`;
 - commits behind the base branch.
 
@@ -113,7 +113,7 @@ Gardening: ran `/prepare-proprio-pr` for historical upstream report on [this tas
 
 Current-head verification at `abc123` found:
 - failing check: test
-- Greptile missing at current head
+- required review approval missing
 
 Gardening round 1/3. Re-verification is required after changes; do not merge based on this comment.
 ```
@@ -163,9 +163,9 @@ node .agents/skills/pr-gardening/scripts/render-report.mjs \
 
 The report states the scope (authors + window), and for every open PR gives its author, a one-line purpose summary taken from the PR description, and a readiness confidence bucket:
 
-- **High:** current-head checks green, no conflicts, Greptile clean, base fresh, originating issue terminal.
+- **High:** current-head checks green, no conflicts, required review complete, base fresh, originating issue terminal.
 - **Medium:** otherwise green but base stale, review not complete, or originating issue active.
-- **Low:** failing/pending checks, missing Greptile, draft/just-fixed-unverified state, or no identifiable origin.
+- **Low:** failing/pending checks, draft/just-fixed-unverified state, or no identifiable origin.
 
 If a PR's generated purpose line is empty or unhelpful, write a one-sentence description from the PR title and diff summary when publishing the report.
 
