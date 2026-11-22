@@ -290,7 +290,7 @@ describe("workspace finalization scheduled lifecycle", () => {
       // until it finishes, or the failing run stays retryable with an overdue deadline.
       await vi.waitFor(async () => {
         await vi.advanceTimersByTimeAsync(5000);
-        expect(settled).toHaveBeenCalledWith(expect.objectContaining({ runId: failing.runId, succeeded: false }));
+        expect(settled).toHaveBeenCalledWith(expect.objectContaining({ runId: failing.runId, succeeded: false, intent: "execution_settlement" }));
       }, { timeout: 10_000 });
       const [exhausted] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, failing.runId));
       expect(exhausted.phase).toBe("terminal_failure");

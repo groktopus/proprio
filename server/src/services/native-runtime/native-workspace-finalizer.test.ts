@@ -873,7 +873,7 @@ describe("native workspace finalization recovery", () => {
         phase: attempt === 2 ? "retryable_failure" : "terminal_failure", failureDetail: { workspaceFinalizeAttempt: attempt },
       });
     }
-    expect(onWorkspaceSettled).toHaveBeenCalledExactlyOnceWith({ runId: blocked.runId, companyId, agentId, succeeded: false });
+    expect(onWorkspaceSettled).toHaveBeenCalledExactlyOnceWith({ runId: blocked.runId, companyId, agentId, intent: "execution_settlement", succeeded: false });
     expect(await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, blocked.runId))).toHaveLength(0);
   });
 
