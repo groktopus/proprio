@@ -8,7 +8,7 @@ import { pendingNativeStatusEffectsCondition } from "./native-pending-effect-wor
 import { notifyNativeRunProjection } from "../native-run-projection-notifications.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, exists, inArray, isNotNull, isNull, not, or, sql, type SQL } from "drizzle-orm";
-import { agents, agentWakeupRequests, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@groktopus/db";
+import { agentWakeupRequests, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@groktopus/db";
 import { notifyRetainedNativeSessionCleanup } from "../retained-native-session-cleanup-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
@@ -136,15 +136,7 @@ export function alreadyProjectedNativeResultCondition(db: Db) {
       inArray(status, ["succeeded", "failed", "cancelled"]),
       or(eq(heartbeatRuns.status, status), eq(heartbeatRuns.status, "cancelled")),
       not(nativeRunProjectionNeedsRepair(status)!),
-      // New settlements carry an atomic per-result receipt. Older releases
-      // did not write one: preserve their cadence when its clock already
-      // covers this terminal run, including an operator Stop winner.
-      or(sql`${heartbeatRuns.resultJson}->'agentHeartbeatSettlement'->>'resultId' = ${nativeRunResults.id}::text`,
-        and(sql`${heartbeatRuns.resultJson}->'agentHeartbeatSettlement' is null`,
-          exists(db.select({ id: agents.id }).from(agents).where(and(
-          eq(agents.id, heartbeatRuns.agentId), eq(agents.companyId, heartbeatRuns.companyId),
-          sql`${agents.lastHeartbeatAt} >= ${heartbeatRuns.finishedAt}`,
-        ))))),
+
     ))),
   )}) IS TRUE`;
 }

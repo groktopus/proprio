@@ -36,7 +36,7 @@ export type NativeWorkspaceSettlement = {
   agentId: string;
 } & (
   | { intent: "execution_settlement"; succeeded: boolean }
-  | { intent: "terminal_replay"; succeeded: true }
+  | { intent: "terminal_replay" }
 );
 
 function record(value: unknown): Record<string, unknown> {

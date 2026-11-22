@@ -791,8 +791,8 @@ async function reconcileNativeFinalizationsPass(
             runId: row.runId,
             companyId: row.companyId,
             agentId: row.agentId,
-            intent: terminalReplay ? "terminal_replay" : "execution_settlement",
-            succeeded: true,
+            ...(terminalReplay ? { intent: "terminal_replay" as const }
+              : { intent: "execution_settlement" as const, succeeded: true }),
           })
           .catch(() => undefined);
       }

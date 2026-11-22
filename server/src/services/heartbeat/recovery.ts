@@ -2234,25 +2234,18 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
   async function settleRecoveredNativeWorkspace(input: NativeWorkspaceSettlement,
     options?: { skipEnvironmentSettlement?: boolean }) {
-    if (!options?.skipEnvironmentSettlement) await settleRecoveredNativeEnvironment(input);
-    const settledRun = input.intent === "execution_settlement" ? await getRun(input.runId) : null;
+    const workspaceSucceeded = input.intent === "terminal_replay" || input.succeeded;
+    if (!options?.skipEnvironmentSettlement) await settleRecoveredNativeEnvironment({ ...input, succeeded: workspaceSucceeded });
+    const settledRun = await getRun(input.runId);
     await releaseRuntimeServicesForRun(input.runId).catch(() => undefined);
-    // Historical upkeep can still release resources, but only execution
-    // settlement moves cadence. Stranded agent status has its own guarded repair.
-    if (input.intent === "terminal_replay") return;
-    await finalizeAgentStatus(
-      input.agentId,
-      input.succeeded ? "succeeded" : "failed",
-      input.succeeded
-        ? null
-        : (settledRun?.error ?? "native_workspace_sync_out_failed"),
-      {
-        settlementRunId: input.runId,
-        wasFirstHeartbeat: settledRun
-          ? timerClaimWasFirstHeartbeat(settledRun)
-          : undefined,
-      },
-    ).catch(() => undefined);
+    const outcome = settledRun && isHeartbeatRunTerminalStatus(settledRun.status)
+      ? settledRun.status : workspaceSucceeded ? "succeeded" : "failed";
+    await finalizeAgentStatus(input.agentId, outcome, settledRun?.error ??
+      (workspaceSucceeded ? null : "native_workspace_sync_out_failed"), {
+      settlementRunId: input.runId,
+      preserveHistoricalCadence: input.intent === "terminal_replay",
+      wasFirstHeartbeat: settledRun ? timerClaimWasFirstHeartbeat(settledRun) : undefined,
+    }).catch(() => undefined);
   }
 
   function cleanupRetainedNativeSession(input: { companyId: string; runId: string }) {

@@ -61,8 +61,9 @@ pnpm exec vitest run server/src/services/heartbeat/agent-status.test.ts server/s
 Run projection and agent settlement are separate obligations. A committed run
 alone does not prove that its agent heartbeat was recorded. Native live and
 recovery settlement pass the run ID to the agent-status owner, which locks the
-run, updates the agent, and records `resultJson.agentHeartbeatSettlement` in one
-transaction. The receipt binds the accepted result ID and settlement time.
+agent before the run, updates the agent, and records `resultJson.agentHeartbeatSettlement` in one
+transaction. The receipt binds the accepted result ID, including when its task
+decision commit is deferred. Late live metadata writes preserve this receipt.
 Repeated settlement of that result does not advance the clock or emit another
 agent-status update.
 
