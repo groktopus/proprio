@@ -80,6 +80,11 @@ jobs:
               'promotes a real user message parked behind the obsolete completion',
               'preserves the settled agent projection for provider_quota',
               'preserves the settled agent projection for setup_failed',
+              'preserves provider_quota through completion preflight (stale on claim)',
+              'preserves setup_failed through completion preflight (stale on claim)',
+              'preserves provider_quota through completion preflight (invalidated after finalizer)',
+              'preserves setup_failed through completion preflight (invalidated after finalizer)',
+              'counts an admitted completion as a genuine running sibling',
             ],
             'server/src/services/heartbeat/run-completion.test.ts': [
               'quietly skips a superseded chat completion (reset)',

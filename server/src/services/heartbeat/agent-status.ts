@@ -3,7 +3,7 @@ import { notifyAttentionRetentionWork } from "../retention-work-notifications.js
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { agents, heartbeatRuns, type Db } from "@groktopus/db";
 import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
-import { CHAT_COMPLETION_SUPERSEDED } from "../chat-completion-delivery.js";
+import { CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY, CHAT_COMPLETION_SUPERSEDED } from "../chat-completion-delivery.js";
 import { trackAgentFirstHeartbeat } from "@groktopus/shared/telemetry";
 import { getTelemetryClient } from "../../telemetry.js";
 import { resolveTelemetryPerson, withTelemetryActor } from "../../telemetry-company-scope.js";
@@ -109,6 +109,7 @@ export function createHeartbeatAgentStatus(db: Db) {
       const [running] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, existing.companyId),
         eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running"),
+        sql`(${heartbeatRuns.runnerProfileJson}->${CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY}::text) IS DISTINCT FROM 'true'::jsonb`,
       )).limit(1);
       // This wake did no agent work. An already settled agent row is
       // authoritative; a bare failed run does not encode keepIdleOnFailure.
