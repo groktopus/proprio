@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import { validateAgentsFile, validateRepositoryAgents } from "./check-agents.mjs";
 
 test("accepts contributor guidance with existing relative links", () => {
@@ -46,6 +47,7 @@ test("reports malformed escaped relative links", () => {
 test("finds nested contributor guides and validates each one", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "proprio-agents-check-"));
   try {
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
     const nested = path.join(root, "nested");
     mkdirSync(nested);
     writeFileSync(path.join(root, "AGENTS.md"), "# Root guidance\n");
@@ -87,5 +89,30 @@ test("ignores code examples and external links but validates references and imag
       'AGENTS.md: broken link target "absent.md"',
       'AGENTS.md: broken link target "absent.png"',
     ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolves root-relative links against the checkout instead of the host", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "proprio-agents-root-"));
+  try {
+    mkdirSync(path.join(root, "nested"));
+    writeFileSync(path.join(root, "target.md"), "# Target\n");
+    const guide = path.join(root, "nested", "AGENTS.md");
+    writeFileSync(guide, "[root](/target.md)\n");
+    assert.deepEqual(validateAgentsFile(guide, root), []);
+    writeFileSync(guide, `[host](${root}/target.md)\n`);
+    assert.equal(validateAgentsFile(guide, root).length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("ignores local guides excluded from Git", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "proprio-agents-inventory-"));
+  try {
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
+    writeFileSync(path.join(root, ".gitignore"), "data/\n");
+    writeFileSync(path.join(root, "AGENTS.md"), "# Guidance\n");
+    mkdirSync(path.join(root, "data"));
+    writeFileSync(path.join(root, "data", "AGENTS.md"), "");
+    assert.deepEqual(validateRepositoryAgents(root), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

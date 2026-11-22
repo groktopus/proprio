@@ -3,13 +3,13 @@ repos:
     hooks:
       - id: agents-guide-links
         name: Validate AGENTS.md guidance links
-        entry: node scripts/check-agents.mjs
+        entry: pnpm check:agents
         language: system
         pass_filenames: false
-        files: (^|/)AGENTS\.md$
+        always_run: true
       - id: adapter-runtime-git-push
         name: Check adapter and runtime git push boundaries
-        entry: node scripts/check-no-git-push.mjs
+        entry: pnpm check:no-git-push
         language: system
         pass_filenames: false
-        files: \.(cjs|js|mjs|ts|tsx)$
+        always_run: true

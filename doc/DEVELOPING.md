@@ -12,8 +12,9 @@ subsystem behaves belong in that subsystem's doc; see
 - Node.js 24.11+
 - pnpm 9+
 
-The optional [Dev Container](../.devcontainer/devcontainer.json) provides Node 24
-and pnpm 9.15.4, and installs workspace dependencies when it is created. Its
+The optional [Dev Container](../.devcontainer/devcontainer.json) provides Node 24.
+On creation, Corepack selects pnpm from `package.json` and installs the workspace
+dependencies. Its
 image digest is pinned for Linux amd64 and arm64. For Runner work, install the
 Rust toolchain declared in `packages/proprio-runner/rust-toolchain.toml` before
 running the [agent worktree preflight](#agent-worktree-preflight).
@@ -38,7 +39,9 @@ Contributor checks include `pnpm check:agents` for local links referenced by
 `AGENTS.md` and `pnpm check:no-git-push` for adapter/runtime remote-push
 boundaries. After installing pre-commit and the workspace dependencies, run `pre-commit
 install` to enable commit hooks. Use `pre-commit run --all-files` to run them on
-the current checkout. These focused checks do not replace `pnpm verify`.
+the current checkout. These focused checks do not replace
+`pnpm verify --base origin/main`. Pass the base explicitly: the current default
+resolver only tries the historical `master` refs.
 
 ## Start Dev
 

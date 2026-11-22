@@ -42,7 +42,7 @@ jobs:
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
       - name: Validate contributor instructions and adapter boundaries
-        run: pnpm check:agents && node --test scripts/check-agents.test.mjs && pnpm check:no-git-push
+        run: pnpm check:agents && pnpm test:check-agents && pnpm check:no-git-push
       - name: Check service onboarding
         run: pnpm exec vitest run cli/src/__tests__/onboard-service.test.ts
       - name: Check cost summaries and database backups

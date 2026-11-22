@@ -1,5 +1,10 @@
 # CI timing in Honeycomb
 
+This page describes the historical upstream profiling setup. The current
+checkout does not enable its PR matrix, AWS admission, sampling, or Honeycomb
+export workflows. See [current CI workflows](ci-workflows.md) for the active
+checks. Do not use the procedures below as current deployment instructions.
+
 CI CODEOWNER PRs send their CI timing to Honeycomb in two ways:
 
 | | Sampled (always on) | `profile-ci` label |
@@ -79,8 +84,8 @@ places the metadata gate on the reserved `proprio-ci-routing-x64` AWS fleet.
 The gate checks current CI CODEOWNERS before authorizing any PR code on AWS;
 PR edits cannot grant access. A stale roster can allocate only the bounded
 metadata gate. Normal base-branch advancement does not change an authorized
-run's placement. See [Trusted PR Workflow](ci-workflows.md#trusted-pr-workflow)
-for the admission settings and immutable merge validation.
+run's placement. These admission settings and immutable merge checks belong to that historical
+setup; they are not enabled by the current [CI workflows](ci-workflows.md).
 The existing fail-closed GitHub-hosted fallback still applies if AWS routing
 cannot be authorized. The separate post-run Honeycomb exporter also uses
 `ubuntu-latest`; it is outside the measured PR suite.
