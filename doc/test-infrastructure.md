@@ -230,21 +230,17 @@ To add a test directory, add it to the `include` of the package's
 Sandbox providers are outside the root workspace, so the root install has none of
 their SDKs. `scripts/typecheck-sandbox-providers` is a small workspace that lists
 them and holds one lockfile. Its install replaces any standalone `node_modules` in
-those providers. After you change a provider's `package.json`, do not refresh or
-commit that lockfile. `typecheck:test-programs` resolves a stale lockfile in place
-for the run, and the lockfile refresh workflow commits the new one after merge (see
-[Dependency Lockfile Policy](ci-workflows.md#dependency-lockfile-policy)).
+those providers. The standalone typecheck scripts can resolve
+stale lockfiles in place for a run. The old automatic lockfile-refresh workflow
+is not enabled in this checkout; do not rely on it to commit those results.
+Follow the current [CI workflow scope](ci-workflows.md#local-verification) and
+review dependency updates explicitly. Routine changes must not commit the
+managed lockfiles.
 
-Do not add a lockfile inside a provider.
-`scripts/build-standalone-public-packages.mjs` uses a frozen install when one
-exists, which changes what a release resolves. Daytona already has one; the
-release build resolves it in place when it is stale.
-
-Daytona is the one exception: it commits its own lockfile, so the workspace
-leaves it out and the script installs it from that lockfile (`LOCKED_PROVIDERS`).
-The same rule applies to it: do not refresh or commit that lockfile. The script
-resolves a stale one in place for the run, and the lockfile refresh workflow
-commits the new one after merge.
+Do not add a lockfile inside another provider. Daytona already has its own
+lockfile and is the existing exception (`LOCKED_PROVIDERS`). The standalone
+release builder uses a frozen install when a lockfile exists, so dependency
+changes need separate release qualification.
 
 Dependabot updates the providers through this workspace (see
 `.github/dependabot.yml`), and Daytona through a second entry. Dependabot does

@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      production-and-development:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: "/scripts/typecheck-sandbox-providers"
+    schedule:
+      interval: weekly
+    groups:
+      sandbox-providers:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: "/packages/plugins/sandbox-providers/daytona"
+    schedule:
+      interval: weekly
+    groups:
+      daytona-provider:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
