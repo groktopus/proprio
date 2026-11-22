@@ -935,8 +935,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(descendantsOnly.runtimeMs).toBeLessThan(150_000 + 60_000);
   });
 
-  it("limits issue tree run summaries to matching bindings in a large history", async () => {
-    const companyId = randomUUID();
+  async function verifyScaledIssueTreePlan(db: ReturnType<typeof createDb>, companyId: string) {
     const agentId = randomUUID();
     const rootIssueId = randomUUID();
     const childIssueId = randomUUID();
@@ -1071,6 +1070,22 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(summary.runtimeMs).toBe(100_000);
     expect(descendantsOnly.runCount).toBe(1);
     expect(descendantsOnly.runtimeMs).toBe(30_000);
+  }
+
+  it("limits issue tree run summaries to matching bindings in a large history", async () => {
+    const companyId = randomUUID();
+    const discardFixture = Symbol("discard scaled issue history");
+    // Avoid deleting 32,000 synthetic runs through all FK checks in afterEach.
+    // PostgreSQL still plans against the full fixture inside this transaction.
+    try {
+      await db.transaction(async tx => {
+        await verifyScaledIssueTreePlan(tx as unknown as ReturnType<typeof createDb>, companyId);
+        throw discardFixture;
+      });
+    } catch (error) {
+      if (error !== discardFixture) throw error;
+    }
+    expect(await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId))).toEqual([]);
   }, 30_000);
 
   it("aggregates finance event sums above int32 without raising Postgres integer overflow", async () => {
