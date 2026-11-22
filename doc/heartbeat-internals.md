@@ -56,6 +56,25 @@ orphan recovery.
 pnpm exec vitest run server/src/services/heartbeat/agent-status.test.ts server/src/__tests__/heartbeat-agent-status-recovery.test.ts
 ```
 
+### Native settlement and replay cadence
+
+Run projection and agent settlement are separate obligations. A committed run
+alone does not prove that its agent heartbeat was recorded. Native live and
+recovery settlement pass the run ID to the agent-status owner, which locks the
+run, updates the agent, and records `resultJson.agentHeartbeatSettlement` in one
+transaction. The receipt binds the accepted result ID and settlement time.
+Repeated settlement of that result does not advance the clock or emit another
+agent-status update.
+
+Historical rows have no receipt. Recovery can preserve their cadence when the
+agent's existing heartbeat clock already covers the run's terminal time and the
+same accepted result is fully projected. An operator Stop may intentionally keep
+the run cancelled even when that result succeeded or failed. A matching receipt
+also preserves cadence after a wall-clock adjustment. Missing settlement,
+including delegated projection before the callback or a crash in that gap,
+records the first genuine heartbeat. Resource cleanup and stranded-agent repair
+keep their own owners.
+
 ## Queued run dispatch order
 
 When an agent is at its concurrency limit, each freed slot starts the next

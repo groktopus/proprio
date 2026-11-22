@@ -2247,6 +2247,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         ? null
         : (settledRun?.error ?? "native_workspace_sync_out_failed"),
       {
+        settlementRunId: input.runId,
         wasFirstHeartbeat: settledRun
           ? timerClaimWasFirstHeartbeat(settledRun)
           : undefined,

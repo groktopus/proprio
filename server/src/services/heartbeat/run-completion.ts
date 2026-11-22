@@ -797,6 +797,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
     const finalizedRun = persistedRun ?? (await getRun(run.id));
     const settleAgent = () => finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
+      ...(adapterResult.nativeFinalization ? { settlementRunId: run.id } : {}),
       keepIdleOnFailure:
         outcome === "failed" &&
         ((finalizedRun

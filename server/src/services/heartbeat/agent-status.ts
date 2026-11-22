@@ -1,7 +1,7 @@
 import { notifyStrandedAgentStatus } from "../live-run-recovery-notifications.js";
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
-import { agents, heartbeatRuns, type Db } from "@groktopus/db";
+import { agents, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
 import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY, CHAT_COMPLETION_SUPERSEDED } from "../chat-completion-delivery.js";
 import { trackAgentFirstHeartbeat } from "@groktopus/shared/telemetry";
@@ -99,12 +99,24 @@ export function createHeartbeatAgentStatus(db: Db) {
     agentId: string,
     outcome: Outcome,
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean; settlementRunId?: string },
   ) {
     const result = await db.transaction(async (tx) => {
+      // Bind the cadence receipt to the accepted result. Projection and agent
+      // settlement are separate commits; only this transaction owns the latter.
+      const [run] = options?.settlementRunId ? await tx.select().from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, options.settlementRunId), eq(heartbeatRuns.agentId, agentId)))
+        .for("update") : [];
+      if (options?.settlementRunId && !run) return null;
+      const [finalization] = run?.runtimeMode === "native" ? await tx.select({ resultId: nativeRunFinalizations.resultId })
+        .from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.runId, run.id),
+          eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.phase, "committed"))) : [];
+      const receipt = run?.resultJson?.agentHeartbeatSettlement as { resultId?: unknown } | undefined;
+      if (finalization?.resultId && receipt?.resultId === finalization.resultId) return null;
+
       const [existing] = await tx.select().from(agents)
         .where(eq(agents.id, agentId)).for("no key update");
-      if (!existing || existing.lifecycleState !== "ready" ||
+      if (!existing || (run && run.companyId !== existing.companyId) || existing.lifecycleState !== "ready" ||
           existing.status === "paused" || existing.status === "terminated") return null;
       const [running] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, existing.companyId),
@@ -127,6 +139,11 @@ export function createHeartbeatAgentStatus(db: Db) {
         updatedAt: now,
       }).where(and(eq(agents.id, agentId), eq(agents.companyId, existing.companyId),
         eq(agents.lifecycleState, "ready"))).returning();
+      if (updated && run && finalization?.resultId && outcome !== "superseded") {
+        await tx.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
+          || ${JSON.stringify({ agentHeartbeatSettlement: { resultId: finalization.resultId, settledAt: now.toISOString() } })}::jsonb` })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, existing.companyId)));
+      }
       return { updated, isFirstHeartbeat: outcome !== "superseded" && (options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt) };
     });
     if (!result?.updated) return;

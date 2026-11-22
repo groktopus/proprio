@@ -1,3 +1,4 @@
+import { createHeartbeatAgentStatus } from "../services/heartbeat/agent-status.js";
 import * as wakeSettlementNotifications from "../services/external-conversation-settlement-notifications.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { claimDueTimerHeartbeatForAgent } from "../services/heartbeat/queue.js";
@@ -187,6 +188,16 @@ describe("committed native run projection lifecycle", () => {
     await start(); await flush(); await quiet();
     expect((await read(binding.runId)).status).toBe("cancelled");
     expect(await readWake(wake.id)).toMatchObject({ status: "cancelled" });
+    const agentAfterStop = (await db.select().from(agents).where(eq(agents.id, binding.agentId)))[0];
+    const heartbeat = heartbeatService(db);
+    try {
+      for (let pass = 0; pass < 3; pass++) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+        expect((await db.select().from(agents).where(eq(agents.id, binding.agentId)))[0].lastHeartbeatAt)
+          .toEqual(agentAfterStop.lastHeartbeatAt);
+      }
+    } finally { await heartbeat.drainActiveRunExecutions(); }
   });
 
   it("preserves Stop that wins after the accepted task decision but before direct run projection", async () => {
@@ -747,12 +758,15 @@ describe("committed native run projection lifecycle", () => {
     }
   });
 
-  it.each(["new result", "provisional failure", "claimed wake", "unsuccessful workspace barrier"] as const)(
+  it.each(["new result", "delegated projection", "delegated first heartbeat", "provisional failure", "claimed wake", "unsuccessful workspace barrier"] as const)(
     "records a genuine heartbeat when recovering a %s", async variant => {
       const old = new Date(Date.now() - 60 * 60_000);
       const { binding, readAgent } = await cadenceFixture("running", old);
       if (variant !== "new result") {
         await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+      }
+      if (variant === "delegated first heartbeat") {
+        await db.update(agents).set({ lastHeartbeatAt: null }).where(eq(agents.id, binding.agentId));
       }
       if (variant === "provisional failure") {
         await db.update(heartbeatRuns).set({ status: "failed", finishedAt: old,
@@ -767,7 +781,7 @@ describe("committed native run projection lifecycle", () => {
       }
       const publish = vi.spyOn(liveEvents, "publishLiveEvent");
       const outcomes = () => publish.mock.calls.flatMap(([event]) => event.type === "agent.status" &&
-        event.payload.agentId === binding.agentId ? [event.payload.outcome] : []);
+        event.payload?.agentId === binding.agentId ? [event.payload.outcome] : []);
       const heartbeat = heartbeatService(db);
       try {
         const before = Date.now();
@@ -777,6 +791,9 @@ describe("committed native run projection lifecycle", () => {
         expect(after.lastHeartbeatAt!.getTime()).toBeGreaterThanOrEqual(before);
         expect(after.updatedAt).toEqual(after.lastHeartbeatAt);
         expect(outcomes()).toEqual(["succeeded"]);
+        expect((await read(binding.runId)).resultJson?.agentHeartbeatSettlement).toMatchObject({
+          resultId: (await state(binding.runId)).resultId, settledAt: after.lastHeartbeatAt!.toISOString(),
+        });
         expect(await read(binding.runId)).toMatchObject({ status: "succeeded", nativePhase: "committed", error: null });
         if (wake) expect(await readWake(wake.id)).toMatchObject({ status: "completed" });
         if (variant === "unsuccessful workspace barrier") {
@@ -794,14 +811,37 @@ describe("committed native run projection lifecycle", () => {
     },
   );
 
+  it("records one settlement receipt across competing callbacks and a clock rollback", async () => {
+    const old = new Date(Date.now() - 60 * 60_000);
+    const { binding, readAgent } = await cadenceFixture("running", old);
+    await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+    const publish = vi.spyOn(liveEvents, "publishLiveEvent");
+    const settle = () => createHeartbeatAgentStatus(db).finalizeAgentStatus(binding.agentId, "succeeded", null,
+      { settlementRunId: binding.runId });
+    await Promise.all([settle(), settle()]);
+    const events = () => publish.mock.calls.filter(([event]) => event.type === "agent.status" && event.payload?.agentId === binding.agentId);
+    expect(events()).toHaveLength(1);
+    const receipt = (await read(binding.runId)).resultJson?.agentHeartbeatSettlement;
+    expect(receipt).toMatchObject({ resultId: (await state(binding.runId)).resultId });
+    await db.update(agents).set({ lastHeartbeatAt: old }).where(eq(agents.id, binding.agentId));
+    await settle();
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+      expect((await readAgent()).lastHeartbeatAt).toEqual(old);
+      expect((await read(binding.runId)).resultJson?.agentHeartbeatSettlement).toEqual(receipt);
+      expect(events()).toHaveLength(1);
+    } finally { await heartbeat.drainActiveRunExecutions(); }
+  });
+
   it("leaves one-time stranded agent status repair to its existing recovery owner", async () => {
     const old = new Date(Date.now() - 60 * 60_000);
     const { binding, readAgent } = await cadenceFixture("running", old);
     await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
-    await db.update(heartbeatRuns).set({ costAccountingPending: false }).where(eq(heartbeatRuns.id, binding.runId));
+    await db.update(heartbeatRuns).set({ costAccountingPending: false, finishedAt: old }).where(eq(heartbeatRuns.id, binding.runId));
     const publish = vi.spyOn(liveEvents, "publishLiveEvent");
     const outcomes = () => publish.mock.calls.flatMap(([event]) => event.type === "agent.status" &&
-      event.payload.agentId === binding.agentId ? [event.payload.outcome] : []);
+      event.payload?.agentId === binding.agentId ? [event.payload.outcome] : []);
     const heartbeat = heartbeatService(db);
     try {
       await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
@@ -826,7 +866,7 @@ describe("committed native run projection lifecycle", () => {
     await reconcileNativeFinalizations(db, [binding.runId], { skipNativeRunProjection: true, skipNativeResultCommit: true,
       skipNativeResponsePresentation: true, skipNativeReviewResponse: true, onWorkspaceSettled: settled });
     expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      runId: binding.runId, succeeded: true, intent: "terminal_replay",
+      runId: binding.runId, succeeded: true, intent: "execution_settlement",
     }));
   });
 

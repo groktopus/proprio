@@ -122,7 +122,7 @@ jobs:
         run: |
           test_file=server/src/__tests__/native-run-projection-work.test.ts
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native-heartbeat-results.json" \
-            "$test_file" -t 'does not postpone an agent timer|records a genuine heartbeat|one-time stranded agent status repair|waits for delegated run projection'
+            "$test_file" -t 'does not postpone an agent timer|records a genuine heartbeat|one-time stranded agent status repair|waits for delegated run projection|preserves actual operator Stop when accepted|settlement receipt'
           node --input-type=module - "$test_file" <<'JS'
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
@@ -133,11 +133,16 @@ jobs:
             'does not postpone an agent timer when orphan recovery replays a native run finished 120 minutes ago',
             'does not postpone an agent timer when orphan recovery replays a native run finished 1 minutes ago',
             'records a genuine heartbeat when recovering a new result',
+            'records a genuine heartbeat when recovering a delegated projection',
+            'records a genuine heartbeat when recovering a delegated first heartbeat',
+            'preserves actual operator Stop when accepted succeeded work finishes delayed workspace finalization',
+            'preserves actual operator Stop when accepted failed work finishes delayed workspace finalization',
             'records a genuine heartbeat when recovering a provisional failure',
             'records a genuine heartbeat when recovering a claimed wake',
             'records a genuine heartbeat when recovering a unsuccessful workspace barrier',
             'leaves one-time stranded agent status repair to its existing recovery owner',
             'waits for delegated run projection before committed resource settlement',
+            'records one settlement receipt across competing callbacks and a clock rollback',
           ];
           for (const title of required) {
             const matches = file?.assertionResults.filter(test => test.title === title) ?? [];
@@ -146,3 +151,11 @@ jobs:
             }
           }
           JS
+      - name: Check native settlement callback consumers
+        run: pnpm exec vitest run --maxWorkers 1 server/src/services/native-runtime/native-workspace-finalizer.test.ts server/src/__tests__/native-workspace-finalization-work.test.ts server/src/services/heartbeat/agent-status.test.ts
+      - name: Typecheck server and build affected packages
+        run: |
+          node scripts/link-plugin-dev-sdk.mjs
+          pnpm --filter @groktopus/server typecheck
+          pnpm --filter @groktopus/hermes-proprio-adapter build
+          node scripts/run-tsc.mjs -p server/tsconfig.build.json
