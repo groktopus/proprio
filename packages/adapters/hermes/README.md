@@ -15,6 +15,12 @@ and Proprio should start `hermes chat` for each heartbeat. Choose
 another host, in Docker, or behind a private-network/TLS endpoint. The adapter
 type keys did not change during package consolidation.
 
+When an operator stops a Hermes Gateway run, Proprio sends one Stop request for
+that exact run. If creation is already in flight, Proprio waits briefly for its
+run ID rather than starting another run or stopping by session. A gateway
+report of `cancelled` does not necessarily mean its worker has exited.
+Proprio keeps that Stop unconfirmed rather than automatically resuming work.
+
 ## Key Features
 
 This adapter provides:
