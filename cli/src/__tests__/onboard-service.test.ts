@@ -203,13 +203,15 @@ describe("onboard service policy", () => {
   });
 
   it.each([
-    { outcome: "enabled", exitCode: 0 },
-    { outcome: "denied", exitCode: 1 },
-  ])("completes onboarding when optional lingering is $outcome", async ({ exitCode }) => {
+    { outcome: "enabled", stderr: "" },
+    { outcome: "denied", stderr: "Access denied" },
+    { outcome: "denied with noisy output", stderr: "Access denied for fake-user\n\u001b[31mdo-not-echo" },
+  ])("completes onboarding when optional lingering is $outcome", async ({ stderr }) => {
     // Real enableLinger, fake subprocess; never run loginctl or install a unit.
     const runner = vi.fn((_command: string, _args: string[]) => defaultCommandRunner(process.execPath, [
       "-e",
-      exitCode ? "console.error('Access denied'); process.exit(1)" : "",
+      "if (process.argv[1]) { console.error(process.argv[1]); process.exit(1); }",
+      stderr,
     ]));
     const manager = new SystemdServiceManager("default", runner);
     const install = vi.spyOn(manager, "install").mockResolvedValue({ changed: true });
@@ -233,11 +235,12 @@ describe("onboard service policy", () => {
     expect(runner).toHaveBeenCalledExactlyOnceWith("loginctl", ["enable-linger", expect.any(String)]);
     expect(install.mock.invocationCallOrder[0]).toBeLessThan(runner.mock.invocationCallOrder[0]);
     expect(success).toHaveBeenCalledExactlyOnceWith("Installed and started proprio.service.");
-    if (exitCode) {
-      expect(warn).toHaveBeenCalledOnce();
-      expect(warn.mock.calls[0]?.[0]).toContain("after logout");
-      expect(warn.mock.calls[0]?.[0]).toContain("Access denied");
-      expect(warn.mock.calls[0]?.[0]).toContain("system administrator");
+    if (stderr) {
+      // Only the stable guidance is allowed: no raw stderr, command line, username, or control characters.
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        "Could not enable the service to keep running after logout. " +
+          "Ask your system administrator to enable systemd lingering for your user.",
+      );
     } else {
       expect(warn).not.toHaveBeenCalled();
     }

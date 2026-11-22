@@ -269,12 +269,11 @@ export async function handleOnboardService(
   if (!explicitlyRequested && detection.manager.enableLinger && await deps.confirmLinger()) {
     try {
       await detection.manager.enableLinger();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+    } catch {
+      // Process errors can include the command, the account name, and raw stderr.
       deps.warn(
         "Could not enable the service to keep running after logout. " +
-          "Ask your system administrator to enable systemd lingering for your user. " +
-          `Details: ${reason}`,
+          "Ask your system administrator to enable systemd lingering for your user.",
       );
     }
   }
