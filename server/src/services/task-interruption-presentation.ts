@@ -1,3 +1,4 @@
+import { runHasUnverifiedProviderStop } from "../agent-run-cancellation.js";
 import { ENVIRONMENT_PROVIDER_WAIT_KEY, ENVIRONMENT_PROVIDER_WAIT_RETRY_REASON, environmentProviderWaitMessage } from "./environment-provider-wait.js";
 import { STORAGE_UNAVAILABLE_WAIT_RETRY_REASON } from "../storage/storage-unavailable.js";
 import { AGENT_DIRECTORY_WAIT_RETRY_REASON, INTERRUPTED_PREPARATION_RETRY_REASON } from "./execution-recovery-attempt.js";
@@ -263,6 +264,8 @@ function projectTaskInterruptionState(issue: ProjectionIssue, input: ProjectionS
     state: "resolved", nextRetryAt: null, canRetry: false, userAction: null,
     sourceRunIds: [run.id], observedRunId: run.id };
   if (["done", "cancelled"].includes(issue.status)) return base;
+  if (run.status === "succeeded" && run.runtimeMode === "legacy" && runHasUnverifiedProviderStop(run))
+    return { ...base, responsibility: "user", state: "waiting_for_user", userAction: "unblock" };
   // Retry took effect: the saved result is being applied again.
   if (run.status === "succeeded" && run.nativeFinalizationRetryPending)
     return { ...base, state: "working", recoveryStep: "finishing_recovery" };

@@ -15,6 +15,25 @@ and Proprio should start `hermes chat` for each heartbeat. Choose
 another host, in Docker, or behind a private-network/TLS endpoint. The adapter
 type keys did not change during package consolidation.
 
+Configure the canonical gateway base URL. Creation and Stop reject redirects, so
+a redirected create cannot start work on a route that Stop cannot reach.
+
+When an operator stops a Hermes Gateway run, Proprio sends one Stop request for
+that exact run. If creation is already in flight, Proprio waits briefly for its
+run ID rather than starting another run or stopping by session. A gateway
+report of `cancelled` does not necessarily mean its worker has exited.
+Proprio keeps that Stop unconfirmed rather than automatically resuming work.
+A completed result observed during Stop settles a still-running run as succeeded;
+an already-persisted terminal outcome remains authoritative. Completion alone
+still does not certify physical termination or authorize continuation.
+
+Stop aborts the event subscription and observes the run through status GETs:
+SSE can disconnect during Stop and cannot certify worker exit. The observation
+uses a 500 ms cadence and one 10-second deadline shared with the Stop POST.
+It ends on a terminal response, request failure, or deadline. There is no idle
+polling after settlement. An in-flight create has its own 10-second grace after
+cancellation to obtain the exact run ID; it is never retried.
+
 ## Key Features
 
 This adapter provides:

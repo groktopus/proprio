@@ -5,13 +5,23 @@ import { forbidden } from "./errors.js";
 /** Stop revokes write authority before waiting for the executor to settle.
  * A run that a fresh continuation replaced loses it too: its agent may still
  * be alive in an unreachable sandbox, and only the new run acts on the task. */
+export function runHasPendingStop(run: { resultJson?: Record<string, unknown> | null } | null | undefined): boolean {
+  const cancellation = run?.resultJson?.executionCancellation;
+  return Boolean(cancellation && typeof cancellation === "object" && "state" in cancellation && cancellation.state === "requested");
+}
+
+/** A host-certified bootstrap cancellation did no provider work. All other
+ * requested Stops retain their termination hold until acknowledged. */
+export function runHasUnverifiedProviderStop(run: { resultJson?: Record<string, unknown> | null } | null | undefined): boolean {
+  const recovery = run?.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  return runHasPendingStop(run) && !(recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false);
+}
+
 export function agentRunWritesRevoked(run: {
   status: string;
   resultJson?: Record<string, unknown> | null;
 } | null | undefined): boolean {
-  const cancellation = run?.resultJson?.executionCancellation;
-  return run?.status === "cancelled" || agentRunSupersededByFreshContinuation(run) || Boolean(cancellation && typeof cancellation === "object"
-    && "state" in cancellation && cancellation.state === "requested");
+  return run?.status === "cancelled" || agentRunSupersededByFreshContinuation(run) || runHasPendingStop(run);
 }
 
 /** Recorded by the fresh-continuation fallback on the run it replaced. */

@@ -48,7 +48,7 @@ import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { recordChatHandoff, recordAcceptedChatHandoff, lockAcceptedChatHandoffSource, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
-import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+import { agentRunWritesRevoked, assertAgentRunWriteAllowed, runHasPendingStop, agentRunSupersededByFreshContinuation } from "../agent-run-cancellation.js";
 import { assertHandedOffRunTaskOwnership } from "../run-task-ownership.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
@@ -13794,7 +13794,11 @@ export function issueService(db: Db) {
       if (issue.conversationAgentId && actor.runId) {
         const [run] = await dbOrTx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, actor.runId));
         const [current] = await dbOrTx.select().from(issues).where(eq(issues.id, issueId));
-        if (agentRunWritesRevoked(run)) throw conflict("This conversation turn was cancelled; it cannot post a reply");
+        const observedCompletionReply = options?.completionReply === true && run?.runtimeMode === "legacy" &&
+          run.status === "succeeded" && runHasPendingStop(run) && run.resultJson?.completionObserved === true &&
+          run.agentId === actor.agentId && run.companyId === issue.companyId &&
+          !agentRunSupersededByFreshContinuation(run) && current.executionRunId === run.id;
+        if (agentRunWritesRevoked(run) && !observedCompletionReply) throw conflict("This conversation turn was cancelled; it cannot post a reply");
         const runTaskId = run?.nativeIssueId ?? run?.issueId ?? run?.contextSnapshot?.issueId ?? run?.contextSnapshot?.taskId;
         if (options?.proactiveChatMessage) {
           if (run?.status !== "running" || run.agentId !== actor.agentId || run.companyId !== issue.companyId

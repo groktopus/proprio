@@ -1,3 +1,4 @@
+import { runHasPendingStop } from "../../agent-run-cancellation.js";
 import { preserveAgentHeartbeatSettlementSql } from "./agent-status.js";
 import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { isContextCompactionRun } from "../context-compaction.js";
@@ -455,7 +456,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const latestRun = await getRun(run.id, { unsafeFullResultJson: true });
     if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
       outcome = latestRun.status;
-    } else if (signal.aborted) {
+    } else if (signal.aborted && !(adapterResult.completionObserved === true &&
+      runHasPendingStop(latestRun) && !(signal.reason instanceof LegacyControllerLeaseLostError) &&
+      adapterResult.exitCode === 0 && !adapterResult.errorMessage && !adapterResult.signal && !adapterResult.timedOut)) {
       outcome = "cancelled";
     } else if (adapterResult.nativeFinalization) {
       const nativeTerminal =
@@ -675,10 +678,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       mergeRunStopMetadataForAgent(agent, outcome, {
         resultJson: mergeAdapterRecoveryMetadata({
           resultJson: {
-            ...(adapterResult.nativeFinalization || outcome === "cancelled"
+            ...(adapterResult.nativeFinalization || adapterResult.completionObserved || outcome === "cancelled"
               ? parseObject(latestRun?.resultJson)
               : {}),
             ...parseObject(adapterResult.resultJson),
+            // This proof belongs to the adapter contract, never its arbitrary payload.
+            completionObserved: adapterResult.completionObserved === true ? true : undefined,
             ...(adapterResult.executionRecovery
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),
@@ -986,6 +991,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           "stderr",
           `[proprio] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
         );
+      }
+      // A completed result is distinct from physical termination. Keep the
+      // execution lock and do not queue follow-up work while Stop lacks proof.
+      if (outcome === "succeeded" && runHasPendingStop(livenessRun)) {
+        await persistSessionState(livenessRun);
+        await settleAgent();
+        return;
       }
       if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
         const policy = parseMaxTurnContinuationPolicy(agent);
