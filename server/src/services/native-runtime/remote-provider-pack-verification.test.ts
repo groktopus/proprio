@@ -216,13 +216,25 @@ describe("installed provider pack compatibility", () => {
     const profiles = JSON.parse(readFileSync(new URL("../../../../packages/proprio-runner/acpx-profiles.json", import.meta.url), "utf8"));
     const current = manifest("b"), installed = manifest("a");
     // Published builtin Grok profile 1 predates grokEffort and grokDisableWebSearch
-    // in session.open. Its launcher bytes equal today's, so its release digest
-    // matches; the pack predates contract digests, so that gate refuses it.
+    // in session.open. It also predates the current release digest and contract
+    // identity; either incompatible identity must refuse the old pack.
     const published = "sha256:f0b698395a3704ed2ffaf84ea19bdb20c36c8a0a70b7c629c7b6ffe144e59e55";
-    expect(profiles.profiles.grok.commandDigest).toBe(published);
+    expect(profiles.profiles.grok.commandDigest).not.toBe(published);
     installed.payload.acpxProfileDigests = { grok: published };
     delete installed.payload.contractDigest;
     current.payload.acpxProfileDigests = { grok: profiles.profiles.grok.commandDigest };
+    const execute = vi.fn();
+    await expect(verifyRemoteProviderPack({ runner: { execute }, cwd: "/workspace", packRoot: "/opt/proprio-runner/provider-pack",
+      manifest: reseal(current), installation: { root: "/opt/proprio-runner/provider-pack", manifest: reseal(installed), immutable: true },
+      provider: { kind: "acpx", agent: "grok" } })).rejects.toThrow("interface or installation is incompatible");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a matching Grok release without its contract digest", async () => {
+    const profiles = JSON.parse(readFileSync(new URL("../../../../packages/proprio-runner/acpx-profiles.json", import.meta.url), "utf8"));
+    const current = manifest("b"), installed = manifest("a");
+    current.payload.acpxProfileDigests = installed.payload.acpxProfileDigests = { grok: profiles.profiles.grok.commandDigest };
+    delete installed.payload.contractDigest;
     const execute = vi.fn();
     await expect(verifyRemoteProviderPack({ runner: { execute }, cwd: "/workspace", packRoot: "/opt/proprio-runner/provider-pack",
       manifest: reseal(current), installation: { root: "/opt/proprio-runner/provider-pack", manifest: reseal(installed), immutable: true },
