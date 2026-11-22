@@ -1011,6 +1011,38 @@ describe("Hermes Gateway operator Stop", () => {
     } finally { release(); }
   });
 
+  it.each(["create", "stop"] as const)("refuses real HTTP redirects during %s without replaying the POST", async phase => {
+    vi.unstubAllGlobals();
+    const { abort, ctx } = makeStopContext();
+    let observed!: () => void;
+    const events = new Promise<void>(resolve => { observed = resolve; });
+    let redirected = 0, creates = 0, stops = 0;
+    const server = createServer((request, response) => {
+      const jsonResponse = (value: unknown) => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
+      const redirect = () => { response.writeHead(307, { Location: "/redirected" }); response.end(); };
+      if (request.url === "/redirected") { redirected++; jsonResponse({ run_id: "unexpected" }); }
+      else if (request.method === "POST" && request.url === "/v1/runs") {
+        creates++; if (phase === "create") redirect(); else jsonResponse({ run_id: "hermes-123" });
+      } else if (request.url?.endsWith("/events")) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" }); response.write(": waiting\n\n"); observed();
+      } else if (request.url?.endsWith("/stop")) { stops++; redirect(); }
+      else jsonResponse({ status: "cancelled" });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    ctx.config.apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const execution = execute(ctx);
+      if (phase === "stop") { await events; abort.abort(); }
+      expect((await execution).exitCode).toBe(1);
+      expect(redirected).toBe(0);
+      expect(creates).toBe(1);
+      expect(stops).toBe(phase === "stop" ? 1 : 0);
+    } finally {
+      abort.abort(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it.each(["stop", "status"] as const)("closes a real stalled HTTP %s connection at the Stop deadline", async phase => {
     vi.unstubAllGlobals();
     const { abort, ctx } = makeStopContext();

@@ -1,4 +1,4 @@
-import { runHasUnverifiedProviderStop } from "../agent-run-cancellation.js";
+import { runHasPendingStop, runHasUnverifiedProviderStop } from "../agent-run-cancellation.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { notifyNativeStatusReassessment } from "./native-status-reassessment-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
@@ -218,8 +218,14 @@ export async function terminalizeLegacyExecution(input: {
       if (await findRecordedLegacyDecision(tx as unknown as Db, run, task.id, unchanged.resultJson)) return unchanged;
     }
     if (patch?.resultJson !== undefined) patch = { ...patch,
-      resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
-        input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
+      resultJson: {
+        ...preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
+          input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
+        ...(status === "succeeded" && runHasPendingStop(current) ? {
+          executionCancellation: current.resultJson!.executionCancellation,
+          cancellation: current.resultJson!.cancellation,
+        } : {}),
+      },
     };
     if (issueId) await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: current.companyId, issueId });
     await notifyInstructionCollection(tx, { companyId: current.companyId, runId: current.id });

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import express from "express";
 import request from "supertest";
 import { expect, it, vi } from "vitest";
 import { agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, issueComments } from "@groktopus/db";
@@ -15,7 +14,7 @@ import { agentRoutes } from "../routes/agents.ts";
 import { agentExecutionsHaveStopped } from "../services/agent-execution-stop.js";
 import { legacyExecutionNeedsReconciliation } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
-import { errorHandler } from "../middleware/index.ts";
+import { routeApp } from "./helpers/route-test-harness.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 
@@ -81,15 +80,8 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
       runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
     const [issue] = await db.insert(issues).values({ companyId, title: "Trusted synthetic Stop fixture",
       status: "todo", assigneeAgentId: agentId, workMode: "conversation", conversationAgentId: agentId, conversationUserId: person, conversationState: "active" }).returning();
-    const app = express();
-    app.use(express.json());
-    app.use((req, _res, next) => {
-      req.actor = { type: "board", source: "session", userId: person, companyIds: [companyId],
-        memberships: [{ companyId, membershipRole: "admin", status: "active" }], isInstanceAdmin: false };
-      next();
-    });
-    app.use("/api", agentRoutes(db, {}));
-    app.use(errorHandler);
+    const app = routeApp(db, { type: "board", source: "session", userId: person, companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: "admin", status: "active" }], isInstanceAdmin: false }, agentRoutes);
 
     const run = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id } });

@@ -47,6 +47,18 @@ const support = externalTestDatabaseUrl ? { supported: true } : await getEmbedde
   } };
   const readLease = async (id: string) => (await db.select().from(environmentLeases).where(eq(environmentLeases.id, id)))[0];
 
+  it("preserves a Stop receipt written after the successful completion snapshot", async () => {
+    const f = await seed();
+    await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } })
+      .where(eq(heartbeatRuns.id, f.runId));
+    await db.update(issues).set({ executionRunId: f.runId, checkoutRunId: f.runId }).where(eq(issues.id, f.issueId));
+    const updated = await terminalizeLegacyExecution({ db, run: f.run, status: "succeeded", reconcileIfNeeded: true,
+      patch: { resultJson: { completionObserved: true }, finishedAt: new Date() } });
+    expect(updated?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0])
+      .toMatchObject({ executionRunId: f.runId, checkoutRunId: f.runId });
+  });
+
   it.each(["legacy", "native"])("records required file repair while a %s Stop retains task ownership", async runtimeMode => {
     const f = await seed();
     const [saved] = await db.update(heartbeatRuns).set({ runtimeMode,
