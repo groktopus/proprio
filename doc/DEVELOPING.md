@@ -12,11 +12,33 @@ subsystem behaves belong in that subsystem's doc; see
 - Node.js 24.11+
 - pnpm 9+
 
+The optional [Dev Container](../.devcontainer/devcontainer.json) provides Node 24
+and pnpm 9.15.4, and installs workspace dependencies when it is created. Its
+image digest is pinned for Linux amd64 and arm64. For Runner work, install the
+Rust toolchain declared in `packages/proprio-runner/rust-toolchain.toml` before
+running the [agent worktree preflight](#agent-worktree-preflight).
+
 ## CI
 
-No upstream GitHub workflows or managed runners are enabled. Run local test
-commands below in an isolated development instance. References to historical
-qualification and publishing workflows are not current operating instructions.
+Pull requests targeting `main` run the **Stability smoke** workflow for
+same-repository branches. It installs the frozen workspace dependencies and
+runs onboarding, cost-summary, backup, chat, native replay, and settlement
+regressions. It also typechecks the server and compiles affected packages. The
+**Droid Auto Review** workflow reviews non-draft pull requests; neither workflow
+replaces the focused verification below or broader qualification required for
+release. Fork pull requests do not run the stability smoke job.
+
+The repository also keeps CI workflow routing, test-selection, and performance
+measurement policy in [CI workflows](ci-workflows.md). That document may include
+operational detail for reusable or centrally managed workflows; the workflows
+present in `.github/workflows/` are the source of truth for what this checkout
+runs directly.
+
+Contributor checks include `pnpm check:agents` for local links referenced by
+`AGENTS.md` and `pnpm check:no-git-push` for adapter/runtime remote-push
+boundaries. After installing pre-commit and the workspace dependencies, run `pre-commit
+install` to enable commit hooks. Use `pre-commit run --all-files` to run them on
+the current checkout. These focused checks do not replace `pnpm verify`.
 
 ## Start Dev
 

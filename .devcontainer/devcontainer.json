@@ -1,0 +1,17 @@
+{
+  "name": "Proprio",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:24-bookworm@sha256:b067c4021d2760daeb24de2580973033064b74c26037b6acd9b2a3268c2d3259",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "24",
+      "pnpmVersion": "9.15.4"
+    }
+  },
+  "postCreateCommand": "pnpm install --frozen-lockfile",
+  "forwardPorts": [3100, 3101],
+  "portsAttributes": {
+    "3100": { "label": "Proprio API and UI" },
+    "3101": { "label": "Mobile UI preview" }
+  },
+  "remoteUser": "node"
+}

@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: agents-guide-links
+        name: Validate AGENTS.md guidance links
+        entry: node scripts/check-agents.mjs
+        language: system
+        pass_filenames: false
+        files: (^|/)AGENTS\.md$
+      - id: adapter-runtime-git-push
+        name: Check adapter and runtime git push boundaries
+        entry: node scripts/check-no-git-push.mjs
+        language: system
+        pass_filenames: false
+        files: \.(cjs|js|mjs|ts|tsx)$
