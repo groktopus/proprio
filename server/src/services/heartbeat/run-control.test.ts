@@ -149,7 +149,6 @@ describe.skipIf(!runControlPostgresSupport.supported)("heartbeat run-control dat
       status: "cancelled", runtimeMode: "legacy", resultJson: { executionCancellation: { state: "requested" },
         ...(neverDispatched ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : {}) } }).returning();
     const deps = callbacks(db);
-    deps.wakeQueue.releaseIssueExecution.mockResolvedValue({ postCommitEffects: [] });
     await createHeartbeatRunControl(db, deps).releaseIssueExecutionAndPromote(run);
     expect(deps.wakeQueue.releaseIssueExecution).toHaveBeenCalledTimes(neverDispatched ? 1 : 0);
   });
