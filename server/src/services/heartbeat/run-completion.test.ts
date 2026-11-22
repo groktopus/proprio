@@ -54,7 +54,7 @@ import { questionResponseDeliveryService } from "../question-response-delivery.j
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { heartbeatService } from "../heartbeat.js";
 import { taskAttemptCondition } from "../task-retry-eligibility.js";
-import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn } from "../chat-completion-delivery.js";
+import { CHAT_COMPLETION_WAKE_REASON, ChatCompletionSupersededBeforeDispatch, prepareChatCompletionTurn } from "../chat-completion-delivery.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
@@ -999,7 +999,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     expect(f.deps.scheduleInteractionContinuationInfrastructureRetryIfEligible).not.toHaveBeenCalled();
     expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(expect.objectContaining({ id: old.id }),
       { suppressImmediateRecovery: true });
-    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(agentId, "superseded", null, { supersededCreatedAt: old.createdAt });
+    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(agentId, "superseded");
     const [currentChat] = await db.select().from(issues).where(eq(issues.id, chat.id));
     expect(currentChat).toEqual(chat);
     expect(await read(replacement.id)).toMatchObject({ status: "queued" });
@@ -1012,6 +1012,25 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     });
     expect(await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, old.id),
       eq(heartbeatRunEvents.eventType, "error")))).toEqual([]);
+  });
+
+  it("preserves a durable operator Stop claimed before quiet chat supersession", async () => {
+    const f = await fixture({ executionStage: "preparing", startedAt: new Date(),
+      contextSnapshot: { wakeReason: CHAT_COMPLETION_WAKE_REASON } });
+    const stop = {
+      cancelledByActorType: "user", cancelledByUserId: "board-user",
+      executionCancellation: { state: "requested", requestedAt: new Date().toISOString() },
+    };
+    // The owner had loaded a still-running run before Stop. No in-memory abort
+    // has arrived, but the database now owns the authoritative Stop intent.
+    const setup = f.setup(new ChatCompletionSupersededBeforeDispatch());
+    expect(setup.signal.aborted).toBe(false);
+    await db.update(heartbeatRuns).set({ resultJson: stop }).where(eq(heartbeatRuns.id, f.run.id));
+    await f.completion.failRunSetup(setup);
+    expect(await read(f.run.id)).toMatchObject({ status: "running", resultJson: stop });
+    expect(f.deps.setWakeupStatus).not.toHaveBeenCalled();
+    expect(f.deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect(f.deps.finalizeAgentStatus).not.toHaveBeenCalled();
   });
 
   it("keeps a real setup failure visible even if its text matches chat supersession", async () => {

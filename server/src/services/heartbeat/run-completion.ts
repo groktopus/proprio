@@ -1606,11 +1606,11 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         errorCode: CHAT_COMPLETION_SUPERSEDED,
         issueCommentStatus: "not_applicable",
         resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
-      }, undefined, { setupFailure: true });
+      }, undefined, { setupFailure: true, onlyWithoutRecordedUserStop: true });
       if (settled.updated && settled.run) {
         await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt, error: null });
         await releaseIssueExecutionAndPromote(settled.run, { suppressImmediateRecovery: true });
-        await finalizeAgentStatus(run.agentId, "superseded", null, { supersededCreatedAt: run.createdAt });
+        await finalizeAgentStatus(run.agentId, "superseded");
       }
       return;
     }

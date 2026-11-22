@@ -5,6 +5,7 @@ import { agents, agentWakeupRequests, authUsers, companies, companyMemberships, 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { createHeartbeatAgentStatus } from "../services/heartbeat/agent-status.js";
 import { CHAT_COMPLETION_WAKE_REASON } from "../services/chat-completion-delivery.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -90,15 +91,26 @@ describe.skipIf(!support.supported)("Agent Chat supersession through heartbeat",
     expect(replacement.contextSnapshot).toMatchObject({ wakeCommentIds: [comment.id], conversationSessionGeneration: 2 });
   });
 
-  it("keeps a real failure authoritative when obsolete work is the last slot to settle", async () => {
+  it.each([
+    { errorCode: "provider_quota", keepIdleOnFailure: true, expectedStatus: "idle" },
+    { errorCode: "setup_failed", keepIdleOnFailure: false, expectedStatus: "error" },
+  ])("preserves the settled agent projection for $errorCode", async ({ errorCode, keepIdleOnFailure, expectedStatus }) => {
     const f = await queuedSupersession();
-    await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: f.agent.id, status: "failed",
-      error: "Genuine setup failure", errorCode: "setup_failed", finishedAt: new Date(), createdAt: new Date(Date.now() + 1_000) });
+    const message = "Genuine run failure";
+    const [failure] = await db.insert(heartbeatRuns).values({
+      companyId: f.company.id, agentId: f.agent.id, status: "failed", error: message, errorCode,
+      finishedAt: new Date(), createdAt: f.run.createdAt,
+    }).returning();
+    await createHeartbeatAgentStatus(db).finalizeAgentStatus(f.agent.id, "failed", message, { keepIdleOnFailure });
+    const [before] = await db.select().from(agents).where(eq(agents.id, f.agent.id));
+    expect(before).toMatchObject({ status: expectedStatus,
+      errorReason: keepIdleOnFailure ? null : message, lastHeartbeatAt: expect.any(Date) });
+
     await heartbeat.resumeQueuedRuns();
     await heartbeat.drainActiveRunExecutions();
+
     await assertQuietSettlement(f);
-    expect((await db.select().from(agents).where(eq(agents.id, f.agent.id)))[0]).toMatchObject({
-      status: "error", errorReason: "Genuine setup failure",
-    });
+    expect((await db.select().from(agents).where(eq(agents.id, f.agent.id)))[0]).toEqual(before);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, failure.id)))[0]).toEqual(failure);
   });
 });

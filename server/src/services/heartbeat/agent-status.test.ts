@@ -318,6 +318,25 @@ describePostgres("heartbeat agent status", () => {
     });
   });
 
+  it("settles only a transient running flag after overlap with a superseded completion", async () => {
+    const { companyId, agentId, runId } = await seed("failed");
+    const [obsolete] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running" }).returning();
+    await service.finalizeAgentStatus(agentId, "failed", "Retrying real work", { keepIdleOnFailure: true });
+    const before = await agent(agentId);
+    expect(before.status).toBe("running");
+    await db.update(heartbeatRuns).set({
+      status: "succeeded", finishedAt: new Date(), errorCode: "chat_completion_superseded",
+    }).where(eq(heartbeatRuns.id, obsolete.id));
+
+    await service.finalizeAgentStatus(agentId, "superseded");
+
+    expect(await agent(agentId)).toMatchObject({
+      status: "idle", errorReason: null, lastHeartbeatAt: before.lastHeartbeatAt,
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))
+      .toEqual([expect.objectContaining({ status: "failed" })]);
+  });
+
   it("keeps failures idle when the caller owns a continuation", async () => {
     const { agentId } = await seed("failed");
     await service.finalizeAgentStatus(agentId, "failed", "Retrying", { keepIdleOnFailure: true });

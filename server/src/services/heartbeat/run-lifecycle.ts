@@ -1218,7 +1218,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
     failureReport?: RunFailureReportOptions,
-    options?: { setupFailure: true },
+    options?: { setupFailure: true; onlyWithoutRecordedUserStop?: true },
   ) {
     return setRunStatusFromLive(runId, status, ["running"], patch, failureReport, undefined, options);
   }
@@ -1237,6 +1237,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     cancellationCondition?: ReturnType<typeof nativeRetryCancellationCommitCondition>,
     options?: {
       setupFailure?: true;
+      onlyWithoutRecordedUserStop?: true;
       /**
        * Write only while no native executor lease on the run is live. Locks the
        * coordinator row first, the order the owner takes back a lapsed lease in
@@ -1289,6 +1290,11 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       };
     }
     const legacyTerminalization = previousStatus?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(status);
+    const stopGuards = [
+      ...(cancellationCondition ? [cancellationCondition] : []),
+      ...(options?.onlyWithoutRecordedUserStop ? [not(recordedUserStopRequestSql())] : []),
+    ];
+    const lostUnattendedWrite = Symbol("unattended terminal write did not own the run");
     const write = () => writeRunStatus(status, previousStatus, async writer => {
       if (options?.setupFailure && previousStatus?.runtimeMode === "native" && previousStatus.nativeIssueId) {
         await writer.select({ runId: nativeRunFinalizations.runId }).from(nativeRunFinalizations)
@@ -1302,7 +1308,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             eq(nativeRunFinalizations.companyId, previousStatus.companyId)))
           .for("update");
       }
-      return previousStatus && legacyTerminalization
+      const written = await (previousStatus && legacyTerminalization
         ? terminalizeLegacyExecution({
             db: writer,
             run: previousStatus,
@@ -1310,7 +1316,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             patch,
             fromStatuses,
             reconcileIfNeeded: true,
-            writeConditions: [nativeRunnerOwnershipNotHeldCondition(), ...(cancellationCondition ? [cancellationCondition] : [])],
+            writeConditions: [nativeRunnerOwnershipNotHeldCondition(), ...stopGuards],
           })
         : writer
             .update(heartbeatRuns)
@@ -1339,7 +1345,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
                     sql`${heartbeatRuns}.xmin::text = ${previous?.rowVersion ?? null}`,
                   ]
                   : []),
-                ...(cancellationCondition ? [cancellationCondition] : []),
+                ...stopGuards,
                 ...(isHeartbeatRunTerminalStatus(status)
                   ? [nativeRunnerOwnershipNotHeldCondition()]
                   : []),
@@ -1355,7 +1361,14 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             .catch((error: unknown) => {
               if (cancellationCondition) rethrowNativeCancellationLockConflict(error);
               throw error;
-            });
+            }));
+      // writeRunStatus can wake shared-workspace waiters. Roll back that work
+      // too when a scheduler no-op loses the durable Stop/status guard.
+      if (options?.onlyWithoutRecordedUserStop && !written) throw lostUnattendedWrite;
+      return written;
+    }).catch(error => {
+      if (error === lostUnattendedWrite) return null;
+      throw error;
     });
     // Legacy terminalization takes the task row under a short lock_timeout so
     // it never queues behind a slow task writer. Losing that race rolls back

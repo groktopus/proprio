@@ -87,7 +87,7 @@ export function settledHeartbeat(now: Date) {
 
 export function createHeartbeatAgentStatus(db: Db) {
   function latestRealOutcome(tx: Pick<Db, "select">, companyId: string, agentId: string) {
-    return tx.select({ status: heartbeatRuns.status, error: heartbeatRuns.error, finishedAt: heartbeatRuns.finishedAt }).from(heartbeatRuns)
+    return tx.select({ status: heartbeatRuns.status, error: heartbeatRuns.error }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
         inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out", "cancelled", "interrupted"]),
         sql`coalesce(${heartbeatRuns.errorCode}, '') <> ${CHAT_COMPLETION_SUPERSEDED}`))
@@ -99,7 +99,7 @@ export function createHeartbeatAgentStatus(db: Db) {
     agentId: string,
     outcome: Outcome,
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean; supersededCreatedAt?: Date },
+    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
   ) {
     const result = await db.transaction(async (tx) => {
       const [existing] = await tx.select().from(agents)
@@ -110,21 +110,18 @@ export function createHeartbeatAgentStatus(db: Db) {
         eq(heartbeatRuns.companyId, existing.companyId),
         eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running"),
       )).limit(1);
-      // A skipped completion did no agent work. Resolve from the last real
-      // outcome under the same agent lock, not from this scheduler receipt.
-      const lastRun = !running && outcome === "superseded" ? await latestRealOutcome(tx, existing.companyId, agentId) : undefined;
-      if (outcome === "superseded" && existing.status !== "running" &&
-          (existing.status === "error" || running || !lastRun?.finishedAt ||
-            !options?.supersededCreatedAt || lastRun.finishedAt < options.supersededCreatedAt)) return null;
-      const nextStatus = running ? "running" : settledStatus(
-        outcome === "superseded" ? lastRun?.status : outcome, options?.keepIdleOnFailure);
+      // This wake did no agent work. An already settled agent row is
+      // authoritative; a bare failed run does not encode keepIdleOnFailure.
+      // Only clear a transient running flag when no other run still owns it.
+      if (outcome === "superseded" && (existing.status !== "running" || running)) return null;
+      const nextStatus = running ? "running" : settledStatus(outcome, options?.keepIdleOnFailure);
       const now = new Date();
       await notifyStrandedAgentStatus(tx, { companyId: existing.companyId, agentId });
       await notifyAttentionRetentionWork(tx, { companyId: existing.companyId, sourceKind: "agent_error_alert" });
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
       const [updated] = await tx.update(agents).set({
         status: nextStatus,
-        errorReason: nextStatus === "error" ? errorReason(outcome === "superseded" ? lastRun?.error : failureReason) : null,
+        errorReason: nextStatus === "error" ? errorReason(failureReason) : null,
         lastHeartbeatAt: outcome === "superseded" ? existing.lastHeartbeatAt : now,
         updatedAt: now,
       }).where(and(eq(agents.id, agentId), eq(agents.companyId, existing.companyId),
