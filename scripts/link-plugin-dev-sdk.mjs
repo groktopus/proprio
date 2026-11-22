@@ -69,7 +69,7 @@ export function readPluginsUnder(parentDir) {
 }
 
 export function linkSdkInto(packageDir) {
-  const scopeDir = join(packageDir, "node_modules", "@proprio");
+  const scopeDir = join(packageDir, "node_modules", "@groktopus");
   const linkTarget = join(scopeDir, "plugin-sdk");
   const relativeSdkDir = relative(scopeDir, sdkDir);
 
