@@ -29,7 +29,6 @@ it("includes the selected engine and fixed fallback warning in db:backup --json"
   const provenance = {
     engine: "javascript" as const,
     fallbackReason: "pg_dump_failed" as const,
-    warning: "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.",
   };
   vi.mocked(runDatabaseBackup).mockResolvedValue({
     backupFile: "/unused/proprio-fixture.sql.gz", sizeBytes: 100, prunedCount: 0, ...provenance,
@@ -38,5 +37,8 @@ it("includes the selected engine and fixed fallback warning in db:backup --json"
   await dbBackupCommand({ dir: "/unused", json: true });
 
   expect(consoleLog).toHaveBeenCalledOnce();
-  expect(JSON.parse(String(consoleLog.mock.calls[0]?.[0]))).toMatchObject(provenance);
+  expect(JSON.parse(String(consoleLog.mock.calls[0]?.[0]))).toMatchObject({
+    ...provenance,
+    warning: "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.",
+  });
 });
