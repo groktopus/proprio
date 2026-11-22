@@ -50,6 +50,8 @@ import {
 import { resolveExecutionWorkspaceReuseRequestForIssue } from "./workspaces.js";
 import {
   CHAT_COMPLETION_WAKE_REASON,
+  CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY,
+  isChatCompletionWakeReceipt,
   isCompletedOnboardingHandoffWake,
 } from "../chat-completion-delivery.js";
 import { hasWorkspaceRestoreFailure } from "@groktopus/shared";
@@ -191,7 +193,7 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
 } from "../execution-workspace-policy.js";
 import { readContinuationAttempt } from "../recovery/index.js";
-import { allowsDependencyBlockedWake, extractWakeCommentIds, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
+import { allowsDependencyBlockedWake, deriveCommentId, extractWakeCommentIds, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
 import { dispatchForAgent, outsideAgentDispatch } from "../agent-start-lock.js";
 import { AgentRunSlotsFull, assertAgentRunSlotFree } from "./run-slot-admission.js";
 import {
@@ -1878,9 +1880,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           return tx.transaction(async (claimTx) => {
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
-            if (run.wakeupRequestId) await claimTx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
-              eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
-            )).for("update");
+            const [wake] = run.wakeupRequestId ? await claimTx.select({
+              status: agentWakeupRequests.status, runId: agentWakeupRequests.runId, payload: agentWakeupRequests.payload,
+              reason: agentWakeupRequests.reason, source: agentWakeupRequests.source, triggerDetail: agentWakeupRequests.triggerDetail,
+              requestedByActorId: agentWakeupRequests.requestedByActorId, requestedByActorType: agentWakeupRequests.requestedByActorType,
+            }).from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, run.wakeupRequestId),
+              eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+            )).for("update") : [];
             const [lockedRun] = await claimTx.select().from(heartbeatRuns).where(and(
               eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
             )).for("update");
@@ -1890,7 +1896,21 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               await assertAgentRunSlotFree(claimTx, run);
             });
             await notifyChatRunMilestones(claimTx, { companyId: run.companyId, runId: run.id, issueId: issueId ?? undefined });
-            const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
+            const lockedContext = parseObject(lockedRun.contextSnapshot);
+            const wakePayload = parseObject(wake?.payload);
+            const completionPreflight = issueId && lockedContext.issueId === issueId && wakePayload.issueId === issueId &&
+              lockedContext.wakeReason === CHAT_COMPLETION_WAKE_REASON &&
+              lockedRun.invocationSource === "automation" && lockedRun.triggerDetail === "system" &&
+              !lockedRun.startedAt && !lockedRun.retryOfRunId && !deriveCommentId(lockedContext, wakePayload) &&
+              queuedCommentIdsFromWakePayload(wakePayload).length === 0 &&
+              lockedRun.wakeupRequestId === run.wakeupRequestId &&
+              wake?.runId === lockedRun.id && wake.status === "queued" && isChatCompletionWakeReceipt(wake);
+            // Reserve the real slot and lease as usual. Until preparation
+            // accepts a delivery, this scheduler wake cannot own agent status.
+            const claimedRun = await claimTx.update(heartbeatRuns).set({ ...claimValues,
+              ...(completionPreflight ? { runnerProfileJson: sql`(${claimValues.runnerProfileJson})
+                || jsonb_build_object(${CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY}::text, true)` } : {}),
+            }).where(and(
               eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
             )).returning().then((rows) => rows[0] ?? null);
             await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);

@@ -1,5 +1,6 @@
 import { LiveTranscriptInterests, DISCONNECTED_TRANSCRIPT_STREAM } from "../lib/live-transcript-interests";
 import { resolveAgentAppearance, TASK_IDENTITY_CHANGED_FIELD, issueActivityChangesTaskIdentity } from "@groktopus/shared";
+import { isSupersededChatCompletion } from "../lib/run-status-presentation";
 import { getPageVisibility, usePageVisibility } from "../lib/page-visibility";
 import { createLiveQueryRecovery } from "../lib/live-query-recovery";
 import { isLiveReconciledQuery } from "../lib/live-reconcile";
@@ -1328,7 +1329,7 @@ function buildRunStatusToast(
   const errorCode = readString(payload.errorCode);
   // Interrupt is an intentional conversation control. Its caller gives
   // feedback; the terminal event must not announce a cancelled/failed run.
-  if (errorCode === "operator_interrupted") return null;
+  if (errorCode === "operator_interrupted" || isSupersededChatCompletion(errorCode)) return null;
   if (status === "cancelled" && errorCode === "provider_limit_wait") return null;
   // Workspace contention is ordinary scheduling, not a failed user action.
   if (errorCode === "workspace_busy" || errorCode === "agent_directory_busy") return null;

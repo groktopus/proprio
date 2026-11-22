@@ -1,3 +1,4 @@
+import type { createHeartbeatAgentStatus } from "./agent-status.js";
 import { hasPendingRunCleanup } from "../execution-blocker.js";
 import { runOwnerFenceHeldSql } from "../remote-workspace-writer-hold.js";
 import { AGENT_DIRECTORY_BUSY_ERROR_CODE, AGENT_DIRECTORY_BUSY_MAX_DEFERRALS, AGENT_DIRECTORY_BUSY_RETRY_REASON, AGENT_DIRECTORY_BUSY_RETRY_WAKE_REASON, agentDirectoryBusyRetryDelayMs, type AgentDirectoryPreparationDeferral } from "./agent-directory-busy.js";
@@ -135,12 +136,7 @@ export interface HeartbeatRetryDependencies {
   }>;
   setWakeupStatus: (wakeupRequestId: string | null | undefined, status: string, patch?: Partial<typeof agentWakeupRequests.$inferInsert>) => Promise<void>;
   releaseIssueExecutionAndPromote: (run: Pick<HeartbeatRun, "id" | "companyId">) => Promise<unknown>;
-  finalizeAgentStatus: (
-    agentId: string,
-    outcome: "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out",
-    failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
-  ) => Promise<void>;
+  finalizeAgentStatus: ReturnType<typeof createHeartbeatAgentStatus>["finalizeAgentStatus"];
   getWorktreeExecutionCutoff: () => Promise<Date | null>;
   applyRunDispatchPostCommitEffects: (effects: PostCommitEffect[]) => void;
 }

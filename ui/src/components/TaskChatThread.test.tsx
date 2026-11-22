@@ -2773,6 +2773,33 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(container.textContent).not.toContain("before returning an answer");
   });
 
+  it.each([["native", "proprio_runner"], ["legacy", "claude_local"]] as const)(
+    "omits a superseded %s completion without hiding a genuine setup failure",
+    async (runtimeMode, adapterType) => {
+      const run = { runtimeMode, adapterType, agentId: "agent-1", agentName: "Agent",
+        createdAt: "2026-09-12T18:00:00.000Z", startedAt: "2026-09-12T18:00:00.000Z",
+        finishedAt: "2026-09-12T18:00:01.000Z" };
+      renderThread({ comments: [], onAdd: async () => {}, onRetryFailedRun: vi.fn(async () => {}),
+        conversationMode: true, linkedRuns: [{ ...run, runId: "obsolete-completion", status: "cancelled",
+          errorCode: "chat_completion_superseded" }] });
+      expect(container.textContent).not.toMatch(/Run cancelled|Run failed|Stopped|Retry|before returning an answer/);
+
+      const onRetryFailedRun = vi.fn(async () => {});
+      renderThread({ comments: [], onAdd: async () => {}, onRetryFailedRun,
+        issueStatus: "in_progress", conversationMode: true, linkedRuns: [
+          { ...run, runId: "real-failure", status: "failed", errorCode: "setup_failed" },
+          { ...run, runId: "newer-obsolete-completion", status: "succeeded", errorCode: "chat_completion_superseded",
+            createdAt: "2026-09-12T18:00:02.000Z", startedAt: "2026-09-12T18:00:02.000Z", finishedAt: "2026-09-12T18:00:03.000Z" },
+        ] });
+      expect(container.textContent).toContain("Run failed");
+      const retry = container.querySelector<HTMLButtonElement>('[data-testid="task-chat-run-failed-try-again"]');
+      expect(retry).not.toBeNull();
+      flushSync(() => retry!.click());
+      await Promise.resolve();
+      expect(onRetryFailedRun).toHaveBeenCalledExactlyOnceWith("real-failure");
+    },
+  );
+
   it("does not render an empty response notice for a conversation reset", () => {
     renderThread({
       comments: [],
