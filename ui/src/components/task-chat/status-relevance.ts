@@ -1,4 +1,5 @@
 import type { ExecutionProjection, IssueRecoveryAction } from "@groktopus/shared";
+import { isSupersededChatCompletion } from "@/lib/run-status-presentation";
 import type { IssueChatComment } from "@/lib/issue-chat-messages";
 import { isTerminalIssueStatus } from "@/lib/liveIssueIds";
 import type { TaskChatItem } from "./task-chat-model";
@@ -39,6 +40,7 @@ export function taskChatStatusRelevance(
   const latestByAgent = new Map<string, number>();
   const latestAttemptByAgent = new Map<string, number>();
   for (const run of byId.values()) {
+    if (isSupersededChatCompletion(run.errorCode)) continue;
     // Admission order, not finish order: an old attempt can finish late.
     const createdAt = timestamp(run.createdAt);
     const order = Number.isFinite(createdAt) ? createdAt : timestamp(run.startedAt);
@@ -54,6 +56,7 @@ export function taskChatStatusRelevance(
     if (terminal) return true;
     const run = byId.get(runId);
     if (!run) return false;
+    if (isSupersededChatCompletion(run.errorCode)) return true;
     if (run.execution?.successorRunId || run.execution?.phase === "completed") return true;
     const wait = run.resultJson?.executionWait;
     if (recoveryAction && wait && typeof wait === "object" && "recoveryActionId" in wait

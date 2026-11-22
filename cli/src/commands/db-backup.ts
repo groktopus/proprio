@@ -1,7 +1,7 @@
 import path from "node:path";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
-import { formatDatabaseBackupResult, runDatabaseBackup } from "@groktopus/db";
+import { databaseBackupWarning, formatDatabaseBackupResult, runDatabaseBackup } from "@groktopus/db";
 import {
   expandHomePrefix,
   resolveDefaultBackupDir,
@@ -85,6 +85,9 @@ export async function dbBackupCommand(opts: DbBackupOptions): Promise<void> {
             backupFile: result.backupFile,
             sizeBytes: result.sizeBytes,
             prunedCount: result.prunedCount,
+            engine: result.engine,
+            fallbackReason: result.fallbackReason,
+            warning: databaseBackupWarning(result.fallbackReason),
             backupDir,
             retentionDays,
             connectionSource: connection.source,

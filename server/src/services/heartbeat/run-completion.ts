@@ -54,6 +54,7 @@ import { CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-
 import { logActivity } from "../activity-log.js";
 import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagnostic, type UnresolvedWorkspaceBaseRefError } from "../workspace-runtime.js";
 import { runnerGoalService } from "../runner-goals.js";
+import { CHAT_COMPLETION_SUPERSEDED, ChatCompletionSupersededBeforeDispatch } from "../chat-completion-delivery.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
 import { hasChatRunOwnedProviderInteraction } from "../chat-interaction-arbitration.js";
 import { conversationTurnPresentsAnswer } from "../native-runtime/native-governance.js";
@@ -1594,6 +1595,25 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
   async function failRunSetup(input: FailHeartbeatRunSetupInput) {
     const { run, runId, outerErr, signal, providerDispatchStarted, nativeDispatchMayHaveStarted, identityRedactor, readFailureReportSecrets } = input;
+    if (outerErr instanceof ChatCompletionSupersededBeforeDispatch &&
+        !providerDispatchStarted && !nativeDispatchMayHaveStarted && !signal.aborted) {
+      // Settle this scheduler no-op like an already-reported completion,
+      // not as an operator Stop. A Stop receipt would strand deferred input.
+      const finishedAt = new Date();
+      const settled = await setRunStatusIfRunning(runId, "succeeded", {
+        finishedAt,
+        error: null,
+        errorCode: CHAT_COMPLETION_SUPERSEDED,
+        issueCommentStatus: "not_applicable",
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      }, undefined, { setupFailure: true, onlyWithoutRecordedUserStop: true });
+      if (settled.updated && settled.run) {
+        await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt, error: null });
+        await releaseIssueExecutionAndPromote(settled.run, { suppressImmediateRecovery: true });
+        await finalizeAgentStatus(run.agentId, "superseded");
+      }
+      return;
+    }
     // The lease watchdog stopped preparation because this host no longer owns
     // the run. That is host infrastructure, not a defect in the agent or setup.
     // A post-dispatch error can also land here (for example a failed usage

@@ -1,0 +1,120 @@
+name: Stability smoke
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stability-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Verify head and install locked dependencies
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git rev-parse HEAD
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          # Restore only the embedded Postgres package symlinks for test fixtures.
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Check service onboarding
+        run: pnpm exec vitest run cli/src/__tests__/onboard-service.test.ts
+      - name: Check cost summaries and database backups
+        run: |
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/stability-results.json" server/src/__tests__/costs-service.test.ts packages/db/src/backup-lib.test.ts
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'stability-results.json'), 'utf8'));
+          const assertions = result.testResults.flatMap(file => file.assertionResults);
+          const required = [
+            'aggregates run wall-clock duration across the recursive issue tree',
+            'preserves identity generation, sequence options and progress in JavaScript backups',
+          ];
+          for (const title of required) {
+            if (!assertions.some(test => test.title === title && test.status === 'passed')) {
+              throw new Error(`Required PostgreSQL test did not pass: ${title}`);
+            }
+          }
+          JS
+      - name: Check Agent Chat supersession and Stop
+        run: |
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
+            server/src/__tests__/heartbeat-chat-completion-supersession.test.ts \
+            server/src/services/heartbeat/agent-status.test.ts \
+            server/src/services/heartbeat/run-completion.test.ts \
+            ui/src/components/TaskChatThread.test.tsx \
+            ui/src/components/task-chat/status-relevance.test.ts \
+            ui/src/context/LiveUpdatesProvider.test.ts \
+            -t 'Agent Chat supersession through heartbeat|transient running flag after overlap|quietly skips a superseded chat completion|durable operator Stop claimed|keeps a real setup failure visible|omits a superseded|ignores a newer .* superseded completion|scheduler-only chat supersession toast'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'chat-supersession-results.json'), 'utf8'));
+          const required = {
+            'server/src/__tests__/heartbeat-chat-completion-supersession.test.ts': [
+              'promotes a real user message parked behind the obsolete completion',
+              'preserves the settled agent projection for provider_quota',
+              'preserves the settled agent projection for setup_failed',
+              'preserves provider_quota through completion preflight (stale on claim)',
+              'preserves setup_failed through completion preflight (stale on claim)',
+              'preserves provider_quota through completion preflight (invalidated after finalizer)',
+              'preserves setup_failed through completion preflight (invalidated after finalizer)',
+              'counts an admitted completion as a genuine running sibling',
+            ],
+            'server/src/services/heartbeat/run-completion.test.ts': [
+              'quietly skips a superseded chat completion (reset)',
+              'quietly skips a superseded chat completion (retargeted)',
+              'preserves a durable operator Stop claimed before quiet chat supersession',
+              'keeps a real setup failure visible even if its text matches chat supersession',
+            ],
+            'server/src/services/heartbeat/agent-status.test.ts': [
+              'settles only a transient running flag after overlap with a superseded completion',
+            ],
+            'ui/src/components/TaskChatThread.test.tsx': [
+              'omits a superseded native completion without hiding a genuine setup failure',
+              'omits a superseded legacy completion without hiding a genuine setup failure',
+            ],
+            'ui/src/components/task-chat/status-relevance.test.ts': [
+              'ignores a newer cancelled superseded completion without hiding a real failure',
+              'ignores a newer succeeded superseded completion without hiding a real failure',
+            ],
+            'ui/src/context/LiveUpdatesProvider.test.ts': [
+              'suppresses a succeeded scheduler-only chat supersession toast',
+              'suppresses a cancelled scheduler-only chat supersession toast',
+            ],
+          };
+          for (const [path, titles] of Object.entries(required)) {
+            const file = result.testResults.find(entry => entry.name.endsWith(`/${path}`));
+            for (const title of titles) {
+              const matches = file?.assertionResults.filter(test => test.title === title) ?? [];
+              if (matches.length !== 1 || matches[0].status !== 'passed') {
+                throw new Error(`Required Agent Chat test did not pass: ${path}: ${title}`);
+              }
+            }
+          }
+          JS

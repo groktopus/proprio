@@ -30,6 +30,13 @@ pnpm proprio db:backup
 pnpm db:backup
 ```
 
+The success receipt names the engine that actually produced the file: `pg_dump`
+or `javascript`. Use `proprio db:backup --json` for structured metadata. If
+the `pg_dump` backup path failed and the JavaScript fallback completed, the receipt has
+`fallbackReason: "pg_dump_failed"` and warns that the fallback may not preserve
+all PostgreSQL features. It does not include the dump command's error output.
+This metadata is not a restore verification.
+
 Environment overrides:
 
 - `PROPRIO_DB_BACKUP_ENABLED=true|false`
