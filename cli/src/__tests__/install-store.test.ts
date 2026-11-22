@@ -164,6 +164,24 @@ describe("managed install store", () => {
     expect(fs.existsSync(paths.lockPath)).toBe(false);
   });
 
+  it("does not initialize a missing store for an existing-only lock", async () => {
+    const enter = async () => { throw new Error("unexpected lock acquisition"); };
+    await expect(withInstallStoreLock(enter, paths, { initialize: "existing-only" }))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(fs.existsSync(paths.cliRoot)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("does not enter or chmod a non-private existing-only store", async () => {
+    await withInstallStoreLock(async () => undefined, paths);
+    fs.chmodSync(paths.installsRoot, 0o755);
+    const enter = async () => { throw new Error("unexpected lock acquisition"); };
+
+    await expect(withInstallStoreLock(enter, paths, { initialize: "existing-only" }))
+      .rejects.toThrow("non-private install-store path");
+    expect(fs.statSync(paths.installsRoot).mode & 0o777).toBe(0o755);
+    expect(fs.existsSync(paths.lockPath)).toBe(false);
+  });
+
   it("recovers a lock owned by a process that no longer exists", async () => {
     const staleToken = "2147483647:stale";
     await withInstallStoreLock(async () => undefined, paths);
