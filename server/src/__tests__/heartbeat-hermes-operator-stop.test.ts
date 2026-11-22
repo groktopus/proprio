@@ -12,11 +12,13 @@ import {
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { agentRoutes } from "../routes/agents.ts";
+import { agentExecutionsHaveStopped } from "../services/agent-execution-stop.js";
+import { legacyExecutionNeedsReconciliation } from "../services/legacy-execution-recovery.js";
 import { errorHandler } from "../middleware/index.ts";
 
 const support = await getEmbeddedPostgresTestSupport();
 
-it.skipIf(!support.supported)("keeps remote Hermes Stop unverified through the HTTP route and durable run record", async () => {
+it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserves the Hermes %s outcome without inventing provider termination through Stop", async (remoteStatus) => {
   const dbFixture = await startEmbeddedPostgresTestDatabase("proprio-hermes-operator-stop-");
   const db = createDb(dbFixture.connectionString);
   const heartbeat = heartbeatService(db, { runtimeEnv: { ...process.env, PROPRIO_IN_WORKTREE: "false" } });
@@ -61,7 +63,7 @@ it.skipIf(!support.supported)("keeps remote Hermes Stop unverified through the H
     }
     if (method === "GET" && url.pathname === `/v1/runs/${remoteRunId}`) {
       if (remoteStopCalled) remoteCancellationObserved = true;
-      return json({ run_id: remoteRunId, status: remoteStopCalled ? "cancelled" : "running" });
+      return json({ run_id: remoteRunId, status: remoteStopCalled ? remoteStatus : "running" });
     }
     throw new Error(`Unexpected fake gateway fetch: ${method} ${url.pathname}`);
   }));
@@ -102,9 +104,11 @@ it.skipIf(!support.supported)("keeps remote Hermes Stop unverified through the H
       { method: "POST", path: `/v1/runs/${remoteRunId}/stop`, redirect: "error" },
     ]);
     expect(remoteCancellationObserved).toBe(true);
-    expect(stored?.status).toBe("cancelled");
+    expect(stored?.status).toBe(remoteStatus === "completed" ? "succeeded" : "cancelled");
     expect(stored?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
     expect(stored?.resultJson?.conversationContinuation).toBeUndefined();
+    expect(legacyExecutionNeedsReconciliation(stored!)).toBe(true);
+    expect(await agentExecutionsHaveStopped(db, [agentId])).toBe(false);
   } finally {
     // A failed assertion must not strand the synthetic agent until its timeout.
     cleaningUp = true;

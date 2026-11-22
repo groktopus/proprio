@@ -169,7 +169,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     }
     await db.execute(sql`set client_min_messages = warning`);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
-  afterAll(async () => { await db?.$client.end(); await database?.cleanup(); vi.restoreAllMocks(); });
+  afterAll(async () => { await db?.$client.end({ timeout: 1 }); await database?.cleanup(); vi.restoreAllMocks(); });
   beforeEach(async () => { await db.execute(sql`truncate table companies restart identity cascade`); });
 
   async function fixture(patch: Partial<typeof heartbeatRuns.$inferInsert> = {}, issuePrefix = "CMP") {
@@ -664,6 +664,24 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     expect(finalizedEarly).toBe(0);
     expect(finalizedAfterRecovery).toEqual([true]);
   });
+
+  it.each(["successful", "missing evidence", "failed", "timed out", "durable Stop"] as const)(
+    "settles an observed completion during Stop only with success and no prior terminal outcome (%s)", async variant => {
+      const f = await fixture();
+      Object.assign(f.input.adapterResult, {
+        exitCode: variant === "failed" ? 1 : 0,
+        completionObserved: variant === "missing evidence" ? undefined : true,
+        timedOut: variant === "timed out",
+      });
+      f.controller.abort();
+      if (variant === "durable Stop") {
+        await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: { winner: "Stop" } })
+          .where(eq(heartbeatRuns.id, f.run.id));
+      }
+      await f.completion.completeRun(f.input);
+      expect((await read(f.run.id)).status).toBe(variant === "successful" ? "succeeded" : "cancelled");
+    },
+  );
 
   it("attributes an adapter stop caused by a lost controller lease", async () => {
     const f = await fixture();

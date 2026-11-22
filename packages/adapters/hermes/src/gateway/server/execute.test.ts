@@ -808,6 +808,7 @@ describe("Hermes Gateway operator Stop", () => {
     expect(ctx.onCancellationReady).toHaveBeenCalledOnce();
     expect(ctx.onDispatch).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
     expect(result.errorCode).toBe("hermes_gateway_cancelled");
     expect(result.resultJson?.executionCancellation).toMatchObject({
       state: "acknowledged", proof: "hermes_gateway_create_not_started",
@@ -935,7 +936,7 @@ describe("Hermes Gateway operator Stop", () => {
     await vi.advanceTimersByTimeAsync(100);
     const result = await execution;
 
-    expect(result).toMatchObject({ exitCode: 0, timedOut: false, resultJson: { status: "completed", output: "saved result" } });
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, completionObserved: true, resultJson: { status: "completed", output: "saved result" } });
     expect(result.resultJson?.executionCancellation).toBeUndefined();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
   });

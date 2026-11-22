@@ -62,6 +62,8 @@ export function legacyExecutionNeedsReconciliation(
   run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson">
     & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "controllerBootId" | "controllerProcess">>,
 ): boolean {
+  if (run.runtimeMode === "legacy" && run.status === "succeeded" &&
+      (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "requested") return true;
   if (
     run.runtimeMode === "native" ||
     !["failed", "timed_out", "interrupted", "cancelled"].includes(run.status)

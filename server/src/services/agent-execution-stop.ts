@@ -40,6 +40,9 @@ export async function agentExecutionStopBlocker(db: Db, agentIds: string[]): Pro
         new Date(observed).getTime() === coordinator.controllerProcessStartedAt.getTime()) return "native_controller_alive";
   }
   for (const run of runs) {
+    if (run.runtimeMode === "legacy" &&
+        (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "requested")
+      return "provider_stop_unconfirmed";
     if (!["succeeded", "failed", "cancelled", "timed_out", "interrupted"].includes(run.status)) return "run_not_terminal";
     if (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt > new Date()) return "run_controller_lease_held";
     const runLeases = leases.filter(lease => lease.heartbeatRunId === run.id);

@@ -107,3 +107,11 @@ it("recognizes only an unclaimed pre-dispatch review wait receipt", () => {
     { resultJson: { ...run.resultJson, workspaceRestoreFailure: "restore_unsafe_archive" } },
   ]) expect(isPreDispatchReviewWait({ ...run, ...patch })).toBe(false);
 });
+
+ it("keeps completed provider work held while an in-flight Stop lacks termination proof", () => {
+  const run = { runtimeMode: "legacy", status: "succeeded", errorCode: null,
+    resultJson: { executionCancellation: { state: "requested" } } };
+  expect(legacyExecutionNeedsReconciliation(run)).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: { executionCancellation: { state: "acknowledged" } } })).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {} })).toBe(false);
+ });

@@ -605,6 +605,17 @@ async function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+async function readRunStatus(input: {
+  baseUrl: URL; headers: Record<string, string>; runId: string; signal: AbortSignal;
+}): Promise<Record<string, unknown> | null> {
+  const record = asRecord(await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}`), {
+    method: "GET", headers: input.headers, signal: input.signal,
+  }));
+  const reportedId = extractRunId(record);
+  if (reportedId && reportedId !== input.runId) throw new Error("Hermes gateway returned another run's status");
+  return record;
+}
+
 async function pollStatus(input: {
   ctx: AdapterExecutionContext;
   baseUrl: URL;
@@ -618,11 +629,7 @@ async function pollStatus(input: {
     await delay(input.intervalMs, input.signal);
     if (input.signal.aborted || input.state.terminal) break;
     try {
-      const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}`), {
-        method: "GET",
-        headers: input.headers,
-        signal: input.signal,
-      });
+      const status = await readRunStatus({ ...input, runId: input.state.runId });
       const normalized = extractStatus(status);
       if (normalized && TERMINAL_STATUSES.has(normalized)) {
         markTerminal(input.state, {
@@ -793,7 +800,7 @@ export function mapFinalResultForTest(input: {
 
 const REQUEST_DEADLINE = Symbol("Hermes gateway request deadline");
 
-function requestDeadline(ms: number, armOn?: AbortSignal) {
+function requestDeadline(armOn?: AbortSignal) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expire!: (value: typeof REQUEST_DEADLINE) => void;
@@ -802,7 +809,7 @@ function requestDeadline(ms: number, armOn?: AbortSignal) {
     timer = setTimeout(() => {
       expire(REQUEST_DEADLINE);
       controller.abort();
-    }, ms);
+    }, STOP_GRACE_MS);
   };
   if (!armOn || armOn.aborted) arm();
   else armOn.addEventListener("abort", arm, { once: true });
@@ -836,6 +843,7 @@ function operatorCancelled(input: {
         ? `Hermes reported the run as ${input.terminalStatus}; remote shutdown was not independently confirmed.`
         : "Hermes gateway cancellation is unconfirmed; remote work may still be running.",
     provider: "hermes_gateway",
+    ...(input.notStarted ? { executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false as const } } : {}),
     resultJson: {
       ...(input.runId ? { run_id: input.runId } : {}),
       status: input.notStarted ? "not_started" : input.terminalStatus ?? "unconfirmed",
@@ -859,7 +867,7 @@ async function stopRunAndObserve(input: {
 }): Promise<Record<string, unknown> | null> {
   // Keep one bounded request and observation window for either stop origin.
   // A successful POST may only mean "stopping"; do not use it as a receipt.
-  const deadline = requestDeadline(STOP_GRACE_MS);
+  const deadline = requestDeadline();
   const runUrl = apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}`);
   const observe = async () => {
     try {
@@ -877,13 +885,7 @@ async function stopRunAndObserve(input: {
     }
     while (!deadline.signal.aborted) {
       try {
-        const record = asRecord(await fetchJson(runUrl, {
-          method: "GET",
-          headers: input.headers,
-          signal: deadline.signal,
-        }));
-        const reportedId = extractRunId(record);
-        if (reportedId && reportedId !== input.runId) return null;
+        const record = await readRunStatus({ ...input, signal: deadline.signal });
         const status = extractStatus(record);
         if (status && TERMINAL_STATUSES.has(status)) return record;
       } catch {
@@ -1059,7 +1061,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // After dispatch, cancellation cannot prove that the create request did not
   // start remote work. Give the same request a bounded chance to return its ID;
   // never retry it or stop by session key, which can name other runs.
-  const createDeadline = ctx.signal ? requestDeadline(STOP_GRACE_MS, ctx.signal) : null;
+  const createDeadline = ctx.signal ? requestDeadline(ctx.signal) : null;
   let runId: string;
   try {
     ctx.onDispatch?.();
@@ -1132,7 +1134,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const status = extractStatus(finalStatus);
   if (outcome === "operator_stop" || ctx.signal?.aborted) {
     if (status === "completed") {
-      return mapTerminal({ runId, status, payload: finalStatus, output: extractOutput(finalStatus) });
+      return { ...mapTerminal({ runId, status, payload: finalStatus, output: extractOutput(finalStatus) }), completionObserved: true };
     }
     // Hermes versions can mark an asyncio wrapper cancelled before its worker
     // exits. A terminal cancellation status is not a physical stop receipt.
