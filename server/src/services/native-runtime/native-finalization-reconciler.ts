@@ -5,7 +5,7 @@ import { notifyLiveRunRecovery } from "../live-run-recovery-notifications.js";
 import { currentControllerProcessStamp } from "../controller-process-identity.js";
 import { NATIVE_SESSION_RESUMPTION_ISSUE_STATUSES } from "./native-session-resumption-statuses.js";
 import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
-import { pendingNativeRunProjectionCondition } from "./native-run-projection.js";
+import { alreadyProjectedNativeResultCondition, pendingNativeRunProjectionCondition } from "./native-run-projection.js";
 import { nativeStatusReassessmentSourceIsSuperseded, reassessNativeStatusFromSource } from "./native-status-reassessment.js";
 import { resolveNativeReconciliationStatus } from "./native-reconciliation-status.js";
 export { resolveNativeReconciliationStatus, type NativeReconciliationFacts } from "./native-reconciliation-status.js";
@@ -58,7 +58,7 @@ import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueService } from "../issues.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { isNewTerminalRunFailure, reportRunFailure } from "../run-failure-report.js";
-import { attemptNativeWorkspaceFinalization, recordNativeWorkspaceFinalizationFailure } from "./native-workspace-finalizer.js";
+import { attemptNativeWorkspaceFinalization, recordNativeWorkspaceFinalizationFailure, type NativeWorkspaceSettlement } from "./native-workspace-finalizer.js";
 import { dismissObsoleteNativePolicyReviews } from "./obsolete-policy-reviews.js";
 import {
   cleanupNativeWorkspaceSync,
@@ -407,12 +407,7 @@ type NativeReconciliationOptions = {
   skipNativeRecoveryNotices?: boolean;
   pluginWorkerManager?: WorkspaceWorkers;
   environmentRuntime?: EnvironmentRuntimeService;
-  onWorkspaceSettled?: (input: {
-    runId: string;
-    companyId: string;
-    agentId: string;
-    succeeded: boolean;
-  }) => Promise<void>;
+  onWorkspaceSettled?: (input: NativeWorkspaceSettlement) => Promise<void>;
 };
 
 type NativeReconciliationPassTiming = ReturnType<typeof createNativeReconciliationPassTiming>;
@@ -523,6 +518,7 @@ async function reconcileNativeFinalizationsPass(
       issueStatusVersion: issues.statusVersion,
       issueDecisionId: issues.lastStatusDecisionId,
       coordinatorPhase: nativeRunFinalizations.phase,
+      alreadyProjected: options.onWorkspaceSettled ? alreadyProjectedNativeResultCondition(db) : sql<boolean>`false`,
       runProjectionPending: options.skipNativeRunProjection ? pendingNativeRunProjectionCondition(db) : sql<boolean>`false`,
       resultId: nativeRunFinalizations.resultId,
       assessmentId: nativeRunFinalizations.assessmentId,
@@ -684,6 +680,7 @@ async function reconcileNativeFinalizationsPass(
               runId: row.runId,
               companyId: row.companyId,
               agentId: row.agentId,
+              intent: "execution_settlement",
               succeeded: false,
             })
             .catch(() => undefined);
@@ -730,6 +727,7 @@ async function reconcileNativeFinalizationsPass(
               runId: row.runId,
               companyId: row.companyId,
               agentId: row.agentId,
+              intent: "execution_settlement",
               succeeded: true,
             })
             .catch(() => undefined);
@@ -782,12 +780,18 @@ async function reconcileNativeFinalizationsPass(
       });
       results.push(finalized);
       if (finalized.phase === "committed") {
+        // Use the projection seen before replay only for the same accepted
+        // result. A new commit or repaired projection must still settle.
+        const terminalReplay = row.alreadyProjected &&
+          finalized.runId === row.runId && finalized.companyId === row.companyId && finalized.issueId === row.issueId &&
+          finalized.resultId === row.resultId;
         await cleanupNativeWorkspaceSync(row.runId).catch(() => undefined);
         await options
           .onWorkspaceSettled?.({
             runId: row.runId,
             companyId: row.companyId,
             agentId: row.agentId,
+            intent: terminalReplay ? "terminal_replay" : "execution_settlement",
             succeeded: true,
           })
           .catch(() => undefined);

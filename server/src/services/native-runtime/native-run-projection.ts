@@ -114,6 +114,33 @@ export function pendingNativeRunProjectionCondition(db: Db) {
   )));
 }
 
+/** Positive proof for a committed replay to do upkeep without recording a
+ * heartbeat. A missing result or a terminal label alone is not this proof. */
+export function alreadyProjectedNativeResultCondition(db: Db) {
+  const status = sql<string>`${nativeRunResults.resultJson}->'terminal'->>'runTerminalState'`;
+  return sql<boolean>`(${and(
+    eq(nativeRunFinalizations.phase, "committed"),
+    eq(nativeRunFinalizations.companyId, heartbeatRuns.companyId),
+    eq(nativeRunFinalizations.issueId, heartbeatRuns.nativeIssueId),
+    eq(heartbeatRuns.nativePhase, "committed"),
+    isNotNull(heartbeatRuns.finishedAt),
+    sql`${heartbeatRuns.resultJson}->>'finalizationPhase' = 'committed'`,
+    nativeRunnerOwnershipNotHeldCondition(),
+    exists(db.select({ id: nativeRunResults.id }).from(nativeRunResults).where(and(
+      eq(nativeRunResults.id, nativeRunFinalizations.resultId),
+      eq(nativeRunResults.runId, heartbeatRuns.id),
+      eq(nativeRunResults.companyId, heartbeatRuns.companyId),
+      eq(nativeRunResults.issueId, nativeRunFinalizations.issueId),
+      eq(nativeRunResults.completionContractId, heartbeatRuns.completionContractId),
+      eq(nativeRunResults.schemaStatus, "accepted"),
+      inArray(status, ["succeeded", "failed", "cancelled"]),
+      eq(heartbeatRuns.status, status),
+      not(nativeRunProjectionNeedsRepair(status)!),
+    ))),
+  )}) IS TRUE`;
+}
+
+
 export function recoveredExecutionFailureMetadata() {
 
   return sql`case when ${heartbeatRuns.error} is not null or ${heartbeatRuns.errorCode} is not null

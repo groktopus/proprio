@@ -1,5 +1,9 @@
 import * as wakeSettlementNotifications from "../services/external-conversation-settlement-notifications.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { claimDueTimerHeartbeatForAgent } from "../services/heartbeat/queue.js";
+import { createHeartbeatTimerPolicy } from "../services/heartbeat/timer-policy.js";
+import * as workspaceRuntime from "../services/workspace-runtime.js";
+import * as liveEvents from "../services/live-events.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { createHeartbeatLifecycle, type HeartbeatLifecycleDependencies } from "../services/heartbeat/run-lifecycle.js";
 import { reconcileNativeFinalizations } from "../services/native-runtime/native-finalization-reconciler.js";
@@ -43,6 +47,7 @@ describe("committed native run projection lifecycle", () => {
   let worker: ReturnType<ReturnType<typeof nativeRunProjectionWork>["register"]> | undefined;
   const companyId = randomUUID(), agentId = randomUUID();
   const priorLogs = process.env.WORKSPACE_OPERATION_LOG_BASE_PATH;
+  let cadenceCompany: string | undefined;
   let admitted = true;
   const errors: unknown[] = [];
   beforeAll(async () => {
@@ -62,6 +67,8 @@ describe("committed native run projection lifecycle", () => {
     await coordinator?.stop(); coordinator = undefined; worker = undefined;
     vi.useRealTimers(); vi.restoreAllMocks();
     await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.companyId, companyId));
+    if (cadenceCompany) await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.companyId, cadenceCompany));
+    cadenceCompany = undefined;
     expect(errors).toEqual([]);
   });
   afterAll(async () => {
@@ -89,7 +96,8 @@ describe("committed native run projection lifecycle", () => {
     try { await vi.advanceTimersByTimeAsync(120_000); await delay(10); expect(queries).toEqual([]); }
     finally { db.$client.options.debug = previous; }
   }
-  async function seed(matchesCompletionClaim = false) {
+  async function seed(matchesCompletionClaim = false, owner = { companyId, agentId }) {
+    const { companyId, agentId } = owner;
     const runId = randomUUID(), issueId = randomUUID(), contractId = randomUUID(), sourceInstanceId = randomUUID();
     await db.insert(issues).values({ id: issueId, companyId, title: "Commit accepted work", status: "in_progress", assigneeAgentId: agentId });
     await db.insert(completionContracts).values({ id: contractId, companyId, issueId, revision: 1,
@@ -114,7 +122,7 @@ describe("committed native run projection lifecycle", () => {
       callerResultId: `${binding.runId}:result` });
   }
   async function barrier(binding: Awaited<ReturnType<typeof seed>>) {
-    await workspaceOperationService(db).createRecorder({ companyId, issueId: binding.issueId, heartbeatRunId: binding.runId })
+    await workspaceOperationService(db).createRecorder({ companyId: binding.companyId, issueId: binding.issueId, heartbeatRunId: binding.runId })
       .recordOperation({ phase: "workspace_finalize", cwd: root, run: async () => ({ status: "succeeded", exitCode: 0 }) });
   }
   async function state(runId: string) {
@@ -127,7 +135,7 @@ describe("committed native run projection lifecycle", () => {
     const binding = await seed(); await complete(binding, "control_plane", db, status); await barrier(binding); return binding;
   }
   async function claimedWake(binding: Awaited<ReturnType<typeof seed>>) {
-    const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "issue",
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: binding.companyId, agentId: binding.agentId, source: "issue",
       status: "claimed", runId: binding.runId, claimedAt: new Date(), payload: { issueId: binding.issueId } }).returning();
     await db.update(heartbeatRuns).set({ wakeupRequestId: wake.id }).where(eq(heartbeatRuns.id, binding.runId));
     return wake;
@@ -690,6 +698,123 @@ describe("committed native run projection lifecycle", () => {
     await lifecycle.setRunStatus(binding.runId, "running", { errorCode: null, nativePhase: "committed" });
     await flush(); expect((await read(binding.runId)).status).toBe("succeeded"); await quiet();
   });
+  async function cadenceFixture(status: "idle" | "running", clock: Date) {
+    const companyId = randomUUID(), agentId = randomUUID();
+    cadenceCompany = companyId;
+    await db.insert(companies).values({ id: companyId, name: "Heartbeat cadence", issuePrefix: `HC${companyId.slice(0, 6)}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Cadence agent", adapterType: "proprio_runner",
+      status, lastHeartbeatAt: clock, updatedAt: clock,
+      runtimeConfig: { heartbeat: { enabled: true, intervalSec: 1800, requireActionableTimerWork: true } },
+    });
+    await db.insert(issues).values({ companyId, title: "Another task", status: "todo", assigneeAgentId: agentId });
+    const binding = await seed(true, { companyId, agentId });
+    await complete(binding, "control_plane");
+    await barrier(binding);
+    return { binding, readAgent: async () => (await db.select().from(agents).where(eq(agents.id, agentId)))[0] };
+  }
+
+  it.each([120, 1])("does not postpone an agent timer when orphan recovery replays a native run finished %i minutes ago", async minutes => {
+    const old = new Date(Date.now() - minutes * 60_000);
+    const { binding, readAgent } = await cadenceFixture("idle", old);
+    await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+    expect(await read(binding.runId)).toMatchObject({ status: "succeeded", nativePhase: "committed" });
+    await db.update(heartbeatRuns).set({ finishedAt: old, updatedAt: old }).where(eq(heartbeatRuns.id, binding.runId));
+    const timer = createHeartbeatTimerPolicy(db);
+    const priorDeadline = await timer.nextTimerHeartbeatAt(await readAgent(), new Date());
+    expect(priorDeadline).toBe(old.getTime() + 1_800_000);
+    const cleanup = vi.spyOn(workspaceRuntime, "releaseRuntimeServicesForRun");
+    const heartbeat = heartbeatService(db);
+    const observed = [];
+    try {
+      for (let pass = 0; pass < 3; pass++) {
+        await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+        const agent = await readAgent();
+        observed.push({ lastHeartbeatAt: agent.lastHeartbeatAt, updatedAt: agent.updatedAt,
+          deadline: await timer.nextTimerHeartbeatAt(agent, new Date()) });
+        await vi.advanceTimersByTimeAsync(30_000);
+      }
+      expect(cleanup.mock.calls.filter(([runId]) => runId === binding.runId)).toHaveLength(3);
+      expect(observed).toEqual(Array.from({ length: 3 },
+        () => ({ lastHeartbeatAt: old, updatedAt: old, deadline: priorDeadline })));
+      if (minutes > 30) {
+        const claimTime = new Date();
+        expect(await claimDueTimerHeartbeatForAgent(db, await readAgent(), claimTime, 1800))
+          .toEqual({ wasFirstHeartbeat: false });
+        expect(await claimDueTimerHeartbeatForAgent(db, await readAgent(), claimTime, 1800)).toBeNull();
+      }
+    } finally {
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
+  it.each(["new result", "provisional failure", "claimed wake", "unsuccessful workspace barrier"] as const)(
+    "records a genuine heartbeat when recovering a %s", async variant => {
+      const old = new Date(Date.now() - 60 * 60_000);
+      const { binding, readAgent } = await cadenceFixture("running", old);
+      if (variant !== "new result") {
+        await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+      }
+      if (variant === "provisional failure") {
+        await db.update(heartbeatRuns).set({ status: "failed", finishedAt: old,
+          errorCode: "provisional", error: "The accepted outcome has not projected" }).where(eq(heartbeatRuns.id, binding.runId));
+      }
+      const wake = variant === "claimed wake" ? await claimedWake(binding) : undefined;
+      if (variant === "unsuccessful workspace barrier") {
+        // Simulate an earlier release that committed its result despite an
+        // unsuccessful workspace barrier. Recovery must validate the actual
+        // workspace directory before classifying subsequent passes as upkeep.
+        await db.update(workspaceOperations).set({ status: "failed" }).where(eq(workspaceOperations.heartbeatRunId, binding.runId));
+      }
+      const publish = vi.spyOn(liveEvents, "publishLiveEvent");
+      const outcomes = () => publish.mock.calls.flatMap(([event]) => event.type === "agent.status" &&
+        event.payload.agentId === binding.agentId ? [event.payload.outcome] : []);
+      const heartbeat = heartbeatService(db);
+      try {
+        const before = Date.now();
+        await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+        const after = await readAgent();
+        expect(after).toMatchObject({ status: "idle", lastHeartbeatAt: expect.any(Date) });
+        expect(after.lastHeartbeatAt!.getTime()).toBeGreaterThanOrEqual(before);
+        expect(after.updatedAt).toEqual(after.lastHeartbeatAt);
+        expect(outcomes()).toEqual(["succeeded"]);
+        expect(await read(binding.runId)).toMatchObject({ status: "succeeded", nativePhase: "committed", error: null });
+        if (wake) expect(await readWake(wake.id)).toMatchObject({ status: "completed" });
+        if (variant === "unsuccessful workspace barrier") {
+          const operations = await db.select().from(workspaceOperations).where(eq(workspaceOperations.heartbeatRunId, binding.runId));
+          expect(operations).toEqual(expect.arrayContaining([
+            expect.objectContaining({ status: "failed" }),
+            expect.objectContaining({ status: "succeeded", metadata: expect.objectContaining({ owningService: "native_workspace_finalizer" }) }),
+          ]));
+        }
+        await vi.advanceTimersByTimeAsync(30_000);
+        await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+        expect(await readAgent()).toEqual(after);
+        expect(outcomes()).toEqual(["succeeded"]);
+      } finally { await heartbeat.drainActiveRunExecutions(); }
+    },
+  );
+
+  it("leaves one-time stranded agent status repair to its existing recovery owner", async () => {
+    const old = new Date(Date.now() - 60 * 60_000);
+    const { binding, readAgent } = await cadenceFixture("running", old);
+    await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+    await db.update(heartbeatRuns).set({ costAccountingPending: false }).where(eq(heartbeatRuns.id, binding.runId));
+    const publish = vi.spyOn(liveEvents, "publishLiveEvent");
+    const outcomes = () => publish.mock.calls.flatMap(([event]) => event.type === "agent.status" &&
+      event.payload.agentId === binding.agentId ? [event.payload.outcome] : []);
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+      const repaired = await readAgent();
+      expect(repaired.status).toBe("idle");
+      expect(outcomes()).toEqual(["reconciled"]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
+      expect(await readAgent()).toEqual(repaired);
+      expect(outcomes()).toEqual(["reconciled"]);
+    } finally { await heartbeat.drainActiveRunExecutions(); }
+  });
+
   it("waits for delegated run projection before committed resource settlement", async () => {
     const binding = await accepted();
     await finalizeNativeRun({ db, runId: binding.runId, workspaceFinalizeStatus: "succeeded" });
@@ -700,7 +825,9 @@ describe("committed native run projection lifecycle", () => {
     await start(); await flush(); expect((await read(binding.runId)).status).toBe("succeeded"); await quiet();
     await reconcileNativeFinalizations(db, [binding.runId], { skipNativeRunProjection: true, skipNativeResultCommit: true,
       skipNativeResponsePresentation: true, skipNativeReviewResponse: true, onWorkspaceSettled: settled });
-    expect(settled).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      runId: binding.runId, succeeded: true, intent: "terminal_replay",
+    }));
   });
 
   describe("a comment deferred behind a run whose projection is left to restart recovery", () => {

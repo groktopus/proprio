@@ -12,7 +12,7 @@ import { noteReattachRunsClaimed, notifyReattachHandOver } from "./reattach-phas
 import { NATIVE_RETAINED_OWNER_WAIT } from "../native-runtime/native-controller-recovery.js";
 import { nativeEnvironmentSettlementDisposition, nativeEnvironmentSettlementWork } from "../native-runtime/native-environment-settlement-work.js";
 import { nativeWorkspaceFinalizationWork } from "../native-runtime/native-workspace-finalization-work.js";
-import { attemptNativeWorkspaceFinalization } from "../native-runtime/native-workspace-finalizer.js";
+import { attemptNativeWorkspaceFinalization, type NativeWorkspaceSettlement } from "../native-runtime/native-workspace-finalizer.js";
 import { retainedNativeSessionCleanupWork } from "../native-runtime/retained-native-session-cleanup-work.js";
 import { reconcileRetainedNativeSessionCleanups } from "../native-runtime/retained-native-session-cleanup.js";
 import { createScheduledRetryCancellationRecovery } from "./scheduled-retry-cancellation.js";
@@ -2232,12 +2232,14 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
   const nativeEnvironmentSettlement = nativeEnvironmentSettlementWork(db, input => settleRecoveredNativeEnvironment(input, true));
 
-  async function settleRecoveredNativeWorkspace(input: {
-    runId: string; companyId: string; agentId: string; succeeded: boolean;
-  }, options?: { skipEnvironmentSettlement?: boolean }) {
+  async function settleRecoveredNativeWorkspace(input: NativeWorkspaceSettlement,
+    options?: { skipEnvironmentSettlement?: boolean }) {
     if (!options?.skipEnvironmentSettlement) await settleRecoveredNativeEnvironment(input);
-    const settledRun = await getRun(input.runId);
+    const settledRun = input.intent === "execution_settlement" ? await getRun(input.runId) : null;
     await releaseRuntimeServicesForRun(input.runId).catch(() => undefined);
+    // Historical upkeep can still release resources, but only execution
+    // settlement moves cadence. Stranded agent status has its own guarded repair.
+    if (input.intent === "terminal_replay") return;
     await finalizeAgentStatus(
       input.agentId,
       input.succeeded ? "succeeded" : "failed",

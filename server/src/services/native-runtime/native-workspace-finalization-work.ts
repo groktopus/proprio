@@ -7,7 +7,7 @@ import { onNativeWorkspaceFinalizationRelease, type NativeWorkspaceFinalizationS
 import { registerScopedDeadlineWork } from "../scoped-deadline-work.js";
 import { measureRunPhase, withRunWorkspaceFinalizationTiming } from "../execution-preparation-timing.js";
 import { nativeRunnerOwnershipNotHeldCondition } from "./native-runner-ownership.js";
-import { attemptNativeWorkspaceFinalization, recordNativeWorkspaceFinalizationFailure } from "./native-workspace-finalizer.js";
+import { attemptNativeWorkspaceFinalization, recordNativeWorkspaceFinalizationFailure, type NativeWorkspaceSettlement } from "./native-workspace-finalizer.js";
 
 type Entry = { id: string; companyId: string; issueId: string; agentId: string; dueAt: number };
 type AttemptInput = Parameters<typeof attemptNativeWorkspaceFinalization>[0];
@@ -19,7 +19,7 @@ export function nativeWorkspaceFinalizationWork(db: Db, options: {
   environmentRuntime?: AttemptInput["environmentRuntime"];
   pluginWorkerManager?: AttemptInput["pluginWorkerManager"];
   attempt?: typeof attemptNativeWorkspaceFinalization;
-  onWorkspaceSettled(input: { runId: string; companyId: string; agentId: string; succeeded: boolean }): Promise<void>;
+  onWorkspaceSettled(input: NativeWorkspaceSettlement): Promise<void>;
 }) {
   function candidates(scope?: NativeWorkspaceFinalizationScope, after?: string) {
     return db.select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
@@ -95,7 +95,7 @@ export function nativeWorkspaceFinalizationWork(db: Db, options: {
     if (outcome.kind === "inactive" || (outcome.kind === "completed" && outcome.operation.status === "succeeded")) return null;
     const failure = await recordNativeWorkspaceFinalizationFailure(db, current.id, outcome.operation);
     if (failure.phase === "terminal_failure") {
-      await options.onWorkspaceSettled({ runId: row.id, companyId: row.companyId, agentId: row.agentId, succeeded: false });
+      await options.onWorkspaceSettled({ runId: row.id, companyId: row.companyId, agentId: row.agentId, intent: "execution_settlement", succeeded: false });
       return null;
     }
     const [remaining] = await candidates(scope);
