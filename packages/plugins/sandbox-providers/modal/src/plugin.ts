@@ -137,7 +137,7 @@ function buildSandboxCreateParams(input: {
     params.idleTimeoutMs = input.config.idleTimeoutMs;
   }
   if (input.config.cidrAllowlist && input.config.cidrAllowlist.length > 0) {
-    params.cidrAllowlist = input.config.cidrAllowlist;
+    params.outboundCidrAllowlist = input.config.cidrAllowlist;
   }
   // Modal sandboxes accept tag metadata via setTags after creation; the create
   // RPC does not take tags directly. We pass them through input so the caller
@@ -268,13 +268,7 @@ async function ensureRemoteWorkspace(sandbox: Sandbox, remoteCwd: string): Promi
 }
 
 async function stageStdin(sandbox: Sandbox, stdin: string, remotePath: string): Promise<void> {
-  const file = await sandbox.open(remotePath, "w");
-  try {
-    await file.write(new TextEncoder().encode(stdin));
-    await file.flush();
-  } finally {
-    await file.close().catch(() => undefined);
-  }
+  await sandbox.filesystem.writeBytes(new TextEncoder().encode(stdin), remotePath);
 }
 
 async function deleteStdinPath(sandbox: Sandbox, remotePath: string): Promise<void> {
