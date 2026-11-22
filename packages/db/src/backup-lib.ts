@@ -1,6 +1,5 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
@@ -419,36 +418,41 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
-  const reader = createInterface({
-    input: stream,
-    crlfDelay: Infinity,
-  });
-  let statementLines: string[] = [];
+  const isBreakpoint = (line: string) => line === STATEMENT_BREAKPOINT || line === `${STATEMENT_BREAKPOINT}\r`;
+  let lineFragments: string[] = [];
+  let statementParts: string[] = [];
 
   const flushStatement = () => {
-    const statement = statementLines.join("\n").trim();
-    statementLines = [];
+    const statement = statementParts.join("").trim();
+    statementParts = [];
     return statement;
   };
 
   try {
-    for await (const line of reader) {
-      if (line === STATEMENT_BREAKPOINT) {
-        const statement = flushStatement();
-        if (statement.length > 0) {
-          yield statement;
+    // LF frames the backup; a legacy CRLF breakpoint is also accepted.
+    // Preserve all other line endings, which may be part of a SQL literal.
+    for await (const chunk of stream) {
+      let offset = 0;
+      for (let newline = chunk.indexOf("\n"); newline !== -1; newline = chunk.indexOf("\n", offset)) {
+        const part = chunk.slice(offset, newline);
+        offset = newline + 1;
+        const line = lineFragments.length > 0 ? [...lineFragments, part].join("") : part;
+        lineFragments = [];
+        if (isBreakpoint(line)) {
+          const statement = flushStatement();
+          if (statement.length > 0) yield statement;
+        } else {
+          statementParts.push(line, "\n");
         }
-        continue;
       }
-      statementLines.push(line);
+      if (offset < chunk.length) lineFragments.push(chunk.slice(offset));
     }
 
+    const lastLine = lineFragments.join("");
+    if (!isBreakpoint(lastLine)) statementParts.push(lastLine);
     const trailingStatement = flushStatement();
-    if (trailingStatement.length > 0) {
-      yield trailingStatement;
-    }
+    if (trailingStatement.length > 0) yield trailingStatement;
   } finally {
-    reader.close();
     stream.destroy();
     raw.destroy();
   }
