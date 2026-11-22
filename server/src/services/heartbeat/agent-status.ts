@@ -1,8 +1,8 @@
 import { notifyStrandedAgentStatus } from "../live-run-recovery-notifications.js";
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
-import { agents, heartbeatRuns, type Db } from "@groktopus/db";
-import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { agents, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@groktopus/db";
+import { and, asc, desc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
 import { CHAT_COMPLETION_PREFLIGHT_PROFILE_KEY, CHAT_COMPLETION_SUPERSEDED } from "../chat-completion-delivery.js";
 import { trackAgentFirstHeartbeat } from "@groktopus/shared/telemetry";
 import { getTelemetryClient } from "../../telemetry.js";
@@ -12,6 +12,15 @@ import { publishLiveEvent } from "../live-events.js";
 import { finishedIdleRun, finishedIdleWake, finishedFailedIdleLease } from "../idle-work-proof.js";
 
 type Outcome = "succeeded" | "interrupted" | "failed" | "cancelled" | "timed_out" | "superseded";
+
+/** Retain the database-owned settlement receipt when a late completion writes
+ * metadata from a snapshot read before recovery settled the agent. */
+export function preserveAgentHeartbeatSettlementSql(incoming: SQL) {
+  return sql`case when jsonb_typeof(${heartbeatRuns.resultJson}->'agentHeartbeatSettlement') = 'object'
+    then coalesce(nullif(${incoming}, 'null'::jsonb), '{}'::jsonb) || jsonb_build_object(
+      'agentHeartbeatSettlement', ${heartbeatRuns.resultJson}->'agentHeartbeatSettlement')
+    else ${incoming} end`;
+}
 
 const RECONCILIATION_GRACE_MS = 5 * 60_000;
 const RECONCILIATION_BATCH_SIZE = 25;
@@ -99,13 +108,30 @@ export function createHeartbeatAgentStatus(db: Db) {
     agentId: string,
     outcome: Outcome,
     failureReason?: string | null,
-    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
+    options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean; settlementRunId?: string; preserveHistoricalCadence?: boolean },
   ) {
     const result = await db.transaction(async (tx) => {
+      // Agent lifecycle and deletion take the agent lock before run locks.
       const [existing] = await tx.select().from(agents)
         .where(eq(agents.id, agentId)).for("no key update");
       if (!existing || existing.lifecycleState !== "ready" ||
           existing.status === "paused" || existing.status === "terminated") return null;
+      const [run] = options?.settlementRunId ? await tx.select().from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, options.settlementRunId), eq(heartbeatRuns.agentId, agentId),
+          eq(heartbeatRuns.companyId, existing.companyId))).for("update") : [];
+      if (options?.settlementRunId && !run) return null;
+      // The accepted result can be durable before its task decision commits.
+      // Bind that exact result now so deferred finalization cannot count twice.
+      const [accepted] = run?.runtimeMode === "native" ? await tx.select({ resultId: nativeRunResults.id })
+        .from(nativeRunFinalizations).innerJoin(nativeRunResults, and(
+          eq(nativeRunResults.id, nativeRunFinalizations.resultId), eq(nativeRunResults.runId, run.id),
+          eq(nativeRunResults.companyId, run.companyId), eq(nativeRunResults.schemaStatus, "accepted")))
+        .where(and(eq(nativeRunFinalizations.runId, run.id), eq(nativeRunFinalizations.companyId, run.companyId))) : [];
+      const receipt = run?.resultJson?.agentHeartbeatSettlement as { resultId?: unknown } | undefined;
+      if (accepted?.resultId && (receipt?.resultId === accepted.resultId ||
+          (!receipt && options?.preserveHistoricalCadence && run?.finishedAt && existing.lastHeartbeatAt &&
+            existing.lastHeartbeatAt >= run.finishedAt))) return null;
+
       const [running] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, existing.companyId),
         eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running"),
@@ -127,6 +153,11 @@ export function createHeartbeatAgentStatus(db: Db) {
         updatedAt: now,
       }).where(and(eq(agents.id, agentId), eq(agents.companyId, existing.companyId),
         eq(agents.lifecycleState, "ready"))).returning();
+      if (updated && run && accepted?.resultId && outcome !== "superseded") {
+        await tx.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
+          || ${JSON.stringify({ agentHeartbeatSettlement: { resultId: accepted.resultId } })}::jsonb` })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, existing.companyId)));
+      }
       return { updated, isFirstHeartbeat: outcome !== "superseded" && (options?.wasFirstHeartbeat ?? !existing.lastHeartbeatAt) };
     });
     if (!result?.updated) return;

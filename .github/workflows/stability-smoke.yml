@@ -65,15 +65,15 @@ jobs:
         run: |
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
             server/src/__tests__/heartbeat-chat-completion-supersession.test.ts \
-            server/src/services/heartbeat/agent-status.test.ts \
             server/src/services/heartbeat/run-completion.test.ts \
             ui/src/components/TaskChatThread.test.tsx \
             ui/src/components/task-chat/status-relevance.test.ts \
             ui/src/context/LiveUpdatesProvider.test.ts \
-            -t 'Agent Chat supersession through heartbeat|transient running flag after overlap|quietly skips a superseded chat completion|durable operator Stop claimed|keeps a real setup failure visible|omits a superseded|ignores a newer .* superseded completion|scheduler-only chat supersession toast'
+            -t 'Agent Chat supersession through heartbeat|quietly skips a superseded chat completion|durable operator Stop claimed|keeps a real setup failure visible|omits a superseded|ignores a newer .* superseded completion|scheduler-only chat supersession toast'
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
           const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'chat-supersession-results.json'), 'utf8'));
           const required = {
             'server/src/__tests__/heartbeat-chat-completion-supersession.test.ts': [
@@ -92,9 +92,6 @@ jobs:
               'preserves a durable operator Stop claimed before quiet chat supersession',
               'keeps a real setup failure visible even if its text matches chat supersession',
             ],
-            'server/src/services/heartbeat/agent-status.test.ts': [
-              'settles only a transient running flag after overlap with a superseded completion',
-            ],
             'ui/src/components/TaskChatThread.test.tsx': [
               'omits a superseded native completion without hiding a genuine setup failure',
               'omits a superseded legacy completion without hiding a genuine setup failure',
@@ -108,13 +105,63 @@ jobs:
               'suppresses a cancelled scheduler-only chat supersession toast',
             ],
           };
-          for (const [path, titles] of Object.entries(required)) {
-            const file = result.testResults.find(entry => entry.name.endsWith(`/${path}`));
-            for (const title of titles) {
-              const matches = file?.assertionResults.filter(test => test.title === title) ?? [];
-              if (matches.length !== 1 || matches[0].status !== 'passed') {
-                throw new Error(`Required Agent Chat test did not pass: ${path}: ${title}`);
-              }
-            }
-          }
+          assertRequiredVitestTests(result, required);
           JS
+      - name: Check native replay heartbeat cadence
+        run: |
+          test_file=server/src/__tests__/native-run-projection-work.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native-heartbeat-results.json" \
+            "$test_file" -t 'does not postpone an agent timer|records a genuine heartbeat|one-time stranded agent status repair|waits for delegated run projection|preserves actual operator Stop when accepted|settlement receipt'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const path = process.argv[2];
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'native-heartbeat-results.json'), 'utf8'));
+          const required = [
+            'does not postpone an agent timer when orphan recovery replays a native run finished 120 minutes ago',
+            'does not postpone an agent timer when orphan recovery replays a native run finished 1 minutes ago',
+            'records a genuine heartbeat when recovering a new result',
+            'records a genuine heartbeat when recovering a failed execution',
+            'retains the live settlement receipt when accepted result commit is deferred',
+            'records a genuine heartbeat when recovering a delegated projection',
+            'records a genuine heartbeat when recovering a delegated first heartbeat',
+            'preserves actual operator Stop when accepted succeeded work finishes delayed workspace finalization',
+            'preserves actual operator Stop when accepted failed work finishes delayed workspace finalization',
+            'records a genuine heartbeat when recovering a provisional failure',
+            'records a genuine heartbeat when recovering a claimed wake',
+            'records a genuine heartbeat when recovering a unsuccessful workspace barrier',
+            'leaves one-time stranded agent status repair to its existing recovery owner',
+            'waits for delegated run projection before committed resource settlement',
+            'records one settlement receipt across competing callbacks and a clock rollback',
+          ];
+          assertRequiredVitestTests(result, { [path]: required });
+          JS
+      - name: Check native settlement callback consumers
+        run: |
+          node --test scripts/ci/assert-required-vitest-tests.test.mjs
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native-callback-results.json" \
+            server/src/services/native-runtime/native-workspace-finalizer.test.ts \
+            server/src/__tests__/native-workspace-finalization-work.test.ts \
+            server/src/services/heartbeat/agent-status.test.ts
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'native-callback-results.json'), 'utf8')), {
+            'server/src/services/heartbeat/agent-status.test.ts': [
+              'settles only a transient running flag after overlap with a superseded completion',
+            ],
+            'server/src/services/native-runtime/native-workspace-finalizer.test.ts': [
+              'accounts for a removed workspace plugin without blocking other accepted runs',
+            ],
+          });
+          JS
+      - name: Check late live settlement metadata
+        run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
+      - name: Typecheck server and build affected packages
+        run: |
+          node scripts/link-plugin-dev-sdk.mjs
+          pnpm --filter @groktopus/server typecheck
+          pnpm --filter @groktopus/hermes-proprio-adapter build
+          node scripts/run-tsc.mjs -p server/tsconfig.build.json

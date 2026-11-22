@@ -750,9 +750,19 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     expect(f.deps.finalizeAgentStatus).not.toHaveBeenCalled();
   });
 
-  it("retains native completion metadata when reconciliation already committed the same terminal status", async () => {
+  it.each(["before snapshot", "during write"] as const)("retains native completion metadata and settlement receipt when reconciliation wins (%s)", async race => {
     const finishedAt = new Date("2026-10-09T12:00:00Z");
-    const f = await fixture({ runtimeMode: "native", status: "succeeded", finishedAt, resultJson: { durable: "accepted" }, usageJson: { durableReceipt: "native" } });
+    const receipt = { resultId: randomUUID() };
+    const f = await fixture({ runtimeMode: "native", status: race === "during write" ? "running" : "succeeded", finishedAt,
+      resultJson: { durable: "accepted", ...(race === "before snapshot" ? { agentHeartbeatSettlement: receipt } : {}) }, usageJson: { durableReceipt: "native" } });
+    if (race === "during write") {
+      const write = f.deps.setRunStatusIfRunning.getMockImplementation()!;
+      f.deps.setRunStatusIfRunning.mockImplementationOnce(async (...args) => {
+        await db.update(heartbeatRuns).set({ status: "succeeded", resultJson: { durable: "accepted", agentHeartbeatSettlement: receipt } })
+          .where(eq(heartbeatRuns.id, f.run.id));
+        return write(...args);
+      });
+    }
     await db.update(agents).set({ adapterType: "proprio_runner" }).where(eq(agents.id, f.agent.id));
     f.agent.adapterType = "proprio_runner";
     f.input.sessionCodec = getAdapterSessionCodec(f.agent.adapterType);
@@ -762,7 +772,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
     f.input.adapterResult.sessionDisplayId = providerSessionId;
     f.input.adapterResult.nativeFinalization = { schema: "proprio.native-finalization.v1", runtimeMode: "native", runId: f.run.id, companyId: f.run.companyId, issueId: "unused", result: {}, terminal: { schema: "proprio.prp.terminal.v1", turnTerminalState: "completed", runTerminalState: "succeeded", reportedWorkDisposition: "done" }, turnId: null, sourceInstanceId: "test", normalizedSessionId: nativeSessionId, providerSessionId, driverKind: "test", driverVersion: "1", nativeEventCount: 1, highestContiguousSourceSeq: 1, workspaceFinalizeStatus: "succeeded" };
     await f.completion.completeRun(f.input);
-    expect(await read(f.run.id)).toMatchObject({ status: "succeeded", finishedAt, sessionIdAfter: providerSessionId, resultJson: { durable: "accepted" }, usageJson: { durableReceipt: "native", inputTokens: 20 } });
+    expect(await read(f.run.id)).toMatchObject({ status: "succeeded", finishedAt, sessionIdAfter: providerSessionId, resultJson: { durable: "accepted", agentHeartbeatSettlement: receipt }, usageJson: { durableReceipt: "native", inputTokens: 20 } });
     expect(f.deps.updateRuntimeState).toHaveBeenCalledOnce();
   });
 
