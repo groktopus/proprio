@@ -20,6 +20,7 @@ import {
   writeManagedShim,
   type InstallChannel,
   type InstallRecord,
+  type InstallStorePaths,
 } from "../install-store.js";
 
 const execFileAsync = promisify(execFile);
@@ -225,14 +226,37 @@ function gitBuildEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return env;
 }
 
+function gitPayloadPath(sha: string, paths: InstallStorePaths): string {
+  return payloadPathFor(paths, "git", sha.slice(0, 12));
+}
+
+function requireGitBuildCorepack(): string {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    // Resolve before the build changes cwd, so it runs the executable we checked.
+    const executable = path.resolve(directory, "corepack");
+    try {
+      if (!fs.statSync(executable).isFile()) continue;
+      fs.accessSync(executable, fs.constants.X_OK);
+      return executable;
+    } catch {
+      // Keep looking if this PATH entry is missing or unusable.
+    }
+  }
+  throw new Error(
+    "Git-source installation requires Corepack on PATH. " +
+      "Install Corepack for the Node.js version in use and verify that `corepack --version` works before retrying.",
+  );
+}
+
 export async function installGitPayload(repo: string, sha: string, runCommand: CommandRunner, paths = resolveInstallStorePaths()): Promise<{ payloadPath: string; reused: boolean; version: string }> {
   const identifier = sha.slice(0, 12);
-  const payloadPath = payloadPathFor(paths, "git", identifier);
+  const payloadPath = gitPayloadPath(sha, paths);
   if (fs.existsSync(payloadPath)) {
     const metadata = JSON.parse(fs.readFileSync(path.join(payloadPath, "node_modules", "proprio", "package.json"), "utf8")) as { version: string };
     await smokePayload(payloadPath, metadata.version, runCommand);
     return { payloadPath, reused: true, version: metadata.version };
   }
+  const corepack = requireGitBuildCorepack();
   const sourceRoot = path.dirname(payloadPath);
   fs.mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
   const sourceStat = fs.lstatSync(sourceRoot);
@@ -257,10 +281,10 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
   try {
     await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 });
-    await runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
-    await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    await runCommand(corepack, ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
+    await runCommand(corepack, ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-    await runCommand("corepack", ["pnpm", "-r", "--filter", "@groktopus/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    await runCommand(corepack, ["pnpm", "-r", "--filter", "@groktopus/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
     for (const [index, workspacePackage] of workspacePackages.entries()) {
@@ -272,7 +296,7 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
         await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "prepare-bundled-package.mjs"), packageDir, stagedPackage], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
         await runCommand("npm", ["pack", stagedPackage, "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
       } else {
-        await runCommand("corepack", ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PROPRIO_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
+        await runCommand(corepack, ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PROPRIO_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
       }
     }
     await runCommand("npm", ["pack", "--pack-destination", stagingRoot], { cwd: path.join(checkoutPath, "cli"), env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
@@ -349,6 +373,9 @@ export async function installCommand(
     await confirmGitInstall(options, gitRequest.repo, gitRequest.ref);
     const sha = await resolveGitHubRef(gitRequest.repo, gitRequest.ref, runCommand);
     const paths = resolveInstallStorePaths();
+    // Ref resolution is read-only. Check before the store lock creates directories or a marker.
+    // Cached payloads need no build tool, and the builder rechecks on a cache miss under the lock.
+    if (!fs.existsSync(gitPayloadPath(sha, paths))) requireGitBuildCorepack();
     const installed = await withInstallStoreLock(async () => {
       assertManagedShimWritable(paths);
       const currentManifest = readInstallManifest(paths);
