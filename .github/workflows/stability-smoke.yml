@@ -118,3 +118,31 @@ jobs:
             }
           }
           JS
+      - name: Check native replay heartbeat cadence
+        run: |
+          test_file=server/src/__tests__/native-run-projection-work.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native-heartbeat-results.json" \
+            "$test_file" -t 'does not postpone an agent timer|records a genuine heartbeat|one-time stranded agent status repair|waits for delegated run projection'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const path = process.argv[2];
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'native-heartbeat-results.json'), 'utf8'));
+          const file = result.testResults.find(entry => entry.name.endsWith(`/${path}`));
+          const required = [
+            'does not postpone an agent timer when orphan recovery replays a native run finished 120 minutes ago',
+            'does not postpone an agent timer when orphan recovery replays a native run finished 1 minutes ago',
+            'records a genuine heartbeat when recovering a new result',
+            'records a genuine heartbeat when recovering a provisional failure',
+            'records a genuine heartbeat when recovering a claimed wake',
+            'records a genuine heartbeat when recovering a unsuccessful workspace barrier',
+            'leaves one-time stranded agent status repair to its existing recovery owner',
+            'waits for delegated run projection before committed resource settlement',
+          ];
+          for (const title of required) {
+            const matches = file?.assertionResults.filter(test => test.title === title) ?? [];
+            if (matches.length !== 1 || matches[0].status !== 'passed') {
+              throw new Error(`Required native heartbeat test did not pass: ${path}: ${title}`);
+            }
+          }
+          JS
