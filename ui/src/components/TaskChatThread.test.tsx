@@ -2773,6 +2773,23 @@ describe("TaskChatThread runtime transcript selection", () => {
     expect(container.textContent).not.toContain("before returning an answer");
   });
 
+  it.each([["native", "proprio_runner"], ["legacy", "claude_local"]] as const)(
+    "omits a superseded %s completion without hiding a genuine setup failure",
+    (runtimeMode, adapterType) => {
+      const run = { runtimeMode, adapterType, agentId: "agent-1", agentName: "Agent",
+        createdAt: "2026-09-12T18:00:00.000Z", startedAt: "2026-09-12T18:00:00.000Z",
+        finishedAt: "2026-09-12T18:00:01.000Z" };
+      renderThread({ comments: [], onAdd: async () => {}, onRetryFailedRun: vi.fn(async () => {}),
+        conversationMode: true, linkedRuns: [{ ...run, runId: "obsolete-completion", status: "cancelled",
+          errorCode: "chat_completion_superseded" }] });
+      expect(container.textContent).not.toMatch(/Run cancelled|Run failed|Stopped|Retry|before returning an answer/);
+
+      renderThread({ comments: [], onAdd: async () => {}, onRetryFailedRun: vi.fn(async () => {}),
+        conversationMode: true, linkedRuns: [{ ...run, runId: "real-failure", status: "failed", errorCode: "setup_failed" }] });
+      expect(container.textContent).toContain("Run failed");
+    },
+  );
+
   it("does not render an empty response notice for a conversation reset", () => {
     renderThread({
       comments: [],

@@ -1680,7 +1680,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       if (
         source.status === "cancelled" &&
         entries.length === 0 &&
-        (meta?.errorCode === "issue_not_in_progress" ||
+        (meta?.errorCode === "chat_completion_superseded" || meta?.errorCode === "issue_not_in_progress" ||
           (meta?.errorCode === "issue_terminal_status" && !meta.startedAt))
       ) {
         settledRunIds.add(source.id);

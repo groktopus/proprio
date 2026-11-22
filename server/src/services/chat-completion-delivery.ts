@@ -6,9 +6,18 @@ import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, ch
   heartbeatRunEvents, heartbeatRuns, issueComments, issueDocuments, issueThreadInteractions, issues, type Db } from "@groktopus/db";
 import { extractIssueReferenceMatches } from "@groktopus/shared";
 import { appendHeartbeatRunEventBatch } from "./heartbeat-run-events.js";
+import { CHAT_COMPLETION_SUPERSEDED } from "./run-cancellation.js";
 import { conflict, forbidden, notFound } from "../errors.js";
 
 export const CHAT_COMPLETION_WAKE_REASON = "chat_task_completed";
+
+/** Only the turn preparation fence emits this; publication keeps its own failure contract. */
+export class ChatCompletionSupersededBeforeDispatch extends Error {
+  constructor() {
+    super(CHAT_COMPLETION_SUPERSEDED);
+  }
+}
+
 /** Run event: the conversation agent read its handed-off task after it was done. */
 export const COMPLETED_HANDOFF_READ_EVENT = "chat_handoff.completed_read";
 const MAX_ATTEMPTS = 5;
@@ -242,7 +251,7 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
     const initialIds = ids(run);
     // Only completion wakes absorb pending events; ordinary user turns retain their existing input.
     if (initialIds.length === 0 && run.contextSnapshot?.wakeReason !== CHAT_COMPLETION_WAKE_REASON) return run;
-    if (run.contextSnapshot?.conversationSessionGeneration !== source.conversationSessionGeneration) throw new Error("chat_completion_superseded");
+    if (run.contextSnapshot?.conversationSessionGeneration !== source.conversationSessionGeneration) throw new ChatCompletionSupersededBeforeDispatch();
     const rows = await tx.select({ delivery: deliveries }).from(deliveries).innerJoin(handoffs, eq(handoffs.taskId, deliveries.taskId))
       .where(and(eq(deliveries.companyId, run.companyId), eq(handoffs.conversationId, issueId),
         eq(handoffs.agentId, run.agentId), eq(handoffs.sessionGeneration, source.conversationSessionGeneration),
@@ -270,7 +279,7 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
       await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
       return { ...run, contextSnapshot };
     }
-    if (accepted.length === 0) throw new Error("chat_completion_superseded");
+    if (accepted.length === 0) throw new ChatCompletionSupersededBeforeDispatch();
     const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates };
     await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
     return { ...run, contextSnapshot };

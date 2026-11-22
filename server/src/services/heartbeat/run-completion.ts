@@ -33,7 +33,7 @@ import { readGitConnectionFailure } from "../git-connection-failure.js";
 import { CONFIGURATION_INCOMPLETE_FAILURE_CODE, ConfigurationIncompleteFailure } from "./run-preparation.js";
 import { isWorkspaceValidationFailedRun, isWorkspaceValidationFailure, attachProprioSessionMetadataToSessionParams } from "./workspaces.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
-import { cancellationResultJson, controllerLeaseLossCancellation, readRunCancellation } from "../run-cancellation.js";
+import { CHAT_COMPLETION_SUPERSEDED, cancellationResultJson, controllerLeaseLossCancellation, readRunCancellation, requestedRunCancellation } from "../run-cancellation.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, LegacyControllerLeaseLostError } from "../legacy-controller-lease.js";
 import { isOwnedAiConnectionSelectionRejection } from "../ai-connection-configuration-failure.js";
 import { REVIEWED_CHAT_BINDING_NOT_READY, ReviewedChatBindingNotReadyError, reviewedChatBindingDenialResultJson } from "../reviewed-chat-binding-diagnostics.js";
@@ -54,6 +54,7 @@ import { CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-
 import { logActivity } from "../activity-log.js";
 import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagnostic, type UnresolvedWorkspaceBaseRefError } from "../workspace-runtime.js";
 import { runnerGoalService } from "../runner-goals.js";
+import { ChatCompletionSupersededBeforeDispatch } from "../chat-completion-delivery.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
 import { hasChatRunOwnedProviderInteraction } from "../chat-interaction-arbitration.js";
 import { conversationTurnPresentsAnswer } from "../native-runtime/native-governance.js";
@@ -1594,6 +1595,29 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
   async function failRunSetup(input: FailHeartbeatRunSetupInput) {
     const { run, runId, outerErr, signal, providerDispatchStarted, nativeDispatchMayHaveStarted, identityRedactor, readFailureReportSecrets } = input;
+    if (outerErr instanceof ChatCompletionSupersededBeforeDispatch &&
+        !providerDispatchStarted && !nativeDispatchMayHaveStarted && !signal.aborted) {
+      // The delivery fence refused this attempt before preparation entered the
+      // adapter. Settle only this run and wake; the outbox owns replacement work.
+      const finishedAt = new Date();
+      const cancelled = await setRunStatusIfRunning(runId, "cancelled", {
+        finishedAt,
+        error: null,
+        errorCode: CHAT_COMPLETION_SUPERSEDED,
+        issueCommentStatus: "not_applicable",
+        resultJson: {
+          cancellation: requestedRunCancellation(null, "Agent Chat completion superseded before dispatch"),
+          executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() },
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        },
+      }, undefined, { setupFailure: true });
+      if (cancelled.updated && cancelled.run) {
+        await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt, error: null });
+        await releaseIssueExecutionAndPromote(cancelled.run, { suppressImmediateRecovery: true });
+        await finalizeAgentStatus(run.agentId, "cancelled");
+      }
+      return;
+    }
     // The lease watchdog stopped preparation because this host no longer owns
     // the run. That is host infrastructure, not a defect in the agent or setup.
     // A post-dispatch error can also land here (for example a failed usage
