@@ -12,7 +12,7 @@ import { noteReattachRunsClaimed, notifyReattachHandOver } from "./reattach-phas
 import { NATIVE_RETAINED_OWNER_WAIT } from "../native-runtime/native-controller-recovery.js";
 import { nativeEnvironmentSettlementDisposition, nativeEnvironmentSettlementWork } from "../native-runtime/native-environment-settlement-work.js";
 import { nativeWorkspaceFinalizationWork } from "../native-runtime/native-workspace-finalization-work.js";
-import { attemptNativeWorkspaceFinalization } from "../native-runtime/native-workspace-finalizer.js";
+import { attemptNativeWorkspaceFinalization, type NativeWorkspaceSettlement } from "../native-runtime/native-workspace-finalizer.js";
 import { retainedNativeSessionCleanupWork } from "../native-runtime/retained-native-session-cleanup-work.js";
 import { reconcileRetainedNativeSessionCleanups } from "../native-runtime/retained-native-session-cleanup.js";
 import { createScheduledRetryCancellationRecovery } from "./scheduled-retry-cancellation.js";
@@ -2232,24 +2232,20 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
   const nativeEnvironmentSettlement = nativeEnvironmentSettlementWork(db, input => settleRecoveredNativeEnvironment(input, true));
 
-  async function settleRecoveredNativeWorkspace(input: {
-    runId: string; companyId: string; agentId: string; succeeded: boolean;
-  }, options?: { skipEnvironmentSettlement?: boolean }) {
-    if (!options?.skipEnvironmentSettlement) await settleRecoveredNativeEnvironment(input);
+  async function settleRecoveredNativeWorkspace(input: NativeWorkspaceSettlement,
+    options?: { skipEnvironmentSettlement?: boolean }) {
+    const workspaceSucceeded = input.intent === "terminal_replay" || input.succeeded;
+    if (!options?.skipEnvironmentSettlement) await settleRecoveredNativeEnvironment({ ...input, succeeded: workspaceSucceeded });
     const settledRun = await getRun(input.runId);
     await releaseRuntimeServicesForRun(input.runId).catch(() => undefined);
-    await finalizeAgentStatus(
-      input.agentId,
-      input.succeeded ? "succeeded" : "failed",
-      input.succeeded
-        ? null
-        : (settledRun?.error ?? "native_workspace_sync_out_failed"),
-      {
-        wasFirstHeartbeat: settledRun
-          ? timerClaimWasFirstHeartbeat(settledRun)
-          : undefined,
-      },
-    ).catch(() => undefined);
+    const outcome = settledRun && isHeartbeatRunTerminalStatus(settledRun.status)
+      ? settledRun.status : workspaceSucceeded ? "succeeded" : "failed";
+    await finalizeAgentStatus(input.agentId, outcome, settledRun?.error ??
+      (workspaceSucceeded ? null : "native_workspace_sync_out_failed"), {
+      settlementRunId: input.runId,
+      preserveHistoricalCadence: input.intent === "terminal_replay",
+      wasFirstHeartbeat: settledRun ? timerClaimWasFirstHeartbeat(settledRun) : undefined,
+    }).catch(() => undefined);
   }
 
   function cleanupRetainedNativeSession(input: { companyId: string; runId: string }) {

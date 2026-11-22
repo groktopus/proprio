@@ -18,5 +18,5 @@
   "planAcceptance": "successful-run-open-task-explicit-continuation",
   "otherProviders": "mainline-gated",
   "modelSelection": "explicit-provider-verified-startup-and-reconnect",
-  "commandDigest": "sha256:c2e39f931fdb89eb226ddee17bdcd16ad14c80fe4d311a41df89f2947d72103d"
+  "commandDigest": "sha256:7787d5b975e44cd8a36e41888018c3b0e25140160a4d1a16e4ccb59315f63b40"
 }

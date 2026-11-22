@@ -1,3 +1,4 @@
+import { preserveAgentHeartbeatSettlementSql } from "./agent-status.js";
 import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { providerFailureFromError } from "../../vendor/proprio-runner/index.js";
@@ -741,9 +742,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           .update(heartbeatRuns)
           .set({
             ...finalRunPatch,
-            resultJson: preserveWorkspaceRestoreRecoveryMetadataSql(
+            resultJson: preserveAgentHeartbeatSettlementSql(preserveWorkspaceRestoreRecoveryMetadataSql(
               cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage) ?? null,
-            ),
+            )),
 
             usageJson: preserveAcceptedRunUsageProjectionSql({ ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) }),
             finishedAt:
@@ -797,6 +798,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
     const finalizedRun = persistedRun ?? (await getRun(run.id));
     const settleAgent = () => finalizeAgentStatus(agent.id, outcome, runErrorMessage, {
+      ...(adapterResult.nativeFinalization ? { settlementRunId: run.id } : {}),
       keepIdleOnFailure:
         outcome === "failed" &&
         ((finalizedRun

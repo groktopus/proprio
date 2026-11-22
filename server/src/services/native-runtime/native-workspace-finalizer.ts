@@ -30,6 +30,15 @@ import {
   resumeNativeWorkspaceSync,
 } from "./native-workspace-sync.js";
 
+export type NativeWorkspaceSettlement = {
+  runId: string;
+  companyId: string;
+  agentId: string;
+} & (
+  | { intent: "execution_settlement"; succeeded: boolean }
+  | { intent: "terminal_replay" }
+);
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
