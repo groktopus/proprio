@@ -112,7 +112,7 @@ Key Perforce CL fields:
 
 ### 3. Wait for pending checks
 
-Before analyzing, ensure all status checks have completed. If any checks are `PENDING` or `IN_PROGRESS` (GitHub) / `running` or `pending` (GitLab), poll every 30 seconds until all checks reach a terminal state.
+Before analyzing, identify the applicable CI gates and required platform checks. Optional automated-review checks do not become merge gates merely because they appear in the rollup. Record them separately. For applicable checks, if any are `PENDING` or `IN_PROGRESS` (GitHub) / `running` or `pending` (GitLab), poll every 30 seconds until those checks reach a terminal state.
 
 **GitHub:** poll `statusCheckRollup` from `gh pr view`.
 

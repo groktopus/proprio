@@ -17,6 +17,11 @@ Get a GitHub PR to a fully green check state, or exit with a concrete blocker.
 - Focus on CI/status checks, not review comments or PR template cleanup.
 - If the user also wants review-comment cleanup, pair this with `check-pr`.
 
+Optional automated-review checks, including Greptile, are not required CI gates.
+Record their findings or service outage separately under CONTRIBUTING.md. Do not
+wait for an optional score or treat an unavailable review as a passing check.
+Apply the loop below to applicable CI and required platform checks.
+
 ## Inputs
 
 - **PR number** (optional): If not provided, detect the PR for the current branch.
