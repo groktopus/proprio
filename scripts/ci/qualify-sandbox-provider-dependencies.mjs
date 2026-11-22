@@ -30,17 +30,24 @@ export function qualifyProviders(root, scope) {
   linkExcludedPlugins();
   const tests = new Set(providersWithTests({ root, providers: plan.providers }));
   const reports = mkdtempSync(path.join(tmpdir(), "proprio-provider-dependencies-"));
+  const failures = [];
+  const check = (operation) => {
+    try { operation(); } catch (error) { failures.push(error); console.error(error); }
+  };
   try {
     for (const directory of plan.providers) {
-      run(["run", "typecheck"], directory);
-      run(["run", "build"], directory);
-      if (tests.has(directory)) {
-        const report = path.join(reports, `${path.basename(directory)}.json`);
-        run(["run", "test", "--reporter=json", `--outputFile=${report}`], directory);
-        requireExecutedTests(JSON.parse(readFileSync(report, "utf8")), directory);
-      }
+      check(() => run(["run", "typecheck"], directory));
+      check(() => run(["run", "build"], directory));
+      if (tests.has(directory)) check(() => {
+        const reportPath = path.join(reports, `${path.basename(directory)}.json`);
+        run(["run", "test", "--reporter=json", `--outputFile=${reportPath}`], directory);
+        const report = JSON.parse(readFileSync(reportPath, "utf8"));
+        requireExecutedTests(report, directory);
+        console.log(`${directory}: ${report.numPassedTests} tests passed; ${report.numPendingTests ?? 0} skipped`);
+      });
     }
   } finally { rmSync(reports, { recursive: true, force: true }); }
+  if (failures.length) throw new AggregateError(failures, "Sandbox provider dependency qualification failed");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

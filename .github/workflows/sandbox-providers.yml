@@ -5,7 +5,8 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'packages/plugins/sandbox-providers/daytona/**'
+      - 'packages/plugins/sandbox-providers/**'
+      - 'scripts/typecheck-sandbox-providers/**'
       - 'packages/plugins/sdk/**'
       - 'packages/shared/**'
       - 'scripts/ci/qualify-sandbox-provider-dependencies*'
@@ -35,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scope: [locked]
+        scope: [locked, shared]
     name: provider-dependencies (${{ matrix.scope }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

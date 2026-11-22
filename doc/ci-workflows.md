@@ -31,10 +31,15 @@ Fork pull requests do not run the smoke job.
 ### Standalone sandbox-provider dependencies
 
 `.github/workflows/sandbox-providers.yml` checks same-repository PRs that touch
-Daytona, the plugin SDK/shared inputs, or the qualification tools. Its Linux
-`provider-dependencies (locked)` job installs the root workspace and Daytona's
+sandbox providers, the plugin SDK/shared inputs, or the qualification tools. Its
+Linux `provider-dependencies (locked)` job installs the root workspace and Daytona's
 standalone lockfile frozen, builds the plugin SDK, and typechecks, builds, and
-tests Daytona. JSON reports must include an executed passing test; all-skipped
+tests Daytona. The `provider-dependencies (shared)` job installs the separate
+shared-provider lockfile frozen and checks every provider that workspace owns,
+including the Cloudflare bridge template. Individual check failures are retained
+while the other providers run; any failure makes the job fail.
+
+JSON reports must include an executed passing test; all-skipped
 suites do not qualify. Cloud credential-dependent live tests remain opt-in.
 
 The runner derives lockfile ownership from `scripts/typecheck-test-programs.mjs`.

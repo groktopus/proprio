@@ -24,10 +24,9 @@ describe("globMatch", () => {
 describe("resolveImage", () => {
   const defaults = { runtimeImage: "ghcr.io/paperclipai/agent-runtime-claude:v1" };
 
-  it("uses adapter default when no override", () => {
-    expect(resolveImage({ imageOverride: null }, defaults, { imageAllowList: [], imageRegistry: undefined })).toBe(
-      "ghcr.io/paperclipai/agent-runtime-claude:v1",
-    );
+  it("requires operator-owned image configuration rather than using an upstream default", () => {
+    expect(() => resolveImage({ imageOverride: null }, defaults, { imageAllowList: [], imageRegistry: undefined }))
+      .toThrow("Configure an operator-owned image registry or allowlisted image override");
   });
 
   it("rewrites registry when imageRegistry is set", () => {

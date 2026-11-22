@@ -50,12 +50,12 @@
     "postpack": "if [ -f package.dev.json ]; then mv package.dev.json package.json; fi"
   },
   "dependencies": {
-    "modal": "^0.7.4"
+    "modal": "^0.11.2"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.8"
+    "vitest": "^5.1.1"
   },
   "engines": {
     "node": ">=24.11.0"
