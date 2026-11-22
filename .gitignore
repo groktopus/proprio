@@ -46,6 +46,8 @@ cli/package.dev.json
 server/src/**/*.js
 server/src/**/*.js.map
 server/src/**/*.d.ts
+# Source-owned Express request augmentation is not a generated declaration.
+!server/src/types/express.d.ts
 server/src/**/*.d.ts.map
 tmp/
 feedback-export-*

@@ -139,7 +139,8 @@ export function runnerImageRuns(runs, sha) {
     && run.path === RUNNER_IMAGE_WORKFLOW_PATH && run.repository?.id === REPOSITORY_ID && run.head_repository?.id === REPOSITORY_ID);
 }
 
-export async function listRunnerImageRuns() {
+// Keep the lookup call shape while Proprio has no published image registry.
+export async function listRunnerImageRuns(_sha = "", _options = {}) {
   throw new Error("Proprio has no published Runner images.");
 }
 
