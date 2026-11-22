@@ -1,4 +1,4 @@
-import { runHasPendingStop } from "../agent-run-cancellation.js";
+import { runHasUnverifiedProviderStop } from "../agent-run-cancellation.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { notifyNativeStatusReassessment } from "./native-status-reassessment-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
@@ -64,7 +64,7 @@ export function legacyExecutionNeedsReconciliation(
     & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "controllerBootId" | "controllerProcess">>,
 ): boolean {
   if (run.runtimeMode === "legacy" && run.status === "succeeded" &&
-      runHasPendingStop(run)) return true;
+      runHasUnverifiedProviderStop(run)) return true;
   if (
     run.runtimeMode === "native" ||
     !["failed", "timed_out", "interrupted", "cancelled"].includes(run.status)
@@ -266,11 +266,12 @@ export async function terminalizeLegacyExecution(input: {
     const needsRecovery = input.recordRestoreFailureOnly
       ? retainedLeaseIds.length > 0 || hasRequiredWorkspaceRecovery(updated.resultJson)
       : !input.reconcileIfNeeded || await legacyExecutionNeedsReconciliationWithEvidence(tx as unknown as Db, updated);
-    if (!needsRecovery || runHasPendingStop(updated)) return updated;
-    if (!input.recordRestoreFailureOnly && task && (task.executionRunId === run.id || task.checkoutRunId === run.id)) {
+    if (!needsRecovery) return updated;
+    const stopPending = runHasUnverifiedProviderStop(updated);
+    if (!input.recordRestoreFailureOnly && !stopPending && task && (task.executionRunId === run.id || task.checkoutRunId === run.id)) {
       await notifyNativeStatusReassessment(tx, { companyId: task.companyId, issueId: task.id });
     }
-    if (!input.recordRestoreFailureOnly && task?.executionRunId === run.id)
+    if (!input.recordRestoreFailureOnly && !stopPending && task?.executionRunId === run.id)
       await tx
         .update(issues)
         .set({
@@ -279,7 +280,7 @@ export async function terminalizeLegacyExecution(input: {
           executionLockedAt: null,
         })
         .where(eq(issues.id, task.id));
-    if (!input.recordRestoreFailureOnly && task?.checkoutRunId === run.id)
+    if (!input.recordRestoreFailureOnly && !stopPending && task?.checkoutRunId === run.id)
       await tx
         .update(issues)
         .set({ checkoutRunId: null })
@@ -331,6 +332,7 @@ export async function terminalizeLegacyExecution(input: {
         fingerprint, attemptCount: 1 });
       return updated;
     }
+    if (stopPending) return updated;
     const owner = task ? decisionOwner(task, updated, retainedLeaseIds.length) : null;
     if (task && owner?.owns) {
       const { isCurrentReviewer } = owner;

@@ -1,3 +1,4 @@
+import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
 import { QUEUED_MESSAGES_DELIVERED_REASON } from "../../modules/wake-queue/index.js";
 import { connectionIntentService } from "../connection-intents.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
@@ -4268,8 +4269,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 .then((rows) => rows[0] ?? null)
             : null;
           let activeExecutionAgentNameKey = issue.executionAgentNameKey;
-          const manualExecutionHold = activeExecutionRun && await nativeManualAdmissionHoldsExecution(tx as unknown as Db,
-            { companyId: issue.companyId, runId: activeExecutionRun.id, issueId: issue.id });
+          const manualExecutionHold = activeExecutionRun && (
+            (activeExecutionRun.runtimeMode === "legacy" && runHasUnverifiedProviderStop(activeExecutionRun)) ||
+            await nativeManualAdmissionHoldsExecution(tx as unknown as Db,
+              { companyId: issue.companyId, runId: activeExecutionRun.id, issueId: issue.id }));
 
           if (
             activeExecutionRun &&

@@ -1,3 +1,4 @@
+import { runHasUnverifiedProviderStop } from "../agent-run-cancellation.js";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import {
   agents,
@@ -521,6 +522,12 @@ export function projectExecution(
     }
     projection.permittedActions.push("inspect_recovery");
     return set("recovery_needed", "Recovery needed");
+  }
+  if (run.runtimeMode === "legacy" && runHasUnverifiedProviderStop(run)) {
+    projection.recoveryOwner = "board";
+    projection.nextAction = "Provider termination is unverified. Inspect the previous run before continuing.";
+    projection.permittedActions.push("inspect_recovery");
+    return set("recovery_needed", "Stop unverified");
   }
   if (run.status === "succeeded") {
     if (pending.length)

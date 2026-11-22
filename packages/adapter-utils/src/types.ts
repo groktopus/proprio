@@ -100,9 +100,9 @@ export type AdapterExecutionErrorFamily =
   | "refresh_token_invalidated";
 
 export interface AdapterExecutionResult {
-  /** A successful provider result observed while Stop was in flight. This can
-   * settle a still-running outcome, but never overrides a durable terminal
-   * outcome or proves physical termination. */
+  /** An observed successful provider result. The host decides how pending Stop
+   * affects settlement. This never overrides a durable terminal outcome or
+   * proves physical termination. */
   completionObserved?: true;
   /** Positive evidence for retrying bootstrap; absent evidence never authorizes replay. */
   executionRecovery?: { kind: "bootstrap"; providerWorkStarted: false } | {

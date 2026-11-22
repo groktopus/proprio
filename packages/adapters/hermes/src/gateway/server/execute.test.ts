@@ -675,7 +675,7 @@ describe("execute", () => {
     } });
     expect(ctx.onDispatch).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBeUndefined();
+    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe("error");
   });
 
   it.each([
@@ -965,6 +965,50 @@ describe("Hermes Gateway operator Stop", () => {
       abort.abort();
       expect(await execution).toMatchObject({ exitCode: 0, completionObserved: true, resultJson: { output: "SSE reply" } });
     } finally { releaseLog(); }
+  });
+
+  it.each(["run created", "stop requested", "stop request failed"])("keeps Stop independent of a stalled %s log", async log => {
+    const { abort, ctx } = makeStopContext();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    ctx.onLog = vi.fn(async (_stream, chunk) => { if (chunk.includes(log)) await gate; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/runs") { abort.abort(); return json({ run_id: "hermes-123" }); }
+      if (path.endsWith("/stop")) {
+        if (log === "stop request failed") throw new Error("Stop rejected");
+        return json({ status: "stopping" });
+      }
+      return json({ status: "completed", output: "Observed despite log" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      expect(await execute(ctx)).toMatchObject({ exitCode: 0, completionObserved: true,
+        resultJson: { output: "Observed despite log" } });
+      expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
+    } finally { release(); }
+  });
+
+  it("fills a sparse SSE completion with the observed status reply", async () => {
+    const { abort, ctx } = makeStopContext();
+    let release!: () => void;
+    let received!: () => void;
+    const event = new Promise<void>(resolve => { received = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    ctx.onLog = vi.fn(async (_stream, chunk) => { if (chunk.includes("event=run.completed")) { received(); await gate; } });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/runs") return json({ run_id: "hermes-123" });
+      if (path.endsWith("/events")) return new Response('event: run.completed\ndata: {"status":"completed"}\n\n');
+      if (path.endsWith("/stop")) return json({ status: "stopping" });
+      return json({ status: "completed", output: "Full status reply", usage: { input_tokens: 12, output_tokens: 3 } });
+    }));
+    try {
+      const execution = execute(ctx);
+      await event;
+      abort.abort();
+      expect(await execution).toMatchObject({ exitCode: 0, resultJson: { output: "Full status reply" } });
+    } finally { release(); }
   });
 
   it.each(["stop", "status"] as const)("closes a real stalled HTTP %s connection at the Stop deadline", async phase => {

@@ -102,7 +102,7 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     const [stored] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     expect(calls.filter(call => call.method === "POST")).toEqual([
-      { method: "POST", path: "/v1/runs", redirect: undefined },
+      { method: "POST", path: "/v1/runs", redirect: "error" },
       { method: "POST", path: `/v1/runs/${remoteRunId}/stop`, redirect: "error" },
     ]);
     expect(remoteCancellationObserved).toBe(true);
@@ -123,6 +123,19 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0])
       .toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
     expect(calls.filter(call => call.method === "POST" && call.path === "/v1/runs")).toHaveLength(1);
+    const followup = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      requestedByActorType: "system", payload: { issueId: issue.id } });
+    expect(followup).toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    expect(calls.filter(call => call.method === "POST" && call.path === "/v1/runs")).toHaveLength(1);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0])
+      .toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+    if (remoteStatus === "completed") {
+      await db.update(heartbeatRuns).set({ resultJson: { ...stored!.resultJson,
+        freshContinuationSupersededAt: new Date().toISOString() } }).where(eq(heartbeatRuns.id, run.id));
+      await expect(issueService(db).addComment(issue.id, "superseded completed reply", { agentId, runId: run.id }, { completionReply: true }))
+        .rejects.toThrow("cannot post a reply");
+    }
   } finally {
     // A failed assertion must not strand the synthetic agent until its timeout.
     cleaningUp = true;

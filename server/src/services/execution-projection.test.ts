@@ -389,3 +389,9 @@ describe("execution truth projection", () => {
     ).toBe("recovery_needed");
   });
 });
+
+it("keeps successful legacy completion separate from an unverified Stop", () => {
+  expect(project(run({ status: "succeeded", runtimeMode: "legacy", resultJson: {
+    completionObserved: true, executionCancellation: { state: "requested" },
+  } }), undefined)).toMatchObject({ phase: "recovery_needed", recoveryOwner: "board" });
+});

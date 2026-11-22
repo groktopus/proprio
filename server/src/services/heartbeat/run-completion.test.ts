@@ -668,6 +668,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
   it.each(["successful", "missing evidence", "failed", "timed out", "durable Stop", "lease loss"] as const)(
     "settles an observed completion during Stop only with success and no prior terminal outcome (%s)", async variant => {
       const f = await fixture();
+      f.input.adapterResult.resultJson = { completionObserved: true };
       Object.assign(f.input.adapterResult, {
         exitCode: variant === "failed" ? 1 : 0,
         completionObserved: variant === "missing evidence" ? undefined : true,
@@ -681,6 +682,7 @@ describe.skipIf(!support.supported && !process.env.PROPRIO_TEST_DATABASE_URL)("h
       }
       await f.completion.completeRun(f.input);
       expect((await read(f.run.id)).status).toBe(variant === "successful" ? "succeeded" : "cancelled");
+      if (variant === "missing evidence") expect((await read(f.run.id)).resultJson?.completionObserved).not.toBe(true);
     },
   );
 

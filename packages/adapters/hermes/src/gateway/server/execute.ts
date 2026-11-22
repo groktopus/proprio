@@ -56,7 +56,6 @@ type ExecutionState = {
   outputChunks: string[];
   lastEventName: string | null;
   terminal: TerminalState | null;
-  receivedCompletion: TerminalState | null;
   resolveTerminal: (state: TerminalState) => void;
   terminalPromise: Promise<TerminalState>;
 };
@@ -526,16 +525,14 @@ function createExecutionState(runId: string): ExecutionState {
     outputChunks: [],
     lastEventName: null,
     terminal: null,
-    receivedCompletion: null,
     resolveTerminal,
     terminalPromise,
   };
 }
 
 function markTerminal(state: ExecutionState, terminal: TerminalState): void {
-  if (state.terminal) return;
-  state.terminal = terminal;
-  state.resolveTerminal(terminal);
+  state.terminal ??= terminal;
+  state.resolveTerminal(state.terminal);
 }
 
 function extractStatus(value: unknown): string | null {
@@ -574,21 +571,20 @@ async function handleEvent(
   const terminal = status && TERMINAL_STATUSES.has(status) ? {
     runId: state.runId, status, eventName, payload: record, output: extractOutput(parsed),
   } : null;
-  if (terminal?.status === "completed") state.receivedCompletion = terminal;
+  if (terminal) state.terminal ??= terminal;
   const redacted = redactForLog(parsed, [], 0, redactText);
   const eventData = sanitizedDelta !== null
     ? JSON.stringify({ delta: sanitizedDelta })
     : stringifyForLog(redacted, 8_000);
-  await ctx.onLog(
-    "stdout",
-    `[hermes-gateway:event] run=${state.runId} event=${eventName ?? "message"} data=${eventData}\n`,
-  );
-
-  if (sanitizedDelta !== null) {
-    state.outputChunks.push(sanitizedDelta);
+  try {
+    await ctx.onLog(
+      "stdout",
+      `[hermes-gateway:event] run=${state.runId} event=${eventName ?? "message"} data=${eventData}\n`,
+    );
+    if (sanitizedDelta !== null) state.outputChunks.push(sanitizedDelta);
+  } finally {
+    if (terminal) markTerminal(state, terminal);
   }
-
-  if (terminal) markTerminal(state, terminal);
 }
 
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -877,10 +873,10 @@ async function stopRunAndObserve(input: {
         signal: deadline.signal,
       });
       if (deadline.signal.aborted) return null;
-      await input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
+      void Promise.resolve().then(() => input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`)).catch(() => undefined);
     } catch (err) {
       if (deadline.signal.aborted) return null;
-      await input.ctx.onLog("stderr", `[hermes-gateway] stop request failed: ${redactErrorMessage(err, input.redactText)}\n`);
+      void Promise.resolve().then(() => input.ctx.onLog("stderr", `[hermes-gateway] stop request failed: ${redactErrorMessage(err, input.redactText)}\n`)).catch(() => undefined);
     }
     while (!deadline.signal.aborted) {
       try {
@@ -1069,6 +1065,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       method: "POST",
       headers: runHeaders,
       body: JSON.stringify(body),
+      redirect: "error",
       ...(createDeadline ? { signal: createDeadline.signal } : {}),
     });
     const created = createDeadline ? await Promise.race([request, createDeadline.expired]) : await request;
@@ -1092,7 +1089,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     createDeadline?.dispose();
   }
 
-  await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
+  void Promise.resolve().then(() => ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`)).catch(() => undefined);
 
   const state = createExecutionState(runId);
   const controller = new AbortController();
@@ -1133,8 +1130,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const finalStatus = await stopRunAndObserve({ ctx, baseUrl, headers: runHeaders, runId, redactText });
   const status = extractStatus(finalStatus);
   if (outcome === "operator_stop" || ctx.signal?.aborted) {
-    const completion = state.receivedCompletion ?? (status === "completed"
-      ? { runId, status, payload: finalStatus, output: extractOutput(finalStatus) } : null);
+    const observed = state.terminal?.status === "completed" ? state.terminal : null;
+    const completion = status === "completed"
+      ? { runId, status, payload: { ...finalStatus, ...observed?.payload },
+          output: observed?.output ?? extractOutput(finalStatus) }
+      : observed;
     if (completion) return mapTerminal(completion);
     // Hermes versions can mark an asyncio wrapper cancelled before its worker
     // exits. A terminal cancellation status is not a physical stop receipt.

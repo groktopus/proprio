@@ -653,3 +653,9 @@ describe("hand-off of a run that failed before any provider work", () => {
       .toMatchObject({ state: "failed", canRetry: true });
   });
 });
+
+it("keeps a successful reply's unverified Stop visible", () => {
+  expect(projectTaskInterruption({ ...issue, status: "todo" }, { run: { ...run, status: "succeeded", runtimeMode: "legacy",
+    resultJson: { executionCancellation: { state: "requested" } } }, agent, paused: false, approval: false }))
+    .toMatchObject({ state: "waiting_for_user", responsibility: "user", canRetry: false });
+});

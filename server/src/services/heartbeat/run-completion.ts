@@ -681,7 +681,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               ? parseObject(latestRun?.resultJson)
               : {}),
             ...parseObject(adapterResult.resultJson),
-            ...(adapterResult.completionObserved ? { completionObserved: true } : {}),
+            // This proof belongs to the adapter contract, never its arbitrary payload.
+            completionObserved: adapterResult.completionObserved === true ? true : undefined,
             ...(adapterResult.executionRecovery
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),

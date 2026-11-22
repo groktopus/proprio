@@ -143,6 +143,17 @@ describe.skipIf(!runControlPostgresSupport.supported)("heartbeat run-control dat
   let db: Db;
   const { fixture, liveRun } = setupRunControlDatabase("proprio-heartbeat-run-control-module", value => { db = value; });
 
+  it.each([false, true])("releases a pending Stop only with no-provider-work evidence (%s)", async neverDispatched => {
+    const { company, agent } = await fixture();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+      status: "cancelled", runtimeMode: "legacy", resultJson: { executionCancellation: { state: "requested" },
+        ...(neverDispatched ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : {}) } }).returning();
+    const deps = callbacks(db);
+    deps.wakeQueue.releaseIssueExecution.mockResolvedValue({ postCommitEffects: [] });
+    await createHeartbeatRunControl(db, deps).releaseIssueExecutionAndPromote(run);
+    expect(deps.wakeQueue.releaseIssueExecution).toHaveBeenCalledTimes(neverDispatched ? 1 : 0);
+  });
+
   it.each(["queued", "running", "cancelled", "succeeded"] as const)("does not supersede a retry that becomes %s between lookup and the cancellation fence", async status => {
     const { company, agent } = await fixture();
     const [run] = await db.insert(heartbeatRuns).values({
