@@ -394,7 +394,7 @@ describeLive("Daytona duplex channel (live)", () => {
         }
 
         const server = http2.createServer();
-        server.on("stream", (stream) => {
+        server.on("stream", (stream: http2.ServerHttp2Stream) => {
           stream.respond({ ":status": 200 });
           stream.end("pong");
         });
