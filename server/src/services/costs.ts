@@ -229,24 +229,6 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
               AND ${issues.harnessKind} IS NULL
           `;
 
-      const cteSeedText = options.excludeRoot
-        ? sql`
-            SELECT (${issues.id})::text AS id
-            FROM ${issues}
-            WHERE ${issues.companyId} = ${companyId}
-              AND ${issues.parentId} = ${issueId}
-              AND ${issues.hiddenAt} IS NULL
-              AND ${issues.harnessKind} IS NULL
-          `
-        : sql`
-            SELECT (${issues.id})::text AS id
-            FROM ${issues}
-            WHERE ${issues.companyId} = ${companyId}
-              AND ${issues.id} = ${issueId}
-              AND ${issues.hiddenAt} IS NULL
-              AND ${issues.harnessKind} IS NULL
-          `;
-
       const issueTreeCondition = sql<boolean>`
         ${issues.id} IN (
           WITH RECURSIVE issue_tree(id) AS (
@@ -263,34 +245,50 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
         )
       `;
 
+      // Query the two links separately. Keep the binding lookup per tree member
+      // so an unrelated task that owns most of the history does not drive a hash
+      // join over all company runs. The index gives the lateral lookup its order.
       const runSummarySql = sql`
         WITH RECURSIVE issue_tree(id) AS (
-          ${cteSeedText}
+          ${cteSeed}
           UNION ALL
-          SELECT (${childIssues.id})::text
+          SELECT ${childIssues.id}
           FROM ${issues} ${childIssues}
-          JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
+          JOIN issue_tree ON ${childIssues.parentId} = issue_tree.id
           WHERE ${childIssues.companyId} = ${companyId}
             AND ${childIssues.hiddenAt} IS NULL
             AND ${childIssues.harnessKind} IS NULL
-        )
-        SELECT
-          count(distinct ${heartbeatRuns.id})::int AS "runCount",
-          coalesce(sum(extract(epoch from (coalesce(${heartbeatRuns.finishedAt}, now()) - ${heartbeatRuns.startedAt})) * 1000), 0)::double precision AS "runtimeMs"
-        FROM ${heartbeatRuns}
-        WHERE ${heartbeatRuns.companyId} = ${companyId}
-          AND ${heartbeatRuns.startedAt} IS NOT NULL
-          AND (
-            ${heartbeatRuns.contextSnapshot} ->> 'issueId' IN (SELECT id FROM issue_tree)
-            OR EXISTS (
-              SELECT 1
+        ),
+        matching_runs AS (
+          SELECT bound.id, bound.started_at, bound.finished_at
+          FROM issue_tree
+          CROSS JOIN LATERAL (
+            SELECT ${heartbeatRuns.id} AS id, ${heartbeatRuns.startedAt} AS started_at, ${heartbeatRuns.finishedAt} AS finished_at
+            FROM ${heartbeatRuns}
+            WHERE ${heartbeatRuns.companyId} = ${companyId}
+              AND ${heartbeatRuns.issueId} = issue_tree.id
+              AND ${heartbeatRuns.startedAt} IS NOT NULL
+            ORDER BY ${heartbeatRuns.createdAt}
+            OFFSET 0
+          ) bound
+          UNION
+          SELECT ${heartbeatRuns.id} AS id, ${heartbeatRuns.startedAt} AS started_at, ${heartbeatRuns.finishedAt} AS finished_at
+          FROM ${heartbeatRuns}
+          WHERE ${heartbeatRuns.companyId} = ${companyId}
+            AND ${heartbeatRuns.startedAt} IS NOT NULL
+            AND ${heartbeatRuns.id} IN (
+              SELECT ${activityLog.runId}
               FROM ${activityLog}
-              JOIN issue_tree ON ${activityLog.entityId} = issue_tree.id
               WHERE ${activityLog.companyId} = ${companyId}
                 AND ${activityLog.entityType} = 'issue'
-                AND ${activityLog.runId} = ${heartbeatRuns.id}
+                AND ${activityLog.entityId} IN (SELECT id::text FROM issue_tree)
+                AND ${activityLog.runId} IS NOT NULL
             )
-          )
+        )
+        SELECT
+          count(*)::int AS "runCount",
+          coalesce(sum(extract(epoch from (coalesce(finished_at, now()) - started_at)) * 1000), 0)::double precision AS "runtimeMs"
+        FROM matching_runs
       `;
 
       // Run cost-event aggregation and run-duration aggregation in parallel.

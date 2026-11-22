@@ -3,7 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { afterAll, afterEach, beforeAll } from "vitest";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
 import {
   createDb,
   companies,
@@ -934,6 +934,144 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(descendantsOnly.runtimeMs).toBeGreaterThanOrEqual(150_000 + 4_000);
     expect(descendantsOnly.runtimeMs).toBeLessThan(150_000 + 60_000);
   });
+
+  it("limits issue tree run summaries to matching bindings in a large history", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const rootIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Proprio",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Run Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: rootIssueId, companyId, title: "Root", status: "in_progress", priority: "medium", issueNumber: 1, identifier: "TST-1" },
+      { id: childIssueId, companyId, parentId: rootIssueId, title: "Child", status: "in_progress", priority: "medium", issueNumber: 2, identifier: "TST-2" },
+      { id: siblingIssueId, companyId, title: "Sibling", status: "done", priority: "medium", issueNumber: 3, identifier: "TST-3" },
+    ]);
+
+    const boundToRootRunId = randomUUID();
+    const boundAndLoggedRunId = randomUUID();
+    const loggedOnlyRunId = randomUUID();
+    const siblingRunId = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      // 60s run bound to the root issue, with no issue in its context snapshot
+      {
+        id: boundToRootRunId,
+        companyId,
+        agentId,
+        issueId: rootIssueId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:00:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:01:00.000Z"),
+        contextSnapshot: {},
+      },
+      // 30s run bound to the child and also linked to it by activity_log: counted once
+      {
+        id: boundAndLoggedRunId,
+        companyId,
+        agentId,
+        issueId: childIssueId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:05:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:05:30.000Z"),
+        contextSnapshot: {},
+      },
+      // 10s run with no binding, linked to the root only by activity_log
+      {
+        id: loggedOnlyRunId,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:10:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:10:10.000Z"),
+      },
+      // run bound to a sibling outside the tree
+      {
+        id: siblingRunId,
+        companyId,
+        agentId,
+        issueId: siblingIssueId,
+        invocationSource: "on_demand",
+        status: "completed",
+        startedAt: new Date("2026-04-10T00:20:00.000Z"),
+        finishedAt: new Date("2026-04-10T00:21:00.000Z"),
+        contextSnapshot: {},
+      },
+    ]);
+    await db.insert(activityLog).values([
+      { companyId, runId: boundAndLoggedRunId, actorType: "agent", actorId: agentId, agentId, action: "issue.checked_out", entityType: "issue", entityId: childIssueId, details: {} },
+      { companyId, runId: loggedOnlyRunId, actorType: "agent", actorId: agentId, agentId, action: "issue.checked_out", entityType: "issue", entityId: rootIssueId, details: {} },
+    ]);
+
+    await db.execute(sql`
+      INSERT INTO ${heartbeatRuns} (company_id, agent_id, issue_id, invocation_source, status, started_at, finished_at, context_snapshot)
+      SELECT ${companyId}, ${agentId}, ${siblingIssueId}, 'on_demand', 'succeeded',
+        now() - interval '10 seconds', now(), jsonb_build_object('issueId', ${siblingIssueId}::text)
+      FROM generate_series(1, 32000)
+    `);
+    await db.execute(sql`ANALYZE ${heartbeatRuns}`);
+
+    const statements: SQL[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop === "execute") {
+          return (query: SQL) => {
+            statements.push(query);
+            return target.execute(query);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const costsWithPlan = costService(recordingDb);
+    const summary = await costsWithPlan.issueTreeSummary(companyId, rootIssueId);
+    const descendantsOnly = await costsWithPlan.issueTreeSummary(companyId, rootIssueId, {
+      excludeRoot: true,
+    });
+
+    expect(statements).toHaveLength(2);
+    type PlanNode = { "Relation Name"?: string; "Node Type": string; Plans?: PlanNode[] };
+    function runScans(node: PlanNode): PlanNode[] {
+      return [
+        ...(node["Relation Name"] === "heartbeat_runs" ? [node] : []),
+        ...(node.Plans ?? []).flatMap(runScans),
+      ];
+    }
+    for (const statement of statements) {
+      const [explain] = await db.execute(sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`);
+      const plan = (explain["QUERY PLAN"] as { Plan: PlanNode }[])[0].Plan;
+      const planText = JSON.stringify(plan);
+      expect(planText).not.toContain("context_snapshot");
+      expect(planText).toContain("heartbeat_runs_company_issue_created_idx");
+      expect(runScans(plan).map(node => node["Node Type"])).not.toContain("Seq Scan");
+    }
+
+    expect(summary.runCount).toBe(3);
+    expect(summary.runtimeMs).toBe(100_000);
+    expect(descendantsOnly.runCount).toBe(1);
+    expect(descendantsOnly.runtimeMs).toBe(30_000);
+  }, 30_000);
 
   it("aggregates finance event sums above int32 without raising Postgres integer overflow", async () => {
     const companyId = randomUUID();
