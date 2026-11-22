@@ -41,6 +41,22 @@ All responses return JSON. Successful responses return the entity directly. Erro
 }
 ```
 
+## Instance database backups
+
+On self-hosted instances, instance admins can call
+`POST /api/instance/database-backups` to create a database backup. A
+`201 Created` response includes the archive path (`backupFile`), byte count
+(`sizeBytes`), and these receipt fields:
+
+| Field | Values |
+|---|---|
+| `engine` | `"pg_dump"` or `"javascript"`. Names the engine that actually wrote the archive, not the requested mode. |
+| `fallbackReason` | `"pg_dump_failed"` when the automatic `pg_dump` backup path failed and JavaScript produced the archive. Otherwise `null`, including when JavaScript was selected intentionally. |
+| `warning` | A fixed message about JavaScript backup limitations when `fallbackReason` is present; otherwise `null`. Does not include subprocess diagnostics or connection details. |
+
+The receipt is not a restore verification. Cloud-managed instances return
+`403` for this endpoint because backups are platform-managed.
+
 ## Error Codes
 
 | Code | Meaning | What to Do |
