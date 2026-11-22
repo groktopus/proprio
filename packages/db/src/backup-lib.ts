@@ -599,7 +599,13 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       }
     }
 
-    await sql`SELECT 1`;
+    await sql.begin("isolation level repeatable read read only", async (sql) => {
+    await sql`SET LOCAL standard_conforming_strings = on`;
+    const [sourceSettings] = await sql<{ search_path: string; schemas: string[] }[]>`
+      SELECT current_setting('search_path') AS search_path, current_schemas(true) AS schemas
+    `;
+    const sourceSchemas = sourceSettings?.schemas ?? ["pg_catalog", "public"];
+    const sourceSearchPath = sourceSchemas.map(quoteIdentifier).join(", ");
 
     const emit = (line: string) => writer.emit(line);
     const emitStatement = (statement: string) => {
@@ -617,6 +623,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     emitStatement("SET LOCAL session_replication_role = replica;");
     emitStatement("SET LOCAL client_min_messages = warning;");
     emitStatement("SET LOCAL check_function_bodies = false;");
+    emitStatement("SET LOCAL standard_conforming_strings = on;");
     emit("");
 
     const allTables = await sql<TableDefinition[]>`
@@ -626,6 +633,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         AND ${sql.unsafe(nonSystemSchemaPredicate("table_schema"))}
       ORDER BY table_schema, table_name
     `;
+    // Keep catalog definitions stable while rows are streamed. Row updates
+    // remain allowed and the repeatable-read snapshot supplies their old state.
+    if (allTables.length > 0) await sql.unsafe(`LOCK TABLE ${allTables.map(table =>
+      quoteQualifiedName(table.schema_name, table.tablename)).join(", ")} IN ACCESS SHARE MODE`);
     const tables = allTables;
     const includedTableNames = new Set(tables.map(({ schema_name, tablename }) => tableKey(schema_name, tablename)));
     const includedSchemas = new Set(tables.map(({ schema_name }) => schema_name));
@@ -907,8 +918,12 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     // JavaScript backups are used when a worktree seed filters or transforms
     // table data. Preserve user-defined routines before indexes because an
     // expression index may depend on a user-defined function.
-    const routines = await sql<{ definition: string }[]>`
-      SELECT pg_get_functiondef(p.oid) AS definition
+    await sql`SET LOCAL search_path = pg_catalog`;
+    const routines = await sql<{ definition: string; identity: string; kind: string; has_search_path: boolean }[]>`
+      SELECT pg_get_functiondef(p.oid) AS definition,
+        quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS identity,
+        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS kind,
+        EXISTS (SELECT 1 FROM unnest(p.proconfig) AS setting WHERE setting LIKE 'search_path=%') AS has_search_path
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE ${sql.unsafe(nonSystemSchemaPredicate("n.nspname"))}
@@ -922,11 +937,15 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         )
       ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
     `;
+    await sql`SELECT set_config('search_path', ${sourceSettings?.search_path ?? '"$user", public'}, true)`;
     if (routines.length > 0) {
       emit("-- Functions and procedures");
       for (const routine of routines) {
         const definition = routine.definition.trimEnd();
         emitStatement(definition.endsWith(";") ? definition : `${definition};`);
+        if (!routine.has_search_path) emitStatement(
+          `ALTER ${routine.kind} ${routine.identity} SET search_path TO ${sourceSearchPath};`,
+        );
       }
       emit("");
     }
@@ -965,12 +984,14 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       emit("");
     }
 
+    const tableRowCounts = new Map<string, number>();
     // Dump data for each table
     for (const { schema_name, tablename } of tables) {
       const currentTableKey = tableKey(schema_name, tablename);
       const qualifiedTableName = quoteQualifiedName(schema_name, tablename);
       const overrideIdentity = identitySequences.some(seq => seq.owner_schema === schema_name && seq.owner_table === tablename);
       const count = await sql.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${qualifiedTableName}`);
+      tableRowCounts.set(currentTableKey, count[0]?.n ?? 0);
       if (excludedTableNames.has(currentTableKey) || (count[0]?.n ?? 0) === 0) continue;
 
       // Get column info for this table
@@ -988,16 +1009,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       if (effectiveBackupEngine !== "javascript" && nullifiedColumns.size === 0) {
         emit(`COPY ${qualifiedTableName} (${colNames}) FROM stdin;`);
         await writer.writeRaw("\n");
-        const copySql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
-        try {
-          const copyStream = await copySql
-            .unsafe(`COPY ${qualifiedTableName} (${colNames}) TO STDOUT`)
-            .readable();
-          for await (const chunk of copyStream) {
-            await writer.writeRaw(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-          }
-        } finally {
-          await copySql.end();
+        const copyStream = await sql.unsafe(`COPY ${qualifiedTableName} (${colNames}) TO STDOUT`).readable();
+        for await (const chunk of copyStream) {
+          await writer.writeRaw(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
         }
         await writer.writeRaw("\\.\n");
         emitStatementBoundary();
@@ -1028,18 +1042,31 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
     // Restore CHECK and exclusion constraints after loading data. In particular,
     // a NOT VALID check can have pre-existing rows that it would reject on insert.
-    // Let Postgres qualify non-catalog objects rather than relying on the
+    // Use the same catalog-only schema path for deparsing and replay, rather than the
     // restoring session's search_path.
-    const checkAndExclusionConstraints = await sql.begin(async (tx) => {
-      await tx`SET LOCAL search_path = pg_catalog`;
-      return tx<{
+    const transformedChecks = nullifiedColumnsByTable.size > 0 ? await sql<{
+      schema_name: string; tablename: string; constraint_name: string; expression: string;
+    }[]>`SELECT n.nspname AS schema_name, t.relname AS tablename, c.conname AS constraint_name,
+        pg_get_expr(c.conbin, c.conrelid) AS expression
+      FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE c.contype = 'c' AND c.convalidated AND ${sql.unsafe(nonSystemSchemaPredicate("n.nspname"))}` : [];
+    await sql`SET LOCAL search_path = pg_catalog`;
+    const checkAndExclusionConstraints = await sql<{
         constraint_name: string;
         schema_name: string;
         tablename: string;
         definition: string;
+        type: string;
+        columns: string[];
       }[]>`
         SELECT c.conname AS constraint_name, n.nspname AS schema_name, t.relname AS tablename,
-               pg_get_constraintdef(c.oid) AS definition
+               pg_get_constraintdef(c.oid) AS definition, c.contype::text AS type,
+               ARRAY(SELECT a.attname FROM pg_attribute a WHERE a.attrelid = t.oid AND (
+                 a.attnum = ANY(c.conkey) OR EXISTS (
+                   SELECT 1 FROM pg_depend d WHERE d.refobjid = t.oid AND d.refobjsubid = a.attnum
+                     AND ((d.classid = 'pg_constraint'::regclass AND d.objid = c.oid)
+                       OR (d.classid = 'pg_class'::regclass AND d.objid = c.conindid))
+                 ))) AS columns
         FROM pg_constraint c
         JOIN pg_class t ON t.oid = c.conrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -1051,15 +1078,39 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           AND NOT EXISTS (
             SELECT 1 FROM pg_inherits i WHERE i.inhrelid = t.oid OR i.inhparent = t.oid
           )
-          AND ${tx.unsafe(nonSystemSchemaPredicate("n.nspname"))}
+          AND ${sql.unsafe(nonSystemSchemaPredicate("n.nspname"))}
         ORDER BY n.nspname, t.relname, c.conname
       `;
-    });
+    await sql`SELECT set_config('search_path', ${sourceSettings?.search_path ?? '"$user", public'}, true)`;
     // The JavaScript serializer does not rebuild inheritance or partition
     // topology. Do not change those tables' current behavior in this slice.
     const ordinaryTableConstraints = checkAndExclusionConstraints.filter(
       (constraint) => includedTableNames.has(tableKey(constraint.schema_name, constraint.tablename)),
     );
+    for (const constraint of ordinaryTableConstraints) {
+      const key = tableKey(constraint.schema_name, constraint.tablename);
+      const nullified = nullifiedColumnsByTable.get(key);
+      if (!nullified?.size || excludedTableNames.has(key) || !tableRowCounts.get(key)) continue;
+      if (constraint.type === "x" && constraint.columns.some(column => nullified.has(column))) {
+        throw new Error(`backup_transform_constraint_conflict: cannot certify exclusion ${key}.${constraint.constraint_name} after nullification`);
+      }
+      const check = transformedChecks.find(entry => entry.schema_name === constraint.schema_name &&
+        entry.tablename === constraint.tablename && entry.constraint_name === constraint.constraint_name);
+      if (!check) continue; // NOT VALID checks deliberately permit existing invalid rows.
+      const columns = await sql<{ name: string; type: string }[]>`SELECT attname AS name,
+        format_type(atttypid, atttypmod) AS type FROM pg_attribute
+        WHERE attrelid = ${quoteQualifiedName(constraint.schema_name, constraint.tablename)}::regclass
+          AND attnum > 0 AND NOT attisdropped ORDER BY attnum`;
+      const projection = columns.map(column => nullified.has(column.name)
+        ? `NULL::${column.type} AS ${quoteIdentifier(column.name)}` : quoteIdentifier(column.name)).join(", ");
+      let invalid;
+      try {
+        invalid = await sql.unsafe(`SELECT 1 FROM (SELECT ${projection} FROM ${quoteQualifiedName(constraint.schema_name, constraint.tablename)}) AS ${quoteIdentifier(constraint.tablename)} WHERE NOT (${check.expression}) LIMIT 1`);
+      } catch (error) {
+        throw new Error(`backup_transform_constraint_conflict: cannot evaluate ${key}.${constraint.constraint_name} after nullification`, { cause: error });
+      }
+      if (invalid.length > 0) throw new Error(`backup_transform_constraint_conflict: ${key}.${constraint.constraint_name}`);
+    }
     if (ordinaryTableConstraints.length > 0) {
       emit("-- Check and exclusion constraints");
       // Replay in the same catalog-only path used for deparsing, so unqualified
@@ -1074,6 +1125,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       }
       emitStatement("SELECT pg_catalog.set_config('search_path', pg_catalog.current_setting('proprio.restore_constraint_saved_search_path'), true);");
       emit("");
+    }
+
+    for (const routine of routines) {
+      if (!routine.has_search_path) emitStatement(`ALTER ${routine.kind} ${routine.identity} RESET search_path;`);
     }
 
     const allTriggers = await sql<{
@@ -1123,6 +1178,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
     emitStatement("COMMIT;");
     emit("");
+    });
 
     await writer.close();
 

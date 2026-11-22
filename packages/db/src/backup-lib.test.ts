@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import {
   createBufferedTextFileWriter,
@@ -226,17 +226,27 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         ORDER BY conname
       `;
     });
+    let stage = "source setup";
     try {
       await sourceSql.unsafe(`
         CREATE SCHEMA booking;
+        SET search_path = booking, public;
+        CREATE FUNCTION booking.normalize_state(value text) RETURNS text
+          LANGUAGE sql IMMUTABLE AS $$ SELECT lower(value) $$;
+        CREATE FUNCTION booking.passthrough_slot(value int4range) RETURNS int4range
+          LANGUAGE sql IMMUTABLE AS $$ SELECT value $$;
+        CREATE FUNCTION booking.normalize_slot(value int4range) RETURNS int4range
+          LANGUAGE sql IMMUTABLE SET search_path = booking, public AS $$ SELECT passthrough_slot(value) $$;
+        CREATE FUNCTION booking.explicit_context(value text) RETURNS text
+          LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$ SELECT value $$;
         CREATE FUNCTION booking.allowed_state(value text) RETURNS boolean
-          LANGUAGE sql IMMUTABLE AS $$ SELECT value IN ('active', 'held') $$;
+          LANGUAGE sql IMMUTABLE AS $$ SELECT normalize_state(value) IN ('active', 'held') $$;
         CREATE TABLE booking.reservations (
           id integer PRIMARY KEY,
           state text NOT NULL,
           slot int4range NOT NULL,
           CONSTRAINT reservation_state_check CHECK (booking.allowed_state(state)),
-          CONSTRAINT reservation_slot_excl EXCLUDE USING gist (slot WITH &&)
+          CONSTRAINT reservation_slot_excl EXCLUDE USING gist (booking.normalize_slot(slot) WITH &&)
         );
         INSERT INTO booking.reservations VALUES (1, 'active', int4range(1, 5));
         ALTER TABLE booking.reservations
@@ -274,7 +284,9 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       `);
       const targetName = new URL(target).pathname.slice(1);
       await targetSql`ALTER DATABASE ${targetSql(targetName)} SET search_path = shadow, pg_catalog, booking, public`;
+      await targetSql`SET search_path = shadow, pg_catalog, booking, public`;
 
+      stage = "source constraint inspection";
       const original = await readConstraints(sourceSql);
       expect(original.map(({ name, type, validated }) => ({ name, type, validated }))).toEqual([
         { name: "reservation_id_check", type: "c", validated: false },
@@ -282,15 +294,21 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         { name: "reservation_state_check", type: "c", validated: true },
       ]);
 
+      stage = "backup";
       const backup = await runDatabaseBackup({
         connectionString: source,
         backupDir: createTempDir("constraint-backup-"),
         backupEngine: "javascript",
         retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
       });
+      stage = "restore";
       await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
 
+      stage = "restored inspection and enforcement";
       expect(await readConstraints(targetSql)).toEqual(original);
+      const routineSettings = (sql: typeof sourceSql) => sql`SELECT p.proname, p.proconfig FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'booking' ORDER BY p.proname`;
+      expect(await routineSettings(targetSql)).toEqual(await routineSettings(sourceSql));
       // The current serializer flattens these tables; this slice must not
       // claim or attempt to reconstruct their topology-dependent constraints.
       const dump = gunzipSync(fs.readFileSync(backup.backupFile)).toString("utf8");
@@ -308,9 +326,144 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       await targetSql`UPDATE booking.reservations SET id = 2 WHERE id = 1`;
       await targetSql`ALTER TABLE booking.reservations VALIDATE CONSTRAINT reservation_id_check`;
       expect((await readConstraints(targetSql)).find((c) => c.name === "reservation_id_check")?.validated).toBe(true);
+    } catch (error) {
+      throw new Error(`Constraint round trip failed during ${stage}`, { cause: error });
     } finally {
       await sourceSql.end();
       await targetSql.end();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("preserves CHECK string literals across source and target string settings", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "constraint_literals");
+    const sourceSql = postgres(source, { max: 1 });
+    const targetSql = postgres(target, { max: 1 });
+    const previousPsql = process.env.PROPRIO_PSQL_PATH;
+    process.env.PROPRIO_PSQL_PATH = "/missing/proprio-fixture-psql";
+    try {
+      await sourceSql.unsafe(String.raw`CREATE TABLE public.literal_guard (
+        value text CHECK (value <> E'\\' AND value <> E'\r')
+      ); INSERT INTO public.literal_guard VALUES ('safe');`);
+      const sourceName = new URL(source).pathname.slice(1);
+      await sourceSql`ALTER DATABASE ${sourceSql(sourceName)} SET standard_conforming_strings = off`;
+      const backup = await runDatabaseBackup({ connectionString: source, backupDir: createTempDir("constraint-literals-"),
+        backupEngine: "javascript", retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } });
+      await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
+      await expect(targetSql`INSERT INTO public.literal_guard VALUES (${"\\"})`).rejects.toMatchObject({ code: "23514" });
+      await expect(targetSql`INSERT INTO public.literal_guard VALUES (${"\r"})`).rejects.toMatchObject({ code: "23514" });
+      await targetSql`INSERT INTO public.literal_guard VALUES (${"\n"})`;
+    } finally {
+      if (previousPsql === undefined) delete process.env.PROPRIO_PSQL_PATH;
+      else process.env.PROPRIO_PSQL_PATH = previousPsql;
+      await sourceSql.end(); await targetSql.end();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it.each(["in_progress", "todo"])("handles nullification against a validated CHECK (%s)", async status => {
+    const source = await createTempDatabase();
+    const sourceSql = postgres(source, { max: 1 });
+    const backupDir = createTempDir("constraint-transform-");
+    try {
+      await sourceSql.unsafe(`CREATE TABLE public.transform_guard (
+        status text, execution_run_id text,
+        CONSTRAINT needs_execution CHECK (status <> 'in_progress' OR execution_run_id IS NOT NULL)
+      );`);
+      await sourceSql`INSERT INTO public.transform_guard VALUES (${status}, 'run-1')`;
+      const backup = runDatabaseBackup({ connectionString: source, backupDir, backupEngine: "javascript",
+        nullifyColumns: { transform_guard: ["execution_run_id"] },
+        retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } });
+      if (status === "in_progress") {
+        await expect(backup).rejects.toThrow("backup_transform_constraint_conflict");
+        expect(fs.readdirSync(backupDir)).toEqual([]);
+      } else {
+        const archive = await backup;
+        const target = await createSiblingDatabase(source, "compatible_transform");
+        await runDatabaseRestore({ connectionString: target, backupFile: archive.backupFile });
+        const targetSql = postgres(target, { max: 1 });
+        try {
+          expect(await targetSql`SELECT status, execution_run_id FROM public.transform_guard`)
+            .toEqual([{ status: "todo", execution_run_id: null }]);
+          expect(await targetSql`SELECT convalidated FROM pg_constraint WHERE conname = 'needs_execution'`)
+            .toEqual([{ convalidated: true }]);
+        } finally { await targetSql.end(); }
+      }
+    } finally { await sourceSql.end(); }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it.each(["populated", "empty", "unrelated column"])("handles nullification against exclusion expression dependencies (%s)", async variant => {
+    const source = await createTempDatabase();
+    const sourceSql = postgres(source, { max: 1 });
+    const backupDir = createTempDir("exclusion-transform-");
+    try {
+      await sourceSql.unsafe(`CREATE TABLE public.exclusion_transform_guard (
+        slot int4range, note text, CONSTRAINT slots_disjoint EXCLUDE USING gist ((coalesce(slot, int4range(1, 2))) WITH &&)
+      );`);
+      if (variant !== "empty") await sourceSql.unsafe(`INSERT INTO public.exclusion_transform_guard VALUES (int4range(1, 2), 'one'), (int4range(3, 4), 'two')`);
+      const backup = runDatabaseBackup({ connectionString: source, backupDir, backupEngine: "javascript",
+        nullifyColumns: { exclusion_transform_guard: [variant === "unrelated column" ? "note" : "slot"] },
+        retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } });
+      if (variant === "populated") {
+        await expect(backup).rejects.toThrow("backup_transform_constraint_conflict");
+        expect(fs.readdirSync(backupDir)).toEqual([]);
+      } else {
+        const archive = await backup;
+        const target = await createSiblingDatabase(source, "compatible_exclusion");
+        await runDatabaseRestore({ connectionString: target, backupFile: archive.backupFile });
+        const targetSql = postgres(target, { max: 1 });
+        try {
+          expect(await targetSql`SELECT slot, note FROM public.exclusion_transform_guard`)
+            .toHaveLength(variant === "empty" ? 0 : 2);
+          expect(await targetSql`SELECT conname FROM pg_constraint WHERE conname = 'slots_disjoint'`)
+            .toEqual([{ conname: "slots_disjoint" }]);
+        } finally { await targetSql.end(); }
+      }
+    } finally { await sourceSql.end(); }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("captures rows and constraints from one snapshot during a concurrent migration", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "constraint_snapshot");
+    const admin = postgres(source, { max: 1 });
+    const blocker = postgres(source, { max: 1 });
+    const migration = postgres(source, { max: 1 });
+    const targetSql = postgres(target, { max: 1 });
+    let release!: () => void, locked!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const acquired = new Promise<void>(resolve => { locked = resolve; });
+    let blocking: Promise<unknown> | undefined, dumping: Promise<Awaited<ReturnType<typeof runDatabaseBackup>>> | undefined;
+    let changing: Promise<unknown> | undefined;
+    try {
+      await admin.unsafe(`CREATE SCHEMA backup_race;
+        CREATE TABLE backup_race.a_data (value integer); INSERT INTO backup_race.a_data VALUES (0);
+        CREATE TABLE backup_race.z_block (value integer); INSERT INTO backup_race.z_block VALUES (1);`);
+      blocking = blocker.begin(async tx => { await tx.unsafe('LOCK TABLE backup_race.z_block IN ACCESS EXCLUSIVE MODE'); locked(); await gate; });
+      await acquired;
+      dumping = runDatabaseBackup({ connectionString: source, backupDir: createTempDir("constraint-snapshot-"),
+        backupEngine: "javascript", retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } });
+      await vi.waitFor(async () => {
+        expect(await admin`SELECT pid FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+          AND datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%z_block%'`).not.toHaveLength(0);
+      }, { timeout: 10_000 });
+      await migration`UPDATE backup_race.a_data SET value = 1`;
+      const [{ pid }] = await migration<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      let changed = false;
+      changing = migration.unsafe('ALTER TABLE backup_race.a_data ADD CONSTRAINT positive_value CHECK (value > 0)')
+        .then(() => { changed = true; });
+      await vi.waitFor(async () => {
+        const waiting = await admin`SELECT pid FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'`;
+        expect(changed || waiting.length > 0).toBe(true);
+      }, { timeout: 10_000 });
+      release(); await blocking;
+      const backup = await dumping;
+      await changing;
+      await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
+      expect(await targetSql`SELECT value FROM backup_race.a_data`).toEqual([{ value: 0 }]);
+      expect(await targetSql`SELECT conname FROM pg_constraint WHERE conrelid = 'backup_race.a_data'::regclass`).toEqual([]);
+    } finally {
+      release?.();
+      await Promise.allSettled([blocking, dumping, changing].filter(Boolean));
+      await admin.end(); await blocker.end(); await migration.end(); await targetSql.end();
     }
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
