@@ -27,6 +27,9 @@ function createBackupService(overrides: Partial<InstanceDatabaseBackupService> =
       backupFile: "/tmp/proprio-20260416.sql.gz",
       sizeBytes: 1234,
       prunedCount: 2,
+      engine: "javascript",
+      fallbackReason: "pg_dump_failed",
+      warning: "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.",
       backupDir: "/tmp",
       retention: {
         dailyDays: 7,
@@ -63,6 +66,9 @@ describe("instance database backup routes", () => {
       backupFile: "/tmp/proprio-20260416.sql.gz",
       sizeBytes: 1234,
       prunedCount: 2,
+      engine: "javascript",
+      fallbackReason: "pg_dump_failed",
+      warning: "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.",
       backupDir: "/tmp",
       retention: {
         dailyDays: 7,

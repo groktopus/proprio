@@ -4,7 +4,12 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
+import {
+  createBufferedTextFileWriter,
+  formatDatabaseBackupResult,
+  runDatabaseBackup,
+  runDatabaseRestore,
+} from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
@@ -76,6 +81,48 @@ describe("createBufferedTextFileWriter", () => {
 });
 
 describeEmbeddedPostgres("runDatabaseBackup", () => {
+  it.each([true, false])("reports database backup provenance when pg_dump succeeds: %s", async (dumpSucceeds) => {
+    const connectionString = await createTempDatabase();
+    const backupDir = createTempDir("proprio-backup-provenance-");
+    const executable = path.join(backupDir, "pg-dump-fixture");
+    const privateDiagnostic = "postgres://fixture:do-not-include@database.invalid/proprio";
+    const fixtureDump = "SELECT 42;\n";
+    fs.writeFileSync(executable, dumpSucceeds
+      ? "#!/bin/sh\nprintf 'SELECT 42;\\n'\n"
+      : `#!/bin/sh\nprintf '%s\\n' '${privateDiagnostic}' >&2\nexit 1\n`,
+    { mode: 0o700 });
+    const previous = process.env.PROPRIO_PG_DUMP_PATH;
+    process.env.PROPRIO_PG_DUMP_PATH = executable;
+    try {
+      const result = await runDatabaseBackup({
+        connectionString,
+        backupDir,
+        retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      });
+      const dump = gunzipSync(fs.readFileSync(result.backupFile)).toString();
+      const summary = formatDatabaseBackupResult(result);
+      if (dumpSucceeds) {
+        expect(result).toMatchObject({ engine: "pg_dump", fallbackReason: null, warning: null });
+        expect(summary).toContain("pg_dump");
+        expect(dump).toBe(fixtureDump);
+      } else {
+        expect(result).toMatchObject({
+          engine: "javascript",
+          fallbackReason: "pg_dump_failed",
+          warning: expect.stringContaining("may not preserve all PostgreSQL features"),
+        });
+        expect(summary).toContain("JavaScript fallback");
+        expect(dump).toContain("-- Proprio database backup");
+      }
+      expect(JSON.stringify(result)).not.toContain(privateDiagnostic);
+      expect(summary).not.toContain(privateDiagnostic);
+      expect(dump).not.toContain(privateDiagnostic);
+    } finally {
+      if (previous === undefined) delete process.env.PROPRIO_PG_DUMP_PATH;
+      else process.env.PROPRIO_PG_DUMP_PATH = previous;
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it("preserves a post-pg_dump verification error without falling back or pruning", async () => {
     const connectionString = await createTempDatabase();
     const backupDir = createTempDir("checkpoint-pg-dump-");
@@ -124,6 +171,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         INSERT INTO identity_fixture.records (value) VALUES ('one'), ('two');
       `);
       const backup = await runDatabaseBackup({ connectionString: source, backupDir: createTempDir("identity-backup-"), backupEngine: "javascript", retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 } });
+      expect(backup).toMatchObject({ engine: "javascript", fallbackReason: null, warning: null });
       await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
       expect(await targetSql`SELECT id::text, default_id, value FROM identity_fixture.records ORDER BY id`)
         .toEqual([{ id: "7", default_id: 1, value: "one" }, { id: "9", default_id: 2, value: "two" }]);

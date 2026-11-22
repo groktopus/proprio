@@ -1227,7 +1227,7 @@ describe("startServer feedback export wiring", () => {
       expect(options.retention).toEqual({ dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 });
       expect(options.verifyBeforePrune).toEqual(expect.any(Function));
       await options.verifyBeforePrune!(backupFile);
-      return { backupFile, sizeBytes: bytes.length, prunedCount: 0 };
+      return { backupFile, sizeBytes: bytes.length, prunedCount: 0, engine: "pg_dump" as const, fallbackReason: null, warning: null };
     };
     vi.mocked(runDatabaseBackup).mockImplementationOnce(async options => {
       await pending;
@@ -1328,7 +1328,7 @@ describe("startServer feedback export wiring", () => {
       rejectBackup(new Error("backup failed"));
       await rejection;
     } else {
-      resolveBackup({ backupFile: "backup.sql.gz", sizeBytes: 1, prunedCount: 0 } as never);
+      resolveBackup({ backupFile: "backup.sql.gz", sizeBytes: 1, prunedCount: 0, engine: "pg_dump", fallbackReason: null, warning: null } as never);
       await backup;
     }
     expect(idleWorkSnapshot().active).toBe(before);

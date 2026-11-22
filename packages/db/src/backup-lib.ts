@@ -37,6 +37,11 @@ export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  /** Engine that actually produced the successful archive, never the requested "auto" mode. */
+  engine: "pg_dump" | "javascript";
+  /** Fixed category only, not a command's raw error or output. */
+  fallbackReason: "pg_dump_failed" | null;
+  warning: string | null;
 };
 
 export type RunDatabaseRestoreOptions = {
@@ -74,6 +79,7 @@ const DEFAULT_BACKUP_WRITE_BUFFER_BYTES = 1024 * 1024;
 const BACKUP_DATA_CURSOR_ROWS = 100;
 const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
+const PG_DUMP_FALLBACK_WARNING = "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.";
 
 const STATEMENT_BREAKPOINT = "-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
@@ -537,6 +543,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
   const backupEngine = opts.backupEngine ?? "auto";
   let effectiveBackupEngine = backupEngine;
+  let fallbackReason: RunDatabaseBackupResult["fallbackReason"] = null;
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
@@ -574,6 +581,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         if (backupEngine === "pg_dump") {
           throw error;
         }
+        // The receipt must not include stderr, command paths, or error messages
+        // that could contain connection details.
+        fallbackReason = "pg_dump_failed";
         effectiveBackupEngine = "javascript";
         sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
         sqlClosed = false;
@@ -586,7 +596,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         const sizeBytes = statSync(backupFile).size;
         await opts.verifyBeforePrune?.(backupFile);
         const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
-        return { backupFile, sizeBytes, prunedCount };
+        return { backupFile, sizeBytes, prunedCount, engine: "pg_dump", fallbackReason: null, warning: null };
       }
     }
 
@@ -1081,6 +1091,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       backupFile,
       sizeBytes,
       prunedCount,
+      engine: "javascript",
+      fallbackReason,
+      warning: fallbackReason ? PG_DUMP_FALLBACK_WARNING : null,
     };
   } catch (error) {
     await writer.abort();
@@ -1137,5 +1150,6 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
 export function formatDatabaseBackupResult(result: RunDatabaseBackupResult): string {
   const size = formatBackupSize(result.sizeBytes);
   const pruned = result.prunedCount > 0 ? `; pruned ${result.prunedCount} old backup(s)` : "";
-  return `${result.backupFile} (${size}${pruned})`;
+  const warning = result.warning ? `; warning: ${result.warning}` : "";
+  return `${result.backupFile} (${size}; engine: ${result.engine}${pruned}${warning})`;
 }
