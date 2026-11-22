@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { confidenceFor, readinessVerdict } from "./check-readiness.mjs";
+import { assessChecks, confidenceFor, readinessVerdict } from "./check-readiness.mjs";
 import { findCandidates } from "./find-candidates.mjs";
 import {
   chooseOriginatingIssue,
@@ -211,7 +211,7 @@ test("normalizes check runs and status contexts", () => {
   assert.equal(normalizeCheck({ __typename: "StatusContext", context: "legacy", state: "FAILURE" }).green, false);
 });
 
-test("drafts are report-only and missing Greptile blocks normal PRs", () => {
+test("drafts are report-only and missing Greptile does not block normal PRs", () => {
   const base = {
     pullRequest: { state: "OPEN", isDraft: false, mergeable: "MERGEABLE", reviewDecision: "APPROVED" },
     checks: { checks: [{}], pending: [], failing: [] },
@@ -219,7 +219,7 @@ test("drafts are report-only and missing Greptile blocks normal PRs", () => {
     behindBy: 0,
     originatingIssue: { status: "done", identifier: "PAP-1" },
   };
-  assert.equal(readinessVerdict(base).verdict, "needs_gardening");
+  assert.equal(readinessVerdict(base).verdict, "ready");
   assert.equal(readinessVerdict({ ...base, pullRequest: { ...base.pullRequest, isDraft: true } }).verdict, "report_only");
 });
 
@@ -314,4 +314,22 @@ test("scripts contain no mutating GitHub commands", async () => {
   const source = scripts.join("\n");
   assert.doesNotMatch(source, /\bgh\s+pr\s+(merge|close|review|comment|ready|reopen)\b/i);
   assert.doesNotMatch(source, /--method\s+(POST|PATCH|PUT|DELETE)\b/i);
+});
+
+test("optional Greptile checks do not replace or block required CI", () => {
+  for (const conclusion of ["FAILURE", "SUCCESS", null]) {
+    const result = assessChecks([
+      { __typename: "CheckRun", name: "Greptile", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion },
+      { __typename: "CheckRun", name: "typecheck", status: "COMPLETED", conclusion: "SUCCESS" },
+    ]);
+    assert.equal(result.allGreen, true);
+    assert.equal(result.checks.length, 1);
+    assert.equal(readinessVerdict({ pullRequest: { state: "OPEN", mergeable: "MERGEABLE" }, checks: result,
+      greptile: { present: true, pending: !conclusion, clean: conclusion === "SUCCESS" }, behindBy: 0,
+      originatingIssue: { status: "done" } }).verdict, "ready");
+  }
+  const failed = assessChecks([{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "FAILURE" }]);
+  assert.equal(readinessVerdict({ pullRequest: { state: "OPEN", mergeable: "MERGEABLE" }, checks: failed,
+    behindBy: 0, originatingIssue: { status: "done" } }).verdict, "needs_gardening");
+  assert.equal(assessChecks([{ __typename: "CheckRun", name: "Greptile", status: "COMPLETED", conclusion: "SUCCESS" }]).allGreen, false);
 });

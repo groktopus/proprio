@@ -14,3 +14,10 @@ See [the stability triage plan](STABILITY.md) for initial priorities and [SECURI
 A repository maintainer may self-review a pull request. If GitHub does not allow the author to submit an approval, record the review in a pull request comment. Name the exact head commit, the behavior reviewed, the checks run, and any remaining risks. Do not describe a self-review as independent.
 
 Merge only when the recorded review covers the current head, the applicable CI checks have passed on that head, and the change has focused verification evidence. Repeat the affected checks and review after a material change. A self-review does not override a failed check, required platform rules, or the design discussion required above. Merge does not authorize a release or deployment.
+
+Automated review, including Greptile, is optional. No provider installation,
+check-run, or score is required. Address actionable findings from available
+reviewers. An optional reviewer job that fails solely because its service is
+unavailable is missing review evidence, not a code-check failure or approval.
+Record that failure and the current-head maintainer review in the PR. Required
+platform rules and applicable CI typecheck, build, and test gates still apply.

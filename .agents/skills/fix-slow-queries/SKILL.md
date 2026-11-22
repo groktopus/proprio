@@ -157,7 +157,7 @@ workflow instead when the fix belongs in `proprio-cloud`.
   dependencies. Attach every created PR to the current chat/task where supported.
 - After each push, refresh the head SHA. Address actionable reviews and failures,
   rerun affected local proof, and wait for fresh review and all expected checks
-  on that SHA. Follow this repo's Greptile 5/5/no-unresolved-findings requirement.
+  on that SHA. Record current-head review under CONTRIBUTING.md and resolve actionable findings. Automated review is optional.
 - Distinguish code failures from runner shutdowns or external outages. Rerun a
   demonstrated transient failure once. Cancel obsolete runs only after verifying
   they belong to this work and an older head; never terminate unrelated jobs.

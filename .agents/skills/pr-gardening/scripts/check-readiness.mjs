@@ -12,8 +12,9 @@ import {
   writeJson,
 } from "./lib.mjs";
 
-function assessChecks(contexts) {
-  const checks = contexts.map(normalizeCheck);
+export function assessChecks(contexts) {
+  // Optional Greptile evidence is reported separately, never a CI gate.
+  const checks = contexts.map(normalizeCheck).filter(check => !/greptile/i.test(check.name));
   return {
     checks,
     pending: checks.filter((check) => check.pending),
@@ -67,9 +68,6 @@ export function readinessVerdict({ pullRequest, checks, greptile, behindBy, orig
     reasons.push(reason("checks_failing", `${checks.failing.length} check(s) are not green`, "blocking", { names: checks.failing.map((check) => check.name) }));
   }
   if (checks.checks.length === 0) reasons.push(reason("checks_missing", "No status checks were found at the current head"));
-  if (!greptile.present) reasons.push(reason("greptile_missing", "No Greptile check-run exists at the current head"));
-  else if (greptile.pending) reasons.push(reason("greptile_pending", "Greptile has not completed at the current head"));
-  else if (!greptile.clean) reasons.push(reason("greptile_not_clean", "Greptile did not conclude success or neutral at the current head"));
   if (pullRequest.reviewDecision === "CHANGES_REQUESTED") reasons.push(reason("changes_requested", "A review requests changes"));
   if (pullRequest.reviewDecision === "REVIEW_REQUIRED") reasons.push(reason("review_required", "Required review approval is missing"));
   if (behindBy > 0) reasons.push(reason("base_behind", `Head is ${behindBy} commit(s) behind base`, "blocking", { behindBy }));
@@ -87,9 +85,6 @@ export function confidenceFor(entry) {
   const codes = new Set(entry.reasons.map((entryReason) => entryReason.code));
   const lowConfidenceCodes = [
     "originating_issue_missing",
-    "greptile_missing",
-    "greptile_pending",
-    "greptile_not_clean",
     "checks_missing",
     "checks_failing",
     "checks_pending",
