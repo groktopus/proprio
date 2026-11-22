@@ -38,12 +38,17 @@ export type InstallStorePaths = {
   shimPath: string;
 };
 
-function ensurePrivateDirectory(directoryPath: string): void {
-  fs.mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
+function assertInstallStoreDirectory(directoryPath: string): fs.Stats {
   const stat = fs.lstatSync(directoryPath);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`Refusing to use non-directory install-store path ${directoryPath}.`);
   }
+  return stat;
+}
+
+function ensurePrivateDirectory(directoryPath: string): void {
+  fs.mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
+  assertInstallStoreDirectory(directoryPath);
   fs.chmodSync(directoryPath, 0o700);
 }
 
@@ -51,6 +56,14 @@ function assertOwnedByCurrentUser(stat: fs.Stats, targetPath: string): void {
   const getuid = process.getuid;
   if (typeof getuid === "function" && stat.uid !== getuid()) {
     throw new Error(`Refusing to modify path not owned by the current user: ${targetPath}.`);
+  }
+}
+
+function assertExistingPrivateDirectory(directoryPath: string): void {
+  const stat = assertInstallStoreDirectory(directoryPath);
+  assertOwnedByCurrentUser(stat, directoryPath);
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+    throw new Error(`Refusing to use non-private install-store path ${directoryPath}.`);
   }
 }
 
@@ -86,18 +99,22 @@ export function resolveInstallStorePaths(options: {
   };
 }
 
+function assertInstallStoreMarker(paths: InstallStorePaths): void {
+  const markerStat = fs.lstatSync(paths.markerPath);
+  if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink > 1) {
+    throw new Error(`Refusing to use unsafe install-store marker ${paths.markerPath}.`);
+  }
+  assertOwnedByCurrentUser(markerStat, paths.markerPath);
+  if (fs.readFileSync(paths.markerPath, "utf8") !== MANAGED_STORE_MARKER) {
+    throw new Error(`Refusing to use unrecognized install store ${paths.cliRoot}.`);
+  }
+}
+
 export function initializeInstallStore(paths = resolveInstallStorePaths()): void {
   ensurePrivateDirectory(paths.cliRoot);
   ensurePrivateDirectory(paths.installsRoot);
   try {
-    const markerStat = fs.lstatSync(paths.markerPath);
-    if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink > 1) {
-      throw new Error(`Refusing to use unsafe install-store marker ${paths.markerPath}.`);
-    }
-    assertOwnedByCurrentUser(markerStat, paths.markerPath);
-    if (fs.readFileSync(paths.markerPath, "utf8") !== MANAGED_STORE_MARKER) {
-      throw new Error(`Refusing to use unrecognized install store ${paths.cliRoot}.`);
-    }
+    assertInstallStoreMarker(paths);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     try {
@@ -147,9 +164,16 @@ export function assertManagedInstallStore(paths = resolveInstallStorePaths()): I
 export async function withInstallStoreLock<T>(
   callback: () => Promise<T>,
   paths = resolveInstallStorePaths(),
-  options: { initialize?: boolean } = {},
+  options: { initialize?: boolean | "existing-only" } = {},
 ): Promise<T> {
-  if (options.initialize !== false) initializeInstallStore(paths);
+  if (options.initialize === "existing-only") {
+    // Validate instead of creating or chmod'ing a store for cache-only work.
+    assertExistingPrivateDirectory(paths.cliRoot);
+    assertExistingPrivateDirectory(paths.installsRoot);
+    assertInstallStoreMarker(paths);
+  } else if (options.initialize !== false) {
+    initializeInstallStore(paths);
+  }
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
   const processIsAlive = (pid: number): boolean => {
     try {

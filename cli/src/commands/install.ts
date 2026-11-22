@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { isSupportedNodeVersion, MINIMUM_NODE_VERSION } from "@groktopus/shared/node-version";
+import { isExecutableFile } from "../utils/executable-file.js";
 import {
   addManagedPathBlock,
   assertManagedShimWritable,
@@ -230,33 +231,36 @@ function gitPayloadPath(sha: string, paths: InstallStorePaths): string {
   return payloadPathFor(paths, "git", sha.slice(0, 12));
 }
 
-function requireGitBuildCorepack(): string {
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
-    // Resolve before the build changes cwd, so it runs the executable we checked.
-    const executable = path.resolve(directory, "corepack");
-    try {
-      if (!fs.statSync(executable).isFile()) continue;
-      fs.accessSync(executable, fs.constants.X_OK);
-      return executable;
-    } catch {
-      // Keep looking if this PATH entry is missing or unusable.
-    }
+async function findGitBuildCorepack(): Promise<string | null> {
+  const searchPath = process.env.PATH;
+  if (!searchPath) return null;
+  for (const directory of searchPath.split(path.delimiter)) {
+    // Make relative entries independent of the build cwd, without lexically
+    // collapsing ".." before the OS has followed symlinks in a PATH entry.
+    const absoluteDirectory = path.isAbsolute(directory) ? directory : `${process.cwd()}${path.sep}${directory}`;
+    const executable = `${absoluteDirectory}${path.sep}corepack`;
+    if (await isExecutableFile(executable)) return executable;
   }
-  throw new Error(
+  return null;
+}
+
+function missingGitBuildCorepack(): Error {
+  return new Error(
     "Git-source installation requires Corepack on PATH. " +
       "Install Corepack for the Node.js version in use and verify that `corepack --version` works before retrying.",
   );
 }
 
 export async function installGitPayload(repo: string, sha: string, runCommand: CommandRunner, paths = resolveInstallStorePaths()): Promise<{ payloadPath: string; reused: boolean; version: string }> {
-  const identifier = sha.slice(0, 12);
   const payloadPath = gitPayloadPath(sha, paths);
+  const identifier = path.basename(payloadPath);
   if (fs.existsSync(payloadPath)) {
     const metadata = JSON.parse(fs.readFileSync(path.join(payloadPath, "node_modules", "proprio", "package.json"), "utf8")) as { version: string };
     await smokePayload(payloadPath, metadata.version, runCommand);
     return { payloadPath, reused: true, version: metadata.version };
   }
-  const corepack = requireGitBuildCorepack();
+  const corepack = await findGitBuildCorepack();
+  if (!corepack) throw missingGitBuildCorepack();
   const sourceRoot = path.dirname(payloadPath);
   fs.mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
   const sourceStat = fs.lstatSync(sourceRoot);
@@ -373,9 +377,11 @@ export async function installCommand(
     await confirmGitInstall(options, gitRequest.repo, gitRequest.ref);
     const sha = await resolveGitHubRef(gitRequest.repo, gitRequest.ref, runCommand);
     const paths = resolveInstallStorePaths();
-    // Ref resolution is read-only. Check before the store lock creates directories or a marker.
-    // Cached payloads need no build tool, and the builder rechecks on a cache miss under the lock.
-    if (!fs.existsSync(gitPayloadPath(sha, paths))) requireGitBuildCorepack();
+    // Without Corepack we can only activate a cached payload. Lock an existing
+    // store without initializing it, in case uninstall wins after cache discovery.
+    const payloadPath = gitPayloadPath(sha, paths);
+    const cacheOnly = !(await findGitBuildCorepack());
+    if (cacheOnly && !fs.existsSync(payloadPath)) throw missingGitBuildCorepack();
     const installed = await withInstallStoreLock(async () => {
       assertManagedShimWritable(paths);
       const currentManifest = readInstallManifest(paths);
@@ -386,7 +392,12 @@ export async function installCommand(
       flipCurrentAtomic(payload.payloadPath, paths);
       try { writeInstallManifestAtomic(nextManifest, paths); } catch (error) { if (oldTarget) flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); else fs.rmSync(paths.currentPath, { force: true }); throw error; }
       writeManagedShim(paths); pruneInstallPayloads(nextManifest, paths); return payload;
-    }, paths);
+    }, paths, { initialize: cacheOnly ? "existing-only" : true }).catch((error: unknown) => {
+      if (cacheOnly && (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" && !fs.existsSync(payloadPath)) {
+        throw missingGitBuildCorepack();
+      }
+      throw error;
+    });
     await ensureShimOnPath(options);
     console.log(pc.green(`${installed.reused ? "Activated cached" : "Installed"} proprio git payload ${sha.slice(0, 12)}.`));
     return;

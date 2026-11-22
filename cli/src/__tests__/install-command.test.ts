@@ -202,6 +202,59 @@ describe("managed install commands", () => {
     expect(fs.existsSync(paths.proprioHome)).toBe(false);
   });
 
+  it("preserves filesystem resolution for symlink-relative PATH components", async () => {
+    const usr = path.join(root, "usr");
+    fs.mkdirSync(path.join(usr, "bin"), { recursive: true });
+    fs.mkdirSync(path.join(usr, "local", "bin"), { recursive: true });
+    const link = path.join(root, "merged-bin");
+    fs.symlinkSync(path.join(usr, "bin"), link);
+    process.env.PATH = path.join(usr, "local", "bin");
+    const executable = stageFakeCorepack();
+    process.env.PATH = `${link}/../local/bin`;
+
+    const runCommand = createGitCheckoutRunCommand("9".repeat(40));
+    await installCommand({ ref: "main", yes: true }, { runCommand });
+
+    const corepackCalls = runCommand.mock.calls.filter(([file]) => path.basename(file) === "corepack");
+    expect(corepackCalls).not.toHaveLength(0);
+    for (const [file] of corepackCalls) {
+      expect(path.isAbsolute(file)).toBe(true);
+      expect(fs.realpathSync.native(file)).toBe(fs.realpathSync.native(executable));
+    }
+  });
+
+  it("does not recreate the store if uninstall wins after cache discovery without Corepack", async () => {
+    const sha = "8".repeat(40);
+    const paths = resolveInstallStorePaths();
+    const corepack = stageFakeCorepack();
+    const fixture = createGitCheckoutRunCommand(sha);
+    await installCommand({ ref: "main", yes: true }, { runCommand: fixture });
+    fs.unlinkSync(corepack);
+
+    const cachedPayload = payloadPathFor(paths, "git", sha.slice(0, 12));
+    const exists = fs.existsSync.bind(fs);
+    const withoutCorepack = createGitCheckoutRunCommand(sha);
+    const observeCache = vi.spyOn(fs, "existsSync").mockImplementation((target) => {
+      const present = exists(target);
+      if (target === cachedPayload && present) {
+        // Deterministically simulate the other process completing uninstall
+        // immediately after this process observes the cache entry.
+        fs.unlinkSync(paths.shimPath);
+        fs.rmSync(paths.cliRoot, { recursive: true });
+      }
+      return present;
+    });
+    try {
+      await expect(installCommand({ ref: "main", yes: true }, { runCommand: withoutCorepack }))
+        .rejects.toThrow("requires Corepack on PATH");
+    } finally {
+      observeCache.mockRestore();
+    }
+    expect(withoutCorepack).toHaveBeenCalledOnce();
+    expect(fs.existsSync(paths.cliRoot)).toBe(false);
+    expect(fs.existsSync(paths.shimPath)).toBe(false);
+  });
+
   it("installs a GitHub branch through codeload and reuses the resolved SHA", async () => {
     const corepack = stageFakeCorepack();
     const sha = "c".repeat(40);
@@ -229,9 +282,14 @@ describe("managed install commands", () => {
     const sha = "d".repeat(40);
     const runCommand = createGitCheckoutRunCommand(sha);
     await expect(installGitPayload("groktopus/proprio", sha, runCommand, resolveInstallStorePaths())).resolves.toMatchObject({ version: "0.3.1", reused: false });
+    const corepackCalls = runCommand.mock.calls.filter(([file]) => path.basename(file) === "corepack");
+    for (const [file] of corepackCalls) {
+      expect(path.isAbsolute(file)).toBe(true);
+      expect(fs.realpathSync.native(file)).toBe(fs.realpathSync.native(corepack));
+    }
     const buildCalls = runCommand.mock.calls.filter(([file, args]) =>
       file === "bash" ||
-      file === corepack ||
+      path.basename(file) === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
     expect(buildCalls).toHaveLength(9);
@@ -240,7 +298,7 @@ describe("managed install commands", () => {
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
       expect(env, `${call[0]} ${call[1].join(" ")} must not inherit NODE_ENV`).not.toHaveProperty("NODE_ENV");
     }
-    const uiPackCall = buildCalls.find(([file, , options]) => file === corepack && options?.env?.PROPRIO_RELEASE_REUSE_UI_DIST === "1");
+    const uiPackCall = buildCalls.find(([file, , options]) => path.basename(file) === "corepack" && options?.env?.PROPRIO_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
   });
 
