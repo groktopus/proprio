@@ -49,6 +49,7 @@ export {
   runDatabaseBackup,
   runDatabaseRestore,
   formatDatabaseBackupResult,
+  databaseBackupWarning,
   type BackupRetentionPolicy,
   type RunDatabaseBackupOptions,
   type RunDatabaseBackupResult,

@@ -39,10 +39,13 @@ describe("managed install commands", () => {
       ...ORIGINAL_ENV,
       HOME: path.join(root, "home"),
       PROPRIO_HOME: path.join(root, "home", ".proprio"),
-      PATH: "/usr/bin:/bin",
+      PATH: path.join(root, "bin"),
       SHELL: "/bin/bash",
     };
     fs.mkdirSync(process.env.HOME!, { recursive: true });
+    fs.mkdirSync(process.env.PATH!, { recursive: true });
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
@@ -51,6 +54,13 @@ describe("managed install commands", () => {
     process.env = { ...ORIGINAL_ENV };
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  function stageFakeCorepack() {
+    // Presence marker only. The Git packaging tests stub every command.
+    const executable = path.join(process.env.PATH!, "corepack");
+    fs.writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    return executable;
+  }
 
   it("selects stable, canary, and exact-version npm sources", () => {
     expect(resolveNpmInstallRequest({})).toEqual({ spec: "latest", channel: "latest" });
@@ -136,7 +146,7 @@ describe("managed install commands", () => {
         }
         return { stdout: "", stderr: "" };
       }
-      if (file === "corepack") {
+      if (path.basename(file) === "corepack") {
         if (args.includes("pack")) {
           const destination = args[args.indexOf("--pack-destination") + 1];
           const packageDir = args[args.indexOf("--dir") + 1];
@@ -161,17 +171,104 @@ describe("managed install commands", () => {
       throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
     });
 
+  it.each(["missing", "directory", "non-executable file"])(
+    "stops Git-source install before archive fetch or managed-store writes when Corepack is %s",
+    async (state) => {
+      const corepack = path.join(process.env.PATH!, "corepack");
+      if (state === "directory") fs.mkdirSync(corepack);
+      if (state === "non-executable file") fs.writeFileSync(corepack, "", { mode: 0o600 });
+      const paths = resolveInstallStorePaths();
+      const fixture = createGitCheckoutRunCommand("e".repeat(40));
+      const runCommand = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) =>
+        path.basename(file) === "corepack" ? runCommandWithDiagnostics(file, args, options) : fixture(file, args, options));
+
+      await expect(installCommand({ ref: "main", yes: true }, { runCommand }))
+        .rejects.toThrow(/requires Corepack on PATH.*corepack --version/);
+      expect(runCommand.mock.calls.map(([file, args]) => [file, args.at(-1)])).toEqual([
+        ["curl", "https://api.github.com/repos/groktopus/proprio/commits/main"],
+      ]);
+      expect(fs.existsSync(paths.proprioHome)).toBe(false);
+      expect(fs.existsSync(paths.shimPath)).toBe(false);
+    },
+  );
+
+  it("rejects a missing Corepack before the uncached Git payload builder writes or downloads", async () => {
+    const paths = resolveInstallStorePaths();
+    const runCommand = vi.fn(async () => { throw new Error("Unexpected attempt to run a command"); });
+
+    await expect(installGitPayload("groktopus/proprio", "f".repeat(40), runCommand, paths))
+      .rejects.toThrow("Git-source installation requires Corepack on PATH");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fs.existsSync(paths.proprioHome)).toBe(false);
+  });
+
+  it("preserves filesystem resolution for symlink-relative PATH components", async () => {
+    const usr = path.join(root, "usr");
+    fs.mkdirSync(path.join(usr, "bin"), { recursive: true });
+    fs.mkdirSync(path.join(usr, "local", "bin"), { recursive: true });
+    const link = path.join(root, "merged-bin");
+    fs.symlinkSync(path.join(usr, "bin"), link);
+    process.env.PATH = path.join(usr, "local", "bin");
+    const executable = stageFakeCorepack();
+    process.env.PATH = `${link}/../local/bin`;
+
+    const runCommand = createGitCheckoutRunCommand("9".repeat(40));
+    await installCommand({ ref: "main", yes: true }, { runCommand });
+
+    const corepackCalls = runCommand.mock.calls.filter(([file]) => path.basename(file) === "corepack");
+    expect(corepackCalls).not.toHaveLength(0);
+    for (const [file] of corepackCalls) {
+      expect(path.isAbsolute(file)).toBe(true);
+      expect(fs.realpathSync.native(file)).toBe(fs.realpathSync.native(executable));
+    }
+  });
+
+  it("does not recreate the store if uninstall wins after cache discovery without Corepack", async () => {
+    const sha = "8".repeat(40);
+    const paths = resolveInstallStorePaths();
+    const corepack = stageFakeCorepack();
+    const fixture = createGitCheckoutRunCommand(sha);
+    await installCommand({ ref: "main", yes: true }, { runCommand: fixture });
+    fs.unlinkSync(corepack);
+
+    const cachedPayload = payloadPathFor(paths, "git", sha.slice(0, 12));
+    const exists = fs.existsSync.bind(fs);
+    const withoutCorepack = createGitCheckoutRunCommand(sha);
+    const observeCache = vi.spyOn(fs, "existsSync").mockImplementation((target) => {
+      const present = exists(target);
+      if (target === cachedPayload && present) {
+        // Deterministically simulate the other process completing uninstall
+        // immediately after this process observes the cache entry.
+        fs.unlinkSync(paths.shimPath);
+        fs.rmSync(paths.cliRoot, { recursive: true });
+      }
+      return present;
+    });
+    try {
+      await expect(installCommand({ ref: "main", yes: true }, { runCommand: withoutCorepack }))
+        .rejects.toThrow("requires Corepack on PATH");
+    } finally {
+      observeCache.mockRestore();
+    }
+    expect(withoutCorepack).toHaveBeenCalledOnce();
+    expect(fs.existsSync(paths.cliRoot)).toBe(false);
+    expect(fs.existsSync(paths.shimPath)).toBe(false);
+  });
+
   it("installs a GitHub branch through codeload and reuses the resolved SHA", async () => {
+    const corepack = stageFakeCorepack();
     const sha = "c".repeat(40);
     const runCommand = createGitCheckoutRunCommand(sha);
     await installCommand({ ref: "master", repo: "HenkDz/proprio", yes: true }, { runCommand });
+    // An already-built payload can still be activated without Corepack.
+    fs.unlinkSync(corepack);
     await installCommand({ ref: "master", repo: "HenkDz/proprio", yes: true }, { runCommand });
     const manifest = readInstallManifest(resolveInstallStorePaths());
     expect(manifest).toMatchObject({ source: "git", repo: "HenkDz/proprio", ref: "master", sha });
     expect(manifest?.payloadPath).toContain(path.join("git", sha.slice(0, 12)));
     expect(runCommand.mock.calls.filter(([command, args]) => command === "curl" && args.includes("--output"))).toHaveLength(1);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args[1] === "install")).toHaveLength(1);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args.includes("pack"))).toHaveLength(2);
+    expect(runCommand.mock.calls.filter(([command, args]) => command === corepack && args[1] === "install")).toHaveLength(1);
+    expect(runCommand.mock.calls.filter(([command, args]) => command === corepack && args.includes("pack"))).toHaveLength(2);
     expect(runCommand.mock.calls.filter(([command, args]) => command === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
@@ -179,13 +276,20 @@ describe("managed install commands", () => {
   });
 
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {
+    const corepack = stageFakeCorepack();
+    process.env.PATH = path.relative(process.cwd(), path.dirname(corepack));
     process.env.NODE_ENV = "production";
     const sha = "d".repeat(40);
     const runCommand = createGitCheckoutRunCommand(sha);
     await expect(installGitPayload("groktopus/proprio", sha, runCommand, resolveInstallStorePaths())).resolves.toMatchObject({ version: "0.3.1", reused: false });
+    const corepackCalls = runCommand.mock.calls.filter(([file]) => path.basename(file) === "corepack");
+    for (const [file] of corepackCalls) {
+      expect(path.isAbsolute(file)).toBe(true);
+      expect(fs.realpathSync.native(file)).toBe(fs.realpathSync.native(corepack));
+    }
     const buildCalls = runCommand.mock.calls.filter(([file, args]) =>
       file === "bash" ||
-      file === "corepack" ||
+      path.basename(file) === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
     expect(buildCalls).toHaveLength(9);
@@ -194,7 +298,7 @@ describe("managed install commands", () => {
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
       expect(env, `${call[0]} ${call[1].join(" ")} must not inherit NODE_ENV`).not.toHaveProperty("NODE_ENV");
     }
-    const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PROPRIO_RELEASE_REUSE_UI_DIST === "1");
+    const uiPackCall = buildCalls.find(([file, , options]) => path.basename(file) === "corepack" && options?.env?.PROPRIO_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
   });
 
@@ -375,6 +479,7 @@ describe("managed install commands", () => {
   });
 
   it("refuses a symlinked git payload root before downloading", async () => {
+    stageFakeCorepack();
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
     const outside = path.join(root, "outside-git"); fs.mkdirSync(outside);
     fs.symlinkSync(outside, path.join(paths.installsRoot, "git"));

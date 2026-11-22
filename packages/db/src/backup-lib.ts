@@ -37,6 +37,10 @@ export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  /** Engine that actually produced the successful archive, never the requested "auto" mode. */
+  engine: "pg_dump" | "javascript";
+  /** Fixed category only, not a command's raw error or output. */
+  fallbackReason: "pg_dump_failed" | null;
 };
 
 export type RunDatabaseRestoreOptions = {
@@ -74,6 +78,7 @@ const DEFAULT_BACKUP_WRITE_BUFFER_BYTES = 1024 * 1024;
 const BACKUP_DATA_CURSOR_ROWS = 100;
 const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
+const PG_DUMP_FALLBACK_WARNING = "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.";
 
 const STATEMENT_BREAKPOINT = "-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
@@ -586,7 +591,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         const sizeBytes = statSync(backupFile).size;
         await opts.verifyBeforePrune?.(backupFile);
         const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
-        return { backupFile, sizeBytes, prunedCount };
+        return { backupFile, sizeBytes, prunedCount, engine: "pg_dump", fallbackReason: null };
       }
     }
 
@@ -1081,6 +1086,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       backupFile,
       sizeBytes,
       prunedCount,
+      engine: "javascript",
+      // Auto only changes to effective JavaScript after a pg_dump path failure.
+      // Intentional JavaScript selection is not a fallback.
+      fallbackReason: backupEngine === "auto" && effectiveBackupEngine === "javascript" ? "pg_dump_failed" : null,
     };
   } catch (error) {
     await writer.abort();
@@ -1134,8 +1143,14 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
   }
 }
 
+/** Operator-facing text is derived from a fixed reason, never subprocess diagnostics. */
+export function databaseBackupWarning(reason: RunDatabaseBackupResult["fallbackReason"]): string | null {
+  return reason === "pg_dump_failed" ? PG_DUMP_FALLBACK_WARNING : null;
+}
+
 export function formatDatabaseBackupResult(result: RunDatabaseBackupResult): string {
   const size = formatBackupSize(result.sizeBytes);
   const pruned = result.prunedCount > 0 ? `; pruned ${result.prunedCount} old backup(s)` : "";
-  return `${result.backupFile} (${size}${pruned})`;
+  const warning = databaseBackupWarning(result.fallbackReason);
+  return `${result.backupFile} (${size}; engine: ${result.engine}${pruned}${warning ? `; warning: ${warning}` : ""})`;
 }
