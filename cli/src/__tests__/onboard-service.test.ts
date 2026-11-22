@@ -12,7 +12,12 @@ import {
 
 import { readInstallManifest, resolveInstallStorePaths, writeManagedShim } from "../install-store.js";
 import { installCommand, runCommandWithDiagnostics, smokePayload } from "../commands/install.js";
-import { isExecutableFile, resolveServiceShimPath } from "../services/service-manager.js";
+import {
+  defaultCommandRunner,
+  isExecutableFile,
+  resolveServiceShimPath,
+  SystemdServiceManager,
+} from "../services/service-manager.js";
 
 vi.mock("../version.js", () => ({ packageVersion: "2026.924.0" }));
 vi.mock("../install-store.js", async (importOriginal) => ({
@@ -195,6 +200,93 @@ describe("onboard service policy", () => {
 
     expect(confirm).toHaveBeenCalledOnce();
     expect(installed).toBe(true);
+  });
+
+  it.each([
+    { outcome: "enabled", exitCode: 0 },
+    { outcome: "denied", exitCode: 1 },
+  ])("completes onboarding when optional lingering is $outcome", async ({ exitCode }) => {
+    // Real enableLinger, fake subprocess; never run loginctl or install a unit.
+    const runner = vi.fn((_command: string, _args: string[]) => defaultCommandRunner(process.execPath, [
+      "-e",
+      exitCode ? "console.error('Access denied'); process.exit(1)" : "",
+    ]));
+    const manager = new SystemdServiceManager("default", runner);
+    const install = vi.spyOn(manager, "install").mockResolvedValue({ changed: true });
+    const warn = vi.fn();
+    const success = vi.fn();
+
+    await expect(handleOnboardService(
+      {},
+      {
+        detect: async () => ({ supported: true, manager }),
+        isInteractive: () => true,
+        confirm: async () => true,
+        confirmLinger: async () => true,
+        ensureServiceShim: async () => ({ ok: true, installedNow: false }),
+        warn,
+        success,
+      },
+    )).resolves.toBe(true);
+
+    expect(install).toHaveBeenCalledExactlyOnceWith({ startNow: true, startOnLogin: true });
+    expect(runner).toHaveBeenCalledExactlyOnceWith("loginctl", ["enable-linger", expect.any(String)]);
+    expect(install.mock.invocationCallOrder[0]).toBeLessThan(runner.mock.invocationCallOrder[0]);
+    expect(success).toHaveBeenCalledExactlyOnceWith("Installed and started proprio.service.");
+    if (exitCode) {
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]?.[0]).toContain("after logout");
+      expect(warn.mock.calls[0]?.[0]).toContain("Access denied");
+      expect(warn.mock.calls[0]?.[0]).toContain("system administrator");
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not enable lingering if the operator declines", async () => {
+    const detection = supportedDetection();
+    const enableLinger = vi.fn();
+
+    await expect(handleOnboardService(
+      {},
+      {
+        detect: async () => ({ ...detection, manager: { ...detection.manager, enableLinger } }),
+        isInteractive: () => true,
+        confirm: async () => true,
+        confirmLinger: async () => false,
+        ensureServiceShim: async () => ({ ok: true, installedNow: false }),
+        success: vi.fn(),
+      },
+    )).resolves.toBe(true);
+
+    expect(enableLinger).not.toHaveBeenCalled();
+  });
+
+  it("propagates a service installation failure without prompting for lingering", async () => {
+    const detection = supportedDetection();
+    detection.manager.install.mockRejectedValueOnce(new Error("Could not start the service"));
+    const enableLinger = vi.fn();
+    const confirmLinger = vi.fn(async () => true);
+    const warn = vi.fn();
+    const success = vi.fn();
+
+    await expect(handleOnboardService(
+      {},
+      {
+        detect: async () => ({ ...detection, manager: { ...detection.manager, enableLinger } }),
+        isInteractive: () => true,
+        confirm: async () => true,
+        confirmLinger,
+        ensureServiceShim: async () => ({ ok: true, installedNow: false }),
+        warn,
+        success,
+      },
+    )).rejects.toThrow("Could not start the service");
+
+    expect(confirmLinger).not.toHaveBeenCalled();
+    expect(enableLinger).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(success).not.toHaveBeenCalled();
   });
 
   it("silences the hint with --no-install-service", async () => {

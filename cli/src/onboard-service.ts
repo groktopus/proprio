@@ -267,7 +267,16 @@ export async function handleOnboardService(
 
   await detection.manager.install({ startNow: true, startOnLogin: true });
   if (!explicitlyRequested && detection.manager.enableLinger && await deps.confirmLinger()) {
-    await detection.manager.enableLinger();
+    try {
+      await detection.manager.enableLinger();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      deps.warn(
+        "Could not enable the service to keep running after logout. " +
+          "Ask your system administrator to enable systemd lingering for your user. " +
+          `Details: ${reason}`,
+      );
+    }
   }
   deps.success(`Installed and started ${detection.manager.serviceName}.`);
   return true;
