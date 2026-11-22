@@ -1,0 +1,59 @@
+name: Sandbox provider dependencies
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'packages/plugins/sandbox-providers/daytona/**'
+      - 'packages/plugins/sdk/**'
+      - 'packages/shared/**'
+      - 'scripts/ci/qualify-sandbox-provider-dependencies*'
+      - 'scripts/typecheck-test-programs.mjs'
+      - 'scripts/test-sandbox-providers.mjs'
+      - 'scripts/link-plugin-dev-sdk.mjs'
+      - '.github/workflows/sandbox-providers.yml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+      - 'scripts/ensure-plugin-build-deps.mjs'
+      - 'package.json'
+      - 'tsconfig.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-provider-dependencies-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  providers:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [locked]
+    name: provider-dependencies (${{ matrix.scope }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install root dependencies and build the plugin SDK
+        run: |
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Qualify the standalone provider dependencies
+        env:
+          PROVIDER_SCOPE: ${{ matrix.scope }}
+        run: |
+          node --test scripts/ci/qualify-sandbox-provider-dependencies.test.mjs
+          node scripts/ci/qualify-sandbox-provider-dependencies.mjs --scope "$PROVIDER_SCOPE"

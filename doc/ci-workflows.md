@@ -28,6 +28,19 @@ is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork pull requests do not run the smoke job.
 
+### Standalone sandbox-provider dependencies
+
+`.github/workflows/sandbox-providers.yml` checks same-repository PRs that touch
+Daytona, the plugin SDK/shared inputs, or the qualification tools. Its Linux
+`provider-dependencies (locked)` job installs the root workspace and Daytona's
+standalone lockfile frozen, builds the plugin SDK, and typechecks, builds, and
+tests Daytona. JSON reports must include an executed passing test; all-skipped
+suites do not qualify. Cloud credential-dependent live tests remain opt-in.
+
+The runner derives lockfile ownership from `scripts/typecheck-test-programs.mjs`.
+It does not resolve or rewrite stale locks during verification. These checks
+prove package compatibility and the executed tests, not live cloud acceptance.
+
 ### Droid Auto Review
 
 `.github/workflows/droid-review.yml` invokes Factory Droid's automatic review
