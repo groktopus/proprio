@@ -353,7 +353,7 @@ NODE
   ACTIVE_ISSUE_PREFIX="$company_issue_prefix"
   ACTIVE_AGENT_JSON="$(curl --fail --silent --show-error --max-time 10 "$origin/api/companies/$company_id/agents" \
     -H "Origin: $origin" -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg command "$(command -v node)" --arg script "$ACTIVE_SCRIPT" --arg effect "$ACTIVE_EFFECT" --arg issue "$ACTIVE_ISSUE_ID" --arg origin "$origin" --arg output "$ACTIVE_OUTPUT" --arg mode "$ACTIVE_MODE" '{name:"Schema upgrade worker",role:"engineer",adapterType:"process",adapterConfig:{command:$command,args:[$script,$effect,$issue,$origin,$output,$mode],graceSec:1},runtimeConfig:{heartbeat:{enabled:false,wakeOnDemand:true}}}')")" \
+    --data "$(jq -n --arg command "$(command -v node)" --arg script "$ACTIVE_SCRIPT" --arg effect "$ACTIVE_EFFECT" --arg issue "$ACTIVE_ISSUE_ID" --arg origin "$origin" --arg output "$ACTIVE_OUTPUT" --arg mode "$ACTIVE_MODE" '{name:"Schema upgrade worker",role:"engineer",adapterType:"process",adapterConfig:{command:$command,args:[$script,$effect,$issue,$origin,$output,$mode],graceSec:1}}')")" \
     || { fail_ "4d recovery worker creation"; exit 1; }
   ACTIVE_AGENT_ID="$(jq -er '.id' <<<"$ACTIVE_AGENT_JSON")" || exit 1
   curl --fail --silent --show-error --max-time 10 --request PATCH "$origin/api/issues/$ACTIVE_ISSUE_ID" \
@@ -365,13 +365,40 @@ NODE
   ACTIVE_RUN_ID=""
   while [ "$(date +%s)" -lt "$active_deadline" ]; do
     ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
-    ACTIVE_RUN_ID="$(jq -er '[.[] | select(.status == "running" or .status == "succeeded")][0].id // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].id // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
     if [ -n "$ACTIVE_RUN_ID" ]; then
       ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.id,status:$run.status,errorCode:($run.errorCode // null)}')"
+        fail_ "4f assignment run reached terminal state $SAFE_RUN_FAILURE"
+        exit 1
+      fi
       if [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then break; fi
     fi
     sleep 1
   done
+  if [ -z "$ACTIVE_RUN_ID" ]; then
+    # Assignment wakeups are best-effort. If there is still no durable run
+    # after the bounded admission window, make exactly one issue-linked wake;
+    # never duplicate an execution already represented in the issue run list.
+    ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+    [ "$(jq -er 'length' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || echo 1)" = 0 ] \
+      || { fail_ "4f assignment wake left a durable run; refusing to issue a duplicate wake"; exit 1; }
+    WAKE_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+    WAKE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/agents/$ACTIVE_AGENT_ID/wakeup" \
+      -H "Origin: $origin" -H 'Content-Type: application/json' \
+      --data "$(jq -n --arg issue "$ACTIVE_ISSUE_ID" --arg key "$WAKE_KEY" '{source:"on_demand",reason:"Qualification assignment wake fallback",payload:{issueId:$issue,mutation:"qualification_assignment_fallback"},idempotencyKey:$key}')")" \
+      || { fail_ "4f issue-linked wake request failed"; exit 1; }
+    WAKE_STATUS="${WAKE_RESPONSE##*$'\n'}"
+    WAKE_BODY="${WAKE_RESPONSE%$'\n'*}"
+    [[ "$WAKE_STATUS" =~ ^2[0-9][0-9]$ ]] \
+      || { fail_ "4f issue-linked wake returned HTTP $(jq -cn --arg status "$WAKE_STATUS" --arg body "$WAKE_BODY" '{status:(try ($status|tonumber) catch 0),error:(try ((($body|fromjson).error // null)|if type=="string" then .[0:200] else null end) catch null),code:(try (($body|fromjson).code // null) catch null)}')"; exit 1; }
+    ACTIVE_RUN_ID="$(jq -er '.id // .executionRunId // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
+    [ -n "$ACTIVE_RUN_ID" ] \
+      || { fail_ "4f issue-linked wake did not return a durable run id"; exit 1; }
+    ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+    pass "4f assignment admitted no run; one issue-linked wake created durable run $ACTIVE_RUN_ID"
+  fi
   [ -n "$ACTIVE_RUN_ID" ] || { fail_ "4f recovered task assignment starts a durable run"; exit 1; }
   ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // .execution.executionWorkspaceId' <<<"$ACTIVE_RUN_BEFORE")" \
     || { fail_ "4g task run has a persistent workspace"; exit 1; }

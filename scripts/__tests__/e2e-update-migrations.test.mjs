@@ -61,6 +61,10 @@ test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagno
   const source = readFileSync(script, "utf8");
   assert.match(source, /status:\"todo\"/);
   assert.match(source, /assigneeAgentId:\$agent/);
+  assert.match(source, /api\/agents\/\$ACTIVE_AGENT_ID\/wakeup/);
+  assert.match(source, /qualification_assignment_fallback/);
+  assert.match(source, /refusing to issue a duplicate wake/);
+  assert.match(source, /terminal state \$SAFE_RUN_FAILURE/);
   assert.match(source, /--write-out \$'\\n%\{http_code\}'/);
   assert.match(source, /status: \(try \(\$status \| tonumber\) catch 0\)/);
   assert.match(source, /error: \(if \(\$response\.error \| type\) == \"string\" then \$response\.error\[0:200\]/);
