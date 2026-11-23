@@ -15,7 +15,6 @@ import { applyEmptyWorktreeSigningSecrets } from "./dev-runner-worktree.js";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
-  DEPLOYMENT_EXPOSURES,
   SECRET_PROVIDERS,
   type BindMode,
   type AuthBaseUrlMode,
@@ -23,6 +22,7 @@ import {
   type DeploymentMode,
   type SecretProvider,
   inferBindModeFromHost,
+  parseDeploymentExposure,
   resolveRuntimeBind,
   validateConfiguredBindMode,
 } from "@groktopus/shared";
@@ -194,12 +194,7 @@ export function loadConfig(override?: ProprioConfig | null): Config {
     strictModeFromEnv !== undefined
       ? strictModeFromEnv === "true"
       : (fileSecrets?.strictMode ?? deploymentMode === "authenticated");
-  const deploymentExposureFromEnvRaw = process.env.PROPRIO_DEPLOYMENT_EXPOSURE;
-  const deploymentExposureFromEnv =
-    deploymentExposureFromEnvRaw &&
-    DEPLOYMENT_EXPOSURES.includes(deploymentExposureFromEnvRaw as DeploymentExposure)
-      ? (deploymentExposureFromEnvRaw as DeploymentExposure)
-      : null;
+  const deploymentExposureFromEnv = parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE);
   const deploymentExposure: DeploymentExposure =
     deploymentMode === "local_trusted"
       ? "private"

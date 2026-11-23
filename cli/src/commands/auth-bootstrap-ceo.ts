@@ -3,8 +3,8 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { createDb, instanceUserRoles, invites } from "@groktopus/db";
-import { inferBindModeFromHost, resolveDeploymentMode } from "@groktopus/shared";
-import { loadProprioEnvFile } from "../config/env.js";
+import { inferBindModeFromHost, parseDeploymentExposure, resolveDeploymentMode } from "@groktopus/shared";
+import { loadDeploymentEnv } from "../config/env.js";
 import { readConfig, resolveConfigPath } from "../config/store.js";
 
 function hashToken(token: string) {
@@ -59,7 +59,8 @@ export async function bootstrapCeoInvite(opts: {
   dbUrl?: string;
 }) {
   const configPath = resolveConfigPath(opts.config);
-  loadProprioEnvFile(configPath);
+  loadDeploymentEnv(configPath);
+  parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE);
   const config = readConfig(configPath);
   if (!config) {
     p.log.error(`No config found at ${configPath}. Run ${pc.cyan("proprio onboard")} first.`);

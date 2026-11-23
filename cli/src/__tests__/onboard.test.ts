@@ -263,22 +263,18 @@ describe("onboard", () => {
     expect(raw.server.host).toBe("100.64.0.8");
   });
 
-  it("keeps tailnet quickstart on loopback until tailscale is available", async () => {
+  it("rejects tailnet quickstart when no tailnet address is available", async () => {
     const configPath = createFreshConfigPath();
     delete process.env.PROPRIO_TAILNET_BIND_HOST;
     process.env.PATH = "";
 
     try {
-      await onboard({ config: configPath, yes: true, invokedByRun: true, bind: "tailnet" });
+      await expect(onboard({ config: configPath, yes: true, invokedByRun: true, bind: "tailnet" }))
+        .rejects.toThrow("PROPRIO_TAILNET_BIND_HOST");
+      expect(fs.existsSync(configPath)).toBe(false);
     } finally {
       process.env.PATH = ORIGINAL_PATH;
     }
-
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as ProprioConfig;
-    expect(raw.server.deploymentMode).toBe("authenticated");
-    expect(raw.server.exposure).toBe("private");
-    expect(raw.server.bind).toBe("tailnet");
-    expect(raw.server.host).toBe("127.0.0.1");
   });
 
   it("honors explicit authenticated mode during --yes quickstart", async () => {

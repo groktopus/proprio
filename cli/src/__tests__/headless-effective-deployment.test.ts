@@ -20,12 +20,14 @@ describe("headless onboarding effective deployment contract", () => {
   let root: string;
   let config: string;
   let originalExitCode: typeof process.exitCode;
+  const cwd = process.cwd();
   beforeEach(() => {
     originalExitCode = process.exitCode;
     root = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-effective-deployment-"));
     config = path.join(root, "instance", "config.json");
+    process.chdir(root);
     for (const key of ["DATABASE_URL", "HOST", "PORT", "PROPRIO_CONFIG", "PROPRIO_INSTANCE_ID", "PROPRIO_BIND",
-      "PROPRIO_BIND_HOST", "PROPRIO_TAILNET_BIND_HOST", "PROPRIO_DEPLOYMENT_MODE", "PROPRIO_DEPLOYMENT_EXPOSURE",
+      "PROPRIO_DISABLE_CWD_ENV_FILE", "PROPRIO_BIND_HOST", "PROPRIO_TAILNET_BIND_HOST", "PROPRIO_DEPLOYMENT_MODE", "PROPRIO_DEPLOYMENT_EXPOSURE",
       "PROPRIO_PUBLIC_URL", "PROPRIO_AUTH_PUBLIC_BASE_URL", "PROPRIO_AUTH_BASE_URL_MODE", "PROPRIO_AUTH_DISABLE_SIGN_UP",
       "PROPRIO_AGENT_JWT_SECRET", "PROPRIO_TOOL_ACTION_SIGNING_SECRET", "PROPRIO_SECRETS_MASTER_KEY",
       "PROPRIO_SECRETS_MASTER_KEY_FILE", "BETTER_AUTH_URL", "BETTER_AUTH_BASE_URL"]) vi.stubEnv(key, undefined);
@@ -36,6 +38,7 @@ describe("headless onboarding effective deployment contract", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     process.exitCode = originalExitCode;
+    process.chdir(cwd);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -88,6 +91,30 @@ describe("headless onboarding effective deployment contract", () => {
       deploymentMode: "local_trusted", exposure: "private", bind: "loopback", host: "127.0.0.1",
     });
     expect(resolveDeploymentMode(raw)).toBe("local_trusted");
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("honors the working-directory env file in both bootstrap entry points", async () => {
+    fs.writeFileSync(path.join(root, ".env"), "PROPRIO_DEPLOYMENT_MODE=authenticated\n");
+    await onboard({ config, yes: true, invokedByRun: true });
+    expect(saved().server.deploymentMode).toBe("authenticated");
+  });
+
+  it("detects a working-directory mode override when the invite command starts fresh", async () => {
+    await onboard({ config, yes: true, invokedByRun: true });
+    fs.writeFileSync(path.join(root, ".env"), "PROPRIO_DEPLOYMENT_MODE=authenticated\n");
+    const denial = vi.spyOn(prompts.log, "error").mockImplementation(() => {});
+    await bootstrapCeoInvite({ config });
+    expect(denial).toHaveBeenCalledWith(expect.stringContaining("PROPRIO_DEPLOYMENT_MODE selects authenticated"));
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid deployment exposure before writing config or invites", async () => {
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+    vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "invalid");
+    await expect(onboard({ config, yes: true, invokedByRun: true })).rejects.toThrow("PROPRIO_DEPLOYMENT_EXPOSURE");
+    expect(fs.existsSync(config)).toBe(false);
+    await expect(bootstrapCeoInvite({ config })).rejects.toThrow("PROPRIO_DEPLOYMENT_EXPOSURE");
     expect(createDb).not.toHaveBeenCalled();
   });
 

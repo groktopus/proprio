@@ -4,16 +4,15 @@ import pc from "picocolors";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,
-  DEPLOYMENT_EXPOSURES,
   SECRET_PROVIDERS,
   STORAGE_PROVIDERS,
   inferBindModeFromHost,
+  parseDeploymentExposure,
   resolveDeploymentMode,
   resolveRuntimeBind,
   validateConfiguredBindMode,
   type BindMode,
   type AuthBaseUrlMode,
-  type DeploymentExposure,
   type SecretProvider,
   type StorageProvider,
 } from "@groktopus/shared";
@@ -28,7 +27,7 @@ import {
   findProprioConfigKeyWarnings,
   type ProprioConfig,
 } from "../config/schema.js";
-import { ensureAgentJwtSecret, ensureToolActionSigningSecret, resolveAgentJwtEnvFile } from "../config/env.js";
+import { ensureAgentJwtSecret, ensureToolActionSigningSecret, loadDeploymentEnv, resolveAgentJwtEnvFile } from "../config/env.js";
 import { ensureLocalSecretsKeyFile } from "../config/secrets-key.js";
 import { promptDatabase } from "../prompts/database.js";
 import { promptLlm } from "../prompts/llm.js";
@@ -71,9 +70,6 @@ type OnboardOptions = {
 };
 
 type OnboardDefaults = Pick<ProprioConfig, "database" | "logging" | "server" | "auth" | "storage" | "secrets">;
-
-const TAILNET_BIND_WARNING =
-  "No Tailscale address was detected during setup. The saved config will stay on loopback until Tailscale is available or PROPRIO_TAILNET_BIND_HOST is set.";
 
 const ONBOARD_ENV_KEYS = [
   "PROPRIO_PUBLIC_URL",
@@ -171,7 +167,7 @@ function describeServerBinding(server: Pick<ProprioConfig["server"], "bind" | "c
   return `${bind}${detail ? ` (${detail})` : ""}:${server.port}`;
 }
 
-function quickstartDefaultsFromEnv(opts: { unattended: boolean; bind?: BindMode }): {
+function quickstartDefaultsFromEnv(opts: { unattended: boolean; setupMode: SetupMode; bind?: BindMode }): {
   defaults: OnboardDefaults;
   usedEnvKeys: string[];
 } {
@@ -189,12 +185,10 @@ function quickstartDefaultsFromEnv(opts: { unattended: boolean; bind?: BindMode 
     process.env.PROPRIO_DEPLOYMENT_MODE,
     opts.bind === "lan" || opts.bind === "tailnet" ? "authenticated" : "local_trusted",
   );
-  const deploymentExposure = parseEnumFromEnv<DeploymentExposure>(
-    process.env.PROPRIO_DEPLOYMENT_EXPOSURE,
-    DEPLOYMENT_EXPOSURES,
-  ) ?? "private";
+  const quickstart = opts.setupMode === "quickstart";
+  const deploymentExposure = parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE) ?? "private";
   const bindFromEnv = parseEnumFromEnv<BindMode>(process.env.PROPRIO_BIND, BIND_MODES);
-  if (opts.bind && bindFromEnv && opts.bind !== bindFromEnv) {
+  if (quickstart && opts.bind && bindFromEnv && opts.bind !== bindFromEnv) {
     throw new Error(`--bind=${opts.bind} conflicts with PROPRIO_BIND=${bindFromEnv}`);
   }
   const customBindHost = process.env.PROPRIO_BIND_HOST?.trim() || undefined;
@@ -203,17 +197,18 @@ function quickstartDefaultsFromEnv(opts: { unattended: boolean; bind?: BindMode 
   const bind = opts.bind ?? bindFromEnv ?? (configuredHost
     ? inferBindModeFromHost(configuredHost)
     : (opts.unattended || deploymentMode === "local_trusted" ? "loopback" : "lan"));
-  if (deploymentMode === "local_trusted" && deploymentExposure !== "private") {
-    throw new Error("PROPRIO_DEPLOYMENT_MODE=local_trusted requires private exposure");
+  if (quickstart) {
+    if (deploymentMode === "local_trusted" && deploymentExposure !== "private") {
+      throw new Error("PROPRIO_DEPLOYMENT_MODE=local_trusted requires private exposure");
+    }
+    const [bindError] = validateConfiguredBindMode({ deploymentMode, deploymentExposure, bind, host, customBindHost });
+    if (bindError) throw new Error(bindError);
   }
-  const [bindError] = validateConfiguredBindMode({ deploymentMode, deploymentExposure, bind, host, customBindHost });
-  if (bindError) throw new Error(bindError);
 
   const tailnetBindHost = bind === "tailnet" ? detectTailnetBindHost() : undefined;
   const resolvedBind = resolveRuntimeBind({ bind, host, customBindHost, tailnetBindHost });
-  if (bind === "tailnet" && !tailnetBindHost) {
-    resolvedBind.host = "127.0.0.1";
-    p.log.warn(TAILNET_BIND_WARNING);
+  if (quickstart && resolvedBind.errors[0]) {
+    throw new Error(`${resolvedBind.errors[0]}. Choose --bind loopback if this instance should use loopback.`);
   }
   const authPublicBaseUrl = publicUrl;
   const authBaseUrlModeFromEnv = parseEnumFromEnv<AuthBaseUrlMode>(
@@ -340,6 +335,7 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
   printProprioCliBanner();
   p.intro(pc.bgCyan(pc.black(" proprio onboard ")));
   const configPath = resolveConfigPath(opts.config);
+  loadDeploymentEnv(configPath);
   const instance = describeLocalInstancePaths(resolveProprioInstanceId());
   p.log.message(
     pc.dim(
@@ -507,6 +503,7 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
   let llm: ProprioConfig["llm"] | undefined;
   const { defaults: derivedDefaults, usedEnvKeys } = quickstartDefaultsFromEnv({
     unattended: opts.yes === true,
+    setupMode,
     bind: opts.bind,
   });
   let {

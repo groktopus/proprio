@@ -135,6 +135,10 @@ Server prompt behavior:
    stays on loopback unless you select another bind or host.
    `--bind` selects reachability and preserves compatible exposure and auth
    settings. Quickstart rejects conflicting settings before it saves config.
+   A Tailnet bind requires a detected Tailscale address or
+   `PROPRIO_TAILNET_BIND_HOST`. Use `--bind loopback` for local-only access.
+   The CLI and server load the instance environment file before the working
+   directory file. Set `PROPRIO_DISABLE_CWD_ENV_FILE=true` to omit the latter.
 2. advanced server setup asks reachability first:
 - `Trusted local` → `bind=loopback`, `local_trusted/private`
 - `Private network` → `bind=lan`, `authenticated/private`

@@ -1,4 +1,4 @@
-import { DEPLOYMENT_MODES, type BindMode, type DeploymentExposure, type DeploymentMode } from "./constants.js";
+import { DEPLOYMENT_EXPOSURES, DEPLOYMENT_MODES, type BindMode, type DeploymentExposure, type DeploymentMode } from "./constants.js";
 
 export const LOOPBACK_BIND_HOST = "127.0.0.1";
 export const ALL_INTERFACES_BIND_HOST = "0.0.0.0";
@@ -8,6 +8,13 @@ export function resolveDeploymentMode(
   configured: DeploymentMode = "local_trusted",
 ): DeploymentMode {
   return DEPLOYMENT_MODES.find(mode => mode === fromEnv) ?? configured;
+}
+
+export function parseDeploymentExposure(fromEnv: string | undefined): DeploymentExposure | undefined {
+  if (fromEnv === undefined) return undefined;
+  const exposure = DEPLOYMENT_EXPOSURES.find(value => value === fromEnv);
+  if (!exposure) throw new Error("PROPRIO_DEPLOYMENT_EXPOSURE must be private or public");
+  return exposure;
 }
 
 function normalizeHost(host: string | null | undefined): string | undefined {

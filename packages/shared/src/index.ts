@@ -833,6 +833,7 @@ export {
   inferBindModeFromHost,
   isAllInterfacesHost,
   isLoopbackHost,
+  parseDeploymentExposure,
   resolveDeploymentMode,
   resolveRuntimeBind,
   validateConfiguredBindMode,
