@@ -144,6 +144,47 @@ test("explicit full execution cannot reuse a passing subset; opaque checks stay 
   assert.match(external.text, /opaque fresh check/);
 });
 
+test("implicit verification works in a main-only checkout", t => {
+  const f = fixture(t);
+  f.git("branch", "-M", "main");
+  f.git("update-ref", "refs/remotes/origin/main", f.base);
+  assert.equal(comparison(f.root).base, f.base);
+
+  const result = spawnSync(process.execPath, ["scripts/local-verify.mjs", "--explain"], {
+    cwd: f.root, env: f.env, encoding: "utf8", timeout: 120_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /1\/3 Vitest test files selected/);
+  f.git("update-ref", "-d", "refs/remotes/origin/main");
+  assert.equal(comparison(f.root).base, f.base);
+});
+
+test("the remote default is used unless an explicit base was supplied", t => {
+  const f = fixture(t);
+  f.git("branch", "-M", "main");
+  f.git("update-ref", "refs/remotes/origin/main", f.base);
+  f.git("add", "ui/src/leaf.ts");
+  f.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "default branch change");
+  const next = f.git("rev-parse", "HEAD");
+  f.git("update-ref", "refs/remotes/origin/trunk", next);
+  f.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+  assert.equal(comparison(f.root).base, next);
+  assert.equal(comparison(f.root, "origin/main").base, f.base);
+  assert.throws(() => comparison(f.root, "missing-ref"), /Cannot resolve a base/);
+});
+
+test("implicit verification retains the legacy master fallback", t => {
+  const f = fixture(t);
+  f.git("branch", "-M", "master");
+  f.git("update-ref", "refs/remotes/origin/master", f.base);
+  f.git("add", "ui/src/leaf.ts");
+  f.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "local change");
+  assert.equal(comparison(f.root).base, f.base);
+  f.git("update-ref", "-d", "refs/remotes/origin/master");
+  assert.equal(comparison(f.root).base, f.git("rev-parse", "HEAD"));
+});
+
 test("working tree comparison includes commits, staging, deletion, rename and untracked files", t => {
   const f = fixture(t);
   f.git("add", "ui/src/leaf.ts");

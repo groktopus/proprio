@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "../test-external-release-contract.mjs";
 import { debugContract, debugKey } from "../runner-debug-crate-cache.mjs";
 import { markCurrent } from "../runner-release-crate-cache.mjs";
 
@@ -87,9 +88,9 @@ test("debug cache keys invalidate source, included inputs, deletions and compile
   assert.notEqual(debugKey(root, env), first);
 });
 
-test("PRs only restore exact debug keys and only verified master pushes publish them", () => {
-  const pr = readFileSync(".github/workflows/pr-trusted.yml", "utf8");
-  const release = readFileSync(".github/workflows/release-verify.yml", "utf8");
+testExternalReleaseContract("PRs only restore exact debug keys and only verified master pushes publish them", () => {
+  const pr = readExternalReleaseFile(".github/workflows/pr-trusted.yml");
+  const release = readExternalReleaseFile(".github/workflows/release-verify.yml");
   const step = (source, name) => source.split(`      - name: ${name}\n`)[1]?.split("      - name:")[0];
   const reader = step(pr, "Restore the Runner debug crate (read only)");
   assert.match(reader, /actions\/cache\/restore@/);

@@ -749,6 +749,39 @@ describe("Inbox toolbar", () => {
     });
   });
 
+  it("renders Inbox with the default task columns when browser storage is denied", async () => {
+    routerMock.location.pathname = "/inbox/mine";
+    setIssueRows([createIssue({ title: "Task with storage disabled" })]);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const root = createRoot(container);
+    const storage = vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+    vi.stubGlobal("BroadcastChannel", undefined);
+
+    try {
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <Inbox />
+          </QueryClientProvider>,
+        );
+      });
+
+      await vi.waitFor(() => {
+        const row = container.querySelector('[data-slot="task-row"]');
+        expect(row?.textContent).toContain("Task with storage disabled");
+        expect(row?.querySelector('[data-slot="task-row-identifier"]')?.textContent).toBe("PAP-904");
+        expect(row?.querySelector('[data-slot="task-row-timestamp"]')).not.toBeNull();
+        expect(container.querySelector('[data-slot="collection-toolbar"]')?.getAttribute("aria-label")).toBe("Inbox controls");
+      });
+    } finally {
+      act(() => root.unmount());
+      storage.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps Mine, Recent, Unread, Blocked, and All in the shared toolbar geometry", async () => {
     for (const tab of ["mine", "recent", "unread", "blocked", "all"] as const) {
       routerMock.location.pathname = `/inbox/${tab}`;

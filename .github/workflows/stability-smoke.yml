@@ -43,6 +43,8 @@ jobs:
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
       - name: Validate contributor instructions and adapter boundaries
         run: pnpm check:agents && pnpm test:check-agents && pnpm check:no-git-push
+      - name: Check the verifier's default branch selection
+        run: node --test --test-name-pattern='implicit verification|the remote default' scripts/__tests__/local-verify.test.mjs
       - name: Verify generated API documentation
         run: pnpm docs:api:check
       - name: Check service onboarding
@@ -66,6 +68,25 @@ jobs:
               throw new Error(`Required PostgreSQL test did not pass: ${title}`);
             }
           }
+          JS
+      - name: Check linked goal deletion
+        run: |
+          test_file=server/src/__tests__/project-goal-validation.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/goal-deletion-results.json" "$test_file"
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'goal-deletion-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'returns a project conflict when deleting a goal linked as primary',
+            'returns a project conflict when deleting a goal linked as secondary',
+            'returns a project conflict when deleting a goal linked as legacy',
+            'returns an actionable child_goal deletion conflict',
+            'returns an actionable task deletion conflict',
+            'deletes a standalone goal once and logs the successful mutation',
+            'rolls back goal deletion when its activity record cannot be inserted',
+          ] });
           JS
       - name: Check Agent Chat supersession and Stop
         run: |
@@ -113,6 +134,8 @@ jobs:
           };
           assertRequiredVitestTests(result, required);
           JS
+      - name: Check release registry from source
+        run: pnpm test:release-registry
       - name: Check native replay heartbeat cadence
         run: |
           test_file=server/src/__tests__/native-run-projection-work.test.ts
@@ -143,6 +166,20 @@ jobs:
           ];
           assertRequiredVitestTests(result, { [path]: required });
           JS
+      - name: Check recovery of unrecorded routine occurrences
+        run: |
+          test_file=server/src/__tests__/routine-schedule-work.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/routine-retry-results.json" "$test_file"
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'routine-retry-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'retries unrecorded catch-up work after the scheduler restarts with 0 recorded runs',
+            'retries unrecorded catch-up work after the scheduler restarts with 1 recorded runs',
+          ] });
+          JS
       - name: Check native settlement callback consumers
         run: |
           node --test scripts/ci/assert-required-vitest-tests.test.mjs
@@ -163,6 +200,8 @@ jobs:
             ],
           });
           JS
+      - name: Check Inbox and shared polling with denied browser storage
+        run: pnpm exec vitest run --maxWorkers 1 ui/src/lib/task-collection-preferences.test.ts ui/src/lib/cross-tab-poll.test.ts ui/src/hooks/useSharedPolling.test.ts ui/src/hooks/useSharedPollingSnapshot.test.tsx ui/src/pages/Inbox.test.tsx
       - name: Check late live settlement metadata
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
       - name: Check company portability

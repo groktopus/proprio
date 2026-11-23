@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { getPriority } from "node:os";
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "../test-external-release-contract.mjs";
 import { BACKGROUND_PRIORITY, createReporter, planLane, runLane, SERIAL_BUILD_GAPS } from "../ci-typecheck-lane.mjs";
 import { PROJECTS } from "../typecheck-test-projects.mjs";
 
@@ -144,8 +144,8 @@ test("background checks run at a lower CPU priority than the critical path", { s
   assert.match(output, new RegExp(`: filler: [^\\n]*\\npriority=${Math.max(own, BACKGROUND_PRIORITY)}\\n`));
 });
 
-test("the PR typecheck job runs the lane after the Runner release crate restore", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/pr-trusted.yml", import.meta.url), "utf8");
+testExternalReleaseContract("the PR typecheck job runs the lane after the Runner release crate restore", () => {
+  const workflow = readExternalReleaseFile(".github/workflows/pr-trusted.yml");
   const job = workflow.split("\n  typecheck_release_registry:\n")[1].split("\n  general_tests:\n")[0];
   const lane = job.indexOf("run: node scripts/ci-typecheck-lane.mjs");
   assert.ok(lane > job.indexOf("- name: Mark the restored Runner release crate current"));
