@@ -415,6 +415,7 @@ export async function handleBridgeRequest(request: Request, authToken: string | 
       const encoder = new TextEncoder();
       const cancellation = new AbortController();
       const signal = AbortSignal.any([request.signal, cancellation.signal]);
+      request.signal.addEventListener("abort", () => console.warn("[bridge diagnostic] public request signal aborted"), { once: true });
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           const send = (data: string) => {
@@ -460,7 +461,10 @@ export async function handleBridgeRequest(request: Request, authToken: string | 
             }
           })();
         },
-        cancel: () => cancellation.abort(),
+        cancel: () => {
+          console.warn("[bridge diagnostic] public SSE stream canceled");
+          cancellation.abort();
+        },
       });
       return toSseResponse(stream);
     }
