@@ -10,7 +10,8 @@ function parseOrigin(value: string | undefined) {
   if (!value) return null;
   try {
     const url = new URL(value);
-    return `${url.protocol}//${url.host}`.toLowerCase();
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
+    return url.origin;
   } catch {
     return null;
   }
@@ -22,38 +23,31 @@ function parseOrigin(value: string | undefined) {
  * compiles the operator's TRUST_PROXY setting into `trust proxy fn`; only a
  * trusted immediate peer may supply the forwarded host.
  */
-function requestHost(req: Request): string | undefined {
-  const host = req.header("host")?.trim();
-  const remoteAddress = req.socket?.remoteAddress;
-  const trustProxy = req.app?.get("trust proxy fn") as
-    | ((address: string, hop: number) => boolean)
-    | undefined;
-
-  if (
-    remoteAddress
-    && typeof trustProxy === "function"
-    && trustProxy(remoteAddress, 0)
-  ) {
-    return req.header("x-forwarded-host")?.split(",")[0]?.trim() || host;
+export function boardRequestHost(
+  host: string | undefined,
+  forwardedHost: string | undefined,
+  remoteAddress: string | undefined,
+  trustProxy: ((address: string, hop: number) => boolean) | undefined,
+): string | undefined {
+  if (remoteAddress && typeof trustProxy === "function" && trustProxy(remoteAddress, 0)) {
+    return forwardedHost?.split(",")[0]?.trim() || host?.trim();
   }
-
-  return host;
+  return host?.trim();
 }
 
-function trustedOriginsForRequest(req: Request) {
-  const origins = new Set(DEFAULT_DEV_ORIGINS.map((value) => value.toLowerCase()));
-  const host = requestHost(req);
-  if (host) {
-    origins.add(`http://${host}`.toLowerCase());
-    origins.add(`https://${host}`.toLowerCase());
-  }
-  // Behind some reverse proxies the Host / X-Forwarded-Host header may
-  // not match the public URL (for example when TLS terminates at the
-  // edge and the inbound Host is an internal service name). Trust the
-  // explicitly-configured PROPRIO_PUBLIC_URL when it's set.
-  const publicUrl = parseOrigin(process.env.PROPRIO_PUBLIC_URL?.trim());
-  if (publicUrl) origins.add(publicUrl);
-  return origins;
+export function trustedBoardRequestOrigin(input: {
+  origin: string | undefined;
+  host: string | undefined;
+  configuredOrigin?: string | null;
+  allowDevOrigins?: boolean;
+}): string | null {
+  const origin = parseOrigin(input.origin);
+  if (!origin) return null;
+  const host = input.host?.toLowerCase();
+  if (host && (origin === `http://${host}` || origin === `https://${host}`)) return origin;
+  if (origin === parseOrigin(input.configuredOrigin ?? process.env.PROPRIO_PUBLIC_URL?.trim())) return origin;
+  if (input.allowDevOrigins && DEFAULT_DEV_ORIGINS.includes(origin)) return origin;
+  return null;
 }
 
 /**
@@ -63,14 +57,12 @@ function trustedOriginsForRequest(req: Request) {
  * example OAuth requiring HTTPS outside loopback).
  */
 export function trustedBoardMutationOrigin(req: Request): string | null {
-  const allowedOrigins = trustedOriginsForRequest(req);
-  const origin = parseOrigin(req.header("origin"));
-  if (origin && allowedOrigins.has(origin)) return origin;
-
-  const refererOrigin = parseOrigin(req.header("referer"));
-  if (refererOrigin && allowedOrigins.has(refererOrigin)) return refererOrigin;
-
-  return null;
+  return trustedBoardRequestOrigin({
+    origin: req.header("origin") ?? req.header("referer"),
+    host: boardRequestHost(req.header("host"), req.header("x-forwarded-host"), req.socket?.remoteAddress,
+      req.app?.get("trust proxy fn")),
+    allowDevOrigins: req.actor?.source !== "local_implicit",
+  });
 }
 
 export function boardMutationGuard(): RequestHandler {
@@ -85,16 +77,19 @@ export function boardMutationGuard(): RequestHandler {
       return;
     }
 
-    // Local-trusted mode, board bearer keys, trusted Cloud tenant calls, and
-    // signed Cloud control assertions are not browser-session requests.
-    // In these modes, origin/referer headers can be absent; do not block those mutations.
+    // Explicit credentials and trusted server-to-server calls have no ambient browser authority.
     if (
-      req.actor.source === "local_implicit"
-      || req.actor.source === "board_key"
+      req.actor.source === "board_key"
       || req.actor.source === "mcp_oauth"
       || req.actor.source === "cloud_tenant"
       || req.actor.source === "cloud_control"
     ) {
+      next();
+      return;
+    }
+
+    if (req.actor.source === "local_implicit"
+      && ["origin", "referer", "sec-fetch-site"].every((name) => req.header(name) === undefined)) {
       next();
       return;
     }

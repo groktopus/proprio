@@ -106,6 +106,25 @@ describe("setupLiveEventsWebSocketServer", () => {
     }
   });
 
+  it("rejects an untrusted browser origin before resolving ambient identity", async () => {
+    const server = new EventEmitter();
+    const resolveSessionFromHeaders = vi.fn(async () => null);
+    const resolveCloudActor = vi.fn(async () => null);
+    setupLiveEventsWebSocketServer(server as never, {} as never, {
+      deploymentMode: "authenticated",
+      resolveSessionFromHeaders,
+      resolveCloudActor,
+    });
+    const socket = new FakeUpgradeSocket();
+    server.emit("upgrade", createUpgradeRequest({
+      headers: { host: "board.example.test", origin: "https://other.example.test" },
+    }), socket as unknown as Duplex, Buffer.alloc(0));
+    await flushPromises();
+    expect(socket.endedChunks[0]).toContain("403 Forbidden");
+    expect(resolveCloudActor).not.toHaveBeenCalled();
+    expect(resolveSessionFromHeaders).not.toHaveBeenCalled();
+  });
+
   it("does not write a rejection response after the raw upgrade socket is already closed", async () => {
     const server = new EventEmitter();
     setupLiveEventsWebSocketServer(server as never, {} as never, { deploymentMode: "authenticated" });
@@ -131,13 +150,15 @@ describe("setupLiveEventsWebSocketServer", () => {
     });
     const socket = new FakeUpgradeSocket();
 
-    server.emit("upgrade", createUpgradeRequest(), socket as unknown as Duplex, Buffer.alloc(0));
+    server.emit("upgrade", createUpgradeRequest({
+      url: "/api/companies/company-1/events/ws?marker=private-fixture-text",
+    }), socket as unknown as Duplex, Buffer.alloc(0));
     expect(() => socket.emitSocketError(new Error("write EPIPE"))).not.toThrow();
     resolveSession(null);
     await flushPromises();
 
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error), path: "/api/companies/company-1/events/ws" }),
+      expect.objectContaining({ err: expect.any(Error), path: "/api/companies/:companyId/events/ws" }),
       "live websocket upgrade socket error",
     );
     expect(socket.endedChunks).toEqual([]);

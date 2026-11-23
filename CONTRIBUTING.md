@@ -11,6 +11,10 @@ See [the stability triage plan](STABILITY.md) for initial priorities and [SECURI
 
 ## Reviewing and merging
 
+The required smoke check runs on the exact PR head, including PRs from forks.
+It uses a GitHub-hosted runner with a read-only token and no repository secrets.
+GitHub may require workflow approval for a first-time external contributor.
+
 A repository maintainer may self-review a pull request. If GitHub does not allow the author to submit an approval, record the review in a pull request comment. Name the exact head commit, the behavior reviewed, the checks run, and any remaining risks. Do not describe a self-review as independent.
 
 Merge only when the recorded review covers the current head, the applicable CI checks have passed on that head, and the change has focused verification evidence. Repeat the affected checks and review after a material change. A self-review does not override a failed check, required platform rules, or the design discussion required above. Merge does not authorize a release or deployment.

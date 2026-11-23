@@ -83,11 +83,13 @@ Proprio now treats **bind** as a separate concern from auth:
 - loopback-only host binding
 - no human login flow
 - optimized for fastest local startup
-- implicit board access belongs to the operator's own local processes. On Linux and macOS, a request that comes from inside an agent run's process tree receives no implicit board access and must authenticate with the run's own credentials. On Linux, a request whose process the server cannot inspect receives implicit board access only when every same-user process that the server cannot inspect has a readable operator parent chain outside any agent run. Requests over IPv4 and IPv6 loopback are covered. If the platform has no process inspection, or `/proc/net/tcp` and `/proc/net/tcp6` cannot be read, the server keeps the previous behavior and logs a warning. Other platforms keep the previous behavior.
+- implicit board access belongs to the operator's own local processes. On Linux and macOS, a request that comes from inside an agent run's process tree receives no implicit board access and must authenticate with the run's own credentials. On Linux, a request whose process the server cannot inspect receives implicit board access only when every same-user process that the server cannot inspect has a readable operator parent chain outside any agent run. Requests over IPv4 and IPv6 loopback are covered. If process attribution is unavailable, the server denies implicit board access and logs a warning. Use `authenticated` mode on hosts where the server cannot attribute operator connections.
+
+- local browser mutations and live event connections must come from the trusted board origin. Local CLI calls without browser headers still require operator process attribution.
 
 ## `authenticated + private`
 
-- login required
+- login required. On self-hosted instances, live event delivery stops when the browser session expires or is revoked.
 - low-friction URL handling (`auto` base URL mode)
 - private-host trust policy required
 - Better Auth request rate limiting is off by default for private mode to keep local/LAN repair loops from locking out the operator; set `PROPRIO_AUTH_RATE_LIMIT_ENABLED=true` to opt in
@@ -95,7 +97,7 @@ Proprio now treats **bind** as a separate concern from auth:
 
 ## `authenticated + public`
 
-- login required
+- login required. On self-hosted instances, live event delivery stops when the browser session expires or is revoked.
 - explicit public URL required
 - stricter deployment checks and failures in doctor
 - Better Auth request rate limiting is on by default; set `PROPRIO_AUTH_RATE_LIMIT_ENABLED=false` only when an explicit front-door limiter covers the deployment

@@ -3,18 +3,20 @@ name: Stability smoke
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
 
 concurrency:
   group: stability-smoke-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # A title or body edit can queue smoke but should not interrupt a running check.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
   smoke:
-    if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
+    # Fork heads run with a read-only token on a GitHub-hosted runner.
+    if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -41,6 +43,8 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Check authorization, audit access, and credential lifecycle
+        run: node scripts/ci/run-security-regressions.mjs
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
