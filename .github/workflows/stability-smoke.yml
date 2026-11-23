@@ -127,6 +127,20 @@ jobs:
             }
           }
           JS
+      - name: Check migration lock timeout and retry
+        run: |
+          report="$RUNNER_TEMP/migration-lock-results.json"
+          pnpm exec vitest run --project @groktopus/db --reporter=default --reporter=json --outputFile="$report" packages/db/src/migration-lock.test.ts
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/db/src/migration-lock.test.ts': [
+              'times out the CLI while another session owns the lock and retries cleanly',
+              'waits for the lock before repairing migration history at startup',
+            ],
+          });
+          JS
       - name: Check linked goal deletion
         run: |
           test_file=server/src/__tests__/project-goal-validation.test.ts
