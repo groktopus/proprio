@@ -6,6 +6,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  agentSessionGoalActions,
+  agentTaskSessions,
   approvals,
   budgetIncidents,
   budgetPolicies,
@@ -78,6 +80,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await db.delete(environmentLeases);
     await db.delete(nativeRunFinalizations);
     await db.delete(activityLog);
+    await db.delete(agentTaskSessions);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
@@ -1401,7 +1404,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       15_000,
     );
 
-    it.each(["resolved", "review", "approval", "response"] as const)(
+    it.each(["resolved", "review", "approval", "response", "optional_response"] as const)(
       "checks the current %s gate before dispatching an automatic continuation",
       async gate => {
         const { companyId, agentId } = await seedCompanyAndAgent();
@@ -1425,9 +1428,9 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
           }).returning();
           await db.insert(issueApprovals).values({ companyId, issueId, approvalId: approval!.id });
         }
-        if (gate === "response") {
+        if (gate === "response" || gate === "optional_response") {
           await db.insert(issueThreadInteractions).values({
-            companyId, issueId, kind: "ask_user_questions", status: "pending",
+            companyId, issueId, kind: gate === "response" ? "ask_user_questions" : "suggest_routine", status: "pending",
             title: "Need a human response", addresseeUserId: "fixture-user", payload: {
               version: 1, questions: [],
             },
@@ -1436,7 +1439,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         const adapter = createPostgresRunDispatchAdapter(db);
         const input = { companyId, runId, now: new Date(), expectedStatus: "queued" as const };
         const early = await adapter.cancelStaleQueuedRun(input);
-        if (gate !== "resolved") {
+        if (gate !== "resolved" && gate !== "optional_response") {
           expect(early).toMatchObject({ outcome: "cancelled", errorCode: gate === "review"
             ? "issue_continuation_waiting_on_review" : "issue_waiting_for_response" });
           const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
@@ -1453,6 +1456,51 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         expect(final.dispatched).toBe(true);
         if (final.dispatched) await expect(final.resultPromise).resolves.toBe("adapter invoked");
         expect(dispatch).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["legacy", "current", "paused", "superseded", "control_pending"] as const)(
+      "rechecks %s goal recovery at queued admission and provider dispatch", async mode => {
+        const { companyId, agentId } = await seedCompanyAndAgent();
+        const issueId = randomUUID();
+        await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+        const [session] = await db.insert(agentTaskSessions).values({
+          companyId, agentId, taskKey: issueId, adapterType: "codex_local",
+          goalStatus: "active", goalDesiredState: "active", goalRevision: 3,
+        }).returning();
+        const runId = await seedRun({ companyId, agentId, contextSnapshot: {
+          issueId, resumeSessionGoalHeartbeat: true,
+          ...(mode === "legacy" ? {} : { sessionGoalRecovery: { sessionId: session!.id, revision: 3 } }),
+        } });
+        await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+        const adapter = createPostgresRunDispatchAdapter(db);
+        const check = { companyId, runId, expectedStatus: "queued" as const, now: new Date() };
+        expect(await adapter.cancelStaleQueuedRun(check)).toMatchObject({ outcome: "not_stale" });
+        if (mode === "paused" || mode === "superseded") {
+          await db.update(agentTaskSessions).set({
+            goalRevision: 4, ...(mode === "paused" ? { goalDesiredState: "paused" } : {}),
+          }).where(eq(agentTaskSessions.id, session!.id));
+        }
+        if (mode === "control_pending") {
+          await db.insert(agentSessionGoalActions).values({
+            companyId, sessionId: session!.id, requestId: "fixture-pause", action: "pause",
+            status: "reconciling", payloadJson: {},
+          });
+        }
+        await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, runId));
+        const reservation = await reserveRunBudget(db, companyId, runId, null);
+        const dispatch = vi.fn(async () => "started");
+        const outcome = await adapter.dispatchResolvedInteractionIfCurrent({
+          ...check, expectedStatus: "running", reservationId: reservation.id, dispatch,
+        });
+        if (mode === "current" || mode === "legacy") {
+          expect(outcome.dispatched).toBe(true);
+          expect(dispatch).toHaveBeenCalledOnce();
+        } else {
+          expect(outcome).toMatchObject({ dispatched: false,
+            cancellation: { outcome: "cancelled", errorCode: "session_goal_recovery_superseded" } });
+          expect(dispatch).not.toHaveBeenCalled();
+        }
       },
     );
 

@@ -1089,7 +1089,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           issueId,
           agent.id,
         );
-        if (rolloverProjection?.goal?.status === "active") {
+        if (rolloverProjection?.goal?.status === "active" && rolloverProjection.sessionId) {
           await enqueueWakeup(agent.id, {
             source: "automation",
             triggerDetail: "system",
@@ -1099,6 +1099,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               intent: "goal_rollover",
               predecessorRunId: livenessRun.id,
             },
+            sessionGoalRecovery: { sessionId: rolloverProjection.sessionId, revision: rolloverProjection.revision },
             idempotencyKey: `goal_rollover:${livenessRun.id}`,
             requestedByActorType: "system",
             contextSnapshot: {

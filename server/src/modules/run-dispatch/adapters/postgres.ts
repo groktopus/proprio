@@ -1,3 +1,4 @@
+import { lockCurrentSessionGoalRecovery } from "../../../services/heartbeat/session-goal-recovery.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
 import { notifyDeferredExecutionWork, notifyDeferredWakesForIssue } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
@@ -30,6 +31,7 @@ import {
   issueRecoveryActions,
   issueComments,
   issueTreeHolds,
+  issueThreadInteractions,
   issues,
   nativeRunFinalizations,
   projects,
@@ -49,6 +51,8 @@ import { agentBlockingQuestionState } from "../../../services/blocked-question-a
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
+import { hasPendingLinkedIssueApproval } from "../../../services/issue-approvals.js";
+import { activeIssueInteractionCondition } from "../../../services/issue-question-context.js";
 import { connectionContinuationPendingResponse } from "../../../services/satisfied-connection-intents.js";
 import { collectDispositionRepairSourceState } from "../../../services/recovery/disposition-repair.js";
 import { legacyDispositionEpisode, legacyDispositionFingerprint } from "../../../services/recovery/legacy-continuation.js";
@@ -65,7 +69,7 @@ import {
   pauseSuppressionResult,
 } from "../../../services/issue-tree-control.js";
 import {
-  continuationSummaryParksExecutor,
+  inProgressContinuationSummaryParksExecutor,
   getIssueContinuationSummaryDocument,
 } from "../../../services/issue-continuation-summary.js";
 import { parseIssueExecutionState } from "../../../services/issue-execution-policy.js";
@@ -82,6 +86,7 @@ import {
   allowsIssueInteractionWake,
   deriveCommentId,
   isNonAssigneeWorkspaceBusyRetry,
+  isAutomaticIssueContinuationWake,
   isResolvedInteractionContinuationWakeContext,
 } from "../domain/wake-context.js";
 import type {
@@ -650,17 +655,12 @@ export function createPostgresRunDispatchAdapter(
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason =
       readNonEmptyString(context.retryReason) ?? input.scheduledRetryReason ?? null;
-    const interactionResolvedAt = readNonEmptyString(context.interactionResolvedAt);
-    const hasResolvedInteractionEvidence =
-      interactionResolvedAt !== null && !Number.isNaN(Date.parse(interactionResolvedAt));
     const isResolvedInteractionContinuation = isResolvedInteractionContinuationWakeContext(context);
 
     const continuationParkApplies = Boolean(
       issue &&
       (issue.status === "in_progress" || issue.status === "in_review") &&
-      !wakeCommentId &&
-      !hasResolvedInteractionEvidence &&
-      (wakeReason === "issue_continuation_needed" || retryReason === "issue_continuation_needed"),
+      isAutomaticIssueContinuationWake(context, input.scheduledRetryReason),
     );
     let continuationSummaryBody: string | null = null;
     let continuationParksExecutor = false;
@@ -672,8 +672,24 @@ export function createPostgresRunDispatchAdapter(
       if (!continuationParksExecutor) {
         const summary = await getIssueContinuationSummaryDocument(dbOrTx, issueId);
         continuationSummaryBody = summary?.body ?? null;
-        continuationParksExecutor = continuationSummaryParksExecutor(continuationSummaryBody, issue.status);
+        continuationParksExecutor = inProgressContinuationSummaryParksExecutor(continuationSummaryBody);
       }
+    }
+
+    let sessionGoalRecoveryCurrent = true;
+    if (context.resumeSessionGoalHeartbeat === true) {
+      const recoveryFence = parseObject(context.sessionGoalRecovery);
+      const [agent] = await dbOrTx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+        eq(agents.id, input.agentId), eq(agents.companyId, input.companyId),
+      )).limit(1);
+      sessionGoalRecoveryCurrent = Boolean(
+        issue && issue.status === "in_progress" && issue.assigneeAgentId === input.agentId && !issue.assigneeUserId && agent
+          && await lockCurrentSessionGoalRecovery(dbOrTx as Db, {
+            companyId: input.companyId, issueId, agentId: input.agentId, adapterType: agent.adapterType,
+            sessionId: readNonEmptyString(recoveryFence.sessionId) ?? undefined,
+            revision: typeof recoveryFence.revision === "number" ? recoveryFence.revision : undefined,
+          }),
+      );
     }
 
     const recoveryActionId = readNonEmptyString(context.recoveryActionId);
@@ -707,6 +723,18 @@ export function createPostgresRunDispatchAdapter(
       ? null : replacementReadiness;
     const continuesNoWorkRun = retryReasonKind === "native_safe_replacement" && issue?.status === "blocked"
       && await continuesNoWorkRunOnBlockedTask(dbOrTx as unknown as Db, { companyId: input.companyId, runId: input.runId });
+    let pendingResponse: QueuedRunFacts["pendingResponse"] = null;
+    if (issue && (input.conversationContinuation
+      || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")) {
+      pendingResponse = await connectionContinuationPendingResponse(dbOrTx as Db, issue, input.responsibleUserId, input.runId);
+    } else if (issue && continuationParkApplies) {
+      const [interaction] = await dbOrTx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
+        .where(and(eq(issueThreadInteractions.companyId, input.companyId), eq(issueThreadInteractions.issueId, issueId),
+          eq(issueThreadInteractions.status, "pending"), activeIssueInteractionCondition({ responsibleUserId: input.responsibleUserId })))
+        .limit(1);
+      if (interaction) pendingResponse = "interaction";
+      else if (await hasPendingLinkedIssueApproval(dbOrTx, { companyId: input.companyId, issueId })) pendingResponse = "approval";
+    }
     return {
       runId: input.runId,
       runAgentId: input.agentId,
@@ -717,10 +745,7 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
-      pendingResponse: issue && (continuationParkApplies || input.conversationContinuation
-        || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")
-        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
-        : null,
+      pendingResponse,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
@@ -750,6 +775,7 @@ export function createPostgresRunDispatchAdapter(
       continuationParkApplies,
       continuationParksExecutor,
       continuationSummaryBody,
+      sessionGoalRecoveryCurrent,
       wakeReason,
       retryReason,
       reviewParticipant: issue

@@ -89,7 +89,7 @@ describe("assigned-work invariant", () => {
       ["scheduled_retry", { activeRuns: [{ id: "s", status: "scheduled_retry", scheduledRetryAt: new Date(now.getTime() + 60_000), owner: "alive" }] }],
       ["native_recovery", { nativeRecoveryPending: true }],
       ["pending_handoff", { pendingHandoff: true }],
-      ["session_goal", { sessionGoal: "active" }],
+      ["session_goal_control", { sessionGoal: "control_pending" }],
       ["scheduled_monitor", { issue: { monitorNextCheckAt: new Date(now.getTime() + 60_000) } }],
       ["system_recovery_working", { interruption: { responsibility: "system", state: "working", userAction: null, nextRetryAt: null, canRetry: false },
         latestRun: { id: "run-1", status: "failed", errorCode: "native_restart_recovery_blocked", finishedAt: ago(5 * 60_000), settlingUntil: null, operatorStopped: false } }],

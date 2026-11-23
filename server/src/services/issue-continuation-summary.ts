@@ -130,15 +130,12 @@ export function extractContinuationSummaryNextAction(body: string | null | undef
   return extractPreviousNextAction(body);
 }
 
-export function continuationSummaryParksExecutor(body: string | null | undefined, currentIssueStatus?: string) {
+export function inProgressContinuationSummaryParksExecutor(body: string | null | undefined) {
   const nextAction = extractContinuationSummaryNextAction(body);
   if (!nextAction) return false;
   const header = body?.split(/^## /m, 1)[0];
   const snapshotStatus = header?.match(/^- Status: ([a-z_]+)\s*$/m)?.[1];
-  if (currentIssueStatus && snapshotStatus
-    && (snapshotStatus !== currentIssueStatus || (currentIssueStatus === "in_progress" && nextAction === GENERATED_REVIEW_WAIT))) {
-    return false;
-  }
+  if (snapshotStatus && nextAction === GENERATED_REVIEW_WAIT) return false;
   return WAITING_FOR_REVIEW_OR_APPROVAL_RE.test(nextAction);
 }
 

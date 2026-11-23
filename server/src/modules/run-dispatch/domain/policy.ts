@@ -119,6 +119,7 @@ export type QueuedRunStalenessErrorCode =
   | "issue_execution_lock_changed"
   | "issue_blocked"
   | "issue_review_participant_changed"
+  | "session_goal_recovery_superseded"
   | "issue_continuation_waiting_on_review"
   | "issue_in_backlog";
 
@@ -168,6 +169,7 @@ export type QueuedRunFacts = {
   continuationParkApplies: boolean;
   /** The pre-classified verdict on whatever continuation summary body applies; only meaningful when continuationParkApplies is true. */
   continuationParksExecutor: boolean;
+  sessionGoalRecoveryCurrent?: boolean;
   continuationSummaryBody: string | null;
   wakeReason: string | null;
   retryReason: string | null;
@@ -558,6 +560,15 @@ export function decideQueuedRunStaleness(
         },
       };
     }
+  }
+
+  if (facts.sessionGoalRecoveryCurrent === false) {
+    return {
+      stale: true,
+      errorCode: "session_goal_recovery_superseded",
+      reason: "Cancelled because the session goal changed or has a pending control before recovery could start",
+      details: { issueId: facts.issueId },
+    };
   }
 
   if (facts.pendingResponse) {
