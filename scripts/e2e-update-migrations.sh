@@ -45,6 +45,10 @@ if [[ "$use_bootstrap_cli" != 0 && "$use_bootstrap_cli" != 1 ]]; then
   echo "E2E_UPDATE_USE_BOOTSTRAP_CLI must be 0 or 1" >&2
   exit 2
 fi
+if [[ "$use_bootstrap_cli" = 1 && ( -z "${E2E_BOOTSTRAP_CLI:-}" || -z "${E2E_BOOTSTRAP_NODE_LOADER:-}" ) ]]; then
+  echo "E2E_UPDATE_USE_BOOTSTRAP_CLI=1 requires E2E_BOOTSTRAP_CLI and E2E_BOOTSTRAP_NODE_LOADER" >&2
+  exit 2
+fi
 if [[ "$probe" = 0 && ( ! "$BASE_REF" =~ ^[0-9a-f]{40}$ || ! "$NEXT_REF" =~ ^[0-9a-f]{40}$ || "$BASE_REF" = "$NEXT_REF" ) ]]; then
   echo "The lifecycle check requires two distinct, full commit SHAs" >&2
   exit 2
@@ -70,7 +74,13 @@ fail_() { RESULTS+=("FAIL  $1"); printf '\033[1;31mFAIL\033[0m %s\n' "$1"; FAILE
 
 shim() { "$SHIM" "$@"; }
 update_cli() {
-  if [ "$use_bootstrap_cli" = 1 ]; then bootstrap "$@"; else shim "$@"; fi
+  if [ "$use_bootstrap_cli" = 1 ]; then
+    local executable="$STORE/current/node_modules/proprio/dist/index.js"
+    E2E_MANAGED_EXECUTABLE="$executable" \
+      node --import "$E2E_BOOTSTRAP_NODE_LOADER" "$PWD/scripts/ci/managed-update-command.mjs" "$@"
+  else
+    shim "$@"
+  fi
 }
 current_target() { readlink "$STORE/current" 2>/dev/null || echo "<missing>"; }
 backup_count() { ls "$BACKUP_DIR" 2>/dev/null | grep -c -E '\.sql(\.gz)?$'; }
@@ -238,6 +248,10 @@ node -e '
 
 CHECK_JSON="$(update_cli update --check --json)"; CHECK_EXIT=$?
 printf '%s\n' "$CHECK_JSON"
+if [ "$use_bootstrap_cli" = 1 ] && ! jq -e '.mode == "managed"' <<<"$CHECK_JSON" >/dev/null; then
+  fail_ "5b exact candidate updater recognizes the installed managed executable"
+  exit 1
+fi
 if [ "$CHECK_EXIT" -ne 10 ]; then
   fail_ "5b update --check sees the new commit (got exit $CHECK_EXIT)"
   exit 1
