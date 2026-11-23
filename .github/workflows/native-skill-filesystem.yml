@@ -79,7 +79,7 @@ jobs:
             sudo chown "$(id -u):$(id -g)" "$scratch/mount"
             TMPDIR="$scratch/mount" PROPRIO_TEST_CODEX_SKILL_FILESYSTEM="$filesystem" \
               pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
-              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging|shares an ext4 repository'
+              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging|shares an ext4 repository|recreates a pinned repository'
             if [ "$filesystem" = ext4 ]; then
               # Codex deliberately denies /tmp within its command sandbox.
               # Give the real provider a second view of the same ext4 fixture

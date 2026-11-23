@@ -307,6 +307,58 @@ describe("runtime context materialization", () => {
     }, 30_000,
   );
 
+  it.skipIf(process.platform !== "linux" || skillFilesystem !== "ext4")(
+    "recreates a pinned repository after interrupted ext4 eviction", async () => {
+      const root = await mkdtemp(join(tmpdir(), "proprio-ext4-eviction-"));
+      roots.push(root);
+      const source = join(root, "source");
+      const cache = join(root, "cache");
+      const dependency = join(".proprio-repository", "skills", "sibling", "data.txt");
+      await mkdir(dirname(join(source, dependency)), { recursive: true });
+      await writeFile(join(source, "SKILL.md"), "# Pinned skill\n");
+      await writeFile(join(source, dependency), "pinned sibling bytes");
+      await mkdir(cache);
+      const assigned = context(source, root, "assigned");
+      async function useSharedRepository<T>(digest: string, use: (entry: string) => Promise<T>): Promise<T> {
+        return use(join(cache, digest));
+      }
+      const oldHome = join(root, "old-home");
+      await prepareIsolatedCodexHome({ context: assigned, codexHome: oldHome, useSharedRepository });
+      const [digest] = await readdir(cache);
+      expect(digest).toMatch(/^[a-f0-9]{64}$/);
+      const entry = join(cache, digest!);
+      const cached = join(entry, "skills", "sibling", "data.txt");
+      expect((await stat(cached)).nlink).toBe(2);
+      await releaseMaterializedNativeRuntimeSkills(join(oldHome, "skills"));
+      expect((await stat(cached)).nlink).toBe(1);
+      // Recreate the state left when the previous sweeper died midway through
+      // an in-place removal. The versioned source tree is still intact.
+      await makeWritable(entry);
+      await rm(join(entry, "skills", "sibling"), { recursive: true });
+
+      const nextHome = join(root, "next-home");
+      await prepareIsolatedCodexHome({ context: assigned, codexHome: nextHome, useSharedRepository });
+      const next = join(nextHome, "skills", "assigned", dependency);
+      expect(await readFile(next, "utf8")).toBe("pinned sibling bytes");
+      expect((await stat(next)).ino).toBe((await stat(cached)).ino);
+      const retained = await stat(next);
+      expect(retained.mode & 0o222).toBe(0);
+
+      // A detached anchor must also leave any existing hard link intact.
+      // Change only the cache directory metadata and its name for the file.
+      await chmod(entry, 0o700);
+      await chmod(dirname(cached), 0o700);
+      await rm(cached);
+      const finalHome = join(root, "final-home");
+      await prepareIsolatedCodexHome({ context: assigned, codexHome: finalHome, useSharedRepository });
+      expect(await readFile(next, "utf8")).toBe("pinned sibling bytes");
+      expect((await stat(next)).mode).toBe(retained.mode);
+      const finalCopy = join(finalHome, "skills", "assigned", dependency);
+      expect(await readFile(finalCopy, "utf8")).toBe("pinned sibling bytes");
+      expect((await stat(finalCopy)).ino).not.toBe(retained.ino);
+    }, 30_000,
+  );
+
   it("preserves a managed provider while excluding ambient auth, hooks, and tool configuration", async () => {
     const root = await mkdtemp(join(tmpdir(), "proprio-routing-home-"));
     roots.push(root);

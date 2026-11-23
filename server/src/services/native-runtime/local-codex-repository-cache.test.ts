@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, link, lstat, utimes, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, link, lstat, readdir, utimes, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -45,14 +45,16 @@ it.skipIf(process.platform === "win32")("serializes one company and pin without 
   await expect(localCodexRepositoryCache(state, "company-one").use("../outside", async path => path)).rejects.toThrow("Invalid pinned repository digest");
 });
 
-it.skipIf(process.platform === "win32")("prunes expired unreferenced trees and interrupted publications", async () => {
+it.skipIf(process.platform === "win32")("prunes expired unreferenced trees and unpublished cache entries", async () => {
   const pin = "a".repeat(64);
   const stalePin = "b".repeat(64);
   const livePin = "c".repeat(64);
   const stagedPin = "d".repeat(64);
+  const retiredPin = "e".repeat(64);
   const liveFile = join(root, "live-session-skill");
   let stale = "";
   let staging = "";
+  let retired = "";
   let live = "";
   const expired = new Date(Date.now() - RUNTIME_ASSET_RETENTION_MS - 3_600_000);
 
@@ -60,8 +62,9 @@ it.skipIf(process.platform === "win32")("prunes expired unreferenced trees and i
     const company = dirname(repository);
     stale = join(company, stalePin);
     staging = join(company, `.repository-staging-${stagedPin}-dryRun`);
+    retired = join(company, `.repository-retired-${retiredPin}-interrupted`);
     live = join(company, livePin);
-    for (const candidate of [stale, staging, live]) {
+    for (const candidate of [stale, staging, retired, live]) {
       await mkdir(candidate);
       await writeFile(join(candidate, "file"), "pinned", { mode: 0o444 });
       await utimes(candidate, expired, expired);
@@ -71,6 +74,8 @@ it.skipIf(process.platform === "win32")("prunes expired unreferenced trees and i
   await vi.waitFor(async () => {
     await expect(lstat(stale)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(lstat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(retired)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(dirname(stale))).toEqual([livePin]);
   });
   expect(await readFile(liveFile, "utf8")).toBe("pinned");
   expect((await lstat(join(live, "file"))).mode & 0o777).toBe(0o444);
@@ -90,6 +95,9 @@ it.skipIf(process.platform === "win32")("restores an archived skill after the sh
   const archive = join(root, "checkpoint.tar");
   await captureNativeHarnessArchive(home, archive);
   await rm(cache, { recursive: true });
+  const retained = join(skill, "shared.txt");
+  expect(await readFile(retained, "utf8")).toBe("pinned repository bytes");
+  expect((await lstat(retained)).mode & 0o777).toBe(0o444);
   const restored = join(root, "restored");
   await restoreNativeHarnessArchive(archive, restored);
   const restoredFile = join(restored, "skills", "assigned", ".proprio-repository", "shared.txt");
