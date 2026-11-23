@@ -211,6 +211,60 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     }
   }, 30_000);
 
+  it("preserves foreign-key validation state in a JavaScript fallback restore", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "foreign_key_validation_target");
+    const sourceSql = postgres(source, { max: 1, onnotice: () => {} });
+    const targetSql = postgres(target, { max: 1, onnotice: () => {} });
+    const backupDir = createTempDir("foreign-key-validation-backup-");
+    const previousPgDump = process.env.PROPRIO_PG_DUMP_PATH;
+    process.env.PROPRIO_PG_DUMP_PATH = path.join(backupDir, "missing-pg-dump");
+    try {
+      await sourceSql.unsafe(`
+        CREATE TABLE public.fk_parent (id integer PRIMARY KEY);
+        CREATE TABLE public.fk_child (
+          id integer PRIMARY KEY,
+          validated_id integer CONSTRAINT validated_fk REFERENCES public.fk_parent (id),
+          legacy_id integer
+        );
+        INSERT INTO public.fk_parent VALUES (1);
+        INSERT INTO public.fk_child VALUES (1, 1, 999);
+        ALTER TABLE public.fk_child ADD CONSTRAINT legacy_fk
+          FOREIGN KEY (legacy_id) REFERENCES public.fk_parent (id) NOT VALID;
+      `);
+      const constraints = (sql: typeof sourceSql) => sql`
+        SELECT conname, convalidated FROM pg_constraint
+        WHERE conrelid = 'public.fk_child'::regclass AND contype = 'f'
+        ORDER BY conname
+      `;
+      const expected = [
+        { conname: "legacy_fk", convalidated: false },
+        { conname: "validated_fk", convalidated: true },
+      ];
+      expect(await constraints(sourceSql)).toEqual(expected);
+      const backup = await runDatabaseBackup({
+        connectionString: source,
+        backupDir,
+        retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      });
+      expect(backup).toMatchObject({ engine: "javascript", fallbackReason: "pg_dump_failed" });
+      await restoreWithJavaScript(target, backup.backupFile, backupDir);
+      expect(await constraints(targetSql)).toEqual(expected);
+      expect(await targetSql`SELECT * FROM public.fk_child`).toEqual([
+        { id: 1, validated_id: 1, legacy_id: 999 },
+      ]);
+      await expect(targetSql`ALTER TABLE public.fk_child VALIDATE CONSTRAINT legacy_fk`)
+        .rejects.toMatchObject({ code: "23503" });
+      await expect(targetSql`INSERT INTO public.fk_child VALUES (2, 1, 998)`)
+        .rejects.toMatchObject({ code: "23503" });
+    } finally {
+      if (previousPgDump === undefined) delete process.env.PROPRIO_PG_DUMP_PATH;
+      else process.env.PROPRIO_PG_DUMP_PATH = previousPgDump;
+      await sourceSql.end();
+      await targetSql.end();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   const nativePgDump = process.env.PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP;
   const constraintBackupEngines = nativePgDump ? ["fallback", "pg_dump"] : ["fallback"];
   it.each(constraintBackupEngines)("restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with %s", async (engine) => {

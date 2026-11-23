@@ -62,7 +62,9 @@ Constraint parsing uses a catalog-only search path and normalized string-literal
 settings. During restore, routines without their own search path temporarily use
 the source's resolved schema path so nested function calls can validate rows.
 The serializer then removes only those temporary routine settings. Explicit
-routine search paths and CHECK validation states are preserved.
+routine search paths and validation states for CHECK constraints and foreign
+keys are preserved. A foreign key awaiting validation still rejects invalid
+new writes and may retain pre-existing invalid rows.
 
 Data transforms must remain compatible with the restored rules. A nullification
 that violates a validated CHECK fails with

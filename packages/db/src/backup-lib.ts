@@ -1006,6 +1006,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       target_columns: string[];
       update_rule: string;
       delete_rule: string;
+      validated: boolean;
     }[]>`
       SELECT
         c.conname AS constraint_name,
@@ -1016,7 +1017,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         tgt.relname AS target_table,
         array_agg(ta.attname ORDER BY key_columns.ordinal_position) AS target_columns,
         CASE c.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule,
-        CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule
+        CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule,
+        c.convalidated AS validated
       FROM pg_constraint c
       JOIN pg_class src ON src.oid = c.conrelid
       JOIN pg_namespace srcn ON srcn.oid = src.relnamespace
@@ -1027,7 +1029,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = key_columns.target_attnum
       WHERE c.contype = 'f'
         AND ${sql.unsafe(nonSystemSchemaPredicate("srcn.nspname"))}
-      GROUP BY c.conname, srcn.nspname, src.relname, tgtn.nspname, tgt.relname, c.confupdtype, c.confdeltype
+      GROUP BY c.conname, srcn.nspname, src.relname, tgtn.nspname, tgt.relname, c.confupdtype, c.confdeltype, c.convalidated
       ORDER BY srcn.nspname, src.relname, c.conname
     `;
     const fks = allForeignKeys.filter(
@@ -1098,7 +1100,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
         const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
         emitStatement(
-          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule};`,
+          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule}${fk.validated ? "" : " NOT VALID"};`,
         );
       }
       emit("");
