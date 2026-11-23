@@ -325,10 +325,24 @@ if (created && mode === "hold") {
   process.stdout.write("qualification output delivered from the retained workspace checkpoint\n");
 }
 NODE
-  ACTIVE_ISSUE_JSON="$(curl --fail --silent --show-error --max-time 10 "$origin/api/companies/$company_id/issues" \
+  ACTIVE_ISSUE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/companies/$company_id/issues" \
     -H "Origin: $origin" -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg title "$ACTIVE_TITLE" '{title:$title,description:"Qualification fixture for a supported schema upgrade.",status:"in_progress"}')")" \
-    || { fail_ "4c recovered task creation"; exit 1; }
+    --data "$(jq -n --arg title "$ACTIVE_TITLE" '{title:$title,description:"Qualification fixture for a supported schema upgrade.",status:"todo"}')")" \
+    || { fail_ "4c recovered task creation request failed"; exit 1; }
+  ACTIVE_ISSUE_STATUS="${ACTIVE_ISSUE_RESPONSE##*$'\n'}"
+  ACTIVE_ISSUE_BODY="${ACTIVE_ISSUE_RESPONSE%$'\n'*}"
+  if [[ ! "$ACTIVE_ISSUE_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+    SAFE_ISSUE_ERROR="$(jq -cn --arg status "$ACTIVE_ISSUE_STATUS" --arg body "$ACTIVE_ISSUE_BODY" '
+      ($body | try fromjson catch {}) as $response |
+      {status: (try ($status | tonumber) catch 0),
+       error: (if ($response.error | type) == "string" then $response.error[0:200] else null end),
+       details: (if ($response.details | type) == "array" then
+         [$response.details[:5][] | {code: (.code // null), path: (.path // null), message: (if (.message | type) == "string" then .message[0:200] else null end)}]
+         else [] end)}')"
+    fail_ "4c recovered task creation returned HTTP $SAFE_ISSUE_ERROR"
+    exit 1
+  fi
+  ACTIVE_ISSUE_JSON="$ACTIVE_ISSUE_BODY"
   ACTIVE_ISSUE_ID="$(jq -er '.id' <<<"$ACTIVE_ISSUE_JSON")" || exit 1
   ACTIVE_ISSUE_IDENTIFIER="$(jq -er '.identifier' <<<"$ACTIVE_ISSUE_JSON")" || exit 1
   ACTIVE_ISSUE_PREFIX="$company_issue_prefix"

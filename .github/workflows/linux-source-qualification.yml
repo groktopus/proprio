@@ -93,7 +93,7 @@ jobs:
           fi
           echo "E2E_UPDATE_BASE_REF=$E2E_UPDATE_BASE_REF" >> "$GITHUB_ENV"
           git fetch --depth=1 https://github.com/groktopus/proprio.git "$E2E_UPDATE_BASE_REF"
-          if git diff --quiet "$E2E_UPDATE_BASE_REF" "$NEXT_SHA" -- 'packages/db/src/migrations/*.sql'; then
+          if git diff --quiet --no-renames "$E2E_UPDATE_BASE_REF" "$NEXT_SHA" -- 'packages/db/src/migrations/*.sql'; then
             export E2E_UPDATE_REQUIRE_ACTIVE_RUN=0
           else
             export E2E_UPDATE_REQUIRE_ACTIVE_RUN=1

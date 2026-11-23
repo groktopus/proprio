@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -39,18 +39,24 @@ function fsMkdir(directory) {
   mkdirSync(directory, { recursive: true });
 }
 
-function fixture(t, { migration = false, skippedTitle = null } = {}) {
+function fixture(t, { migration = false, removedMigration = false, skippedTitle = null } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "proprio-durable-evidence-"));
   const temp = path.join(root, "reports");
   execFileSync("git", ["init", "-q", root]);
   writeFileSync(path.join(root, "README.md"), "base\n");
-  const baseSha = commit(root, "base");
-  writeFileSync(path.join(root, "README.md"), "candidate\n");
-  if (migration) {
-    const migrationPath = path.join(root, "packages/db/src/migrations/0503_fixture.sql");
+  const migrationPath = path.join(root, "packages/db/src/migrations/0503_fixture.sql");
+  if (removedMigration) {
     fsMkdir(path.dirname(migrationPath));
     writeFileSync(migrationPath, "SELECT 1;\n");
   }
+  const baseSha = commit(root, "base");
+  writeFileSync(path.join(root, "README.md"), "candidate\n");
+  if (migration) {
+    fsMkdir(path.dirname(migrationPath));
+    writeFileSync(migrationPath, "SELECT 1;\n");
+  }
+  if (removedMigration) renameSync(migrationPath, `${migrationPath}.disabled`);
+  const migrationChanged = migration || removedMigration;
   const sourceSha = commit(root, "candidate");
   const env = {
     GITHUB_REPOSITORY: "groktopus/proprio",
@@ -65,7 +71,7 @@ function fixture(t, { migration = false, skippedTitle = null } = {}) {
     baseSha,
     cases: {
       "managed-update-rollback": { outcome: "passed" },
-      "migration-active-run-recovery": migration ? {
+      "migration-active-run-recovery": migrationChanged ? {
         outcome: "passed", previousReleaseSha: baseSha, schemaCandidateSha: sourceSha,
         elapsedRecoveryMs: 921, observedDataLoss: 0,
       } : { outcome: "not_applicable" },
@@ -104,6 +110,17 @@ test("writes one exact-head report and marks a no-migration case not applicable"
 
 test("requires migration recovery measurements when the exact source range adds SQL migrations", async t => {
   const f = fixture(t, { migration: true });
+  const { qualification } = await writeDurableWorkAcceptance({ env: f.env, root: f.root });
+  const migration = qualification.cases["migration-active-run-recovery"];
+  assert.equal(migration.outcome, "passed");
+  assert.equal(migration.previousReleaseSha, f.baseSha);
+  assert.equal(migration.schemaCandidateSha, f.sourceSha);
+  assert.equal(migration.elapsedRecoveryMs, 921);
+  assert.equal(migration.observedDataLoss, 0);
+});
+
+test("requires migration recovery evidence when SQL is renamed to a non-SQL path", async t => {
+  const f = fixture(t, { removedMigration: true });
   const { qualification } = await writeDurableWorkAcceptance({ env: f.env, root: f.root });
   const migration = qualification.cases["migration-active-run-recovery"];
   assert.equal(migration.outcome, "passed");

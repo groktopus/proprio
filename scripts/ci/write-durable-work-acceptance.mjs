@@ -29,7 +29,7 @@ function assertBrowserCase(report, title) {
 }
 
 function hasSqlMigrationDelta(baseSha, sourceSha, root) {
-  const paths = execFileSync("git", ["diff", "--name-only", baseSha, sourceSha, "--", "packages/db/src/migrations"], { encoding: "utf8", cwd: root })
+  const paths = execFileSync("git", ["diff", "--name-only", "--no-renames", baseSha, sourceSha, "--", "packages/db/src/migrations"], { encoding: "utf8", cwd: root })
     .split("\n").filter(path => path.endsWith(".sql"));
   return paths.length > 0;
 }

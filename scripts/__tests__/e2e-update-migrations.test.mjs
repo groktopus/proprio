@@ -44,6 +44,16 @@ test("qualification can run the exact tested CLI against the installed base payl
   assert.match(workflow, /E2E_UPDATE_USE_BOOTSTRAP_CLI=1/);
 });
 
+test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagnostics", () => {
+  const source = readFileSync(script, "utf8");
+  assert.match(source, /status:\"todo\"/);
+  assert.match(source, /assigneeAgentId:\$agent/);
+  assert.match(source, /--write-out \$'\\n%\{http_code\}'/);
+  assert.match(source, /status: \(try \(\$status \| tonumber\) catch 0\)/);
+  assert.match(source, /error: \(if \(\$response\.error \| type\) == \"string\" then \$response\.error\[0:200\]/);
+  assert.ok(source.includes("{code: (.code // null), path: (.path // null), message:"));
+});
+
 test("managed update qualification wrapper accepts only the lifecycle flags", () => {
   assert.deepEqual(parseManagedUpdateInvocation(["update", "--check", "--json"]), { check: true, json: true });
   assert.deepEqual(parseManagedUpdateInvocation(["update", "--yes"]), { yes: true });
