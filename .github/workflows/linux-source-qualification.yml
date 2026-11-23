@@ -58,7 +58,8 @@ jobs:
           pnpm --filter @groktopus/proprio-runner run build:runner-binaries
           pnpm --filter @groktopus/server prepare:ui-dist
           pnpm --filter @groktopus/server build
-          node cli/dist/index.js --version
+          node --check cli/dist/index.js
+          pnpm --dir cli exec tsx src/index.ts --version
       - name: Run a synthetic agent in a fresh source instance
         run: |
           command -v strace
