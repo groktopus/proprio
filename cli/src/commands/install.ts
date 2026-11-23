@@ -371,7 +371,12 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     if (!cliTarball || workspaceTarballs.length !== workspacePackages.length) {
       throw new Error(`Git install packaging produced ${workspaceTarballs.length} workspace tarballs; expected ${workspacePackages.length}.`);
     }
-    await runCommand("npm", ["install", "--prefix", stagedPayload, path.join(stagingRoot, cliTarball), ...workspaceTarballs.map((entry) => path.join(stagingRoot, entry)), "--no-audit", "--no-fund"], { cwd: stagingRoot, maxBuffer: 32 * 1024 * 1024 });
+    // Keep npm's native executables out of group and world write access.
+    await runCommand("sh", [
+      "-c", 'umask g-w,o-w && exec "$@"', "proprio-npm-install",
+      "npm", "install", "--prefix", stagedPayload, path.join(stagingRoot, cliTarball),
+      ...workspaceTarballs.map((entry) => path.join(stagingRoot, entry)), "--no-audit", "--no-fund",
+    ], { cwd: stagingRoot, maxBuffer: 32 * 1024 * 1024 });
     await smokePayload(stagedPayload, metadata.version, runCommand);
     fs.renameSync(stagedPayload, payloadPath);
     return { payloadPath, reused: false, version: metadata.version };
