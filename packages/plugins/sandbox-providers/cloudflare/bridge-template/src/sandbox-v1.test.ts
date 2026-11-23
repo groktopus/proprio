@@ -161,3 +161,21 @@ it("rejects queued same-session commands after destruction without restarting th
   expect(test.container.start).toHaveBeenCalledOnce();
   expect(test.container.exec).toHaveBeenCalledTimes(1);
 });
+
+it("requests container process cancellation when the public SSE consumer disconnects", async () => {
+  const test = fixture();
+  let started!: () => void;
+  let finish!: (code: number) => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const exitCode = new Promise<number>(resolve => { finish = resolve; });
+  const kill = vi.fn(() => finish(143));
+  test.container.exec.mockImplementationOnce(async () => {
+    started();
+    return { exitCode, kill, stdout: null, stderr: null };
+  });
+  const response = await test.request("/exec", { providerLeaseId: "lease-id", command: "sleep", streamOutput: true });
+  await ready;
+  await response.body!.cancel();
+  await vi.waitFor(() => expect(kill).toHaveBeenCalledExactlyOnceWith(15));
+  expect(test.container.destroy).not.toHaveBeenCalled();
+});

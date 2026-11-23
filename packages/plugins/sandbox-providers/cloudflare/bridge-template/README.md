@@ -61,7 +61,10 @@ Durable Object owns container startup, idle timeout, keep-alive alarms,
 session environment, and command cancellation. Resume checks the workspace
 sentinel through the 1.0 SDK. A stopped container returns a lost-state
 response without creating a replacement. Non-keep-alive idle timeouts on the
-1.0 path must be positive and at most six hours.
+1.0 path must be positive and at most six hours. The lease container is the
+execution boundary. Cloudflare gives processes root-equivalent Linux
+capabilities under its Durable Object scheduling policy. See the
+[Container API](https://developers.cloudflare.com/containers/api/durable-object-container/).
 
 ### Verify before routing leases
 

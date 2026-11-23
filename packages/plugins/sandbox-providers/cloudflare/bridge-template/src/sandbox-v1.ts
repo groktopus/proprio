@@ -10,7 +10,6 @@ interface LeaseSettings {
 
 const defaults = { keepAlive: false, sleepAfter: "10m" };
 const maxIdleMs = 6 * 60 * 60 * 1000;
-const minKeepAliveWindowMs = 60_000;
 const sessionPrefix = "session:";
 
 function inactivityMs(settings: LeaseSettings): number {
@@ -60,7 +59,7 @@ export class ProprioSandboxV1 extends DurableObject {
       await this.container.setInactivityTimeout(idleMs);
     }
     if (settings.keepAlive && this.container.running) {
-      await this.ctx.storage.setAlarm(Date.now() + idleMs - minKeepAliveWindowMs);
+      await this.ctx.storage.setAlarm(Date.now() + idleMs / 2);
     } else {
       await this.ctx.storage.deleteAlarm();
     }
