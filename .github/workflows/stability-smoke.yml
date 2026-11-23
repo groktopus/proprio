@@ -59,6 +59,25 @@ jobs:
         run: pnpm check:agents && pnpm test:check-agents && pnpm check:no-git-push
       - name: Check the verifier's default branch selection
         run: node --test --test-name-pattern='implicit verification|the remote default' scripts/__tests__/local-verify.test.mjs
+      - name: Check goal hierarchy cycle prevention and recovery
+        run: |
+          goal_test=server/src/__tests__/goal-parent-company-validation.test.ts
+          tree_test=ui/src/components/GoalTree.test.tsx
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/goal-cycle-results.json" "$goal_test" "$tree_test"
+          node --input-type=module - "$goal_test" "$tree_test" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'goal-cycle-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            [process.argv[2]]: [
+              'rejects self-parenting and moves under immediate or deeper descendants',
+              'allows clearing a parent to repair an already-cyclic hierarchy',
+              'rejects one of two concurrent edits that would jointly form a cycle',
+            ],
+            [process.argv[3]]: ['keeps goals in a saved cycle and their descendants visible'],
+          });
+          JS
       - name: Verify generated API documentation
         run: pnpm docs:api:check
       - name: Check transactional document revision conflicts

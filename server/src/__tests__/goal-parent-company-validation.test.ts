@@ -236,7 +236,40 @@ describeDatabase("goal parent company validation", () => {
     }
   });
 
-  it("allows concurrent parent edits without conflicting with foreign-key checks", async () => {
+  it("rejects self-parenting and moves under immediate or deeper descendants", async () => {
+    const companyId = await company();
+    const service = goalService(db);
+    const root = await service.create(companyId, { title: "Root" });
+    const child = await service.create(companyId, { title: "Child", parentId: root.id });
+    const grandchild = await service.create(companyId, { title: "Grandchild", parentId: child.id });
+
+    for (const parentId of [root.id, child.id, grandchild.id]) {
+      await expect(service.update(root.id, { parentId })).rejects.toMatchObject({
+        status: 422, message: "A goal cannot be moved under itself or one of its descendants",
+      });
+    }
+    expect(await service.getById(root.id)).toMatchObject({ parentId: null });
+    expect(await service.getById(child.id)).toMatchObject({ parentId: root.id });
+    expect(await service.getById(grandchild.id)).toMatchObject({ parentId: child.id });
+  });
+
+  it("allows clearing a parent to repair an already-cyclic hierarchy", async () => {
+    const companyId = await company();
+    const service = goalService(db);
+    const root = await service.create(companyId, { title: "Root" });
+    const child = await service.create(companyId, { title: "Child", parentId: root.id });
+    await db.update(goals).set({ parentId: child.id }).where(eq(goals.id, root.id));
+
+    const independent = await service.create(companyId, { title: "Independent" });
+    await expect(service.update(independent.id, { parentId: child.id })).rejects.toMatchObject({
+      status: 422, message: "Repair the proposed parent's goal hierarchy before moving this goal",
+    });
+    expect(await service.update(root.id, { parentId: null })).toMatchObject({ parentId: null });
+    expect(await service.getById(child.id)).toMatchObject({ parentId: root.id });
+    expect(await service.update(independent.id, { parentId: child.id })).toMatchObject({ parentId: child.id });
+  });
+
+  it("rejects one of two concurrent edits that would jointly form a cycle", async () => {
     const companyId = await company();
     const service = goalService(db);
     const first = await service.create(companyId, { title: "First" });
@@ -269,17 +302,24 @@ describeDatabase("goal parent company validation", () => {
       await expect.poll(async () => {
         const [waiting] = await db.execute<{ count: number }>(sql`select count(*)::int as count
           from pg_locks where locktype = 'advisory' and not granted
-          and ${ownerPid} = any(pg_blocking_pids(pid))`);
+          and database = (select oid from pg_database where datname = current_database())`);
         return waiting.count;
       }, { timeout: 5_000 }).toBe(2);
+      const [blocked] = await db.execute<{ waiting: boolean }>(sql`
+        select exists (select 1 from pg_stat_activity where ${ownerPid} = any(pg_blocking_pids(pid))) as waiting
+      `);
+      expect(blocked.waiting).toBe(true);
       release();
       await gate;
-      const failures = (await edits).flatMap((result) => result.status === "rejected"
-        ? [result.reason?.cause?.code ?? result.reason?.code ?? String(result.reason)]
-        : []);
-      expect(failures).toEqual([]);
-      expect(await service.getById(first.id)).toMatchObject({ parentId: second.id });
-      expect(await service.getById(second.id)).toMatchObject({ parentId: first.id });
+      const results = await edits;
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      const loser = results.find(result => result.status === "rejected");
+      expect(loser?.reason).toMatchObject({
+        status: 422, message: "A goal cannot be moved under itself or one of its descendants",
+      });
+      const stored = await service.list(companyId);
+      expect(stored.filter(goal => goal.parentId === null)).toHaveLength(1);
+      expect(stored.filter(goal => goal.parentId !== null)).toHaveLength(1);
     } finally {
       release();
       await Promise.allSettled([gate, ...(edits ? [edits] : [])]);
