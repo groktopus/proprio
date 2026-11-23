@@ -1,0 +1,2 @@
+ALTER TABLE "issues" ADD COLUMN "goal_origin" text DEFAULT 'unknown' NOT NULL;--> statement-breakpoint
+ALTER TABLE "issues" ADD CONSTRAINT "issues_goal_origin_check" CHECK ("issues"."goal_origin" in ('explicit', 'inherited', 'unknown'));

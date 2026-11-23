@@ -37,6 +37,9 @@ export const issues = pgTable(
     projectId: uuid("project_id").references(() => projects.id),
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
+    // `unknown` identifies pre-migration rows and raw writers that do not know
+    // whether the resolved goal came from a caller or a project/company default.
+    goalOrigin: text("goal_origin").$type<"explicit" | "inherited" | "unknown">().notNull().default("unknown"),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
     visibility: text("visibility").notNull().default("open"),
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),
@@ -102,6 +105,7 @@ export const issues = pgTable(
   },
   (table) => ({
     visibilityCheck: check("issues_visibility_check", sql`${table.visibility} in ('open', 'private')`),
+    goalOriginCheck: check("issues_goal_origin_check", sql`${table.goalOrigin} in ('explicit', 'inherited', 'unknown')`),
     conversationIdentityIdx: uniqueIndex("issues_conversation_identity_idx").on(table.companyId, table.conversationAgentId, table.conversationUserId),
     conversationIdentityCheck: check("issues_conversation_identity_check", sql`(
       ${table.conversationAgentId} is null and ${table.conversationUserId} is null and ${table.conversationState} is null
