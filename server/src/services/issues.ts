@@ -223,12 +223,15 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
 import {
+  effectiveIssueGoalOrigin,
+  resolveIssueGoalBinding,
   resolveIssueGoalId,
   resolveNextIssueGoalId,
+  type IssueGoalOrigin,
 } from "./issue-goal-fallback.js";
 import { getRunLogStore, isRunLogStoreType } from "./run-log-store.js";
 import { recoverSettledNativeRunLog } from "./native-runtime/native-run-log-recovery.js";
-import { getDefaultCompanyGoal } from "./goals.js";
+import { getDefaultCompanyGoal, getGoalIdInCompany } from "./goals.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import {
   CHAT_RUN_PRESENTATION_AUTHORIZATION_REASON,
@@ -5302,6 +5305,11 @@ const issueListSelect = {
   projectId: issues.projectId,
   projectWorkspaceId: issues.projectWorkspaceId,
   goalId: issues.goalId,
+  goalOrigin: sql<"explicit" | "inherited" | "unknown">`CASE
+    WHEN ${issues.goalOriginGoalId} IS NOT DISTINCT FROM ${issues.goalId}
+      THEN ${issues.goalOrigin}
+    ELSE 'unknown'
+  END`,
   parentId: issues.parentId,
   visibility: issues.visibility,
   privacyRootIssueId: issues.privacyRootIssueId,
@@ -7211,7 +7219,9 @@ export function issueService(db: Db) {
       .where(eq(issues.id, id))
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
+    row.goalOrigin = effectiveIssueGoalOrigin(row);
     const [enriched] = await withIssueLabels(db, [row]);
+    Object.defineProperty(enriched, "goalOriginGoalId", { enumerable: false });
     return enriched;
   }
 
@@ -7222,7 +7232,9 @@ export function issueService(db: Db) {
       .where(eq(issues.identifier, identifier.toUpperCase()))
       .then((rows) => rows[0] ?? null));
     if (!row) return null;
+    row.goalOrigin = effectiveIssueGoalOrigin(row);
     const [enriched] = await withIssueLabels(db, [row]);
+    Object.defineProperty(enriched, "goalOriginGoalId", { enumerable: false });
     return enriched;
   }
 
@@ -8830,7 +8842,9 @@ export function issueService(db: Db) {
           ISSUE_LIST_DESCRIPTION_MAX_CHARS,
         ),
       }));
-      const withLabels = await timePhase("labels", () => withIssueLabels(db, rows));
+      // This list projection intentionally omits goalOriginGoalId. Its
+      // effective goalOrigin was selected with the matching SQL predicate.
+      const withLabels = await timePhase("labels", () => withIssueLabels(db, rows as unknown as IssueRow[]));
       const runMap = filters?.listProjection === "index" ? new Map() : await timePhase("active_runs", () => activeRunMapForIssues(db, withLabels));
       const withRuns = withActiveRuns(withLabels, runMap);
       if (withRuns.length === 0) {
@@ -10170,6 +10184,7 @@ export function issueService(db: Db) {
                 ? parent.projectWorkspaceId
                 : undefined),
         goalId: issueData.goalId ?? parent.goalId,
+        goalOrigin: issueData.goalOrigin ?? (issueData.goalId ? "explicit" : parent.goalOrigin),
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId:
           issueData.trustExplicitResponsibleUserId === true,
@@ -10828,6 +10843,11 @@ export function issueService(db: Db) {
         });
 
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
+        if (issueData.goalId) {
+          if (!await getGoalIdInCompany(tx, companyId, issueData.goalId)) {
+            throw notFound("Goal not found");
+          }
+        }
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference =
@@ -11179,6 +11199,13 @@ export function issueService(db: Db) {
               .then((rows) => rows.length > 0));
           if (!originPublic) originIssueId = null;
         }
+        const goalBinding = resolveIssueGoalBinding({
+          projectId: issueData.projectId,
+          goalId: issueData.goalId,
+          goalOrigin: issueData.goalOrigin,
+          projectGoalId,
+          defaultGoalId: defaultCompanyGoal?.id ?? null,
+        });
         const values = {
           ...issueData,
           workspaceSelection: workspaceIntent,
@@ -11194,12 +11221,9 @@ export function issueService(db: Db) {
           responsibleUserId,
           requestDepth: clampIssueRequestDepth(issueData.requestDepth),
           originKind: issueData.originKind ?? "manual",
-          goalId: resolveIssueGoalId({
-            projectId: issueData.projectId,
-            goalId: issueData.goalId,
-            projectGoalId,
-            defaultGoalId: defaultCompanyGoal?.id ?? null,
-          }),
+          goalId: goalBinding.goalId,
+          goalOrigin: goalBinding.goalOrigin,
+          goalOriginGoalId: goalBinding.goalId,
           projectWorkspaceId,
           executionWorkspaceId,
           executionWorkspacePreference,
@@ -11513,6 +11537,8 @@ export function issueService(db: Db) {
             projectWorkspaceId,
             executionWorkspaceSettings,
             goalId,
+            goalOrigin: "inherited",
+            goalOriginGoalId: goalId,
             responsibleUserId: null,
             requestDepth: clampIssueRequestDepth(undefined),
             originKind: "manual",
@@ -12198,26 +12224,40 @@ export function issueService(db: Db) {
             : Promise.resolve(new Map<string, IssueRelationSummaryMap>()),
         ]);
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
+        if (issueData.goalId) {
+          if (!await getGoalIdInCompany(tx, existing.companyId, issueData.goalId)) {
+            throw notFound("Goal not found");
+          }
+        }
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
-          getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
+          getProjectDefaultGoalId(tx, receiptExisting.companyId, receiptExisting.projectId),
           getProjectDefaultGoalId(
             tx,
-            existing.companyId,
-            issueData.projectId !== undefined
-              ? issueData.projectId
-              : existing.projectId,
+            receiptExisting.companyId,
+            patch.projectId !== undefined
+              ? patch.projectId
+              : receiptExisting.projectId,
           ),
         ]);
 
-        patch.goalId = resolveNextIssueGoalId({
-          currentProjectId: existing.projectId,
-          currentGoalId: existing.goalId,
+        const goalBinding = resolveNextIssueGoalId({
+          currentProjectId: receiptExisting.projectId,
+          currentGoalId: receiptExisting.goalId,
+          currentGoalOrigin: receiptExisting.goalOrigin,
+          currentGoalOriginGoalId: receiptExisting.goalOriginGoalId,
           currentProjectGoalId,
-          projectId: issueData.projectId,
+          projectId:
+            patch.projectId !== undefined
+              ? patch.projectId
+              : receiptExisting.projectId,
           goalId: issueData.goalId,
+          goalOrigin: issueData.goalOrigin,
           projectGoalId: nextProjectGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,
         });
+        patch.goalId = goalBinding.goalId;
+        patch.goalOrigin = goalBinding.goalOrigin;
+        patch.goalOriginGoalId = goalBinding.goalId;
         // Ownership changes invalidate observed handoff versions even if status
         // stays the same, including an A -> B -> A assignment race.
         if (issueData.status === "done" || issueData.status === "cancelled") {

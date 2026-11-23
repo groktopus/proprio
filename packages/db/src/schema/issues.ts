@@ -21,7 +21,7 @@ import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projectWorkspaces } from "./project_workspaces.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
-import type { IssueReviewPolicy, IssueUnblockDescriptor, SourceTrustMetadata, TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "@groktopus/shared";
+import type { IssueGoalOrigin, IssueReviewPolicy, IssueUnblockDescriptor, SourceTrustMetadata, TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "@groktopus/shared";
 
 export const issues = pgTable(
   "issues",
@@ -37,6 +37,13 @@ export const issues = pgTable(
     projectId: uuid("project_id").references(() => projects.id),
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
+    // `unknown` identifies pre-migration rows and raw writers that do not know
+    // whether the resolved goal came from a caller or a project/company default.
+    goalOrigin: text("goal_origin").$type<IssueGoalOrigin>().notNull().default("unknown"),
+    // Snapshot of the goal ID to which goalOrigin applies. Older app versions
+    // can update goal_id without knowing about provenance; a mismatch makes
+    // the provenance unknown rather than applying stale intent to the new ID.
+    goalOriginGoalId: uuid("goal_origin_goal_id"),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
     visibility: text("visibility").notNull().default("open"),
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),
@@ -102,6 +109,7 @@ export const issues = pgTable(
   },
   (table) => ({
     visibilityCheck: check("issues_visibility_check", sql`${table.visibility} in ('open', 'private')`),
+    goalOriginCheck: check("issues_goal_origin_check", sql`${table.goalOrigin} in ('explicit', 'inherited', 'unknown')`),
     conversationIdentityIdx: uniqueIndex("issues_conversation_identity_idx").on(table.companyId, table.conversationAgentId, table.conversationUserId),
     conversationIdentityCheck: check("issues_conversation_identity_check", sql`(
       ${table.conversationAgentId} is null and ${table.conversationUserId} is null and ${table.conversationState} is null

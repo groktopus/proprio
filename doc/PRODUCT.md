@@ -96,6 +96,14 @@ I am researching the Facebook ads Granola uses (current task)
 
 Tasks have parentage. Every task exists in service of a parent task, all the way up to the company goal. This is what keeps autonomous agents aligned — they can always answer "why am I doing this?"
 
+A task goal can be an explicit selection or an inherited project or company
+default. Moving a task between projects preserves an explicit selection and
+updates an inherited goal to the destination default. Older records and direct
+database writes have unknown origin. For those records, a move keeps the
+existing behavior: a goal equal to the old default follows the new default;
+another goal stays selected. New API-created tasks record their origin so this
+heuristic is no longer needed for them.
+
 The current issue model includes stable issue identifiers, parent/sub-issues, blockers, a single assignee, comments, issue documents, attachments and work products, and review/approval handoffs. That structure keeps work inspectable by both the board and agents while still allowing agents to decompose work into smaller tasks.
 
 Canceling a task with active subtasks opens a modal headed “Cancel N active subtasks?”

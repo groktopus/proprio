@@ -3501,6 +3501,13 @@
       "when": 1795395039758,
       "tag": "0501_sour_pepper_potts",
       "breakpoints": true
+    },
+    {
+      "idx": 502,
+      "version": "7",
+      "when": 1795468250606,
+      "tag": "0502_stormy_sumo",
+      "breakpoints": true
     }
   ]
 }

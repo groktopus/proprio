@@ -1,6 +1,6 @@
 import { and, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
-import { agents, companyOnboardingSeeds, goals } from "@groktopus/db";
+import { agents, companyOnboardingSeeds } from "@groktopus/db";
 import type { ApplyOnboardingSeed } from "@groktopus/shared";
 import { writeProprioSkillSyncPreference } from "@groktopus/adapter-utils/server-utils";
 import { findActiveServerAdapter } from "../adapters/registry.js";
@@ -8,7 +8,7 @@ import { agentService } from "./agents.js";
 import { createAgentLifecycle, scheduleAgentLifecycle } from "./agent-lifecycle.js";
 import { withDedicatedDbConnection } from "@groktopus/db";
 import { PROPRIO_CORE_SKILL_KEYS } from "./company-skills.js";
-import { goalService } from "./goals.js";
+import { getGoalIdInCompany, goalService } from "./goals.js";
 import { readBuiltInAgentMarker } from "../lib/built-in-agent-metadata.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 
@@ -103,12 +103,7 @@ export function onboardingSeedService(db: Db) {
   }
 
   async function goalStillExists(dbx: Db, companyId: string, goalId: string | null) {
-    if (!goalId) return false;
-    return dbx
-      .select({ id: goals.id })
-      .from(goals)
-      .where(and(eq(goals.id, goalId), eq(goals.companyId, companyId)))
-      .then((rows) => rows.length > 0);
+    return Boolean(await getGoalIdInCompany(dbx, companyId, goalId));
   }
 
   /**
