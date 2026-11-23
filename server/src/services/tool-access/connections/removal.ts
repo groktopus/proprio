@@ -595,6 +595,9 @@ async function removeConnection(
             and(
               eq(toolApplications.id, updatedConnection.applicationId),
               ne(toolApplications.status, "archived"),
+              // Removing the last AI account must not turn an operator pause into
+              // a recoverable automatic archive.
+              updatedConnection.connectionPurpose === "ai" ? ne(toolApplications.status, "disabled") : undefined,
             ),
           )
           .returning({ id: toolApplications.id });

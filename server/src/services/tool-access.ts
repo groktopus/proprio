@@ -4484,6 +4484,8 @@ export function toolAccessService(
           name: input.name ?? existing.name,
           description: input.description ?? existing.description,
           status: input.status ?? existing.status,
+          // An explicit state supersedes an archive caused by the last removal.
+          ...(input.status !== undefined ? { archivedAt: null } : {}),
           pluginId: input.pluginId ?? existing.pluginId,
           ownerAgentId: input.ownerAgentId ?? existing.ownerAgentId,
           ownerUserId: input.ownerUserId ?? existing.ownerUserId,

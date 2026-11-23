@@ -718,6 +718,7 @@ export function aiConnectionService(db: Db) {
           .for("update");
         if (
           !current ||
+          current.status === "revoked" ||
           current.updatedAt.getTime() !== reconnect.grant.updatedAt.getTime() ||
           current.updatedAt.getTime() > attemptStartedAt.getTime()
         )
@@ -792,7 +793,7 @@ export function aiConnectionService(db: Db) {
       const source = aiConnectionCatalogSlug(input.provider, routing);
       const providerName = getAppStoreDefinition(source)?.name ?? AI_CONNECTION_CAPABILITIES[input.provider].name;
       const key = `app-gallery:${source}`;
-      await tx
+      if (!reconnect) await tx
         .insert(toolApplications)
         .values({
           companyId,
@@ -809,16 +810,28 @@ export function aiConnectionService(db: Db) {
         .where(
           and(
             eq(toolApplications.companyId, companyId),
-            or(
-              eq(toolApplications.applicationKey, key),
-              eq(
-                toolApplications.name,
-                providerName,
-              ),
-            ),
+            reconnect
+              ? eq(toolApplications.id, reconnect.connection.applicationId)
+              : or(eq(toolApplications.applicationKey, key), eq(toolApplications.name, providerName)),
           ),
-        );
+        )
+        // Last-connection removal locks the same company-scoped application row.
+        .for("update");
       if (!app) throw unprocessable("Could not find the provider application");
+      if (app.status === "disabled") {
+        throw unprocessable("This provider application is disabled");
+      }
+      if (app.status === "archived") {
+        // Last-connection removal sets both timestamps together. Do not revive
+        // a same-name application or an archive subsequently edited by an operator.
+        if (app.applicationKey !== key || app.archivedAt?.getTime() !== app.updatedAt.getTime()) {
+          throw unprocessable("This provider application is archived");
+        }
+        await tx
+          .update(toolApplications)
+          .set({ status: "active", archivedAt: null, updatedAt: new Date() })
+          .where(and(eq(toolApplications.id, app.id), eq(toolApplications.companyId, companyId)));
+      }
       if (reconnect)
         await tx
           .update(toolConnections)
