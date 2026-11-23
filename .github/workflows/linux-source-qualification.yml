@@ -7,6 +7,7 @@ on:
       - .github/workflows/linux-source-qualification.yml
       - scripts/ci/linux-source-qualification.mjs
       - tests/runner-recovery/README.md
+      - packages/proprio-runner/protocol/manifest.json
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
@@ -70,8 +71,9 @@ jobs:
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
           pnpm test:runner-recovery
+          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+            src/live/runnerd-restart-continuation.test.ts \
+            src/live/runnerd-codex-transport-settlement.test.ts
           pnpm exec vitest run --maxWorkers 1 \
-            packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts \
-            packages/proprio-runner/src/live/runnerd-codex-transport-settlement.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
