@@ -858,6 +858,40 @@ describe("Hermes Gateway operator Stop", () => {
     },
   );
 
+  it.each(["qualified", "older version", "wrong run", "wrong admission", "unaccepted Stop"] as const)(
+    "recognizes an exact observed worker exit only with qualified evidence (%s)",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const { abort, ctx } = makeStopContext();
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/v1/runs") return json({ run_id: "hermes-123" });
+        if (path.endsWith("/events")) return hung();
+        expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fixture-token");
+        expect(init?.redirect).toBe("error");
+        if (path.endsWith("/stop")) {
+          return json({ run_id: "hermes-123", status: "stopping", admission_id: "admission" },
+            scenario === "unaccepted Stop" ? 409 : 200);
+        }
+        if (path === "/health/detailed") {
+          return json({ platform: "hermes-agent", version: scenario === "older version" ? "0.23.2" : "0.23.3" });
+        }
+        return json({ run_id: scenario === "wrong run" ? "other" : "hermes-123", status: "cancelled",
+          admission_id: scenario === "wrong admission" ? "other" : "admission" });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const execution = execute(ctx);
+      await vi.advanceTimersByTimeAsync(0);
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      const result = await execution;
+      expect(result.providerStopObserved).toEqual(scenario === "qualified"
+        ? { provider: "hermes_gateway", remoteRunId: "hermes-123", gatewayVersion: "0.23.3" }
+        : undefined);
+      expect(result.executionRecovery).toBeUndefined();
+    },
+  );
+
   it.each(["create", "stop", "status", "still running"])(
     "bounds cancellation without false proof when the gateway is stuck at %s",
     async (phase) => {
