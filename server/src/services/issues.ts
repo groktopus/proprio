@@ -12221,22 +12221,25 @@ export function issueService(db: Db) {
           if (!selectedGoal) throw notFound("Goal not found");
         }
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
-          getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
+          getProjectDefaultGoalId(tx, receiptExisting.companyId, receiptExisting.projectId),
           getProjectDefaultGoalId(
             tx,
-            existing.companyId,
-            issueData.projectId !== undefined
-              ? issueData.projectId
-              : existing.projectId,
+            receiptExisting.companyId,
+            patch.projectId !== undefined
+              ? patch.projectId
+              : receiptExisting.projectId,
           ),
         ]);
 
         const goalBinding = resolveNextIssueGoalId({
-          currentProjectId: existing.projectId,
-          currentGoalId: existing.goalId,
-          currentGoalOrigin: existing.goalOrigin as IssueGoalOrigin,
+          currentProjectId: receiptExisting.projectId,
+          currentGoalId: receiptExisting.goalId,
+          currentGoalOrigin: receiptExisting.goalOrigin as IssueGoalOrigin,
           currentProjectGoalId,
-          projectId: issueData.projectId,
+          projectId:
+            patch.projectId !== undefined
+              ? patch.projectId
+              : receiptExisting.projectId,
           goalId: issueData.goalId,
           projectGoalId: nextProjectGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -352,6 +352,69 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
       .send({ projectId: projectB!.id, goalId: null }).expect(200);
     changed = await db.select().from(issues).where(eq(issues.id, explicit.body.id)).then((rows) => rows[0]!);
     expect(changed).toMatchObject({ projectId: projectB!.id, goalId: goalB!.id, goalOrigin: "inherited" });
+  });
+
+  it("resolves goal binding from the row locked for a concurrent update", async () => {
+    const companyId = await seedCompany();
+    const app = createApp();
+    const [goalA, goalB, goalC] = await db.insert(goals).values([
+      { companyId, title: "Concurrent A", level: "company", status: "active" },
+      { companyId, title: "Concurrent B", level: "company", status: "active" },
+      { companyId, title: "Concurrent C", level: "company", status: "active" },
+    ]).returning();
+    const [projectA, projectB] = await db.insert(projects).values([
+      { companyId, name: "Concurrent Project A", goalId: goalA!.id },
+      { companyId, name: "Concurrent Project B", goalId: goalB!.id },
+    ]).returning();
+    const explicit = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Concurrent explicit", projectId: projectA!.id, goalId: goalA!.id, allowDuplicate: true })
+      .expect(201);
+    const inherited = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Concurrent inherited", projectId: projectA!.id, allowDuplicate: true })
+      .expect(201);
+
+    async function queueTwoUpdates(issueId: string, firstPatch: Record<string, unknown>, secondPatch: Record<string, unknown>) {
+      let markLocked!: () => void;
+      let release!: () => void;
+      const rowLocked = new Promise<void>((resolve) => { markLocked = resolve; });
+      const mayCommit = new Promise<void>((resolve) => { release = resolve; });
+      const blocker = db.transaction(async (tx) => {
+        await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+        markLocked();
+        await mayCommit;
+      });
+      await rowLocked;
+
+      let first: Promise<unknown> | undefined;
+      let second: Promise<unknown> | undefined;
+      const waitingUpdates = async () => (await db.execute<{ count: number }>(sql`
+        select count(*)::int as count from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'
+      `))[0]!.count;
+      try {
+        first = request(app).patch(`/api/issues/${issueId}`).send(firstPatch).expect(200).then((response) => response);
+        await expect.poll(waitingUpdates, { timeout: 5000 }).toBe(1);
+        second = request(app).patch(`/api/issues/${issueId}`).send(secondPatch).expect(200).then((response) => response);
+        await expect.poll(waitingUpdates, { timeout: 5000 }).toBe(2);
+        release();
+        await blocker;
+        await Promise.all([first, second]);
+      } finally {
+        release();
+        await blocker;
+        await Promise.allSettled([first, second].filter((pending): pending is Promise<unknown> => pending !== undefined));
+      }
+    }
+
+    await queueTwoUpdates(explicit.body.id, { goalId: goalC!.id }, { title: "Concurrent explicit after wait" });
+    const [afterExplicit] = await db.select().from(issues).where(eq(issues.id, explicit.body.id));
+    expect(afterExplicit).toMatchObject({ goalId: goalC!.id, goalOrigin: "explicit", title: "Concurrent explicit after wait" });
+
+    await queueTwoUpdates(inherited.body.id, { projectId: projectB!.id }, { title: "Concurrent inherited after wait" });
+    const [afterInherited] = await db.select().from(issues).where(eq(issues.id, inherited.body.id));
+    expect(afterInherited).toMatchObject({ projectId: projectB!.id, goalId: goalB!.id, goalOrigin: "inherited", title: "Concurrent inherited after wait" });
   });
 
   it("keeps legacy rows with unknown origin on the prior fallback heuristic", async () => {
