@@ -45,7 +45,7 @@ import { releaseRetainedNativeSessionCleanup } from "../retained-native-session-
 import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-work.js";
 import { isLeavingRunStartsToReplacement, subscribeRunStartHandoverChanges } from "../run-start-handover.js";
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
-import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
+import { settleNativeFailureTask } from "./native-failure-task-settlement.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
@@ -324,7 +324,6 @@ import { resolveProprioInstanceRoot } from "../../home-paths.js";
 import { localCodexRepositoryCache } from "./local-codex-repository-cache.js";
 import { documentService } from "../documents.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
-import { issueService } from "../issues.js";
 import {
   NATIVE_STATUS_ARBITER_POLICY_VERSION,
   type NativeAuthoritativeIssueStatus,
@@ -13778,33 +13777,17 @@ async function executeProprioNativeSessionAttempt(
         ) {
           terminalRunToReport = updatedRun;
         }
-        const stillOwnsTask =
-          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
-          ["in_progress", "in_review"].includes(failureTask.status) &&
-          (!failureTask.executionRunId ||
-            failureTask.executionRunId === input.execution.binding.runId) &&
-          (!failureTask.checkoutRunId ||
-            failureTask.checkoutRunId === input.execution.binding.runId);
-        let failureBlockStatusVersion: number | undefined;
-        if (stillOwnsTask && recoveryProjection.issueStatus) {
-          const projected = await issueService(tx as unknown as Db).update(
-            input.execution.binding.issueId,
-            { status: recoveryProjection.issueStatus },
-            tx,
-          );
-          if (projected?.status === "blocked") failureBlockStatusVersion = projected.statusVersion;
-        }
-        if (
-          !ownershipUnverified &&
-          stillOwnsTask &&
-          phase === "terminal_failure"
-        ) {
-          await notifyNativeStatusReassessment(tx, { companyId: input.execution.binding.companyId, issueId: input.execution.binding.issueId });
-          await tx
-            .update(issues)
-            .set({ executionRunId: null, checkoutRunId: null, updatedAt: now })
-            .where(eq(issues.id, input.execution.binding.issueId));
-        }
+        const { stillOwnsTask, failureBlockStatusVersion } = await settleNativeFailureTask(tx, {
+          failureTask,
+          agentId: input.execution.binding.agentId,
+          companyId: input.execution.binding.companyId,
+          issueId: input.execution.binding.issueId,
+          runId: input.execution.binding.runId,
+          phase,
+          ownershipUnverified,
+          recoveryIssueStatus: recoveryProjection.issueStatus,
+          now,
+        });
         if (!stillOwnsTask) return;
         // The hold's reset deadline belongs to the provider-limit owner.
         if (providerLimit?.plan.automatic) await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerLimitResume,
