@@ -106,6 +106,7 @@ import {
   prepareIsolatedCodexHome,
   prepareIsolatedCodexRecoveryHome,
   releaseMaterializedNativeRuntimeSkills,
+  type NativeCodexRepositoryCache,
 } from "../drivers/runtime-context-materializer.js";
 import { resolvePackagedRunnerBinary, resolvePackagedRunnerBinaryAsync } from "./runner-binary.js";
 import { RUNNERD_CANONICAL_ITEM, RUNNERD_RUN_TERMINAL, RUNNERD_RUNTIME_ACTIVITY } from "../drivers/codex/codex-driver-values.js";
@@ -1741,6 +1742,8 @@ export interface CapabilityRunnerdProcessEvidence {
 export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionDriver {
   observability?: import("../drivers/agent-observability.js").ProviderObservabilityLaunch;
   homeMode?: "isolated" | "preconfigured";
+  /** Controller-owned scope and lock. Only the default local sandbox can share inodes. */
+  useSharedCodexRepository?: NativeCodexRepositoryCache;
   provider?: "cursor_cloud" | "codex" | "opencode" | "claude_managed" | "aws_agentcore" | "acpx";
   observeCredentials?: boolean;
   onCredentialsUpdated?: (event: PrpEvent) => Promise<void>;
@@ -6363,6 +6366,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
+        useSharedRepository: !this.options.runnerFilesystemRoot && !this.options.codexArgs
+          ? this.options.useSharedCodexRepository : undefined,
         observability: this.options.observability,
         sourceCodexHome:
           this.options.sourceCodexHome ??
@@ -7509,6 +7514,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ...auth,
           context: sourceRuntimeContext,
           colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
+          useSharedRepository: !this.options.runnerFilesystemRoot && !this.options.codexArgs
+            ? this.options.useSharedCodexRepository : undefined,
           observability: this.options.observability,
         });
       }

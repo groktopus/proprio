@@ -270,11 +270,21 @@ describe("runtime context materialization", () => {
       const alternate = await assignedSkill("first", 2, otherBytes);
       const homes = [join(root, "session-one"), join(root, "session-two"), join(root, "session-alternate")];
       const assignments = [[first, second], [second], [alternate]];
+      const cache = join(root, "company-cache");
+      await mkdir(cache, { mode: 0o700 });
+      let cacheOperation = Promise.resolve();
+      function useSharedRepository<T>(digest: string, consume: (entry: string) => Promise<T>): Promise<T> {
+        const operation = cacheOperation.then(() => consume(join(cache, digest)));
+        cacheOperation = operation.then(() => undefined, () => undefined);
+        return operation;
+      }
       await Promise.all(assignments.map((skills, i) => {
         const assigned = context(skills[0]!.bundle.rootPath, root);
         assigned.skills = skills;
         assigned.aggregateDigest = canonicalNativeRuntimeContextDigest(assigned);
-        return prepareIsolatedCodexHome({ context: assigned, codexHome: homes[i]!, colocateRepositoryFiles: true });
+        return prepareIsolatedCodexHome({
+          context: assigned, codexHome: homes[i]!, colocateRepositoryFiles: true, useSharedRepository,
+        });
       }));
 
       const copies = assignments.flatMap((skills, i) => skills.map(

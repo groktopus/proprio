@@ -8,6 +8,8 @@ on:
       - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
       - packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts
+      - packages/proprio-runner/src/live/runnerd-codex-transport.ts
+      - server/src/services/native-runtime/local-codex-repository-cache.ts
       - packages/proprio-runner/runner/crates/runner-core/src/bin/fake-codex-app-server.rs
 
 permissions:

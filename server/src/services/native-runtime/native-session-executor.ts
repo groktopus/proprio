@@ -321,6 +321,7 @@ import { emitStartupReuse, environmentStartupReuse } from "@groktopus/adapter-ut
 import { persistActivity, publishActivity } from "../activity-log.js";
 import { commitNativeStatusDecision } from "./status-decision-committer.js";
 import { resolveProprioInstanceRoot } from "../../home-paths.js";
+import { localCodexRepositoryCache } from "./local-codex-repository-cache.js";
 import { documentService } from "../documents.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueService } from "../issues.js";
@@ -18831,6 +18832,9 @@ async function createRunnerdBackendWithinSessionClaim(
         onSpawn: input.onSpawn,
         ...(input.execution.provider.kind === "codex" ? { disableCodexWebSearch: "webSearch" in input.execution.provider && input.execution.provider.webSearch === "disabled" } : {}),
         homeMode: preconfiguredHome ? "preconfigured" : "isolated",
+        useSharedCodexRepository: input.execution.provider.kind === "codex" && !remoteTarget && !preconfiguredHome
+          ? localCodexRepositoryCache(runnerdStateBase(), input.execution.binding.companyId)
+          : undefined,
         ...accountingTransportOptions,
         onCredentialsUpdated: credentialUpdates?.onCredentialsUpdated,
         provider:
