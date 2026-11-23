@@ -1,0 +1,55 @@
+name: Native skill filesystem
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-skill-filesystem.yml
+      - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
+      - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
+
+permissions:
+  contents: read
+
+jobs:
+  skill-staging:
+    if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ! command -v mkfs.btrfs; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends btrfs-progs
+          fi
+      - name: Verify ext4 copies and Btrfs shared extents
+        run: |
+          scratch="$(mktemp -d "$RUNNER_TEMP/proprio-skill-fs.XXXXXX")"
+          mkdir "$scratch/mount"
+          trap 'if mountpoint -q "$scratch/mount"; then sudo umount "$scratch/mount"; fi' EXIT
+          for filesystem in ext4 btrfs; do
+            image="$scratch/$filesystem.image"
+            truncate -s 256M "$image"
+            if [ "$filesystem" = ext4 ]; then
+              mkfs.ext4 -F "$image"
+            else
+              mkfs.btrfs "$image"
+            fi
+            sudo mount -o loop "$image" "$scratch/mount"
+            sudo chown "$(id -u):$(id -g)" "$scratch/mount"
+            TMPDIR="$scratch/mount" PROPRIO_TEST_CODEX_SKILL_FILESYSTEM="$filesystem" \
+              pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging'
+            sudo umount "$scratch/mount"
+          done
