@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 const sourceRoot = new URL("../", import.meta.url);
@@ -98,7 +98,7 @@ if (args[0] === 'api') {
       return spawnSync("bash", [join(root, "scripts/create-github-release.sh"), ...args], {
         cwd: root, encoding: "utf8", env: {
           ...process.env,
-          PATH: `${bin}:/usr/bin:/bin`,
+          PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
           GH_LOG: logPath,
           GH_REPORT: reportPath,
           REPORT: JSON.stringify(report),
