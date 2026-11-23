@@ -122,6 +122,23 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
   it("keeps configured manual-only and invalid schedules quiet", async () => {
     await job("manual", ""); await job("invalid", "not cron"); await start(); await quiet(); expect(rpc).not.toHaveBeenCalled();
   });
+  it("clears a saved malformed plugin deadline and still allows manual execution", async () => {
+    const row = await due();
+    await db.update(pluginJobs).set({ schedule: "*/10minutes * * * *" }).where(eq(pluginJobs.id, row.id));
+
+    await start();
+    await vi.waitFor(async () => {
+      expect(await pluginJobStore(db).getJobById(row.id)).toMatchObject({
+        status: "active", schedule: "*/10minutes * * * *", nextRunAt: null,
+      });
+    });
+    expect(await runs()).toEqual([]);
+    expect(rpc).not.toHaveBeenCalled();
+    await scheduler!.triggerJob(row.id);
+    await completed();
+    expect(rpc.mock.calls[0][2]).toMatchObject({ job: { trigger: "manual" } });
+  });
+
   it("initializes a first declaration after empty startup and runs only at its deadline", async () => {
     await start(); await quiet(); const row = await job(); await settled();
     const current = await pluginJobStore(db).getJobById(row.id);
