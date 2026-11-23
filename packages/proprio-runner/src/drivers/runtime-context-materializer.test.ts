@@ -200,7 +200,7 @@ describe("runtime context materialization", () => {
       roots.push(root);
       expect(execFileSync("findmnt", ["--noheadings", "--output", "FSTYPE", "--target", root], { encoding: "utf8" }).trim())
         .toBe(skillFilesystem);
-      const repositoryPath = join("repo", "skills", "unassigned-sibling", "data.bin");
+      const repositoryPath = join(".proprio-repository", "skills", "unassigned-sibling", "data.bin");
       const data = randomBytes(8 * 1024 * 1024);
       const bundles = await Promise.all(["first", "second"].map(async name => {
         const bundle = join(root, name);
@@ -213,14 +213,29 @@ describe("runtime context materialization", () => {
       assignment.skills = bundles;
       assignment.aggregateDigest = canonicalNativeRuntimeContextDigest(assignment);
       const homes = [join(root, "run-1"), join(root, "run-2")];
-      await Promise.all(homes.map(codexHome => prepareIsolatedCodexHome({ context: assignment, codexHome })));
+      await Promise.all(homes.map(codexHome => prepareIsolatedCodexHome({
+        context: assignment, codexHome, colocateRepositoryFiles: true,
+      })));
       const copies = homes.flatMap(home => bundles.map(bundle => join(home, "skills", bundle.runtimeName, repositoryPath)));
       const stats = await Promise.all(copies.map(path => stat(path)));
-      expect(new Set(stats.map(file => file.ino)).size).toBe(copies.length);
-      const allocated = stats.reduce((sum, file) => sum + file.blocks * 512, 0);
+      const uniqueFiles = new Map(stats.map(file => [file.ino, file]));
+      const allocated = [...uniqueFiles.values()].reduce((sum, file) => sum + file.blocks * 512, 0);
       if (skillFilesystem === "ext4") {
-        expect(allocated).toBeGreaterThanOrEqual(copies.length * data.byteLength);
+        expect(stats[0]!.ino).toBe(stats[1]!.ino);
+        expect(stats[2]!.ino).toBe(stats[3]!.ino);
+        expect(uniqueFiles.size).toBe(homes.length);
+        expect(stats.every(file => file.nlink === 2)).toBe(true);
+        for (const bundle of bundles) {
+          const source = await stat(join(bundle.bundle.rootPath, repositoryPath));
+          expect(source.nlink).toBe(1);
+          expect(uniqueFiles.has(source.ino)).toBe(false);
+        }
+        expect(allocated).toBe(homes.length * data.byteLength);
+        await releaseMaterializedNativeRuntimeSkills(join(homes[0]!, "skills"));
+        expect((await readFile(copies[2]!)).equals(data)).toBe(true);
+        expect((await stat(copies[2]!)).mode & 0o222).toBe(0);
       } else {
+        expect(uniqueFiles.size).toBe(copies.length);
         for (const path of copies) {
           expect((await readFile(path)).equals(data)).toBe(true);
           const extents = execFileSync("filefrag", ["-sv", path], { encoding: "utf8" });

@@ -6362,6 +6362,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       await prepareIsolatedCodexHome({
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
+        colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
         observability: this.options.observability,
         sourceCodexHome:
           this.options.sourceCodexHome ??
@@ -7507,6 +7508,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         await prepareIsolatedCodexHome({
           ...auth,
           context: sourceRuntimeContext,
+          colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
           observability: this.options.observability,
         });
       }
