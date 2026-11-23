@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -47,7 +48,6 @@ vi.mock("postgres", () => ({
 
 const dirs: string[] = [];
 const connectionString = "postgresql://fixture@127.0.0.1:1/fixture";
-const loader = import.meta.resolve("tsx");
 const source = new URL("./backup-lib.ts", import.meta.url).href;
 
 function fixture(script: string) {
@@ -73,6 +73,7 @@ it.skipIf(process.platform === "win32")("rejects missing gzip input in a subproc
   const directory = fixture('printf "%s" "$$" > "$RESTORE_FIXTURE_PID"\nexec cat >/dev/null\n');
   const pidPath = path.join(directory, "pid");
   const backupFile = path.join(directory, "missing.sql.gz");
+  const loader = createRequire(import.meta.url).resolve("tsx");
   const result = spawnSync(process.execPath, ["--import", loader, "--input-type=module", "-e", `
     import { runDatabaseRestore } from ${JSON.stringify(source)};
     try {
