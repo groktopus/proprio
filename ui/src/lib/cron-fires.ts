@@ -2,10 +2,8 @@
 
 import { nextRoutineCronFire, parseRoutineCron } from "@groktopus/shared/routine-cron";
 
-export type ParsedCron = ReturnType<typeof parseRoutineCron>;
-
 /** Parse a 5-field cron expression. Returns null when it cannot be parsed. */
-export function parseCronExpression(expression: string | null | undefined): ParsedCron | null {
+export function parseCronExpression(expression: string | null | undefined) {
   if (!expression) return null;
   try {
     return parseRoutineCron(expression);
@@ -16,17 +14,19 @@ export function parseCronExpression(expression: string | null | undefined): Pars
 
 /** Compute upcoming occurrences using the same expression, timezone and reference clock as the server. */
 export function nextCronFires(
-  expression: string | null | undefined,
+  expression: string | ReturnType<typeof parseRoutineCron> | null | undefined,
   count: number,
   options: { after?: Date; timeZone?: string } = {},
 ): Date[] {
-  if (!parseCronExpression(expression) || count <= 0) return [];
+  if (!expression || count <= 0) return [];
+  const cron = typeof expression === "string" ? parseCronExpression(expression) : expression;
+  if (!cron) return [];
   const timeZone = options.timeZone ?? "UTC";
   const fires: Date[] = [];
   let cursor = options.after ?? new Date();
   for (let i = 0; i < count; i++) {
     try {
-      const next = nextRoutineCronFire(expression!, timeZone, cursor);
+      const next = nextRoutineCronFire(cron, timeZone, cursor);
       if (!next) break;
       fires.push(next);
       cursor = next;

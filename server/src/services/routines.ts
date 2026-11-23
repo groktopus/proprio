@@ -72,6 +72,7 @@ import {
   stringifyRoutineVariableValue,
   syncRoutineVariablesWithTemplate,
 } from "@groktopus/shared";
+import { parseRoutineCron } from "@groktopus/shared/routine-cron";
 import { trackRoutineRun } from "@groktopus/shared/telemetry";
 import { HttpError, badRequest, conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -629,7 +630,6 @@ export function routineService(
     eq(routineTriggers.archived, false),
     eq(routines.status, "active"),
     eq(companies.status, "active"),
-    isNotNull(routineTriggers.nextRunAt),
     isNotNull(routineTriggers.cronExpression),
     isNotNull(routineTriggers.timezone),
   );
@@ -637,6 +637,42 @@ export function routineService(
     eq(routineTriggers.routineId, routines.id),
     eq(routineTriggers.companyId, routines.companyId),
   );
+
+  async function initializeLegacyScheduleDeadlines(now: Date) {
+    const schedules = await db.select({
+      id: routineTriggers.id,
+      companyId: routineTriggers.companyId,
+      expression: routineTriggers.cronExpression,
+      timezone: routineTriggers.timezone,
+    }).from(routineTriggers)
+      .innerJoin(routines, scheduledRoutineJoin())
+      .innerJoin(companies, eq(routines.companyId, companies.id))
+      .where(and(scheduledTriggerEligibility(), isNull(routineTriggers.nextRunAt)));
+
+    for (const { id, companyId, expression, timezone } of schedules) {
+      if (expression === null || timezone === null) continue;
+      let nextRunAt: Date | null;
+      try {
+        const cron = parseRoutineCron(expression);
+        // Only schedules restricting both day fields gain dates from the OR rule.
+        if (cron.daysOfMonth.length === 31 || cron.daysOfWeek.length === 7) continue;
+        nextRunAt = nextRoutineCronFire(cron, timezone, now);
+      } catch {
+        continue;
+      }
+      if (!nextRunAt) continue;
+      await db.update(routineTriggers).set({ nextRunAt, updatedAt: now }).where(and(
+        eq(routineTriggers.id, id),
+        eq(routineTriggers.companyId, companyId),
+        eq(routineTriggers.kind, "schedule"),
+        eq(routineTriggers.enabled, true),
+        eq(routineTriggers.archived, false),
+        eq(routineTriggers.cronExpression, expression),
+        eq(routineTriggers.timezone, timezone),
+        isNull(routineTriggers.nextRunAt),
+      ));
+    }
+  }
 
   async function getRoutineById(id: string) {
     if (!isRoutineUuidInput(id)) return null;
@@ -2907,7 +2943,7 @@ export function routineService(
       const existing = await getTriggerById(id);
       if (!existing) return null;
 
-      let nextRunAt = existing.nextRunAt;
+      let nextRunAt: Date | null | undefined;
       let clearScheduleError = false;
       let cronExpression = existing.cronExpression;
       let timezone = existing.timezone;
@@ -2929,7 +2965,9 @@ export function routineService(
         if (cronError && (patch.cronExpression !== undefined || patch.enabled === true || patch.timezone !== undefined)) {
           throw unprocessable(cronError);
         }
-        if (cronExpression && timezone && !cronError) {
+        const scheduleChanged = cronExpression !== existing.cronExpression || timezone !== existing.timezone;
+        const resumed = (patch.enabled === true && !existing.enabled) || (patch.archived === false && existing.archived);
+        if ((scheduleChanged || resumed) && cronExpression && timezone && !cronError) {
           nextRunAt = nextCronTickInTimeZone(cronExpression, timezone, new Date());
         }
         if ((patch.enabled ?? existing.enabled) === true) {
@@ -2979,12 +3017,12 @@ export function routineService(
           .update(routineTriggers)
           .set({
             label: patch.label === undefined ? existing.label : patch.label,
-            enabled: patch.enabled ?? existing.enabled,
+            enabled: patch.enabled ?? current.enabled,
             ...(patch.setupPending !== undefined ? { setupPending: patch.setupPending } : {}),
             ...(plan.restoredDelivery ? { lastWebhookDelivery: plan.restoredDelivery.value } : {}),
             ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
-            cronExpression,
-            timezone,
+            cronExpression: patch.cronExpression === undefined ? undefined : cronExpression,
+            timezone: patch.timezone === undefined ? undefined : timezone,
             ...(clearScheduleError ? { lastResult: null } : {}),
             nextRunAt,
             signingMode: patch.signingMode === undefined ? current.signingMode : patch.signingMode,
@@ -3599,11 +3637,12 @@ export function routineService(
     },
 
     nextScheduledTriggerAt: async (): Promise<number | null> => {
+      await initializeLegacyScheduleDeadlines(new Date());
       const [row] = await db.select({ at: routineTriggers.nextRunAt })
         .from(routineTriggers)
         .innerJoin(routines, scheduledRoutineJoin())
         .innerJoin(companies, eq(routines.companyId, companies.id))
-        .where(scheduledTriggerEligibility())
+        .where(and(scheduledTriggerEligibility(), isNotNull(routineTriggers.nextRunAt)))
         .orderBy(asc(routineTriggers.nextRunAt)).limit(1);
 
       return row?.at?.getTime() ?? null;

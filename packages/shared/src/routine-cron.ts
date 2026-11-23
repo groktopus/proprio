@@ -1,13 +1,11 @@
 /** Shared cron interpretation for routine schedule previews and execution. */
 
-export interface RoutineCron {
+interface RoutineCron {
   minutes: number[];
   hours: number[];
   daysOfMonth: number[];
   months: number[];
   daysOfWeek: number[];
-  daysOfMonthWildcard: boolean;
-  daysOfWeekWildcard: boolean;
 }
 
 const SPECS = [
@@ -23,19 +21,22 @@ const formatterCache = new Map<string, Intl.DateTimeFormat>();
 function parseField(token: string, spec: typeof SPECS[number]): number[] {
   const values = new Set<number>();
   for (const part of token.split(",")) {
+    if (!part) throw new Error(`Empty element in cron ${spec.name} field`);
     const match = /^(\*|([0-9]+)(?:-([0-9]+))?)(?:\/([0-9]+))?$/.exec(part);
     if (!match) throw new Error(`Invalid element "${part}" in cron ${spec.name} field`);
     const [, base, startText, endText, stepText] = match;
     const step = stepText === undefined ? 1 : Number(stepText);
-    if (!Number.isSafeInteger(step) || step < 1) throw new Error(`Invalid step in cron ${spec.name} field`);
+    if (!Number.isSafeInteger(step) || step < 1) throw new Error(`Invalid step "${stepText}" in cron ${spec.name} field`);
     const start = base === "*" ? spec.min : Number(startText);
     const end = endText !== undefined ? Number(endText) : base === "*" || stepText !== undefined ? spec.max : start;
-    if (start < spec.min || start > spec.max || end < spec.min || end > spec.max || start > end) {
-      throw new Error(`Invalid range in cron ${spec.name} field`);
+    for (const value of [start, end]) {
+      if (value < spec.min || value > spec.max) {
+        throw new Error(`Value ${value} out of range [${spec.min}–${spec.max}] for cron ${spec.name} field`);
+      }
     }
+    if (start > end) throw new Error(`Invalid range ${start}-${end} in cron ${spec.name} field (start > end)`);
     for (let value = start; value <= end; value += step) values.add(value);
   }
-  if (!values.size) throw new Error("Empty cron field");
   return [...values].sort((a, b) => a - b);
 }
 
@@ -44,18 +45,18 @@ function coversField(values: number[], spec: typeof SPECS[number]) {
 }
 
 export function parseRoutineCron(expression: string): RoutineCron {
-  const fields = expression.trim().split(/\s+/);
-  if (fields.length !== 5) throw new Error(`Cron expression must have exactly 5 fields, got ${fields.length}`);
-  const daysOfMonth = parseField(fields[2]!, SPECS[2]);
-  const daysOfWeek = parseField(fields[4]!, SPECS[4]);
+  const trimmed = expression.trim();
+  if (!trimmed) throw new Error("Cron expression must not be empty");
+  const fields = trimmed.split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`Cron expression must have exactly 5 fields, got ${fields.length}: "${trimmed}"`);
+  }
   return {
     minutes: parseField(fields[0]!, SPECS[0]),
     hours: parseField(fields[1]!, SPECS[1]),
-    daysOfMonth,
+    daysOfMonth: parseField(fields[2]!, SPECS[2]),
     months: parseField(fields[3]!, SPECS[3]),
-    daysOfWeek,
-    daysOfMonthWildcard: coversField(daysOfMonth, SPECS[2]),
-    daysOfWeekWildcard: coversField(daysOfWeek, SPECS[4]),
+    daysOfWeek: parseField(fields[4]!, SPECS[4]),
   };
 }
 
@@ -63,7 +64,7 @@ function formatter(timeZone: string) {
   let value = formatterCache.get(timeZone);
   if (!value) {
     value = new Intl.DateTimeFormat("en-US", {
-      timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
       weekday: "short", hourCycle: "h23",
     });
     formatterCache.set(timeZone, value);
@@ -75,40 +76,42 @@ export function assertRoutineTimeZone(timeZone: string) {
   formatter(timeZone);
 }
 
-function matches(cron: RoutineCron, date: Date, timeZone: string) {
-  // Cheap UTC filters keep sparse UTC schedules off the Intl formatting path.
-  if (timeZone === "UTC" && (
-    !cron.minutes.includes(date.getUTCMinutes()) || !cron.hours.includes(date.getUTCHours()) ||
-    !cron.months.includes(date.getUTCMonth() + 1)
-  )) return false;
-  const parts: Record<string, string> = {};
-  for (const part of formatter(timeZone).formatToParts(date)) {
-    if (part.type !== "literal") parts[part.type] = part.value;
-  }
-  const weekday = WEEKDAYS[parts.weekday ?? ""];
-  if (weekday === undefined) throw new Error(`Unable to resolve weekday for ${timeZone}`);
-  const domMatches = cron.daysOfMonth.includes(Number(parts.day));
-  const dowMatches = cron.daysOfWeek.includes(weekday);
-  const dayMatches = !cron.daysOfMonthWildcard && !cron.daysOfWeekWildcard
-    ? domMatches || dowMatches
-    : domMatches && dowMatches;
-  return cron.minutes.includes(Number(parts.minute)) && cron.hours.includes(Number(parts.hour)) &&
-    cron.months.includes(Number(parts.month)) && dayMatches;
-}
-
-export function nextRoutineCronFire(expression: string, timeZone: string, after: Date): Date | null {
-  const cron = parseRoutineCron(expression);
-  // Constructing the formatter validates the timezone before searching.
-  assertRoutineTimeZone(timeZone);
+export function nextRoutineCronFire(expression: string | RoutineCron, timeZone: string, after: Date): Date | null {
+  const cron = typeof expression === "string" ? parseRoutineCron(expression) : expression;
+  const format = timeZone === "UTC" ? null : formatter(timeZone);
   if (!Number.isFinite(after.getTime())) throw new RangeError("Invalid reference date");
+
+  const eitherDayMatches = !coversField(cron.daysOfMonth, SPECS[2]) && !coversField(cron.daysOfWeek, SPECS[4]);
+  function matchesDay(day: number, weekday: number) {
+    const dayOfMonthMatches = cron.daysOfMonth.includes(day);
+    const dayOfWeekMatches = cron.daysOfWeek.includes(weekday);
+    return eitherDayMatches ? dayOfMonthMatches || dayOfWeekMatches : dayOfMonthMatches && dayOfWeekMatches;
+  }
+
   const cursor = new Date(after.getTime());
   cursor.setUTCSeconds(0, 0);
   cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
-  const maxIterations = 366 * 24 * 60 * 5;
-  for (let i = 0; i < maxIterations; i++) {
-    if (matches(cron, cursor, timeZone)) return new Date(cursor.getTime());
+  const deadline = cursor.getTime() + 5 * 366 * 24 * 60 * 60_000;
+  while (cursor.getTime() < deadline) {
+    if (!format) {
+      if (!cron.months.includes(cursor.getUTCMonth() + 1) || !matchesDay(cursor.getUTCDate(), cursor.getUTCDay())) {
+        cursor.setUTCHours(24, 0, 0, 0);
+        continue;
+      }
+      if (cron.hours.includes(cursor.getUTCHours()) && cron.minutes.includes(cursor.getUTCMinutes())) return cursor;
+    } else {
+      const parts: Record<string, string> = {};
+      for (const part of format.formatToParts(cursor)) {
+        if (part.type !== "literal") parts[part.type] = part.value;
+      }
+      const weekday = WEEKDAYS[parts.weekday ?? ""];
+      if (weekday === undefined) throw new Error(`Unable to resolve weekday for ${timeZone}`);
+      if (
+        cron.minutes.includes(Number(parts.minute)) && cron.hours.includes(Number(parts.hour))
+        && cron.months.includes(Number(parts.month)) && matchesDay(Number(parts.day), weekday)
+      ) return cursor;
+    }
     cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
   }
   return null;
 }
-

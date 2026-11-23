@@ -185,8 +185,10 @@ both day-of-month and day-of-week are restricted, either matching day fires; if
 one field is wildcard, the restricted field controls the day match. Existing
 saved `next_run_at` values remain the current durable obligation after an
 upgrade. Once that occurrence is consumed, subsequent deadlines use the shared
-rules; creating or editing a schedule computes its first deadline with those
-rules immediately.
+rules. Previews use the selected schedule timezone. Metadata edits preserve an
+existing deadline, while creating, changing, or resuming a schedule computes a
+new one. The scheduler initializes eligible legacy schedules whose deadline is
+missing and whose day fields now produce a future occurrence.
 
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
 Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)

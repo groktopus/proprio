@@ -14,8 +14,8 @@ describe("nextCronTickInTimeZone formatter caching", () => {
       if (formats > 48) throw new Error("Sparse UTC schedules must skip impossible dates");
       return format.call(this, date);
     });
-    const next = nextCronTickInTimeZone("0 12 1 1 *", "UTC", new Date("2020-01-01T12:00:00Z"));
-    expect(next?.toISOString()).toBe("2021-01-01T12:00:00.000Z");
+    const next = nextCronTickInTimeZone("* * 1 * *", "UTC", new Date("2026-11-01T23:59:00Z"));
+    expect(next?.toISOString()).toBe("2026-12-01T00:00:00.000Z");
     expect(formats).toBeLessThanOrEqual(48);
   });
 

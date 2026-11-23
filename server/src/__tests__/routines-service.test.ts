@@ -1614,6 +1614,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       // when this occurrence is consumed and the next deadline is calculated.
       const legacyDeadline = new Date("2027-02-01T09:00:00.000Z");
       await db.update(routineTriggers).set({ nextRunAt: legacyDeadline }).where(eq(routineTriggers.id, trigger.id));
+      await svc.updateTrigger(trigger.id, { label: "Renamed schedule" }, {});
       expect((await svc.getTrigger(trigger.id))?.nextRunAt).toEqual(legacyDeadline);
 
       const dueAt = legacyDeadline;
@@ -1625,6 +1626,25 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       // future deadline, so restart recovery cannot replay the claimed fire.
       expect(await svc.tickScheduledTriggers(dueAt)).toEqual({ triggered: 0 });
       expect(await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("initializes an existing null deadline once the cron has a valid next fire", async () => {
+    const { routine, svc } = await seedFixture();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2027-02-01T00:00:00Z"));
+    try {
+      const { trigger } = await svc.createTrigger(routine.id, {
+        kind: "schedule", enabled: true, cronExpression: "0 9 31 2 1", timezone: "UTC",
+      }, {});
+      await db.update(routineTriggers).set({ nextRunAt: null }).where(eq(routineTriggers.id, trigger.id));
+      const firstFire = new Date("2027-02-01T09:00:00Z");
+      expect(await svc.nextScheduledTriggerAt()).toBe(firstFire.getTime());
+      expect((await svc.getTrigger(trigger.id))?.nextRunAt).toEqual(firstFire);
+      expect(await svc.tickScheduledTriggers(firstFire)).toEqual({ triggered: 1 });
+      expect(await svc.tickScheduledTriggers(firstFire)).toEqual({ triggered: 0 });
     } finally {
       vi.useRealTimers();
     }

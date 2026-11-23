@@ -152,7 +152,7 @@ function ordinalSuffix(n: number): string {
 
 export { describeSchedule };
 
-export function getScheduleCronValidation(cron: string): {
+export function getScheduleCronValidation(cron: string, timezone = "UTC"): {
   valid: boolean;
   message: string;
   nextFires: Date[];
@@ -175,7 +175,8 @@ export function getScheduleCronValidation(cron: string): {
     };
   }
 
-  if (!parseCronExpression(trimmed)) {
+  const parsed = parseCronExpression(trimmed);
+  if (!parsed) {
     return {
       valid: false,
       message: "Cron fields must use valid numbers, ranges, lists, wildcards, or steps.",
@@ -183,7 +184,7 @@ export function getScheduleCronValidation(cron: string): {
     };
   }
 
-  const nextFires = nextCronFires(trimmed, 3, { timeZone: "UTC" });
+  const nextFires = nextCronFires(parsed, 3, { timeZone: timezone });
   return {
     valid: true,
     message: nextFires.length > 0 ? "Valid cron." : "Valid cron, but no upcoming fires were found.",
@@ -195,12 +196,14 @@ export function ScheduleEditor({
   value,
   onChange,
   onValidityChange,
+  timezone = "UTC",
   inline = false,
   trailing,
 }: {
   value: string;
   onChange: (cron: string) => void;
   onValidityChange?: (valid: boolean) => void;
+  timezone?: string;
   /** Lay the frequency and its time controls out on one wrapping line. */
   inline?: boolean;
   /** Extra control placed after the time controls, such as a time zone picker. */
@@ -213,7 +216,7 @@ export function ScheduleEditor({
   const [dayOfWeek, setDayOfWeek] = useState(parsed.dayOfWeek);
   const [dayOfMonth, setDayOfMonth] = useState(parsed.dayOfMonth);
   const [customCron, setCustomCron] = useState(preset === "custom" ? value : "");
-  const customValidation = useMemo(() => getScheduleCronValidation(customCron), [customCron]);
+  const customValidation = useMemo(() => getScheduleCronValidation(customCron, timezone), [customCron, timezone]);
 
   useEffect(() => {
     onValidityChange?.(preset !== "custom" || customValidation.valid);
@@ -276,9 +279,9 @@ export function ScheduleEditor({
               // their submit affordance in the same render. Relying solely on the
               // effect below leaves a one-tick window where an invalid draft still
               // reads as valid to the parent.
-              const nextValidation = getScheduleCronValidation(nextCron);
-              onValidityChange?.(nextValidation.valid);
-              if (nextValidation.valid) {
+              const valid = parseCronExpression(nextCron) !== null;
+              onValidityChange?.(valid);
+              if (valid) {
                 emitChange("custom", hour, minute, dayOfWeek, dayOfMonth, nextCron);
               }
             }}
@@ -296,7 +299,7 @@ export function ScheduleEditor({
           >
             {customValidation.message}
             {customValidation.valid && customValidation.nextFires.length > 0
-              ? ` Next: ${customValidation.nextFires.map((fire) => fire.toLocaleString()).join(", ")}.`
+              ? ` Next: ${customValidation.nextFires.map((fire) => fire.toLocaleString(undefined, { timeZone: timezone })).join(", ")}.`
               : null}
           </p>
         </div>

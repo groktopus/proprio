@@ -247,6 +247,7 @@ export function RoutineEditDialog({
             {draft.schedule ? (
               <div className="flex flex-col gap-3">
                 <ScheduleEditor
+                  timezone={draft.schedule.timezone}
                   inline
                   value={draft.schedule.cronExpression}
                   onChange={(cronExpression) =>
