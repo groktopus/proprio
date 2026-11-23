@@ -14,7 +14,38 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
-  smoke:
+  route-durable-work:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      applicable: ${{ steps.route.outputs.applicable }}
+    steps:
+      - name: Check out the PR comparison commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Route durable-work acceptance
+        id: route
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node --test scripts/ci/durable-work-acceptance.test.mjs
+          node scripts/ci/durable-work-acceptance.mjs route "$GITHUB_SHA" "$PR_HEAD"
+
+  durable-work:
+    needs: route-durable-work
+    if: needs.route-durable-work.outputs.applicable == 'true'
+    uses: ./.github/workflows/linux-source-qualification.yml
+
+  stability-checks:
     # Fork heads run with a read-only token on a GitHub-hosted runner.
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
@@ -362,3 +393,25 @@ jobs:
           pnpm --filter @groktopus/server typecheck
           pnpm --filter @groktopus/hermes-proprio-adapter build
           node scripts/run-tsc.mjs -p server/tsconfig.build.json
+
+  smoke:
+    if: ${{ always() && github.repository == 'groktopus/proprio' }}
+    needs: [stability-checks, route-durable-work, durable-work]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Require smoke tests and applicable qualification
+        env:
+          STABILITY_RESULT: ${{ needs.stability-checks.result }}
+          ROUTING_RESULT: ${{ needs.route-durable-work.result }}
+          APPLICABLE: ${{ needs.route-durable-work.outputs.applicable }}
+          DURABLE_WORK_RESULT: ${{ needs.durable-work.result }}
+        run: |
+          test "$STABILITY_RESULT" = success
+          test "$ROUTING_RESULT" = success
+          node scripts/ci/durable-work-acceptance.mjs gate "$APPLICABLE" "$DURABLE_WORK_RESULT"

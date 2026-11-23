@@ -2,25 +2,14 @@ name: Linux source qualification
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/linux-source-qualification.yml
-      - scripts/ci/linux-source-qualification.mjs
-      - tests/runner-recovery/README.md
-      - packages/proprio-runner/protocol/manifest.json
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
 
 permissions:
   contents: read
 
-concurrency:
-  group: linux-source-qualification-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   source-and-runner:
-    if: github.repository == 'groktopus/proprio' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -68,14 +57,43 @@ jobs:
             ip link set lo up
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
+      - name: Check managed rollback and fresh-target restore
+        run: |
+          report="$RUNNER_TEMP/durable-work-acceptance.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            cli/src/__tests__/update-command.test.ts packages/db/src/backup-lib.test.ts
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'cli/src/__tests__/update-command.test.ts': [
+              'backs up, installs side-by-side, flips, and rolls back instantly',
+              'rolls back the active payload when restart validation fails',
+            ],
+            'packages/db/src/backup-lib.test.ts': [
+              'preserves identity generation, sequence options and progress in JavaScript backups',
+            ],
+          });
+          JS
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
           pnpm test:runner-recovery
-          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+          report="$RUNNER_TEMP/durable-work-runner.json"
+          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts': [
+              'adopts the in-flight turn when a restart lands just after turn.start (t77)',
+              'finalizes the durable proposed result when the runner and provider die before the turn terminal',
+            ],
+          });
+          JS
           pnpm exec vitest run --maxWorkers 1 \
             server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
             server/src/services/native-runtime/native-codex-runner.integration.test.ts \

@@ -38,6 +38,29 @@ repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
 
+### Durable-work acceptance
+
+The required `smoke` job combines Stability smoke with [Linux source
+qualification](../.github/workflows/linux-source-qualification.yml) when
+[the routing rules](../scripts/ci/durable-work-acceptance.mjs) match the PR
+diff. The rules cover managed install and update, backup and restore, database
+migrations, and runner or controller recovery. They also cover the qualification
+workflows and shared inputs such as the lockfile. The route job compares GitHub's PR comparison commit
+with its target-branch parent and verifies the named PR head.
+Qualification checks out and logs the exact head before building.
+
+For an applicable PR, the source build and disposable Linux agent run must
+succeed. Named managed rollback, fresh-target PostgreSQL restore and runner
+restart tests must report passing assertions. Missing, skipped or failed
+qualification fails `smoke` for an applicable change. For an unrelated PR,
+the router records that qualification does not apply and `smoke` checks the
+focused Stability smoke results. Both jobs have read-only permissions and
+use no secrets. Maintain the routing fixtures when adding a relevant entry point.
+
+Maintainers can also run Linux source qualification on demand for a candidate
+ref. The active-work migration, browser evidence, and publication gate are
+tracked in [#127](https://github.com/groktopus/proprio/issues/127).
+
 ### Standalone sandbox-provider dependencies
 
 `.github/workflows/sandbox-providers.yml` checks same-repository PRs that touch
