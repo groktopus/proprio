@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
   });
 
   afterAll(async () => {
+    await db?.$client.end({ timeout: 1 });
     await tempDb?.cleanup();
   });
 
@@ -187,6 +189,91 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
       body: saved.document.body,
       latestRevisionId: saved.document.latestRevisionId,
     });
+  });
+
+  async function overlapRevisionInserts<T>(start: () => Promise<T>[]) {
+    await db.execute(sql`
+      create function test_gate_document_revision() returns trigger language plpgsql as $$
+      begin
+        perform pg_advisory_xact_lock(72072);
+        return new;
+      end;
+      $$
+    `);
+    try {
+      await db.execute(sql`
+        create trigger test_gate_document_revision before insert on document_revisions
+        for each row execute function test_gate_document_revision()
+      `);
+      try {
+        let release!: () => void;
+        let ready!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        const acquired = new Promise<void>(resolve => { ready = resolve; });
+        const gate = db.transaction(async tx => {
+          await tx.execute(sql`select pg_advisory_xact_lock(72072)`);
+          ready();
+          await released;
+        });
+        await Promise.race([acquired, gate]);
+        const results = Promise.allSettled(start());
+        try {
+          await expect.poll(async () => {
+            const [row] = await db.execute<{ waiting: number }>(sql`
+              select count(*)::int as waiting from pg_locks
+              where locktype = 'advisory' and objid = 72072 and not granted
+            `);
+            return row.waiting;
+          }, { timeout: 5_000 }).toBe(2);
+        } finally {
+          release();
+          await gate;
+          await results;
+        }
+        return results;
+      } finally {
+        await db.execute(sql`drop trigger test_gate_document_revision on document_revisions`);
+      }
+    } finally {
+      await db.execute(sql`drop function test_gate_document_revision()`);
+    }
+  }
+
+  it("reports the winning revision when two saves share the same base", async () => {
+    const { issueId } = await createIssueWithDocuments();
+    const initial = await svc.getIssueDocumentByKey(issueId, "plan");
+    expect(initial?.latestRevisionId).toBeTruthy();
+    const save = (body: string, baseRevisionId = initial!.latestRevisionId) =>
+      svc.upsertIssueDocument({ issueId, key: "plan", format: "markdown", body, baseRevisionId });
+
+    const results = await overlapRevisionInserts(() => [save("First edit"), save("Second edit")]);
+    const winner = results.find(result => result.status === "fulfilled");
+    const loser = results.find(result => result.status === "rejected");
+    expect(winner?.value.document.latestRevisionNumber).toBe(2);
+    const winningId = winner!.value.document.latestRevisionId;
+    expect(loser?.reason).toMatchObject({ status: 409, details: { currentRevisionId: winningId } });
+    const history = await svc.listIssueDocumentRevisions(issueId, "plan");
+    expect(history).toHaveLength(2);
+    expect(history[0]).toMatchObject({ id: winningId, body: winner!.value.document.body });
+
+    const updated = await save("Reconciled edit", winningId);
+    expect(updated.document.latestRevisionNumber).toBe(3);
+  });
+
+  it("preserves the duplicate-key conflict for overlapping document creation", async () => {
+    const { issueId } = await createIssueWithDocuments();
+    const create = (body: string) => svc.upsertIssueDocument({
+      issueId, key: "receipt", format: "markdown", body,
+    });
+
+    const results = await overlapRevisionInserts(() => [create("First create"), create("Second create")]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")?.reason).toMatchObject({
+      status: 409,
+      message: "Document key already exists on this issue",
+      details: { key: "receipt" },
+    });
+    expect(await svc.listIssueDocumentRevisions(issueId, "receipt")).toHaveLength(1);
   });
 
   it("locks and unlocks issue documents", async () => {
