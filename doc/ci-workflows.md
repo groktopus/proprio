@@ -66,6 +66,11 @@ before changing them; this workflow is not a substitute for test checks.
 review, or comment contains `@droid`. It uses write permissions to respond to
 requests and comments. It is event-driven assistance, not a required CI lane.
 
+Both workflows use `openai/gpt-6.2-sol` through Nous Portal for code and security
+reviews. The runner registers the model in Droid's user settings and reads
+`NOUS_API_KEY` from GitHub Actions secrets. Review runs also require
+`FACTORY_API_KEY` for the Factory action.
+
 ## Local verification
 
 Install the pinned package manager and workspace dependencies using the setup
