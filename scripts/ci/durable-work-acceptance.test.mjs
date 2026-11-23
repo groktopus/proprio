@@ -11,6 +11,7 @@ test("routes changes that affect update, restore, or run recovery", () => {
     "cli/src/commands/worktree.ts",
     "cli/src/services/service-manager.ts",
     "scripts/build-npm.sh",
+    "scripts/e2e-update-migrations.sh",
     "scripts/prepare-bundled-package.mjs",
     "packages/db/src/backup-lib.ts",
     "packages/db/src/migrate.ts",

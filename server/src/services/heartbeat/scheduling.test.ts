@@ -497,6 +497,19 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     expect(await f.scheduler.recoverActiveSessionGoals()).toEqual({ scanned: 0, enqueued: 0 });
   });
 
+  it("keeps recovering other active goals after one admission fails", async () => {
+    const first = await fixture();
+    const [otherIssue] = await db.insert(issues).values({
+      companyId: first.company.id, title: "Other goal", status: "in_progress", assigneeAgentId: first.agent.id,
+    }).returning();
+    await session(first);
+    await session({ ...first, issue: otherIssue });
+    first.deps.enqueueWakeup.mockClear().mockRejectedValueOnce(new Error("fixture admission fault"));
+    const scheduler = createHeartbeatScheduling(db, first.deps);
+    expect(await scheduler.recoverActiveSessionGoals()).toEqual({ scanned: 2, enqueued: 1 });
+    expect(first.deps.enqueueWakeup).toHaveBeenCalledTimes(2);
+  });
+
   it("excludes goals after reassignment or with a mismatched company binding", async () => {
     const f = await fixture();
     const [other] = await db.insert(companies).values({ name: "Other company", issuePrefix: "OTH" }).returning();

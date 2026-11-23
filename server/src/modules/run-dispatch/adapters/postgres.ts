@@ -1,3 +1,4 @@
+import { lockCurrentSessionGoalRecovery } from "../../../services/heartbeat/session-goal-recovery.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
 import { notifyDeferredExecutionWork, notifyDeferredWakesForIssue } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
@@ -676,6 +677,22 @@ export function createPostgresRunDispatchAdapter(
       continuationParksExecutor = continuationSummaryParksExecutor(continuationSummaryBody);
     }
 
+    let sessionGoalRecoveryCurrent = true;
+    if (context.resumeSessionGoalHeartbeat === true) {
+      const recoveryFence = parseObject(context.sessionGoalRecovery);
+      const [agent] = await dbOrTx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+        eq(agents.id, input.agentId), eq(agents.companyId, input.companyId),
+      )).limit(1);
+      sessionGoalRecoveryCurrent = Boolean(
+        issue && issue.status === "in_progress" && issue.assigneeAgentId === input.agentId && !issue.assigneeUserId && agent
+          && await lockCurrentSessionGoalRecovery(dbOrTx as Db, {
+            companyId: input.companyId, issueId, agentId: input.agentId, adapterType: agent.adapterType,
+            sessionId: readNonEmptyString(recoveryFence.sessionId) ?? undefined,
+            revision: typeof recoveryFence.revision === "number" ? recoveryFence.revision : undefined,
+          }),
+      );
+    }
+
     const recoveryActionId = readNonEmptyString(context.recoveryActionId);
     const isAuthorizedSourceScopedRecovery =
       issue && wakeReason === "source_scoped_recovery_action" && recoveryActionId
@@ -749,6 +766,7 @@ export function createPostgresRunDispatchAdapter(
       continuationParkApplies,
       continuationParksExecutor,
       continuationSummaryBody,
+      sessionGoalRecoveryCurrent,
       wakeReason,
       retryReason,
       reviewParticipant: issue

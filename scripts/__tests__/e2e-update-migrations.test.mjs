@@ -49,3 +49,24 @@ test("cross-version migration harness requires both refs before side effects", (
     }
   }
 });
+
+
+test("exact-commit qualification rejects identical or abbreviated refs before side effects", () => {
+  const testHome = mkdtempSync(path.join(os.tmpdir(), "proprio-update-migrations-"));
+  try {
+    const full = "a".repeat(40);
+    for (const next of [full, "abcdef1"]) {
+      const result = spawnSync("bash", [script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { ...cleanEnv, HOME: testHome, E2E_UPDATE_REQUIRE_PROBE: "0",
+          E2E_UPDATE_BASE_REF: full, E2E_UPDATE_NEXT_REF: next },
+      });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /two distinct, full commit SHAs/);
+      assert.deepEqual(readdirSync(testHome), []);
+    }
+  } finally {
+    rmSync(testHome, { recursive: true, force: true });
+  }
+});

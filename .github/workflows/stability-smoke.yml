@@ -84,6 +84,8 @@ jobs:
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
       - name: Check authorization, audit access, and credential lifecycle
         run: node scripts/ci/run-security-regressions.mjs
+      - name: Check durable-work workflow and lifecycle harness
+        run: node --test scripts/ci/durable-work-acceptance.test.mjs scripts/ci/durable-work-policy.test.mjs scripts/__tests__/e2e-update-migrations.test.mjs
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
@@ -143,7 +145,23 @@ jobs:
       - name: Check managed restart and same-version updates
         run: |
           pnpm exec vitest run cli/src/__tests__/managed-service-restart.test.ts cli/src/__tests__/service-health-check.test.ts server/src/__tests__/managed-restart-health.test.ts
-          pnpm exec vitest run cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update'
+          report="$RUNNER_TEMP/managed-update-results.json"
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$report" \
+            cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update|settles overlapping managed Git updates'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'cli/src/__tests__/update-command.test.ts': [
+              'validates a same-version Git update before retaining its new payload (true)',
+              'validates a same-version Git update before retaining its new payload (false)',
+              'settles overlapping managed Git updates when older passes',
+              'settles overlapping managed Git updates when older fails',
+              'settles overlapping managed Git updates when both fail',
+              'settles overlapping managed Git updates when staging fails',
+            ],
+          });
+          JS
       - name: Check database backup CLI output
         run: pnpm exec vitest run cli/src/__tests__/db-backup.test.ts
       - name: Check cost summaries and database backups
@@ -153,18 +171,34 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
           const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'stability-results.json'), 'utf8'));
-          const assertions = result.testResults.flatMap(file => file.assertionResults);
-          const required = [
-            'aggregates run wall-clock duration across the recursive issue tree',
-            'reclaims aged orphan output while preserving a concurrent backup',
-            'preserves aged staging owned by a different live process and reclaims it after exit',
-            'preserves identity generation, sequence options and progress in JavaScript backups',
-          ];
-          for (const title of required) {
-            if (!assertions.some(test => test.title === title && test.status === 'passed')) {
-              throw new Error(`Required PostgreSQL test did not pass: ${title}`);
-            }
-          }
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/costs-service.test.ts': [
+              'aggregates run wall-clock duration across the recursive issue tree',
+            ],
+            'packages/db/src/backup-lib-binary.test.ts': [
+              'reclaims aged orphan output while preserving a concurrent backup',
+              'preserves aged staging owned by a different live process and reclaims it after exit',
+            ],
+            'packages/db/src/backup-lib.test.ts': [
+              'preserves identity generation, sequence options and progress in JavaScript backups',
+              'preserves foreign-key validation state in a JavaScript fallback restore',
+            ],
+          });
+          JS
+      - name: Check migration lock timeout and retry
+        run: |
+          report="$RUNNER_TEMP/migration-lock-results.json"
+          pnpm exec vitest run --project @groktopus/db --reporter=default --reporter=json --outputFile="$report" packages/db/src/migration-lock.test.ts
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/db/src/migration-lock.test.ts': [
+              'times out the CLI while another session owns the lock and retries cleanly',
+              'waits for the lock before repairing migration history at startup',
+            ],
+          });
           JS
       - name: Check linked goal deletion
         run: |
@@ -285,6 +319,27 @@ jobs:
             'records one settlement receipt across competing callbacks and a clock rollback',
           ];
           assertRequiredVitestTests(result, { [path]: required });
+          JS
+      - name: Check orphaned session-goal recovery
+        run: |
+          report="$RUNNER_TEMP/session-goal-recovery.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/__tests__/assigned-work-invariant.test.ts \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts \
+            -t 'retries an orphaned session goal|does not enqueue goal recovery beside|goal recovery at queued admission and provider dispatch'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/__tests__/assigned-work-invariant.test.ts': [
+              'retries an orphaned session goal and leaves an independent goal recoverable',
+              'does not enqueue goal recovery beside a live run',
+              'does not enqueue goal recovery beside a queued successor',
+            ],
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts':
+              ['legacy', 'current', 'paused', 'superseded', 'control_pending'].map(
+                state => `rechecks ${state} goal recovery at queued admission and provider dispatch`),
+          });
           JS
       - name: Check recovery of unrecorded routine occurrences
         run: |

@@ -60,13 +60,14 @@ Linux workflow on `main` with its PR number and exact head SHA. The trusted
 policy uses that default-branch run as evidence. To qualify a source candidate
 outside a PR, leave both inputs empty and select the candidate ref.
 
-The initial Linux lane requires a source build, a fresh disposable Linux agent
-run and named cases for rollback, fresh-target PostgreSQL restore and runner
-recovery. The update cases use a real temporary install store with simulated
-Git resolution, backup and restart. The restore case requires a native
-PostgreSQL 18 dump and restore into a fresh target. The job summary retains
-the tested SHA and reported case outcomes. The executed managed update and
-rollback, active-work migration, and browser acceptance are tracked in
+The Linux lane requires a source build, a fresh disposable agent run, native
+PostgreSQL 18 backup and restore into a fresh target, and named runner recovery
+cases. A managed update builds a Git payload and restarts a real systemd user
+service. The check verifies the running commit and a saved database record
+after the update and after rollback to the original commit. The existing
+simulated backup and restart cases also run in Stability smoke. The Linux job
+summary retains both revisions and the executed case outcomes. The active-work
+schema migration and browser acceptance remain tracked in
 [#127](https://github.com/groktopus/proprio/issues/127).
 
 ### Standalone sandbox-provider dependencies

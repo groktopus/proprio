@@ -23,12 +23,25 @@
 #   E2E_BOOTSTRAP_CLI         path to an already-built bootstrap CLI entry point
 #                             (dist/index.js); when unset, builds one from BASE
 #   E2E_SERVICE_TIMEOUT_SECS  service active/health wait (default 300)
+#   E2E_UPDATE_REQUIRE_PROBE  0 for an exact-commit lifecycle check without a probe migration
+#   E2E_UPDATE_NEXT_REPO      GitHub repository containing NEXT (default: E2E_REPO)
+#   E2E_UPDATE_STEP_SUMMARY   optional path to GitHub Actions step summary
 set -uo pipefail
 
 E2E_REPO="${E2E_REPO:-groktopus/proprio}"
 BASE_REF="${E2E_UPDATE_BASE_REF:?E2E_UPDATE_BASE_REF is required}"
 NEXT_REF="${E2E_UPDATE_NEXT_REF:?E2E_UPDATE_NEXT_REF is required}"
 E2E_SERVICE_TIMEOUT_SECS="${E2E_SERVICE_TIMEOUT_SECS:-300}"
+probe="${E2E_UPDATE_REQUIRE_PROBE:-1}"
+NEXT_REPO="${E2E_UPDATE_NEXT_REPO:-$E2E_REPO}"
+if [[ "$probe" != 0 && "$probe" != 1 ]]; then
+  echo "E2E_UPDATE_REQUIRE_PROBE must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$probe" = 0 && ( ! "$BASE_REF" =~ ^[0-9a-f]{40}$ || ! "$NEXT_REF" =~ ^[0-9a-f]{40}$ || "$BASE_REF" = "$NEXT_REF" ) ]]; then
+  echo "The lifecycle check requires two distinct, full commit SHAs" >&2
+  exit 2
+fi
 
 # Clean environment, then isolate ALL Proprio state (managed store, config,
 # embedded Postgres, backups) under a dedicated home for this test.
@@ -56,10 +69,16 @@ dump_text() { case "$1" in *.gz) gunzip -c "$1" ;; *) cat "$1" ;; esac; }
 first_run_count() { shim service logs -n 2000 2>/dev/null | grep -c "first-run embedded PostgreSQL" || true; }
 
 wait_active() {
+  local expected_commit="${1:-}"
   local deadline=$(( $(date +%s) + E2E_SERVICE_TIMEOUT_SECS )) status_json=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
     status_json="$(shim service status --json 2>/dev/null || true)"
-    if echo "$status_json" | grep -q '"active"[[:space:]]*:[[:space:]]*true'; then return 0; fi
+    if [ -n "$expected_commit" ]; then
+      if jq -e --arg sha "$expected_commit" '.active and .health.ok and .health.commit == $sha' \
+          <<<"$status_json" >/dev/null 2>&1; then return 0; fi
+    elif echo "$status_json" | grep -q '"active"[[:space:]]*:[[:space:]]*true'; then
+      return 0
+    fi
     sleep 5
   done
   echo "last status: ${status_json:-<none>}"
@@ -72,7 +91,14 @@ cleanup() {
   shim service uninstall >/dev/null 2>&1 || true
   shim uninstall >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+record_summary() {
+  if [ -n "${E2E_UPDATE_STEP_SUMMARY:-}" ]; then
+    {
+      printf '\nManaged service qualification for `%s` → `%s`.\n\n' "$BASE_REF" "$NEXT_REF"
+      printf -- '- %s\n' "${RESULTS[@]}"
+    } >> "$E2E_UPDATE_STEP_SUMMARY"
+  fi
+}
 
 note "0. Preflight"
 uname -a
@@ -83,7 +109,15 @@ command -v corepack >/dev/null || npm install -g corepack
 if [ "$(uname -s)" = "Linux" ] && [ ! -S "/run/user/$(id -u)/bus" ]; then
   echo "no systemd user bus at /run/user/$(id -u)/bus — this test needs a real service"; exit 2
 fi
-echo "repo=$E2E_REPO base=$BASE_REF next=$NEXT_REF proprio_home=$PROPRIO_HOME"
+echo "repo=$E2E_REPO base=$BASE_REF next=$NEXT_REPO@$NEXT_REF proprio_home=$PROPRIO_HOME"
+trap 'record_summary; cleanup' EXIT
+base_commit=""
+next_commit=""
+if [ "$probe" = 0 ]; then
+  command -v jq >/dev/null || exit 2
+  base_commit="$BASE_REF"
+  next_commit="$NEXT_REF"
+fi
 
 if [ -n "${E2E_BOOTSTRAP_CLI:-}" ] && [ -f "$E2E_BOOTSTRAP_CLI" ]; then
   BOOTSTRAP_CLI="$E2E_BOOTSTRAP_CLI"
@@ -126,7 +160,7 @@ if shim onboard --yes --install-service; then
 else
   fail_ "3a onboard --yes --install-service exits 0"; exit 1
 fi
-if wait_active; then
+if wait_active "$base_commit"; then
   pass "3b service active on base version"
 else
   fail_ "3b service active on base version"; exit 1
@@ -136,34 +170,50 @@ PG_VERSION_FILE="$(find "$PROPRIO_HOME" -name PG_VERSION 2>/dev/null | head -1)"
 PG_INODE_BEFORE="$([ -n "$PG_VERSION_FILE" ] && ls -i "$PG_VERSION_FILE" | awk '{print $1}')"
 [ -n "$PG_VERSION_FILE" ] && pass "3c embedded Postgres cluster initialized" || fail_ "3c embedded Postgres cluster found"
 
-note "4. baseline dump: probe table must NOT exist on the old schema"
-if shim db-backup >/dev/null 2>&1; then
-  pass "4a db-backup on base version exits 0"
+if [ "$probe" = 1 ]; then
+  note "4. baseline dump: probe table must NOT exist on the old schema"
+  if shim db-backup >/dev/null 2>&1; then
+    pass "4a db-backup on base version exits 0"
+  else
+    fail_ "4a db-backup on base version exits 0"
+  fi
+  BASELINE_DUMP="$(newest_backup)"
+  if [ -n "$BASELINE_DUMP" ] && ! dump_text "$BASELINE_DUMP" | grep -q "e2e_update_probe"; then
+    pass "4b baseline schema has no e2e_update_probe table"
+  else
+    fail_ "4b baseline schema has no e2e_update_probe table (dump: ${BASELINE_DUMP:-<none>})"
+  fi
 else
-  fail_ "4a db-backup on base version exits 0"
-fi
-BASELINE_DUMP="$(newest_backup)"
-if [ -n "$BASELINE_DUMP" ] && ! dump_text "$BASELINE_DUMP" | grep -q "e2e_update_probe"; then
-  pass "4b baseline schema has no e2e_update_probe table"
-else
-  fail_ "4b baseline schema has no e2e_update_probe table (dump: ${BASELINE_DUMP:-<none>})"
+  note "4. Save one record through the running service"
+  base_version="$(shim service status --json | jq -er '.health.serverVersion')" || exit 1
+  port="$(jq -er '.server.port' "$PROPRIO_HOME/instances/default/config.json")" || exit 1
+  origin="http://127.0.0.1:$port"
+  fixture_name="Managed update acceptance fixture"
+  company_id="$(curl --fail --silent --show-error --max-time 5 "$origin/api/companies"     -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data '{"name":"Managed update acceptance fixture"}' | jq -er '.id')" || exit 1
+  verify_record() {
+    curl --fail --silent --show-error --max-time 5 "$origin/api/companies/$company_id" \
+      | jq -e --arg id "$company_id" --arg name "$fixture_name" '.id == $id and .name == $name' >/dev/null
+  }
+  verify_record && pass "4a record is saved by the base service" || { fail_ "4a base record"; exit 1; }
 fi
 BACKUPS_BEFORE="$(backup_count)"
 
-note "5. simulate time passing: tracked ref now points at $NEXT_REF (adds one migration)"
+note "5. simulate time passing: tracked ref now points at $NEXT_REF"
 node -e '
   const fs = require("fs");
   const p = process.argv[1];
   const m = JSON.parse(fs.readFileSync(p, "utf8"));
   m.ref = process.argv[2];
+  m.repo = process.argv[3];
   fs.writeFileSync(p, JSON.stringify(m, null, 2));
-' "$STORE/install.json" "$NEXT_REF" && pass "5a tracked ref updated in install.json" || fail_ "5a tracked ref update"
+' "$STORE/install.json" "$NEXT_REF" "$NEXT_REPO" && pass "5a tracked ref updated in install.json" || fail_ "5a tracked ref update"
 
 shim update --check --json; CHECK_EXIT=$?
 if [ "$CHECK_EXIT" -eq 10 ]; then
-  pass "5b update --check sees the new version (exit 10)"
+  pass "5b update --check sees the new commit (exit 10)"
 else
-  fail_ "5b update --check sees the new version (got exit $CHECK_EXIT)"
+  fail_ "5b update --check sees the new commit (got exit $CHECK_EXIT)"
 fi
 
 note "6. update --yes (backup -> build new payload -> flip -> restart service)"
@@ -187,26 +237,34 @@ else
 fi
 
 note "7. service healthy on the new version, with the migration applied"
-if wait_active; then
+if wait_active "$next_commit"; then
   pass "7a service active after update"
 else
   fail_ "7a service active after update"; exit 1
 fi
-if shim service logs -n 2000 2>/dev/null | grep -q "e2e_update_probe"; then
-  pass "7b service logs mention applying the probe migration"
+if [ "$probe" = 1 ]; then
+  if shim service logs -n 2000 2>/dev/null | grep -q "e2e_update_probe"; then
+    pass "7b service logs mention applying the probe migration"
+  else
+    fail_ "7b service logs mention applying the probe migration"
+  fi
+  if shim db-backup >/dev/null 2>&1; then
+    pass "7c db-backup on new version exits 0"
+  else
+    fail_ "7c db-backup on new version exits 0"
+  fi
+  POST_DUMP="$(newest_backup)"
+  if [ -n "$POST_DUMP" ] && dump_text "$POST_DUMP" | grep -q "e2e_update_probe"; then
+    pass "7d probe migration table exists in the real database after update"
+  else
+    fail_ "7d probe migration table exists in the real database (dump: ${POST_DUMP:-<none>})"
+  fi
+
 else
-  fail_ "7b service logs mention applying the probe migration"
-fi
-if shim db-backup >/dev/null 2>&1; then
-  pass "7c db-backup on new version exits 0"
-else
-  fail_ "7c db-backup on new version exits 0"
-fi
-POST_DUMP="$(newest_backup)"
-if [ -n "$POST_DUMP" ] && dump_text "$POST_DUMP" | grep -q "e2e_update_probe"; then
-  pass "7d probe migration table exists in the real database after update"
-else
-  fail_ "7d probe migration table exists in the real database (dump: ${POST_DUMP:-<none>})"
+  installed_commit="$(jq -er '.sha' "$STORE/install.json")" || exit 1
+  [ "$installed_commit" = "$next_commit" ] && pass "7b install manifest matches the running candidate" \
+    || { fail_ "7b candidate manifest"; exit 1; }
+  verify_record && pass "7c candidate reads the saved base record" || { fail_ "7c candidate record continuity"; exit 1; }
 fi
 
 note "8. data continuity: same database cluster, not re-initialized"
@@ -233,10 +291,16 @@ case "$(current_target)" in
   "$BASE_TARGET") pass "9b rollback restored the base payload" ;;
   *) fail_ "9b rollback restored the base payload (got: $(current_target))" ;;
 esac
-if wait_active; then
-  pass "9c rolled-back service is active against the migrated schema"
+if wait_active "$base_commit"; then
+  pass "9c rolled-back service is active against the retained database"
 else
-  fail_ "9c rolled-back service is active against the migrated schema"
+  fail_ "9c rolled-back service is active against the retained database"
+fi
+if [ "$probe" = 0 ]; then
+  rollback_version="$(shim service status --json | jq -er '.health.serverVersion')" || exit 1
+  [ "$rollback_version" = "$base_version" ] && pass "9d rollback reports the original version and commit" \
+    || fail_ "9d rollback version or commit"
+  verify_record && pass "9e original service reads the same saved record after rollback"     || fail_ "9e rollback record continuity"
 fi
 
 note "10. cleanup"
@@ -246,6 +310,7 @@ if shim service uninstall && shim uninstall; then
 else
   fail_ "10a service uninstall + uninstall exit 0"
 fi
+record_summary
 trap - EXIT
 
 note "RESULTS ($E2E_REPO $BASE_REF -> $NEXT_REF on $(uname -sm))"
