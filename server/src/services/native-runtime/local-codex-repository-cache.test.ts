@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, writeFile, link, lstat, utimes, readFile, rm } from "no
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { captureNativeHarnessArchive, restoreNativeHarnessArchive } from "./native-harness-backup-archive.js";
 import { localCodexRepositoryCache } from "./local-codex-repository-cache.js";
 import { RUNTIME_ASSET_RETENTION_MS } from "./runtime-asset-retention.js";
 
@@ -73,4 +74,27 @@ it.skipIf(process.platform === "win32")("prunes expired unreferenced trees and i
   });
   expect(await readFile(liveFile, "utf8")).toBe("pinned");
   expect((await lstat(join(live, "file"))).mode & 0o777).toBe(0o444);
+});
+
+it.skipIf(process.platform === "win32")("restores an archived skill after the shared cache has been removed", async () => {
+  const home = join(root, "home");
+  const cache = join(root, "cache");
+  const pinned = join(cache, "pinned");
+  const skill = join(home, "skills", "assigned", ".proprio-repository");
+  await mkdir(skill, { recursive: true });
+  await mkdir(cache);
+  await writeFile(join(home, "manifest.json"), "{}");
+  await writeFile(pinned, "pinned repository bytes", { mode: 0o444 });
+  await link(pinned, join(skill, "shared.txt"));
+
+  const archive = join(root, "checkpoint.tar");
+  await captureNativeHarnessArchive(home, archive);
+  await rm(cache, { recursive: true });
+  const restored = join(root, "restored");
+  await restoreNativeHarnessArchive(archive, restored);
+  const restoredFile = join(restored, "skills", "assigned", ".proprio-repository", "shared.txt");
+  expect(await readFile(restoredFile, "utf8")).toBe("pinned repository bytes");
+  const info = await lstat(restoredFile);
+  expect(info.nlink).toBe(1);
+  expect(info.mode & 0o777).toBe(0o444);
 });

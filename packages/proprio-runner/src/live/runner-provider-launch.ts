@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { parseNativeRuntimeContext, retargetNativeSystemInstructions } from "../contracts/runtime-context.js";
 import { resolve } from "node:path";
 import { codexExecutableReadOnlyRoots } from "../drivers/codex/codex-security-config.js";
@@ -225,7 +226,7 @@ export function preparedRunnerLaunchWorkingDirectory(
 export interface RunnerProviderLaunchEnvironment {
   options: Pick<CapabilityRunnerdCodexTransportOptions,
     "acpxRuntimeDirectory" | "homeMode" | "environment" | "codexArgs" |
-    "runnerFilesystemRoot" | "disableCodexProjectInstructions" | "externallySandboxed">;
+    "runnerFilesystemRoot" | "sharedCodexRepositories" | "disableCodexProjectInstructions" | "externallySandboxed">;
   root: string;
   cwd: string;
   codexHome: string;
@@ -510,7 +511,8 @@ export function createRunnerdCodexAppServerArgs(input: {
       input.instructionWorkingCopyRoot,
       [
         ...(usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : []),
-        ...(input.sharedCodexRepositoriesRoot ? [input.sharedCodexRepositoriesRoot] : []),
+        ...(input.sharedCodexRepositoriesRoot && existsSync(input.sharedCodexRepositoriesRoot)
+          ? [input.sharedCodexRepositoriesRoot] : []),
       ],
     ),
   ];

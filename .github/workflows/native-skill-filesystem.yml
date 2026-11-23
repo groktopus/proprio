@@ -10,6 +10,7 @@ on:
       - packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts
       - packages/proprio-runner/src/live/runnerd-codex-transport.ts
       - server/src/services/native-runtime/local-codex-repository-cache.ts
+      - server/src/services/native-runtime/local-codex-repository-cache.test.ts
       - packages/proprio-runner/runner/crates/runner-core/src/bin/fake-codex-app-server.rs
 
 permissions:
@@ -37,6 +38,8 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends btrfs-progs
           fi
+      - name: Verify controller repository cache scope, cleanup, and archive
+        run: pnpm --filter @groktopus/server exec vitest run src/services/native-runtime/local-codex-repository-cache.test.ts
       - name: Build the native runner and synthetic Codex provider
         run: |
           pnpm --filter @groktopus/proprio-runner build:typescript
