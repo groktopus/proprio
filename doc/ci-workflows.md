@@ -13,6 +13,7 @@ from forks and branches in this repository, including PRs retargeted to
 persisting checkout credentials, and installs the workspace from the frozen
 pnpm lockfile. Its checks include:
 
+- `pnpm lint` for server, UI, and CLI source using the locked workspace version of Oxlint;
 - the named authorization, credential lifecycle, and audit cases described in
   [Secure engineering](SECURE-ENGINEERING.md);
 - the `AGENTS.md` local-link check and its Node test suite;
