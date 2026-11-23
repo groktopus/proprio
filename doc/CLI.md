@@ -802,6 +802,10 @@ pnpm proprio teams preview <catalog-id-or-key-or-slug> --company-id <company-id>
 pnpm proprio teams install <catalog-id-or-key-or-slug> --company-id <company-id>
 ```
 
+Preview reports each planned agent adapter, its provider when available, and
+whether the catalog selected the default. The JSON result also includes the
+source manifest and any runtime selection errors.
+
 Preview/install options:
 
 - Under agent authentication, use `proprio company list --json`,
@@ -821,6 +825,9 @@ Preview/install options:
   catalog root agents under an existing manager.
 - `--agent <slug>` and `--selected-file <path>` narrow the import.
 - `--collision-strategy rename|skip|replace` controls name/key collisions.
+- `--adapter-override <slug=type>` applies a per-agent adapter selection.
+  Repeat the option for other agents. Use the same overrides for preview and
+  install.
 - `--allow-external-sources`, `--allow-unpinned-optional-sources`, and
   `--allow-local-path-sources` explicitly opt into higher-trust source policy.
   Local-path sources are development-only and stay blocked unless that flag is

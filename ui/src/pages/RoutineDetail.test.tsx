@@ -393,6 +393,17 @@ describe("RoutineDetail (routed routine page)", () => {
     expect(routinesApi.updateTrigger).toHaveBeenCalledWith("trigger-1", { enabled: false });
   });
 
+  it("shows why the scheduler paused a malformed schedule", async () => {
+    const lastResult = 'Invalid schedule: Invalid element "15oops" in cron minute field';
+    vi.mocked(routinesApi.get).mockResolvedValue(routine({
+      triggers: [trigger({ enabled: false, cronExpression: "15oops * * * *", nextRunAt: null, lastResult })],
+    }));
+    await render();
+    const schedule = container.querySelector<HTMLButtonElement>('button[aria-label^="Change schedule"]');
+    await act(async () => { schedule!.click(); await flush(); });
+    expect(document.body.textContent).toContain(lastResult);
+  });
+
   it("offers Undo on the page after removing a schedule", async () => {
     await render();
     await act(async () => { button("Change schedule: Weekdays at 9:00 AM")!.click(); await flush(); });
