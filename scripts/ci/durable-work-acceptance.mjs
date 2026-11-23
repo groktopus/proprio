@@ -4,7 +4,7 @@ import { mergeDiff } from "../../.github/scripts/ci-diff.mjs";
 
 const durableWorkPaths = [
   /^(?:\.github\/workflows\/(?:stability-smoke|linux-source-qualification|durable-work-policy)\.yml|\.github\/scripts\/ci-diff\.mjs)$/,
-  /^scripts\/ci\/(?:linux-source-qualification|durable-work-acceptance|durable-work-release-evidence|durable-work-policy|assert-required-vitest-tests)/,
+  /^scripts\/ci\/(?:linux-source-qualification|durable-work-acceptance|durable-work-release-evidence|durable-work-policy|write-durable-work-acceptance|browser-task-readback|assert-required-vitest-tests)/,
   /^scripts\/(?:build-npm\.sh|e2e-update-migrations\.sh|prepare-bundled-package\.mjs)$/,
   /^cli\/src\/(?:commands\/(?:install|update|uninstall|db-backup|service|worktree)\.ts|services\/service-manager\.ts|install-store\.ts|onboard-service\.ts|checks\/(?:managed-install-check|service-health-check)\.ts|__tests__\/(?:install-command|install-store|update-command|managed-service-restart|db-backup)\.test\.ts)$/,
   /^packages\/db\/src\/(?:backup-lib[^/]*\.ts|client\.ts|migrate\.ts|migration-runtime\.ts|migrations\/)/,

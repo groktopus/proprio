@@ -70,3 +70,47 @@ test("exact-commit qualification rejects identical or abbreviated refs before si
     rmSync(testHome, { recursive: true, force: true });
   }
 });
+
+test("active-run migration qualification requires the exact lifecycle mode before side effects", () => {
+  const testHome = mkdtempSync(path.join(os.tmpdir(), "proprio-update-migrations-"));
+  try {
+    const full = "b".repeat(40);
+    for (const env of [
+      { E2E_UPDATE_REQUIRE_ACTIVE_RUN: "invalid", E2E_UPDATE_REQUIRE_PROBE: "0" },
+      { E2E_UPDATE_REQUIRE_ACTIVE_RUN: "1", E2E_UPDATE_REQUIRE_PROBE: "1" },
+    ]) {
+      const result = spawnSync("bash", [script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { ...cleanEnv, HOME: testHome, E2E_UPDATE_BASE_REF: full,
+          E2E_UPDATE_NEXT_REF: "c".repeat(40), ...env },
+      });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /E2E_UPDATE_REQUIRE_ACTIVE_RUN|active-run fixture requires/);
+      assert.deepEqual(readdirSync(testHome), [], "validation must run before the harness writes files");
+    }
+  } finally {
+    rmSync(testHome, { recursive: true, force: true });
+  }
+});
+
+test("browser readback qualification requires the lifecycle mode and a report path", () => {
+  const testHome = mkdtempSync(path.join(os.tmpdir(), "proprio-update-migrations-"));
+  try {
+    const env = { ...cleanEnv, HOME: testHome, E2E_UPDATE_REQUIRE_PROBE: "0",
+      E2E_UPDATE_BASE_REF: "a".repeat(40), E2E_UPDATE_NEXT_REF: "b".repeat(40) };
+    const invalidMode = spawnSync("bash", [script], {
+      cwd: repoRoot, encoding: "utf8", env: { ...env, E2E_UPDATE_BROWSER_READBACK: "maybe" },
+    });
+    assert.equal(invalidMode.status, 2);
+    assert.match(invalidMode.stderr, /E2E_UPDATE_BROWSER_READBACK must be 0 or 1/);
+    const missingReport = spawnSync("bash", [script], {
+      cwd: repoRoot, encoding: "utf8", env: { ...env, E2E_UPDATE_BROWSER_READBACK: "1" },
+    });
+    assert.equal(missingReport.status, 2);
+    assert.match(missingReport.stderr, /requires E2E_UPDATE_BROWSER_REPORT/);
+    assert.deepEqual(readdirSync(testHome), []);
+  } finally {
+    rmSync(testHome, { recursive: true, force: true });
+  }
+});

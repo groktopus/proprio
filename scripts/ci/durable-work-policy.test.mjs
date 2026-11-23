@@ -24,6 +24,8 @@ test("accepts changed workflow evidence only from default-branch qualification",
   assert.equal(evidenceSubject({ ...run, head_repository: { full_name: "outside/proprio" } }), null);
   const workflow = [".github/workflows/linux-source-qualification.yml"];
   assert.equal(qualificationDecision(workflow, automatic, pass), null);
+  assert.equal(qualificationDecision(["scripts/ci/durable-work-release-evidence.mjs"], automatic, pass), null);
+  assert.equal(qualificationDecision(["scripts/ci/write-durable-work-acceptance.mjs"], automatic, pass), null);
   assert.equal(qualificationDecision(workflow, subject, [{ name: "source-and-runner", conclusion: "success" }]).state, "success");
   assert.equal(qualificationDecision([
     "scripts/ci/durable-work-release-evidence.mjs",

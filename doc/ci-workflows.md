@@ -57,18 +57,26 @@ does not check out PR code or use PR artifacts. Add that status to the main
 ruleset after validating both an applicable run and an unrelated PR.
 
 If the PR changes the workflow or its routing and report checks, run the
-Linux workflow on `main` with its PR number and exact head SHA. The trusted
-policy uses that default-branch run as evidence. To qualify a source candidate
-outside a PR, leave both inputs empty and select the candidate ref.
+Linux workflow on `main` with its PR number, exact head SHA, and exact base
+SHA. The trusted policy uses that default-branch run as evidence. To qualify a
+source candidate outside a PR, select `main`, then provide the candidate's
+exact source SHA and the exact previous-release SHA as `test_head` and
+`base_sha`. The run title and report bind both values; for the first source
+qualification, use the `v0.0.1` tag's commit as the base.
 
 The Linux lane requires a source build, a fresh disposable agent run, native
 PostgreSQL 18 backup and restore into a fresh target, and named runner recovery
 cases. A managed update builds a Git payload and restarts a real systemd user
 service. The check verifies the running commit and a saved database record
-after the update and after rollback to the original commit. The existing
+after the update and after rollback to the original commit. Chromium also reads
+the output from the task recovered by that same managed update, then reloads
+that task URL and reads the output again. The workflow requires the recovered-task
+browser check to pass. It uploads one `durable-work-acceptance` artifact
+containing exact source/base SHAs and the five required case outcomes with links
+to the workflow attempt. The existing
 simulated backup and restart cases also run in Stability smoke. The Linux job
 summary retains both revisions and the executed case outcomes. The active-work
-schema migration and browser acceptance remain tracked in
+schema migration and its run and workspace recovery evidence remain tracked in
 [#127](https://github.com/groktopus/proprio/issues/127).
 
 ### Source publication gate
