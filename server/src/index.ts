@@ -76,7 +76,7 @@ import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./se
 import { isIdleTaskDrainActive, readTaskDrain, beginIdleTrackedWork, trackIdleWork, registerTaskDrainExpiryWork } from "./services/task-admission.js";
 import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { idleBackupWakeMarker } from "./services/idle-database-backup.js";
-import { createDatabaseBackupOwner } from "./services/database-backup-owner.js";
+import { createDatabaseBackupOwner, readServerBackupRetention } from "./services/database-backup-owner.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
@@ -948,7 +948,6 @@ async function startServerWithDatabaseTeardown(
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
   const feedback = feedbackService(db as any);
-  const backupSettingsSvc = instanceSettingsService(db);
   const databaseBackupMaxAgeHours = Math.max(
     1,
     Number(process.env.PROPRIO_DB_BACKUP_MAX_AGE_HOURS) ||
@@ -967,7 +966,8 @@ async function startServerWithDatabaseTeardown(
   const runServerDatabaseBackup = createDatabaseBackupOwner({
     connectionString: activeDatabaseConnectionString,
     backupDir: config.databaseBackupDir,
-    getRetention: async () => (await backupSettingsSvc.getGeneral()).backupRetention,
+    getRetention: signal => readServerBackupRetention(db, signal, async connection =>
+      (await instanceSettingsService(connection).getGeneral()).backupRetention),
     logger,
   });
   const pluginWorkerManager = createPluginWorkerManager();
@@ -1013,15 +1013,14 @@ async function startServerWithDatabaseTeardown(
         return result;
       },
     },
-    databaseBackupHealth: config.databaseBackupEnabled
-      ? {
-          enabled: config.databaseBackupEnabled,
-          backupDir: config.databaseBackupDir,
-          maxAgeHours: databaseBackupMaxAgeHours,
-          alertFile: databaseBackupAlertFile,
-          alertFiles: databaseBackupAlertFiles,
-        }
-      : undefined,
+    databaseBackupHealth: {
+      enabled: config.databaseBackupEnabled,
+      backupDir: config.databaseBackupDir,
+      maxAgeHours: databaseBackupMaxAgeHours,
+      alertFile: databaseBackupAlertFile,
+      alertFiles: databaseBackupAlertFiles,
+      getCurrentBackup: runServerDatabaseBackup.status,
+    },
     deploymentMode: config.deploymentMode,
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,

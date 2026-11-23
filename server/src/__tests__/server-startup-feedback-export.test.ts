@@ -398,6 +398,10 @@ vi.mock("detect-port", () => ({
 vi.mock("@groktopus/db", async (importOriginal) => ({
   ...await importOriginal<typeof import("@groktopus/db")>(),
   createDb: createDbMock,
+  withDedicatedDbConnection: vi.fn(async (db, work) => work({
+    ...db,
+    transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({ execute: vi.fn() }),
+  })),
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
   inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),

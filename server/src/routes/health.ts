@@ -407,7 +407,7 @@ export function healthRoutes(
       : undefined;
 
     if (!exposeFullDetails) {
-      const redactedDatabaseBackup = databaseBackup ? redactedDatabaseBackupHealth(databaseBackup) : undefined;
+      const redactedDatabaseBackup = databaseBackup?.enabled ? redactedDatabaseBackupHealth(databaseBackup) : undefined;
       const redactedWarnings = redactedDatabaseBackup?.warnings.length ? redactedDatabaseBackup.warnings : undefined;
       res.json({
         status: healthStatus,

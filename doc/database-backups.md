@@ -16,6 +16,13 @@ Automatic backups are disabled for isolated worktree instances created with
 configs are migrated to the disabled setting when their server next starts. The
 main/default instance keeps the normal enabled-by-default behavior.
 
+Server-owned backups have a one-hour deadline. The owner cancels a stalled dump
+or stream and waits for its cleanup before it accepts another backup. The full
+operator response from `/api/health` shows the current run's age and the last
+published backup. Incomplete files use a `.partial` suffix and stay out of
+health and retention. A canceled dump leaves the previous recovery point
+available and does not trigger JavaScript fallback or retention pruning.
+
 Configure these in:
 
 ```sh

@@ -1,3 +1,4 @@
+import type { InstanceDatabaseBackupTrigger } from "../routes/instance-database-backups.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
@@ -17,6 +18,7 @@ export type DatabaseBackupHealthStatus = {
   status: "ok" | "warning";
   backupDir: string;
   maxAgeHours: number;
+  currentBackup?: { trigger: InstanceDatabaseBackupTrigger; startedAt: string; ageMs: number } | null;
   latestBackup: {
     name: string;
     path: string;
@@ -39,6 +41,7 @@ export type InspectDatabaseBackupHealthOptions = {
   alertFile?: string;
   alertFiles?: string[];
   now?: Date;
+  getCurrentBackup?: () => DatabaseBackupHealthStatus["currentBackup"];
 };
 
 function roundHours(value: number): number {
@@ -114,14 +117,14 @@ export function inspectDatabaseBackupHealth(
 
   try {
     latestBackup = findLatestBackup(opts.backupDir, now.getTime());
-    lastFailure = readLastFailure(alertFileCandidates(opts));
+    if (opts.enabled) lastFailure = readLastFailure(alertFileCandidates(opts));
 
-    if (!latestBackup) {
+    if (opts.enabled && !latestBackup) {
       warnings.push({
         code: "database_backup_missing",
         message: `No .sql.gz database backups found in ${opts.backupDir}.`,
       });
-    } else if (latestBackup.ageHours > maxAgeHours) {
+    } else if (opts.enabled && latestBackup && latestBackup.ageHours > maxAgeHours) {
       warnings.push({
         code: "database_backup_stale",
         message: `Latest database backup is ${latestBackup.ageHours}h old, exceeding ${maxAgeHours}h.`,
@@ -146,6 +149,7 @@ export function inspectDatabaseBackupHealth(
     status: warnings.length > 0 ? "warning" : "ok",
     backupDir: opts.backupDir,
     maxAgeHours,
+    ...(opts.getCurrentBackup ? { currentBackup: opts.getCurrentBackup() } : {}),
     latestBackup,
     lastFailure,
     warnings,
