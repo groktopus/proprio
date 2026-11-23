@@ -130,7 +130,15 @@ pnpm proprio onboard
 
 Server prompt behavior:
 
-1. quickstart `--yes` defaults to `server.bind=loopback` and therefore `local_trusted/private`
+1. Quickstart `--yes` defaults to `local_trusted/private` on loopback. Set
+   `PROPRIO_DEPLOYMENT_MODE=authenticated` to require sign-in. Reachability
+   stays on loopback unless you select another bind or host.
+   `--bind` selects reachability and preserves compatible exposure and auth
+   settings. Quickstart rejects conflicting settings before it saves config.
+   A Tailnet bind requires a detected Tailscale address or
+   `PROPRIO_TAILNET_BIND_HOST`. Use `--bind loopback` for local-only access.
+   The CLI and server load the instance environment file before the working
+   directory file. Set `PROPRIO_DISABLE_CWD_ENV_FILE=true` to omit the latter.
 2. advanced server setup asks reachability first:
 - `Trusted local` → `bind=loopback`, `local_trusted/private`
 - `Private network` → `bind=lan`, `authenticated/private`
@@ -147,7 +155,10 @@ pnpm proprio onboard --yes --bind lan
 pnpm proprio run --bind tailnet
 ```
 
-`configure --section server` follows the same interactive behavior.
+`configure --section server` follows the same interactive behavior. If the
+environment and saved config select different modes, `auth bootstrap-ceo`
+reports the mismatch before it accesses the database. Match the saved mode to
+the running service and rerun the invite command.
 
 ## 5. Doctor UX Contract
 
