@@ -24,6 +24,8 @@ test("routes changes that affect update, restore, or run recovery", () => {
     "server/src/services/runner-goals.ts",
     "packages/proprio-runner/runner/crates/runner-core/src/lib.rs",
     ".github/workflows/linux-source-qualification.yml",
+    "scripts/ci/durable-work-release-evidence.mjs",
+    "scripts/ci/durable-work-release-evidence.test.mjs",
   ]) {
     assert.equal(requiresDurableWorkAcceptance(["doc/GOAL.md", path]), true, path);
   }
