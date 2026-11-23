@@ -410,6 +410,25 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     } finally { await sourceSql.end(); }
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
+  it("rejects nullifying distinct keys before publishing a NULLS NOT DISTINCT backup", async () => {
+    const source = await createTempDatabase();
+    const sourceSql = postgres(source, { max: 1 });
+    const backupDir = createTempDir("unique-transform-");
+    const retention = { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 };
+    try {
+      await sourceSql.unsafe(`CREATE TABLE public.unique_transform_guard (
+        external_id text, CONSTRAINT unique_external_id UNIQUE NULLS NOT DISTINCT (external_id)
+      ); INSERT INTO public.unique_transform_guard VALUES ('first'), ('second');`);
+      const prior = await runDatabaseBackup({ connectionString: source, backupDir, backupEngine: "javascript", retention });
+      const priorBytes = fs.readFileSync(prior.backupFile);
+      await expect(runDatabaseBackup({ connectionString: source, backupDir, backupEngine: "javascript", retention,
+        nullifyColumns: { unique_transform_guard: ["external_id"] } }))
+        .rejects.toThrow(/backup_transform_constraint_conflict.*unique_external_id/);
+      expect(fs.readdirSync(backupDir)).toEqual([path.basename(prior.backupFile)]);
+      expect(fs.readFileSync(prior.backupFile)).toEqual(priorBytes);
+    } finally { await sourceSql.end(); }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it.each(["populated", "empty", "unrelated column"])("handles nullification against exclusion expression dependencies (%s)", async variant => {
     const source = await createTempDatabase();
     const sourceSql = postgres(source, { max: 1 });
