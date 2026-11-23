@@ -41,6 +41,20 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Check competing approval revision requests
+        run: |
+          test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/approval-results.json" "$test_file" -t 'first revision request|waits for resubmission'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'approval-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'keeps the first revision request and rejects a waiting operator',
+            'waits for resubmission and never removes retained membership after approval',
+          ] });
+          JS
       - name: Validate contributor instructions and adapter boundaries
         run: pnpm check:agents && pnpm test:check-agents && pnpm check:no-git-push
       - name: Verify generated API documentation

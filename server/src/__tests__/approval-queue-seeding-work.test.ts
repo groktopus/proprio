@@ -230,6 +230,61 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     await companyService(db).update(companyId, { status: "active" }); await seeded(approval.id); await quiet();
   });
 
+  it("keeps the first revision request and rejects a waiting operator", async () => {
+    const approval = await pending();
+    const service = approvalRecords(db);
+    let release!: () => void;
+    let ready!: (pid: number) => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const applied = new Promise<number>(resolve => { ready = resolve; });
+    const first = db.transaction(async tx => {
+      const result = await approvalRecords(tx as unknown as Db)
+        .requestRevision(approval.id, "first-operator", "Keep the first note");
+      const [owner] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      ready(owner.pid);
+      await released;
+      return result;
+    });
+    let second: Promise<PromiseSettledResult<Awaited<ReturnType<typeof service.requestRevision>>>> | undefined;
+    try {
+      const pid = await Promise.race([applied, first.then(() => { throw new Error("First request ended before its write"); })]);
+      second = service.requestRevision(approval.id, "second-operator", "Overwrite the note").then(
+        value => ({ status: "fulfilled", value }),
+        reason => ({ status: "rejected", reason }),
+      );
+      await vi.waitFor(async () => {
+        const [row] = await db.execute<{ blocked: boolean }>(sql`
+          select exists (select 1 from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid))) as blocked
+        `);
+        expect(row.blocked).toBe(true);
+      }, { timeout: 5_000 });
+    } finally {
+      release();
+      await Promise.allSettled(second ? [first, second] : [first]);
+    }
+
+    const winner = await first;
+    expect(winner).toMatchObject({
+      status: "revision_requested",
+      decisionNote: "Keep the first note",
+      decidedByUserId: "first-operator",
+      decidedAt: expect.any(Date),
+    });
+    expect(await second).toMatchObject({
+      status: "rejected",
+      reason: { status: 422, message: "Only pending approvals can request revision" },
+    });
+    expect(await service.getById(approval.id)).toMatchObject({
+      decisionNote: winner.decisionNote,
+      decidedByUserId: winner.decidedByUserId,
+      decidedAt: winner.decidedAt,
+    });
+
+    expect(await service.resubmit(approval.id)).toMatchObject({ status: "pending", decidedAt: null });
+    await expect(service.requestRevision(approval.id, "second-operator", "New decision"))
+      .resolves.toMatchObject({ status: "revision_requested", decidedByUserId: "second-operator", decisionNote: "New decision" });
+  });
+
   it("waits for resubmission and never removes retained membership after approval", async () => {
     const approval = await pending(); await approvalRecords(db).requestRevision(approval.id, "board-user");
     await start(); await quiet(); expect(await memberships()).toEqual([]);
