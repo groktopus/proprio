@@ -20,6 +20,7 @@ workspace from the frozen pnpm lockfile, and runs:
 - native heartbeat replay cadence and settlement callback consumers;
 - late live-settlement metadata regressions;
 - recovery of interrupted plugin jobs and preservation of active owners;
+- strict cron parsing and routine and plugin schedule recovery;
 - the server typecheck, Hermes adapter build, and server TypeScript build compilation.
 
 Named PostgreSQL and selected regression cases must report a passing result.

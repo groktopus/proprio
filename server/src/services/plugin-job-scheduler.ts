@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { pluginJobs, pluginJobRuns, withDedicatedDbConnection, type Db } from "@groktopus/db";
 import { pluginJobStore, type PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
@@ -247,8 +247,28 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
   async function refresh(signal?: AbortSignal) {
     const settlements = await Promise.allSettled([...pendingSettlements.keys()].map(settle));
     const jobs = await db.select().from(pluginJobs).where(eq(pluginJobs.status, "active"));
-    const runnable = jobs.filter(job => !unregistered.has(job.pluginId) && workerManager.isRunning(job.pluginId)
-      && !activeJobs.has(job.id) && !pendingSettlements.has(job.id) && job.schedule && !validateCron(job.schedule));
+    const runnable: Job[] = [];
+    for (const job of jobs) {
+      if (!canRun() || signal?.aborted) break;
+      if (!job.schedule || unregistered.has(job.pluginId) || activeJobs.has(job.id) || pendingSettlements.has(job.id)) continue;
+      const cronError = validateCron(job.schedule);
+      if (!cronError) {
+        if (workerManager.isRunning(job.pluginId)) runnable.push(job);
+        continue;
+      }
+      if (!job.nextRunAt) continue;
+      const [cleared] = await db.update(pluginJobs)
+        .set({ nextRunAt: null, updatedAt: new Date() })
+        .where(and(
+          eq(pluginJobs.id, job.id),
+          eq(pluginJobs.pluginId, job.pluginId),
+          eq(pluginJobs.schedule, job.schedule),
+          eq(pluginJobs.status, "active"),
+          isNotNull(pluginJobs.nextRunAt),
+        ))
+        .returning({ id: pluginJobs.id });
+      if (cleared) log.warn({ pluginId: job.pluginId, jobId: job.id, cronError }, "cleared invalid plugin job schedule");
+    }
     const outstanding = runnable.length === 0 ? [] : await db.select({ jobId: pluginJobRuns.jobId })
       .from(pluginJobRuns).where(and(inArray(pluginJobRuns.jobId, runnable.map(job => job.id)),
         inArray(pluginJobRuns.status, [...outstandingStatuses])));

@@ -267,6 +267,28 @@ jobs:
           JS
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
+      - name: Check cron parsing and schedule recovery
+        run: |
+          pnpm exec vitest run server/src/services/cron.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/cron-schedule-results.json" \
+            server/src/__tests__/routine-schedule-work.test.ts server/src/__tests__/plugin-scheduled-work.test.ts -t 'malformed'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'cron-schedule-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/routine-schedule-work.test.ts': [
+              'rejects malformed cron 15oops * * * * on creation and editing',
+              'rejects malformed cron */10minutes * * * * on creation and editing',
+              'rejects malformed cron 5-10-12 * * * * on creation and editing',
+              'pauses a saved malformed schedule without firing its stale deadline',
+            ],
+            'server/src/__tests__/plugin-scheduled-work.test.ts': [
+              'clears a saved malformed plugin deadline and still allows manual execution',
+            ],
+          });
+          JS
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs

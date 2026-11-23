@@ -129,6 +129,12 @@ Three trigger kinds:
 }
 ```
 
+Cron accepts five fields with numeric values, wildcards, ranges, steps, and
+lists. A malformed field returns HTTP 422 on creation or editing. If the
+scheduler reaches a previously saved malformed expression, it pauses the
+trigger, clears its next run, and records the error in `lastResult`. Correct the
+expression before resuming the trigger.
+
 **Webhook** — fires on an inbound HTTP POST to a generated URL:
 
 ```
