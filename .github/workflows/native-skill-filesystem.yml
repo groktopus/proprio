@@ -6,6 +6,10 @@ on:
     paths:
       - .github/workflows/native-skill-filesystem.yml
       - scripts/ci/codex-shared-skill-discovery.mjs
+      - pnpm-lock.yaml
+      - packages/proprio-runner/package.json
+      - packages/proprio-runner/src/drivers/codex/app-server-transport.ts
+      - server/src/services/skill-repository-package.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
       - packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts
@@ -62,7 +66,7 @@ jobs:
             if [ "$filesystem" = ext4 ]; then
               sudo unshare --net -- runuser -u "$(id -un)" -- \
                 env TMPDIR="$scratch/mount" PATH="$PATH" PROPRIO_TEST_ISOLATED_NETWORK=1 "$(command -v node)" \
-                scripts/ci/codex-shared-skill-discovery.mjs packages/proprio-runner/node_modules/.bin/codex
+                --import ./cli/node_modules/tsx/dist/loader.mjs scripts/ci/codex-shared-skill-discovery.mjs
               TMPDIR="$scratch/mount" PROPRIO_TEST_NATIVE_SKILL_EXT4=1 \
                 pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
                 src/live/runnerd-restart-continuation.test.ts -t 'completes after the real runner and provider are killed'
