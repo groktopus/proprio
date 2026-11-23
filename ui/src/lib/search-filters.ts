@@ -1,5 +1,6 @@
 import {
   COMPANY_SEARCH_SORTS,
+  COMPANY_SEARCH_UNASSIGNED,
   type CompanySearchSort,
 } from "@groktopus/shared";
 import type { ParsedSearchQuery } from "./search-query-parser";
@@ -55,7 +56,7 @@ export function countActiveFilters(filters: SearchFilters): number {
 // it across assigneeAgentId (string | null) and assigneeUserId (string). These
 // helpers translate between a single opaque token and that split representation.
 //   "me"          → assigneeUserId = currentUserId
-//   "none"        → assigneeAgentId = null (unassigned)
+//   "none"        → assigneeAgentId = null in the board URL; API calls use "unassigned"
 //   "agent:<id>"  → assigneeAgentId
 //   "user:<id>"   → assigneeUserId
 // ---------------------------------------------------------------------------
@@ -211,6 +212,7 @@ export function describeLoosenSuggestion(filterKey: string, values: string[], lo
     case "priority":
       return `Priority: ${values.map(humanize).join(", ")}`;
     case "assigneeAgentId":
+      if (values.includes(COMPANY_SEARCH_UNASSIGNED)) return "Assignee: Unassigned";
       return `Assignee: ${values.map((id) => lookups.agentName(id) ?? "Agent").join(", ")}`;
     case "assigneeUserId":
       return `Assignee: ${values.map((id) => (id === lookups.currentUserId ? "Me" : lookups.userName(id) ?? "User")).join(", ")}`;

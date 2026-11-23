@@ -4,6 +4,8 @@ import type { IssueBlockerAttention } from "./issue.js";
 export const COMPANY_SEARCH_SCOPES = ["all", "issues", "comments", "documents", "artifacts", "agents", "projects"] as const;
 export type CompanySearchScope = (typeof COMPANY_SEARCH_SCOPES)[number];
 
+export const COMPANY_SEARCH_UNASSIGNED = "unassigned";
+
 export const COMPANY_SEARCH_SORTS = ["relevance", "updated", "created", "priority"] as const;
 export type CompanySearchSort = (typeof COMPANY_SEARCH_SORTS)[number];
 
