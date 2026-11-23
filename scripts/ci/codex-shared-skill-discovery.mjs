@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -28,11 +28,16 @@ async function createAssignment(revision) {
   return { home, skill, files };
 }
 
-async function verifyDiscovery(workspace, session, assignment) {
+async function verifyDiscovery(workspace, session, assignment, outsideAssignment) {
   const privateHome = join(root, session);
   await mkdir(privateHome);
   await writeFile(join(privateHome, "config.toml"), `model = ${JSON.stringify(session)}\n`);
-  const child = spawn(codex, ["app-server"], {
+  const selectedSkillRule = assignment ? `,${JSON.stringify(assignment.skill)}="read"` : "";
+  const child = spawn(codex, [
+    "-c", 'default_permissions="fixture"',
+    "-c", `permissions.fixture.filesystem={":root"="none",":minimal"="read",":tmpdir"="none",${JSON.stringify(root)}="none"${selectedSkillRule}}`,
+    "-c", "permissions.fixture.network.enabled=false", "app-server",
+  ], {
     cwd: workspace,
     env: { PATH: process.env.PATH, HOME: assignment?.home ?? privateHome, CODEX_HOME: privateHome, TMPDIR: root },
     stdio: ["pipe", "pipe", "pipe"],
@@ -58,6 +63,11 @@ async function verifyDiscovery(workspace, session, assignment) {
     }
   }
 
+  const command = async (id, ...argv) => {
+    send({ id, method: "command/exec", params: { command: argv, cwd: workspace, timeoutMs: 3_000 } });
+    return resultFor(id);
+  };
+
   const deadline = setTimeout(() => child.kill("SIGKILL"), 15_000);
   try {
     send({ id: 1, method: "initialize", params: { clientInfo: { name: "proprio_skill_fixture", title: "Proprio skill fixture", version: "1" } } });
@@ -74,8 +84,17 @@ async function verifyDiscovery(workspace, session, assignment) {
       for (const [relativePath, content] of assignment.files) {
         assert.equal(await readFile(join(dirname(matches[0].path), relativePath), "utf8"), content);
       }
+      const selected = join(assignment.skill, rootFile);
+      const read = await command(4, "/bin/cat", selected);
+      assert.equal(read.exitCode, 0, JSON.stringify(read));
+      assert.equal(read.stdout, await readFile(selected, "utf8"));
+      const changeMode = await command(5, "/bin/chmod", "600", selected);
+      assert.notEqual(changeMode.exitCode, 0, "The Codex sandbox must refuse permission changes on a shared file");
+      assert.equal((await stat(selected)).mode & 0o777, 0o444);
     }
-    console.log(`${session}: verified private config and ${matches.length} matching skills`);
+    const outsideRead = await command(6, "/bin/cat", join(outsideAssignment.skill, rootFile));
+    assert.notEqual(outsideRead.exitCode, 0, "The Codex sandbox must refuse files outside the assigned revision");
+    console.log(`${session}: verified private config, ${matches.length} matching skills, and sandbox permissions`);
   } finally {
     output.close();
     child.stdin.end();
@@ -91,10 +110,10 @@ try {
   await mkdir(workspace);
   const first = await createAssignment("first-revision");
   const alternate = await createAssignment("alternate-revision");
-  await verifyDiscovery(workspace, "session-one", first);
-  await verifyDiscovery(workspace, "session-two", first);
-  await verifyDiscovery(workspace, "session-alternate", alternate);
-  await verifyDiscovery(workspace, "session-without-assignment", null);
+  await verifyDiscovery(workspace, "session-one", first, alternate);
+  await verifyDiscovery(workspace, "session-two", first, alternate);
+  await verifyDiscovery(workspace, "session-alternate", alternate, first);
+  await verifyDiscovery(workspace, "session-without-assignment", null, first);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
