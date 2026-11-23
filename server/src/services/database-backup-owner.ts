@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { formatDatabaseBackupResult, runDatabaseBackup, type BackupRetentionPolicy } from "@groktopus/db";
+import { sql } from "drizzle-orm";
+import { formatDatabaseBackupResult, runDatabaseBackup, withDedicatedDbConnection, type BackupRetentionPolicy, type Db } from "@groktopus/db";
 import { conflict } from "../errors.js";
 import type { InstanceDatabaseBackupRunResult, InstanceDatabaseBackupTrigger } from "../routes/instance-database-backups.js";
 import { beginIdleTrackedWork } from "./task-admission.js";
@@ -11,14 +12,45 @@ type BackupLogger = {
   error: (details: object, message: string) => void;
 };
 
+const BACKUP_DEADLINE_MS = 60 * 60 * 1000;
+const BACKUP_SETTINGS_STATEMENT_TIMEOUT_MS = 5_000;
+
+export function readServerBackupRetention(
+  db: Db,
+  signal: AbortSignal,
+  readRetention: (connection: Db) => Promise<BackupRetentionPolicy>,
+): Promise<BackupRetentionPolicy> {
+  signal.throwIfAborted();
+  return withDedicatedDbConnection(db, async connection => {
+    let closing: Promise<void> | undefined;
+    const stop = () => { closing ??= connection.$client.end({ timeout: 0 }); };
+    signal.addEventListener("abort", stop, { once: true });
+    try {
+      signal.throwIfAborted();
+      // The server may keep executing after a client disconnect. Bound the
+      // backend statement independently on this dedicated transaction.
+      const retention = await connection.transaction(async tx => {
+        await tx.execute(sql`select set_config('statement_timeout', ${String(BACKUP_SETTINGS_STATEMENT_TIMEOUT_MS)}, true)`);
+        return readRetention(tx as unknown as Db);
+      });
+      signal.throwIfAborted();
+      return retention;
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", stop);
+      await closing;
+    }
+  }, { admitWithoutWaiting: true });
+}
+
 export function createDatabaseBackupOwner(options: {
   connectionString: string;
   backupDir: string;
-  getRetention: () => Promise<BackupRetentionPolicy>;
+  getRetention: (signal: AbortSignal) => Promise<BackupRetentionPolicy>;
   logger: BackupLogger;
-  timeoutMs?: number;
 }) {
-  const timeoutMs = options.timeoutMs ?? 60 * 60 * 1000;
   let current: { trigger: InstanceDatabaseBackupTrigger; startedAt: Date } | null = null;
   const status = () => current && {
     trigger: current.trigger,
@@ -42,13 +74,14 @@ export function createDatabaseBackupOwner(options: {
     current = { trigger, startedAt };
     const finishIdleBackup = beginIdleTrackedWork();
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(new Error(`Database backup exceeded ${timeoutMs} ms`)), timeoutMs);
+    const timer = setTimeout(() => abort.abort(new Error(`Database backup exceeded ${BACKUP_DEADLINE_MS} ms`)), BACKUP_DEADLINE_MS);
     timer.unref();
     const label = trigger === "manual" ? "Manual" : trigger === "idle" ? "Pre-sleep" : "Automatic";
     try {
       if (trigger === "idle") await markIdleBackupWakeRequired(options.backupDir);
       options.logger.info({ backupDir: options.backupDir, trigger }, `${label} database backup starting`);
-      const retention = await options.getRetention();
+      const retention = await options.getRetention(abort.signal);
+      abort.signal.throwIfAborted();
       const verifyCheckpoint = trigger === "idle" || existsSync(idleBackupWakeMarker(options.backupDir));
 
       const result = await runDatabaseBackup({

@@ -1,4 +1,4 @@
-import { constants, createReadStream } from "node:fs";
+import { constants } from "node:fs";
 import { mkdir, open, unlink } from "node:fs/promises";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -34,14 +34,14 @@ export async function verifyIdleDatabaseBackup(backupFile: string, signal?: Abor
     if (!stat.isFile() || stat.size === 0) throw new Error("Idle backup archive is empty or invalid");
     let bytes = 0;
     await pipeline(
-      createReadStream(backupFile, { fd: handle.fd, autoClose: false }),
+      handle.createReadStream({ autoClose: false }),
       createGunzip(),
       new Writable({ write(chunk, _encoding, done) { bytes += chunk.length; done(); } }),
       { signal },
     );
     if (bytes === 0) throw new Error("Idle backup archive contains no SQL");
     await handle.sync();
-  } finally { await handle.close(); }
+  } finally { if (handle.fd !== -1) await handle.close(); }
   await syncDirectory(path.dirname(backupFile));
 }
 

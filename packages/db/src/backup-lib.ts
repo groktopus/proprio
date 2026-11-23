@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
@@ -349,6 +349,7 @@ async function runPgDumpBackup(opts: {
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         PGCONNECT_TIMEOUT: String(opts.connectTimeout),
@@ -361,9 +362,27 @@ async function runPgDumpBackup(opts: {
   }
 
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  let termination: Promise<void> | undefined;
   const stopChild = () => {
-    child.kill("SIGKILL");
-    child.stderr?.destroy();
+    termination ??= (async () => {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        await new Promise<void>(resolve => {
+          const taskkill = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+          execFile(taskkill, ["/pid", String(child.pid), "/t", "/f"], { timeout: 2_000, windowsHide: true }, error => {
+            if (error) child.kill("SIGKILL");
+            resolve();
+          });
+        });
+        return;
+      }
+      // Kill the dump's dedicated process group, including children of an
+      // operator-supplied wrapper that share its stdout and stderr.
+      try { process.kill(-child.pid, "SIGKILL"); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL");
+      }
+    })();
   };
   const streamCancellation = new AbortController();
   const signal = opts.signal
@@ -383,6 +402,7 @@ async function runPgDumpBackup(opts: {
     opts.signal?.throwIfAborted();
     throw error;
   } finally {
+    await termination;
     await closed;
     opts.signal?.removeEventListener("abort", stopChild);
   }
@@ -578,8 +598,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
   let sqlClosing: Promise<void> | undefined;
-  const closeSql = (timeout = signal?.aborted ? 0 : 1) => sqlClosing ??= Promise.resolve(sql.end({ timeout }));
-  const abortSql = () => { void closeSql(0).catch(() => {}); };
+  const closeSql = () => sqlClosing ??= Promise.resolve(sql.end({ timeout: signal?.aborted ? 0 : 1 }));
+  const abortSql = () => { void closeSql().catch(() => {}); };
 
   mkdirSync(opts.backupDir, { recursive: true });
   // Keep partial output out of health checks and retention. Concurrent
@@ -595,10 +615,16 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     await opts.verifyBeforePrune?.(stagedArchive);
     signal?.throwIfAborted();
     renameSync(stagedArchive, backupFile);
-    if (opts.verifyBeforePrune) {
-      // The verification fsync covered the staged bytes. Persist their final name.
-      const directory = await openFile(opts.backupDir, "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+    try {
+      if (opts.verifyBeforePrune) {
+        // The verification fsync covered the staged bytes. Persist their final name.
+        const directory = await openFile(opts.backupDir, "r");
+        try { await directory.sync(); } finally { await directory.close(); }
+      }
+      signal?.throwIfAborted();
+    } catch (error) {
+      try { unlinkSync(backupFile); } catch { /* keep the publication error */ }
+      throw error;
     }
     const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
     return { backupFile, sizeBytes, prunedCount, engine, fallbackReason };
@@ -1233,8 +1259,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       backupEngine === "auto" && effectiveBackupEngine === "javascript" ? "pg_dump_failed" : null);
   } catch (error) {
     await writer.abort();
-    if (existsSync(stagedArchive)) {
-      try { unlinkSync(stagedArchive); } catch { /* keep the original error */ }
+    for (const partial of [stagedArchive, sqlFile]) {
+      try { unlinkSync(partial); } catch { /* keep the original error */ }
     }
     signal?.throwIfAborted();
     throw error;
