@@ -239,6 +239,43 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     return { companyId, agentId, issueSvc, projectId, routine, svc, wakeups };
   }
 
+  it.each([false, true])("dispatches without borrowing a second connection (agent parent=%s)", async (withParent) => {
+    const f = await seedFixture();
+    if (withParent) {
+      const parent = await f.issueSvc.create(f.companyId, { title: "Routine parent", assigneeAgentId: f.agentId });
+      await f.svc.update(f.routine.id, { parentIssueId: parent.id }, { agentId: f.agentId });
+    }
+    const single = createDb(externalUrl ?? tempDb!.connectionString, { maxConnections: 1, statementTimeoutMs: 2_000 });
+    const wakeup = vi.fn(async (_agentId: string, opts: { payload?: Record<string, unknown> | null }) => {
+      const issueId = String(opts.payload?.issueId);
+      const [issue] = await single.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue.originRunId).toBeTruthy();
+      return { id: randomUUID() };
+    });
+    const svc = routineService(single, { heartbeat: { wakeup } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const args = { source: withParent ? "api" : "manual", idempotencyKey: "dispatch-once" } as const;
+    const dispatch = svc.runRoutine(f.routine.id, args, withParent ? { agentId: f.agentId } : {});
+    try {
+      const [run, retry] = await Promise.race([
+        Promise.all([dispatch, svc.runRoutine(f.routine.id, args, withParent ? { agentId: f.agentId } : {})]),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Routine dispatch waited for another database connection")), 3_000);
+        }),
+      ]);
+      expect(run).toMatchObject({ status: "issue_created", linkedIssueId: expect.any(String) });
+      expect(retry).toMatchObject({ id: run.id, linkedIssueId: run.linkedIssueId });
+      expect(wakeup).toHaveBeenCalledOnce();
+      const [task] = await db.select().from(issues).where(eq(issues.id, run.linkedIssueId!));
+      expect(task).toMatchObject({ originRunId: run.id, companyId: f.companyId });
+      expect(Boolean(task.parentId)).toBe(withParent);
+    } finally {
+      clearTimeout(timer);
+      await single.$client.end({ timeout: 0 });
+      await dispatch.catch(() => {});
+    }
+  }, 15_000);
+
   it("checks the author of an agent-edited routine revision when dispatching later work", async () => {
     const f = await seedFixture();
     const editorId = randomUUID();
@@ -1725,6 +1762,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           source: "assignment",
           triggerDetail: "system",
           reason: "issue_assigned",
+          idempotencyKey: `routine-dispatch:${run.id}`,
           payload: { issueId: run.linkedIssueId, mutation: "create" },
           requestedByActorType: undefined,
           requestedByActorId: null,

@@ -1,0 +1,1 @@
+ALTER TABLE "routine_runs" ADD COLUMN "assignment_wake_pending" boolean DEFAULT false NOT NULL;
