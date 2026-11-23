@@ -516,14 +516,12 @@ wait_for_npm_package_versions() {
   # rest of its budget. The subshell also keeps this trap from clobbering
   # the caller's cleanup trap.
   (
-    local status_dir
-    local pids=()
-    local specs=()
-    local failures=()
-    local index=0
-    local pkg_name
-    local pkg_version
-    local i
+    # The subshell already isolates this state. Bash 3 drops function-local
+    # variables before running its EXIT trap, so keep the cleanup state here.
+    pids=()
+    specs=()
+    failures=()
+    index=0
 
     status_dir="$(mktemp -d "${TMPDIR:-/tmp}/proprio-release-visibility.XXXXXX")"
 

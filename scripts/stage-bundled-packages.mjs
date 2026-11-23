@@ -12,7 +12,7 @@ import { startPrefetch } from './prefetch-child.mjs';
 export const PREPARE_BUNDLED_PACKAGE_SCRIPT = fileURLToPath(new URL('./prepare-bundled-package.mjs', import.meta.url));
 
 // `@groktopus/adapter-utils` -> `adapter_utils`, for log names and timing keys.
-export const bundledPackageSlug = name => name.replace(/^@proprio\//, '').replace(/[^a-z0-9]+/gi, '_');
+export const bundledPackageSlug = name => name.replace(/^@(?:groktopus|proprio)\//, '').replace(/[^a-z0-9]+/gi, '_');
 
 // Starts one child per entry (`{ name, stagedSource, target }`) at once and
 // returns the entries with their `slug` and prefetch `handle`. The caller joins

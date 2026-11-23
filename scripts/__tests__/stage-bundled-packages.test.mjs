@@ -76,14 +76,25 @@ test('stopping the installs after one fails also stops the npm process the other
     execFileSync(process.execPath, ['-e', "process.stdout.write('npm ' + process.pid + '\\\\n'); setInterval(() => {}, 1000)"], { stdio: 'inherit' });
   `);
   const installs = startBundledInstalls(entriesFor(root, ['@groktopus/server', '@groktopus/db']), { logDir: root, cwd: root, script });
-  await assert.rejects(Promise.all(installs.map(({ handle }) => handle.done)), /bundled-db prefetch failed \(exit 2\)/);
-  const log = join(root, 'bundled-server.log');
-  const logHasPid = () => existsSync(log) && /npm \d+/.test(readFileSync(log, 'utf8'));
-  for (let attempt = 0; attempt < 200 && !logHasPid(); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
-  const npmPid = Number(readFileSync(log, 'utf8').match(/npm (\d+)/)[1]);
-  const alive = pid => { try { process.kill(pid, 0); return !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch (error) { return error.code !== 'ESRCH'; } };
-  assert.ok(alive(npmPid), 'the stand-in npm runs before the stop');
-  await stopPrefetches(installs.map(({ handle }) => handle));
+  let npmPid;
+  const alive = pid => {
+    try {
+      process.kill(pid, 0);
+      return process.platform !== 'linux' || !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch (error) { return error.code !== 'ESRCH' && (process.platform !== 'linux' || error.code !== 'ENOENT'); }
+  };
+  try {
+    await assert.rejects(Promise.all(installs.map(({ handle }) => handle.done)), /bundled-db prefetch failed \(exit 2\)/);
+    const log = join(root, 'bundled-server.log');
+    const logHasPid = () => existsSync(log) && /npm \d+/.test(readFileSync(log, 'utf8'));
+    for (let attempt = 0; attempt < 200 && !logHasPid(); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+    const match = readFileSync(log, 'utf8').match(/npm (\d+)/);
+    assert.ok(match, 'the stand-in npm wrote its PID');
+    npmPid = Number(match[1]);
+    assert.ok(alive(npmPid), 'the stand-in npm runs before the stop');
+  } finally {
+    await stopPrefetches(installs.map(({ handle }) => handle));
+  }
   let stopped = false;
   for (let attempt = 0; attempt < 200 && !(stopped = !alive(npmPid)); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
   assert.ok(stopped, `stand-in npm ${npmPid} outlived stopPrefetches`);
@@ -97,8 +108,11 @@ test('a failed install rejects with the tail of its own log and leaves the other
     setTimeout(() => {}, 30_000);
   `);
   const installs = startBundledInstalls(entriesFor(root, ['@groktopus/server', '@groktopus/adapter-utils']), { logDir: root, cwd: root, script });
-  await assert.rejects(Promise.all(installs.map(({ handle }) => handle.done)), /bundled-adapter_utils prefetch failed \(exit 2\): bundled install exploded/);
-  assert.equal(installs[0].handle.child.exitCode, null, 'the other install is still running when the failure surfaces');
-  await stopPrefetches(installs.map(({ handle }) => handle));
+  try {
+    await assert.rejects(Promise.all(installs.map(({ handle }) => handle.done)), /bundled-adapter_utils prefetch failed \(exit 2\): bundled install exploded/);
+    assert.equal(installs[0].handle.child.exitCode, null, 'the other install is still running when the failure surfaces');
+  } finally {
+    await stopPrefetches(installs.map(({ handle }) => handle));
+  }
   assert.notEqual(installs[0].handle.child.signalCode ?? installs[0].handle.child.exitCode, null);
 }));
