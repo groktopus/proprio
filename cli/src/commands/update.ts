@@ -17,7 +17,9 @@ import { packageVersion } from "../version.js";
 const execFileAsync = promisify(execFile);
 export type InstallMode = "managed" | "global-npm" | "npx" | "source" | "unknown";
 export type UpdateOptions = { canary?: boolean; latest?: boolean; version?: string; rollback?: boolean; check?: boolean; dryRun?: boolean; json?: boolean; yes?: boolean; backup?: boolean };
-type Dependencies = { executablePath: string; runCommand: CommandRunner; backup: () => Promise<void>; confirm: (message: string) => Promise<boolean>; now: () => Date; paths: InstallStorePaths; restartActiveService: (expectedVersion: string) => Promise<boolean>; hasInstanceData: () => boolean };
+type RestartTarget = { expectedCommit?: string; startIfInactive?: boolean };
+type RestartActiveService = (expectedVersion: string, target?: RestartTarget) => Promise<boolean>;
+type Dependencies = { executablePath: string; runCommand: CommandRunner; backup: () => Promise<void>; confirm: (message: string) => Promise<boolean>; now: () => Date; paths: InstallStorePaths; restartActiveService: RestartActiveService; hasInstanceData: () => boolean };
 
 const DATABASE_UNREACHABLE_CODES = new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT"]);
 
@@ -67,11 +69,15 @@ async function runPreUpdateBackup(options: UpdateOptions, backup: () => Promise<
   }
 }
 
-async function restartActiveManagedService(expectedVersion: string): Promise<boolean> {
+async function restartActiveManagedService(expectedVersion: string, target?: RestartTarget): Promise<boolean> {
   const instanceId = resolveProprioInstanceId();
   const detection = await detectServiceManager({ instanceId });
-  if (!detection.supported || !(await detection.manager.status()).active) return false;
-  await restartManagedService({ instanceId, expectedVersion });
+  if (!detection.supported) {
+    if (target?.startIfInactive) throw new Error(detection.reason);
+    return false;
+  }
+  if (!target?.startIfInactive && !(await detection.manager.status()).active) return false;
+  await restartManagedService({ instanceId, expectedVersion, ...target });
   return true;
 }
 
@@ -148,13 +154,13 @@ function emit(options: UpdateOptions, value: Record<string, unknown>, message: s
 
 async function rollbackAfterServiceValidationFailure(
   paths: InstallStorePaths,
-  restartActiveService: (expectedVersion: string) => Promise<boolean>,
+  restartActiveService: RestartActiveService,
   validationError: unknown,
   payloadLabel: string,
 ): Promise<never> {
   const rolledBack = await withInstallStoreLock(async () => rollbackManagedInstall(paths), paths);
   try {
-    await restartActiveService(rolledBack.version);
+    await restartActiveService(rolledBack.version, { startIfInactive: true, ...(rolledBack.sha ? { expectedCommit: rolledBack.sha } : {}) });
   } catch (restartError) {
     throw new Error(
       `${payloadLabel} failed service validation and was rolled back to ${rolledBack.version}, but the rolled-back service also failed to restart.`,
@@ -174,7 +180,8 @@ export async function updateCommand(options: UpdateOptions, overrides: Partial<D
     if (mode !== "managed") throw new Error("--rollback is only available for managed installs.");
     if (options.dryRun) { emit(options, { mode, action: "rollback", dryRun: true, target: manifest?.previous[0]?.version ?? null }, `Would roll back to ${manifest?.previous[0]?.version ?? "the previous payload"}.`); return; }
     const next = await withInstallStoreLock(async () => rollbackManagedInstall(paths), paths);
-    const restarted = await (overrides.restartActiveService ?? restartActiveManagedService)(next.version);
+    const restart = overrides.restartActiveService ?? restartActiveManagedService;
+    const restarted = next.sha ? await restart(next.version, { expectedCommit: next.sha }) : await restart(next.version);
     emit(options, { mode, action: "rollback", version: next.version, restarted }, pc.green(`Rolled back to proprio ${next.version}${restarted ? " and restarted the active service" : ""}. Database migrations are not reversed; restore the pre-update backup if needed.`));
     return;
   }
@@ -204,7 +211,7 @@ export async function updateCommand(options: UpdateOptions, overrides: Partial<D
     }, paths);
     let restarted: boolean;
     try {
-      restarted = await (overrides.restartActiveService ?? restartActiveManagedService)(installed.version);
+      restarted = await (overrides.restartActiveService ?? restartActiveManagedService)(installed.version, { expectedCommit: targetSha });
     } catch (error) {
       return rollbackAfterServiceValidationFailure(
         paths,

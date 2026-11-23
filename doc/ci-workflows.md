@@ -14,6 +14,7 @@ workspace from the frozen pnpm lockfile, and runs:
 
 - the `AGENTS.md` local-link check and its Node test suite;
 - the CLI service-onboarding test;
+- managed service restart and same-version Git update validation;
 - server cost-summary and database-backup tests, with named PostgreSQL assertions;
 - Agent Chat supersession and Stop regressions across server and UI;
 - the standalone release-registry test suite;

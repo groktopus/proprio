@@ -1,5 +1,14 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import {
+  MANAGED_RESTART_LOCK_FILENAME,
+  MANAGED_RESTART_PROBE_HEADER,
+  MANAGED_RESTART_PROOF_HEADER,
+  managedRestartProbeMessage,
+} from "@groktopus/shared/service-restart-probe";
+import { resolveProprioInstanceRoot } from "../home-paths.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import type { Db } from "@groktopus/db";
 import { and, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
@@ -260,6 +269,22 @@ export function healthRoutes(
     // one, unlike the fuller `serverInfo` block. Deploy tooling (and anyone)
     // can read which commit this server is running without authenticating.
     const commit = serverInfo.git.available ? serverInfo.git.fullSha : null;
+    const probe = req.get(MANAGED_RESTART_PROBE_HEADER);
+    const lockToken = runtimeEnv.PROPRIO_SERVICE_MANAGED === "1" && probe
+      && /^[0-9]+:[0-9a-f-]{36}$/.test(probe) && probe.startsWith(`${process.pid}:`)
+      ? await readFile(path.join(resolveProprioInstanceRoot(), MANAGED_RESTART_LOCK_FILENAME), "utf8")
+        .then(value => value.trim()).catch(() => null)
+      : null;
+    function reply(body: { status: string; serverVersion?: string; commit?: string | null } & Record<string, unknown>) {
+      if (lockToken && probe) {
+        // Only the CLI and the managed process can read the restart lock.
+        const healthy = res.statusCode >= 200 && res.statusCode < 300 && body.status === "ok";
+        const message = managedRestartProbeMessage(probe, healthy, body.serverVersion ?? null, body.commit ?? null);
+        res.set(MANAGED_RESTART_PROOF_HEADER, createHmac("sha256", lockToken).update(message).digest("hex"));
+        res.set("Cache-Control", "no-store");
+      }
+      return res.json(body);
+    }
     const exposeDevServerDetails =
       exposeFullDetails || hasDevServerStatusToken(req.get("x-proprio-dev-server-status-token"));
     // Workspace readiness names the instance and execution workspace that
@@ -275,7 +300,7 @@ export function healthRoutes(
       : null;
 
     if (!db) {
-      res.json(
+      reply(
         exposeFullDetails
           ? {
               status: healthStatus,
@@ -302,7 +327,7 @@ export function healthRoutes(
     // keep the idle database awake. The claim itself still performs durable SQL,
     // and claimed instances retain the normal live database check below.
     if (opts.isWarmStandby?.()) {
-      res.json({
+      reply({
         status: healthStatus,
         deploymentMode: opts.deploymentMode,
         deploymentExposure: opts.deploymentExposure,
@@ -324,7 +349,8 @@ export function healthRoutes(
       const workspace = exposeWorkspaceReadiness
         ? await resolveWorkspaceReadiness({ db, handoffSubject }).catch(() => null)
         : null;
-      res.status(503).json({
+      res.status(503);
+      reply({
         status: "unhealthy",
         version: serverVersion,
         serverVersion,
@@ -409,7 +435,7 @@ export function healthRoutes(
     if (!exposeFullDetails) {
       const redactedDatabaseBackup = databaseBackup?.enabled ? redactedDatabaseBackupHealth(databaseBackup) : undefined;
       const redactedWarnings = redactedDatabaseBackup?.warnings.length ? redactedDatabaseBackup.warnings : undefined;
-      res.json({
+      reply({
         status: healthStatus,
         deploymentMode: opts.deploymentMode,
         deploymentExposure: opts.deploymentExposure,
@@ -430,7 +456,7 @@ export function healthRoutes(
       return;
     }
 
-    res.json({
+    reply({
       status: healthStatus,
       version: serverVersion,
       serverVersion,

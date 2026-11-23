@@ -277,6 +277,11 @@ proprio service status [--json]
 proprio service logs [-f]
 ```
 
+A successful restart requires a new supervisor process and a health response
+from that process. Managed Git updates also require the health response to
+report the selected commit, even when the package version stays the same.
+The restart result includes the recovery report when it matches the request.
+
 Every service verb supports `--instance <id>` and `--json`. Linux and WSL2 use
 a systemd user unit when available; macOS uses a LaunchAgent. Unsupported
 environments receive foreground `proprio run` guidance.

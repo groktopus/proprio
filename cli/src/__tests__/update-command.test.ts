@@ -111,7 +111,7 @@ describe("update command", () => {
     expect(() => resolveUpdateRequest(manifest, { latest: true, canary: true })).toThrow("only one");
   });
 
-  it("re-resolves a moving git branch and activates the new SHA payload", async () => {
+  it.each([true, false])("validates a same-version Git update before retaining its new payload (%s)", async (replacementHealthy) => {
     const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
     const oldSha = "1".repeat(40); const newSha = "2".repeat(40);
     const oldPayload = payloadPathFor(paths, "git", oldSha.slice(0, 12));
@@ -127,15 +127,25 @@ describe("update command", () => {
     fs.writeFileSync(paths.shimPath, fs.readFileSync(paths.shimPath, "utf8").replace(/^export PATH=.*\n/m, ""));
     const backup = vi.fn(async () => undefined);
     const confirm = vi.fn(async () => true);
-    const restartActiveService = vi.fn(async () => true);
+    const restartActiveService = vi.fn(async (_version: string, target?: { expectedCommit?: string }) => {
+      if (!replacementHealthy && target?.expectedCommit === newSha) throw new Error("health reported the previous commit");
+      return true;
+    });
     const runCommand = vi.fn(async (file: string) => file === "curl" ? { stdout: JSON.stringify({ sha: newSha }), stderr: "" } : { stdout: "0.3.1\n", stderr: "" });
-    await updateCommand({}, { paths, executablePath: executable, runCommand, backup, confirm, restartActiveService, hasInstanceData: () => true, now: () => new Date("2026-07-22T12:00:00Z") });
+    const update = updateCommand({}, { paths, executablePath: executable, runCommand, backup, confirm, restartActiveService, hasInstanceData: () => true, now: () => new Date("2026-07-22T12:00:00Z") });
+    if (replacementHealthy) await update;
+    else await expect(update).rejects.toThrow("Updated git payload failed service validation and was rolled back");
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining(`commit ${newSha.slice(0, 12)}`));
     expect(fs.readFileSync(paths.shimPath, "utf8")).toContain(`export PATH='${path.dirname(process.execPath)}'`);
     expect(backup).toHaveBeenCalledOnce();
-    expect(restartActiveService).toHaveBeenCalledWith("0.3.1");
-    expect(readInstallManifest(paths)?.sha).toBe(newSha);
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(newPayload));
+    expect(restartActiveService).toHaveBeenNthCalledWith(1, "0.3.1", { expectedCommit: newSha });
+    if (!replacementHealthy) {
+      expect(restartActiveService).toHaveBeenNthCalledWith(2, "0.3.1", {
+        expectedCommit: oldSha, startIfInactive: true,
+      });
+    }
+    expect(readInstallManifest(paths)?.sha).toBe(replacementHealthy ? newSha : oldSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(replacementHealthy ? newPayload : oldPayload));
   });
 
   it("reports SHA git installs as pinned without resolving again", async () => {
@@ -266,7 +276,7 @@ describe("update command", () => {
     await expect(updateCommand({}, { paths, executablePath: executable, runCommand, backup: async () => undefined, restartActiveService })).rejects.toThrow("rolled back to 1.0.0");
     expect(readInstallManifest(paths)?.version).toBe("1.0.0");
     expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
-    expect(restartActiveService).toHaveBeenLastCalledWith("1.0.0");
+    expect(restartActiveService).toHaveBeenLastCalledWith("1.0.0", { startIfInactive: true });
   });
 
   it("surfaces a failure to restart the rolled-back payload", async () => {
@@ -292,7 +302,7 @@ describe("update command", () => {
     expect(readInstallManifest(paths)?.version).toBe("1.0.0");
     expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
     expect(restartActiveService).toHaveBeenNthCalledWith(1, "2.0.0");
-    expect(restartActiveService).toHaveBeenNthCalledWith(2, "1.0.0");
+    expect(restartActiveService).toHaveBeenNthCalledWith(2, "1.0.0", { startIfInactive: true });
   });
 
 });
