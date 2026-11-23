@@ -31,7 +31,9 @@ async function createAssignment(revision) {
 
 async function verifyDiscovery(workspace, session, assignment, outsideAssignment) {
   const privateHome = join(root, session);
-  await mkdir(privateHome);
+  // The policy grants read access to this private output directory. Supply
+  // the mount source before Bubblewrap applies read-only parent mounts.
+  await mkdir(join(privateHome, "generated_images"), { recursive: true });
   await writeFile(join(privateHome, "config.toml"), `model = ${JSON.stringify(session)}\n`);
   const environment = {
     PATH: process.env.PATH, HOME: assignment?.home ?? privateHome, CODEX_HOME: privateHome,
@@ -44,7 +46,7 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
   let diagnostics = "";
   const transport = new ProcessCodexAppServerTransport({
     command: codex,
-    args: createIsolatedCodexAppServerArgs(environment, readOnlyRoots, undefined, [root]),
+    args: createIsolatedCodexAppServerArgs(environment, readOnlyRoots),
     workingDirectory: workspace,
     environment,
     onDiagnostic: message => { diagnostics = (diagnostics + message).slice(-4000); },
