@@ -82,8 +82,8 @@ const interval = setInterval(() => {
         logger,
       });
       const realTimeout = setTimeout;
-      const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, ms, ...args) =>
-        realTimeout(callback, ms === 60 * 60 * 1000 ? 2_000 : ms, ...args)) as typeof setTimeout);
+      const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, ms, ...args) =>
+        realTimeout(callback, ms === 60 * 60 * 1000 ? 2_000 : ms, ...args));
       try { backup = run("scheduled"); }
       finally { timer.mockRestore(); }
       // Observe premature setup failures as well as the expected held child.

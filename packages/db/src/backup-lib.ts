@@ -367,11 +367,11 @@ async function runPgDumpBackup(opts: {
     termination ??= (async () => {
       if (!child.pid) return;
       if (process.platform === "win32") {
-        await new Promise<void>(resolve => {
+        await new Promise<void>(done => {
           const taskkill = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
           execFile(taskkill, ["/pid", String(child.pid), "/t", "/f"], { timeout: 2_000, windowsHide: true }, error => {
             if (error) child.kill("SIGKILL");
-            resolve();
+            done();
           });
         });
         return;
