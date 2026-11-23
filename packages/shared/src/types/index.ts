@@ -306,6 +306,7 @@ export type {
   CatalogTeamInstallOptions,
   CatalogTeamSkillPreparationAction,
   CatalogTeamSkillPreparation,
+  CatalogTeamAgentRuntimePlan,
   CatalogTeamImportPreviewResult,
   CatalogTeamInstallResult,
   InstalledCatalogTeam,
@@ -446,6 +447,7 @@ export {
   COMPANY_SEARCH_EXTRACT_KINDS,
   COMPANY_SEARCH_EXTRACT_SCOPES,
   COMPANY_SEARCH_SCOPES,
+  COMPANY_SEARCH_UNASSIGNED,
   COMPANY_SEARCH_SORTS,
   COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS,
 } from "./search.js";

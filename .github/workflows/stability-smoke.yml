@@ -235,8 +235,40 @@ jobs:
         run: pnpm exec vitest run --maxWorkers 1 ui/src/lib/task-collection-preferences.test.ts ui/src/lib/cross-tab-poll.test.ts ui/src/hooks/useSharedPolling.test.ts ui/src/hooks/useSharedPollingSnapshot.test.tsx ui/src/pages/Inbox.test.tsx
       - name: Check late live settlement metadata
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
+      - name: Check closed budget windows and current holds
+        run: |
+          test_file=server/src/__tests__/budgets-service.test.ts
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/budget-rollover.json" "$test_file" -t 'retires the closed monthly incident'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'budget-rollover.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'retires the closed monthly incident with 20 cents spent this month',
+            'retires the closed monthly incident with 125 cents spent this month',
+          ] });
+          JS
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
+      - name: Check Team Catalog runtime previews
+        run: |
+          test_file=server/src/__tests__/teams-catalog-install-no-overrides.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/catalog-runtime-results.json" "$test_file" -t 'previews the native Codex|surfaces an unavailable default|honors an explicit caller'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'catalog-runtime-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/teams-catalog-install-no-overrides.test.ts': [
+              'previews the native Codex default and installs the same runtime',
+              'surfaces an unavailable default in preview before installation writes agents',
+              'honors an explicit caller adapter override for a single slug while defaulting the rest to native Claude',
+            ],
+          });
+          JS
+          pnpm exec vitest run ui/src/pages/TeamCatalog.test.tsx
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs

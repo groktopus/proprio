@@ -6,6 +6,8 @@ import { eq } from "drizzle-orm";
 import type {
   CatalogManifest,
   CatalogTeam,
+  CatalogTeamAgentRuntimePlan,
+  CatalogTeamImportPreviewResult,
   CatalogTeamInstallResult as SharedCatalogTeamInstallResult,
   CatalogTeamFileKind,
   CatalogTeamKind,
@@ -19,7 +21,6 @@ import type {
   CompanyPortabilityImportResult,
   CompanyPortabilityInclude,
   CompanyPortabilityPreview,
-  CompanyPortabilityPreviewResult,
   CompanyPortabilitySource,
 } from "@groktopus/shared";
 import { normalizeAgentUrlKey } from "@groktopus/shared";
@@ -96,14 +97,6 @@ export interface CatalogTeamPreparedSource {
 interface CatalogTargetManagerReference {
   agentId: string;
   slug: string;
-}
-
-export interface CatalogTeamImportPreviewResult {
-  team: CatalogTeam;
-  portabilityPreview: CompanyPortabilityPreviewResult;
-  skillPreparations: CatalogTeamSkillPreparation[];
-  warnings: string[];
-  errors: string[];
 }
 
 export interface CatalogTeamInstallResult {
@@ -698,7 +691,7 @@ function defaultSafeCatalogAdapterType() {
  * catalog agent the caller did not explicitly override so default-trust teams
  * install without manual adapter flags. Explicit caller overrides win and are
  * left untouched (both `adapterType` and `adapterConfig`). This is scoped to the
- * catalog install path; the generic portability fallback is unchanged.
+ * catalog preview and install paths; the generic portability fallback is unchanged.
  */
 function withSafeCatalogAdapterDefaults(
   agentSlugs: string[],
@@ -841,17 +834,61 @@ export function teamsCatalogService(db: Db) {
     });
   }
 
+  async function planCatalogImport(
+    companyId: string,
+    prepared: CatalogTeamPreparedSource,
+    options: CatalogTeamImportOptions,
+  ) {
+    const defaultAdapterType = defaultSafeCatalogAdapterType();
+    const input: CompanyPortabilityImport = {
+      ...buildPortabilityInput(companyId, prepared.source, options),
+      adapterOverrides: withSafeCatalogAdapterDefaults(prepared.team.agentSlugs, options.adapterOverrides, defaultAdapterType),
+      secretValues: options.secretValues,
+    };
+    const preview = await portability.previewImport(input, { mode: "agent_safe", sourceCompanyId: companyId });
+    const manifestBySlug = new Map(preview.manifest.agents.map(agent => [agent.slug, agent]));
+    const agentRuntimes: CatalogTeamAgentRuntimePlan[] = [];
+    for (const plan of preview.plan.agentPlans) {
+      if (plan.action === "skip") continue;
+      const agent = manifestBySlug.get(plan.slug);
+      if (!agent) continue;
+      const override = input.adapterOverrides?.[agent.slug];
+      const selected = {
+        slug: agent.slug,
+        requestedAdapterType: override?.adapterType ?? agent.adapterType,
+        defaulted: Boolean(override && !options.adapterOverrides?.[agent.slug]),
+      };
+      try {
+        const runtime = await portability.previewImportedAgentRuntime(companyId, agent, override);
+        const { provider } = runtime.adapterConfig;
+        agentRuntimes.push({
+          ...selected, adapterType: runtime.adapterType,
+          provider: typeof provider === "string" ? provider : null, error: null,
+        });
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status >= 500) throw error;
+        const message = `Agent ${agent.slug}: ${error.message}`;
+        preview.errors.push(message);
+        agentRuntimes.push({ ...selected, adapterType: null, provider: null, error: message });
+      }
+    }
+
+    const defaultedSlugs = agentRuntimes.filter(runtime => runtime.defaulted).map(runtime => runtime.slug);
+    if (defaultedSlugs.length) {
+      preview.warnings.push(
+        `Catalog agents without explicit overrides (${defaultedSlugs.join(", ")}) default to ${defaultAdapterType}. Pass adapterOverrides or PROPRIO_TEAMS_CATALOG_DEFAULT_ADAPTER_TYPE to use a different supported adapter.`,
+      );
+    }
+    return { input, preview, agentRuntimes };
+  }
+
   async function previewCatalogTeamImport(
     companyId: string,
     catalogRef: string,
     options: CatalogTeamImportOptions = {},
   ): Promise<CatalogTeamImportPreviewResult> {
     const prepared = await prepareCatalogTeamSource(companyId, catalogRef, options);
-    const previewInput = buildPortabilityInput(companyId, prepared.source, options);
-    const portabilityPreview = await portability.previewImport(previewInput, {
-      mode: "agent_safe",
-      sourceCompanyId: companyId,
-    });
+    const { preview: portabilityPreview, agentRuntimes } = await planCatalogImport(companyId, prepared, options);
     portabilityPreview.warnings.push(...prepared.warnings);
     portabilityPreview.errors.push(...prepared.errors);
     await logCatalogEvent("company.team_catalog_previewed", companyId, prepared.team, options.actor, {
@@ -861,6 +898,7 @@ export function teamsCatalogService(db: Db) {
     return {
       team: prepared.team,
       portabilityPreview,
+      agentRuntimes,
       skillPreparations: prepared.skillPreparations,
       warnings: portabilityPreview.warnings,
       errors: portabilityPreview.errors,
@@ -914,35 +952,11 @@ export function teamsCatalogService(db: Db) {
       throw unprocessable(`Catalog team source preparation failed: ${prepared.errors.join("; ")}`);
     }
 
-    const defaultAdapterType = defaultSafeCatalogAdapterType();
-    const importInput: CompanyPortabilityImport = {
-      ...buildPortabilityInput(companyId, prepared.source, options),
-      adapterOverrides: withSafeCatalogAdapterDefaults(
-        prepared.team.agentSlugs,
-        options.adapterOverrides,
-        defaultAdapterType,
-      ),
-      secretValues: options.secretValues,
-    };
-    const importPreview = await portability.previewImport(importInput, {
-      mode: "agent_safe",
-      sourceCompanyId: companyId,
-    });
+    const { input: importInput, preview: importPreview } = await planCatalogImport(companyId, prepared, options);
     if (importPreview.errors.length > 0) {
       throw unprocessable(`Catalog team import preview has errors: ${importPreview.errors.join("; ")}`);
     }
-    const defaultedAdapterSlugs = prepared.team.agentSlugs.filter(
-      (slug) => !options.adapterOverrides?.[slug],
-    );
-    const warnings = [
-      ...prepared.warnings,
-      ...importPreview.warnings,
-      ...(defaultedAdapterSlugs.length > 0
-        ? [
-            `Catalog agents without explicit overrides (${defaultedAdapterSlugs.join(", ")}) default to ${defaultAdapterType}. Pass adapterOverrides or PROPRIO_TEAMS_CATALOG_DEFAULT_ADAPTER_TYPE to use a different supported adapter.`,
-          ]
-        : []),
-    ];
+    const warnings = [...prepared.warnings, ...importPreview.warnings];
     const result = await portability.importBundle(
       importInput,
       options.actor?.userId ?? (options.actor?.actorType === "user" ? options.actor.actorId : null),
