@@ -25,7 +25,8 @@ Pull requests targeting `main` run the **Stability smoke** workflow for
 same-repository branches and forks. It installs the frozen workspace dependencies and
 runs onboarding, cost-summary, backup, chat, native replay, and settlement
 regressions. It also typechecks the server and compiles affected packages. The
-**Droid Auto Review** workflow reviews non-draft pull requests; neither workflow
+**Droid Auto Review** workflow reviews non-draft pull requests from
+same-repository branches. Neither workflow
 replaces the focused verification below or broader qualification required for
 release. GitHub can require workflow approval for first-time external contributors.
 
