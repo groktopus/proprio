@@ -1,5 +1,5 @@
 {
-  "$schema": "https://oxc.rs/schemas/oxlint.json",
+  "$schema": "https://unpkg.com/oxlint@1.94.0/configuration_schema.json",
   "rules": {
     "no-debugger": "deny",
     "no-dupe-keys": "deny",
