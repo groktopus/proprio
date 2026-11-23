@@ -438,10 +438,10 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
       (error: unknown) => ({ ok: false as const, error }),
     );
 
-    const settling = settleFailureAsOwner(run).then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error }),
-    );
+    let settling: Promise<
+      | { ok: true; value: Awaited<ReturnType<typeof settleFailureAsOwner>> }
+      | { ok: false; error: unknown }
+    > | undefined;
     try {
       const setup = await Promise.race([
         acceptedLocked.then(() => ({ ready: true as const })),
@@ -451,6 +451,11 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
         if (!setup.outcome.ok) throw setup.outcome.error;
         throw new Error("Acceptance fixture committed before reaching its lock barrier");
       }
+      const settlement = settleFailureAsOwner(run).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      settling = settlement;
       const waitingOnAcceptance = async () => (await observer.execute<{ count: number }>(sql`
       select count(*)::int as count from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock'
@@ -459,7 +464,7 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
       const contention = await Promise.race([
         expect.poll(waitingOnAcceptance, { timeout: 5000 }).toBe(1)
           .then(() => ({ kind: "blocked" as const }), (error: unknown) => ({ kind: "poll_error" as const, error })),
-        settling.then((outcome) => ({ kind: "settled" as const, outcome })),
+        settlement.then((outcome) => ({ kind: "settled" as const, outcome })),
       ]);
       if (contention.kind === "poll_error") throw contention.error;
       if (contention.kind === "settled") {
@@ -469,7 +474,7 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
       releaseAcceptance();
       const accepted = await accepting;
       if (!accepted.ok) throw accepted.error;
-      const settled = await settling;
+      const settled = await settlement;
       if (!settled.ok) throw settled.error;
       expect(settled.value).toHaveLength(0);
     } finally {
