@@ -8,7 +8,7 @@ import type { PersistedNativeSession } from "../contracts/native-session-backend
 import type { PrpEvent } from "../protocol/replay-contract.js";
 import { canonicalNativeRuntimeContextDigest, nativeRuntimePromptDigest, NATIVE_RUNTIME_ASSET_SCHEMA,
   PROPRIO_EXECUTION_PROMPT, PROPRIO_EXECUTION_PROMPT_REVISION, type NativeRuntimeContextSnapshot } from "../contracts/runtime-context.js";
-import { releaseMaterializedNativeRuntimeSkills } from "../drivers/runtime-context-materializer.js";
+import { prepareIsolatedCodexHome, releaseMaterializedNativeRuntimeSkills } from "../drivers/runtime-context-materializer.js";
 import { executeNativeSession } from "../native-session-runtime.js";
 import { unreadSteeredMessageIds } from "../steering-delivery.js";
 import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "./runnerd-codex-transport.js";
@@ -64,6 +64,16 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     interactionResponses: [], credentialBindings: [],
   };
   const skills = process.env.PROPRIO_TEST_NATIVE_SKILL_EXT4 === "1" ? await pinnedRepositoryFixture(root) : null;
+  const repositoryCache = join(root, "repository-cache");
+  const peerHome = join(root, "peer-codex-home");
+  const useSharedRepository = skills ? async <T>(digest: string, consume: (entry: string) => Promise<T>) =>
+    consume(join(repositoryCache, digest)) : undefined;
+  if (skills) {
+    await mkdir(repositoryCache, { mode: 0o700 });
+    const peer = { ...skills.context, skills: [skills.context.skills[1]!] };
+    peer.aggregateDigest = canonicalNativeRuntimeContextDigest(peer);
+    await prepareIsolatedCodexHome({ context: peer, codexHome: peerHome, useSharedRepository });
+  }
   const options = {
     runnerBinary: defaultCapabilityRunnerdBinary(),
     codexCommand: resolve(import.meta.dirname, "../../runner/target/debug/fake-codex-app-server"),
@@ -71,6 +81,7 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
       ...(skills ? ["--verify-skill-files", skills.manifest] : [])],
     ...(skills ? { runtimeContext: skills.context, sourceCodexHome: join(root, "no-ambient-codex-home") } : {}),
     stateDirectory: root,
+    sharedCodexRepositories: useSharedRepository ? { rootPath: repositoryCache, use: useSharedRepository } : undefined,
     prpIdentity: { runnerInstanceId: "runner-restart", environmentLeaseId: "lease-restart", runId: identity.runId, normalizedSessionId: identity.sessionId, turnId: "turn-restart", itemId: "item-restart" },
   };
   const first = createRunnerdCodexTransport(options);
@@ -101,6 +112,12 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     kill(owner.runnerPid);
     kill(owner.providerPid);
     await vi.waitFor(() => { expect(alive(owner.runnerPid)).toBe(false); expect(alive(owner.providerPid)).toBe(false); });
+    if (skills) {
+      const peer = await stat(join(peerHome, "skills", "second", skills.entry));
+      const interrupted = await stat(join(root, "codex-home", "skills", "second", skills.entry));
+      expect(peer.ino).toBe(interrupted.ino);
+      await releaseMaterializedNativeRuntimeSkills(join(peerHome, "skills"));
+    }
     // Simulate Codex's process-loss history: the thread remains, its in-memory
     // turn does not. Keep the turn counter to prevent provider identity reuse.
     const providerState = JSON.parse(await readFile(join(root, "fake-state.json"), "utf8"));
@@ -171,7 +188,11 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
       kill(evidence.runnerPid);
       kill(evidence.providerPid);
     }
-    if (skills) await releaseMaterializedNativeRuntimeSkills(join(root, "codex-home", "skills"));
+    if (skills) {
+      await releaseMaterializedNativeRuntimeSkills(join(root, "codex-home", "skills"));
+      await releaseMaterializedNativeRuntimeSkills(join(peerHome, "skills"));
+      await releaseMaterializedNativeRuntimeSkills(repositoryCache);
+    }
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);

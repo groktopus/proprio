@@ -1742,8 +1742,8 @@ export interface CapabilityRunnerdProcessEvidence {
 export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionDriver {
   observability?: import("../drivers/agent-observability.js").ProviderObservabilityLaunch;
   homeMode?: "isolated" | "preconfigured";
-  /** Controller-owned scope and lock. Only the default local sandbox can share inodes. */
-  useSharedCodexRepository?: NativeCodexRepositoryCache;
+  /** Controller-owned scope and lock for a local Codex sandbox with read-only skills. */
+  sharedCodexRepositories?: { rootPath: string; use: NativeCodexRepositoryCache };
   provider?: "cursor_cloud" | "codex" | "opencode" | "claude_managed" | "aws_agentcore" | "acpx";
   observeCredentials?: boolean;
   onCredentialsUpdated?: (event: PrpEvent) => Promise<void>;
@@ -6366,8 +6366,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
-        useSharedRepository: !this.options.runnerFilesystemRoot && !this.options.codexArgs
-          ? this.options.useSharedCodexRepository : undefined,
+        useSharedRepository: !this.options.runnerFilesystemRoot
+          ? this.options.sharedCodexRepositories?.use : undefined,
         observability: this.options.observability,
         sourceCodexHome:
           this.options.sourceCodexHome ??
@@ -7307,6 +7307,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             codexHome,
             workingDirectory: this.options.resumeWorkingDirectory,
             runtimeStateRoot: this.options.runnerFilesystemRoot ?? this.#root,
+            sharedCodexRepositoriesRoot: this.options.sharedCodexRepositories?.rootPath,
             codexCommand: typeof recordedCommand === "string" ? recordedCommand : this.options.codexCommand,
             instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
             disableProjectInstructions: this.options.disableCodexProjectInstructions,
@@ -7514,8 +7515,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ...auth,
           context: sourceRuntimeContext,
           colocateRepositoryFiles: !this.options.runnerFilesystemRoot,
-          useSharedRepository: !this.options.runnerFilesystemRoot && !this.options.codexArgs
-            ? this.options.useSharedCodexRepository : undefined,
+          useSharedRepository: !this.options.runnerFilesystemRoot
+            ? this.options.sharedCodexRepositories?.use : undefined,
           observability: this.options.observability,
         });
       }

@@ -185,9 +185,9 @@ async function linkSharedRepository(
       throw error;
     });
     if (!existing) {
-      const staging = await mkdtemp(join(dirname(repository), ".repository-staging-"));
+      const staging = await mkdtemp(join(dirname(repository), `.repository-staging-${digest}-`));
       try {
-        await cp(source, staging, { recursive: true, force: false, errorOnExist: true });
+        await cp(source, staging, { recursive: true, force: false });
         await protectStagedTree(staging);
         if (await repositoryTreeDigest(staging, true) !== digest) {
           throw new Error("runtime repository asset changed while publishing skills");

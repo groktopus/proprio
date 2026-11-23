@@ -295,7 +295,9 @@ describe("runtime context materialization", () => {
       expect(stats[1]!.ino).toBe(stats[2]!.ino);
       expect(stats[2]!.ino).not.toBe(stats[3]!.ino);
       const unique = new Map(stats.map(stat => [stat.ino, stat]));
-      expect([...unique.values()].reduce((sum, stat) => sum + stat.blocks * 512, 0)).toBe(2 * pinnedBytes.length);
+      const allocated = [...unique.values()].reduce((sum, stat) => sum + stat.blocks * 512, 0);
+      console.log(`ext4: ${unique.size} pinned repository files across ${homes.length} sessions, ${allocated} allocated bytes`);
+      expect(allocated).toBe(2 * pinnedBytes.length);
       expect((await readFile(copies[3]!)).equals(otherBytes)).toBe(true);
 
       await releaseMaterializedNativeRuntimeSkills(join(homes[0]!, "skills"));

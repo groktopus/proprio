@@ -18832,7 +18832,7 @@ async function createRunnerdBackendWithinSessionClaim(
         onSpawn: input.onSpawn,
         ...(input.execution.provider.kind === "codex" ? { disableCodexWebSearch: "webSearch" in input.execution.provider && input.execution.provider.webSearch === "disabled" } : {}),
         homeMode: preconfiguredHome ? "preconfigured" : "isolated",
-        useSharedCodexRepository: input.execution.provider.kind === "codex" && !remoteTarget && !preconfiguredHome
+        sharedCodexRepositories: process.platform === "linux" && input.execution.provider.kind === "codex" && !remoteTarget
           ? localCodexRepositoryCache(runnerdStateBase(), input.execution.binding.companyId)
           : undefined,
         ...accountingTransportOptions,

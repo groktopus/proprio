@@ -391,6 +391,7 @@ export function createRunnerProviderLaunch(
                           codexHome,
                           workingDirectory: input.cwd,
                           runtimeStateRoot: input.options.runnerFilesystemRoot ?? input.root,
+                          sharedCodexRepositoriesRoot: input.options.sharedCodexRepositories?.rootPath,
                           codexCommand: effectiveCodexCommand,
                           instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
                           disableProjectInstructions: settings.disableCodexProjectInstructions ?? input.options.disableCodexProjectInstructions,
@@ -487,6 +488,7 @@ export function createRunnerdCodexAppServerArgs(input: {
   codexCommand?: string;
   workingDirectory?: string;
   runtimeStateRoot?: string;
+  sharedCodexRepositoriesRoot?: string;
   readOnlyRoots?: string[];
   instructionWorkingCopyRoot?: string;
   disableProjectInstructions?: boolean;
@@ -506,7 +508,10 @@ export function createRunnerdCodexAppServerArgs(input: {
       },
       [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
       input.instructionWorkingCopyRoot,
-      usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : [],
+      [
+        ...(usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : []),
+        ...(input.sharedCodexRepositoriesRoot ? [input.sharedCodexRepositoriesRoot] : []),
+      ],
     ),
   ];
   if (!input.args && usesPreconfiguredHome(input.environment) && input.workingDirectory) {
