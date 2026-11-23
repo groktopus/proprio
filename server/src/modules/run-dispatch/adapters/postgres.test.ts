@@ -6,6 +6,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  agentSessionGoalActions,
+  agentTaskSessions,
   approvals,
   budgetIncidents,
   budgetPolicies,
@@ -77,6 +79,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await db.delete(environmentLeases);
     await db.delete(nativeRunFinalizations);
     await db.delete(activityLog);
+    await db.delete(agentTaskSessions);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
@@ -1398,6 +1401,51 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         expect(persisted?.status).toBe("cancelled");
       },
       15_000,
+    );
+
+    it.each(["legacy", "current", "paused", "superseded", "control_pending"] as const)(
+      "rechecks %s goal recovery at queued admission and provider dispatch", async mode => {
+        const { companyId, agentId } = await seedCompanyAndAgent();
+        const issueId = randomUUID();
+        await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+        const [session] = await db.insert(agentTaskSessions).values({
+          companyId, agentId, taskKey: issueId, adapterType: "codex_local",
+          goalStatus: "active", goalDesiredState: "active", goalRevision: 3,
+        }).returning();
+        const runId = await seedRun({ companyId, agentId, contextSnapshot: {
+          issueId, resumeSessionGoalHeartbeat: true,
+          ...(mode === "legacy" ? {} : { sessionGoalRecovery: { sessionId: session!.id, revision: 3 } }),
+        } });
+        await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+        const adapter = createPostgresRunDispatchAdapter(db);
+        const check = { companyId, runId, expectedStatus: "queued" as const, now: new Date() };
+        expect(await adapter.cancelStaleQueuedRun(check)).toMatchObject({ outcome: "not_stale" });
+        if (mode === "paused" || mode === "superseded") {
+          await db.update(agentTaskSessions).set({
+            goalRevision: 4, ...(mode === "paused" ? { goalDesiredState: "paused" } : {}),
+          }).where(eq(agentTaskSessions.id, session!.id));
+        }
+        if (mode === "control_pending") {
+          await db.insert(agentSessionGoalActions).values({
+            companyId, sessionId: session!.id, requestId: "fixture-pause", action: "pause",
+            status: "reconciling", payloadJson: {},
+          });
+        }
+        await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, runId));
+        const reservation = await reserveRunBudget(db, companyId, runId, null);
+        const dispatch = vi.fn(async () => "started");
+        const outcome = await adapter.dispatchResolvedInteractionIfCurrent({
+          ...check, expectedStatus: "running", reservationId: reservation.id, dispatch,
+        });
+        if (mode === "current" || mode === "legacy") {
+          expect(outcome.dispatched).toBe(true);
+          expect(dispatch).toHaveBeenCalledOnce();
+        } else {
+          expect(outcome).toMatchObject({ dispatched: false,
+            cancellation: { outcome: "cancelled", errorCode: "session_goal_recovery_superseded" } });
+          expect(dispatch).not.toHaveBeenCalled();
+        }
+      },
     );
 
     it("maps a review-parking continuation summary into a stale queued-run decision", async () => {

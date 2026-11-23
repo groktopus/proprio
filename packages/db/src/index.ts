@@ -56,12 +56,6 @@ export {
   type RunDatabaseRestoreOptions,
 } from "./backup-lib.js";
 export {
-  checkMigrationStagingEvidence,
-  type MigrationStagingEvidence,
-  type MigrationStagingEvidenceResult,
-  type MigrationStagingManifest,
-} from "./migration-staging-evidence.js";
-export {
   createEmbeddedPostgresLogBuffer,
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";

@@ -254,6 +254,19 @@ When you change the data model:
 Then update every layer that the change affects: `packages/shared` types and
 validators, `server` routes and services, and `ui` API clients and pages.
 
+### Competing migration processes
+
+The migration command and server startup acquire the same PostgreSQL session
+lock before they repair migration history or apply migrations. The default
+lock wait is 60 seconds. Set `PROPRIO_MIGRATION_LOCK_TIMEOUT_MS` to a positive
+integer to change the wait in milliseconds. This setting covers lock
+acquisition. Migration execution can continue beyond that time.
+
+If the process reports `MIGRATION_LOCK_TIMEOUT`, it did not start work under
+that lock. Wait for the active migrator to finish, then retry the command or
+restart the server. Inspect migration history before retrying an error that
+occurred after a migration started.
+
 ### Migration compatibility with the running release
 
 Proprio Cloud starts a new release while the previous one is still serving
@@ -325,46 +338,55 @@ array lists every packed migration in journal order with `idx`, `tag`,
 `compatibility`, `classified` (the classifier's verdict before an override),
 `override`, `overrideJustification`, and `reasons`.
 
-Before applying any pending `requires_staging` migration, the deployment owner
-supplies a version 1 staging-evidence document and checks it against that exact
-manifest and the target database's pending migration list:
+For a managed rollout, use the exact manifest for the packed migrator and
+invoke the gated migration command. Supply an absolute path to the deployment
+owner's evidence when the target has staging-required migrations.
 
 ```sh
-pnpm --filter @groktopus/db exec tsx scripts/check-migration-staging-evidence.ts \
-  manifest.json pending-migration-tags.json staging-evidence.json
+pnpm db:migrate --rollout-manifest "$PWD/manifest.json" \
+  --staging-evidence "$PWD/staging-evidence.json"
 ```
 
-`pending-migration-tags.json` is a JSON array of migration tags returned by
-`inspectMigrations` for the target database. Do not construct it from the
-manifest. Previously applied staging-required or unknown migrations do not
-block the next rollout. Every pending migration must appear in the manifest.
+In this mode Core reads the pending list on the reserved PostgreSQL session
+under the migration lock. It checks each pending SQL file against the manifest
+before repairing history or applying DDL. Missing staging evidence, unknown
+classifications, or mismatched SQL block the attempt. The deployment owner
+configures the rollout to use this command and reviews the referenced evidence
+before invoking it.
 
-The evidence document identifies the manifest `sourceSha`, the responsible
-deployment `owner`, and one entry for every staging-required migration. Each
-entry repeats the migration `tag` and `sqlSha256`, identifies either an
-expand/backfill/contract sequence or an explicitly staged deployment, and
-links each stage (`expand`, `backfill`, `contract`, or `staging`) to its release
-SHA and evidence reference. It records whether the previous release remains
-`serving` or was `drained`. A serving release requires evidence from an
-overlapping read/write rehearsal; a drained release requires evidence of the
-drain. It also records migration attempts separately: a `timed_out` advisory
-lock attempt must say `migrationStarted: false`, and at least one successful
-attempt must record lock acquisition, migration start, and `migrationOutcome: "applied"`.
-This preserves the safe-retry distinction from a failure after DDL has begun.
+To preview the check, pass the target's migration status JSON to the checker.
+The checker reads `pendingMigrations` and maps the SQL filenames to manifest tags.
+Use the same target connection for the preview and the gated migration.
 
-The checker rejects missing entries, stale SQL hashes, unknown classifications,
-and incomplete overlap, drain, or attempt records. It checks reference presence
-and structure. It does not fetch or validate the evidence behind a reference.
-The deployment gate must review the linked rehearsal itself. It must not treat a
-metadata field as proof of compatible overlap. Deployment owners retain
-responsibility for reviewing evidence and selecting their release sequence. The
-stability smoke gate runs the checker contract tests and a disposable
-PostgreSQL overlap fixture that exercises reads and writes from old and new
-release query shapes after an additive expand. A real deployment must retain
-its own sanitized rehearsal results. A lock-acquisition timeout before start
-leaves the active release in place and can be retried only after confirming
-there was no migration-history change. If migration started, stop promotion
-and inspect durable migration history and actual schema before recovery.
+```sh
+pnpm --filter @groktopus/db exec tsx src/migration-status.ts --json > migration-status.json
+pnpm --filter @groktopus/db exec tsx scripts/check-migration-staging-evidence.ts \
+  "$PWD/manifest.json" "$PWD/migration-status.json" "$PWD/staging-evidence.json"
+```
+
+The version 1 evidence identifies the exact manifest `sourceSha`, the
+responsible deployment `owner`, and an entry for each pending staging-required
+migration. Each entry repeats the `tag` and `sqlSha256`, links the rollout plan
+with `rollout.evidenceRef`, and names the phase, release SHA, and evidence for
+each stage. The phases are either `expand`, `backfill`, and `contract` or a
+single `staging` phase. The `previousRelease` record links evidence that the
+previous release is `serving` or `drained`. Serving overlap also needs an
+`overlap.evidenceRef` for read and write proof.
+
+`rehearsalAttempts` records outcomes from the exact SQL tested on a staging or
+disposable database. At least one rehearsal must acquire the lock, record a
+start, and apply the SQL. A lock acquisition timeout records
+`migrationStarted: false`. Record actual target migration outcomes separately
+for retry and promotion decisions. Evidence for known staging-required
+migrations may be retained when a rollout resumes after partial success.
+
+Core validates the handoff structure, migration identity, and evidence
+references. The deployment owner reviews the referenced rehearsal itself and
+selects the release sequence. Stability smoke exercises both the locked CLI
+gate on a disposable PostgreSQL database and overlapping old and new query
+shapes after an additive expand. If a target attempt times out before
+acquisition, confirm that history is unchanged before retrying. If DDL starts,
+pause promotion and inspect migration history and schema before recovery.
 
 ## Migration authoring checklist
 
