@@ -69,6 +69,25 @@ jobs:
             }
           }
           JS
+      - name: Check linked goal deletion
+        run: |
+          test_file=server/src/__tests__/project-goal-validation.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/goal-deletion-results.json" "$test_file"
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'goal-deletion-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'returns a project conflict when deleting a goal linked as primary',
+            'returns a project conflict when deleting a goal linked as secondary',
+            'returns a project conflict when deleting a goal linked as legacy',
+            'returns an actionable child_goal deletion conflict',
+            'returns an actionable task deletion conflict',
+            'deletes a standalone goal once and logs the successful mutation',
+            'rolls back goal deletion when its activity record cannot be inserted',
+          ] });
+          JS
       - name: Check Agent Chat supersession and Stop
         run: |
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
