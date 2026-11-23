@@ -10,6 +10,7 @@ import { resolveProprioInstanceRoot } from "../home-paths.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import type { Db } from "@groktopus/db";
 import { and, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { heartbeatRuns, instanceUserRoles, invites } from "@groktopus/db";
@@ -242,7 +243,19 @@ export function healthRoutes(
     });
   });
 
-  router.get("/", async (req, res) => {
+  const credentialedHealthRateLimit = rateLimit({
+    windowMs: 60_000,
+    // The CLI can poll twice per second while the replacement starts.
+    limit: 180,
+    keyGenerator: req => ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0"),
+    skip: req => !req.get(MANAGED_RESTART_PROBE_HEADER)
+      && !req.get("x-proprio-dev-server-status-token")
+      && !req.get(WORKSPACE_READINESS_TOKEN_HEADER),
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { status: "unhealthy", error: "health_probe_rate_limited" },
+  });
+  router.get("/", credentialedHealthRateLimit, async (req, res) => {
     const actorType = "actor" in req ? req.actor?.type : null;
     const exposeFullDetails = shouldExposeFullHealthDetails(
       actorType,

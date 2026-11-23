@@ -46,3 +46,17 @@ it("signs the health of the requested managed process using its instance lock", 
     await rm(home, { recursive: true, force: true });
   }
 });
+
+it("limits managed restart probes while keeping ordinary health available", async () => {
+  const app = express();
+  app.use("/api/health", healthRoutes());
+  const client = request(app);
+  const probe = `${process.pid}:${randomUUID()}`;
+  for (let requestNumber = 0; requestNumber < 180; requestNumber++) {
+    const response = await client.get("/api/health").set(MANAGED_RESTART_PROBE_HEADER, probe);
+    expect(response.status).not.toBe(429);
+  }
+  await client.get("/api/health").set(MANAGED_RESTART_PROBE_HEADER, probe).expect(429);
+  await client.get("/api/health").set("x-proprio-dev-server-status-token", "fixture").expect(429);
+  expect((await client.get("/api/health")).status).not.toBe(429);
+});
