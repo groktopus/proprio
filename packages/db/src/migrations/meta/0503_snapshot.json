@@ -1,6 +1,6 @@
 {
-  "id": "7ef590bd-dacb-421f-8b7c-2795e9b313b4",
-  "prevId": "3a5e2d96-185b-4177-925a-12e219d11678",
+  "id": "789ff1b9-fa8c-418c-8c23-e5708d718611",
+  "prevId": "db74b5e5-a103-41cd-95f2-e4675088b4c3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -43558,6 +43558,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'unknown'"
+        },
+        "goal_origin_goal_id": {
+          "name": "goal_origin_goal_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "parent_id": {
           "name": "parent_id",
