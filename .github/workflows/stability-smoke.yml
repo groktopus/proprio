@@ -14,7 +14,46 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
-  smoke:
+  route-durable-work:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      applicable: ${{ steps.route.outputs.applicable }}
+    steps:
+      - name: Check out the trusted target policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: target-policy
+          persist-credentials: false
+      - name: Read GitHub's PR comparison commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: pr-comparison
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Route durable-work acceptance
+        id: route
+        working-directory: pr-comparison
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          policy=../target-policy/scripts/ci/durable-work-acceptance.mjs
+          if [[ -f "$policy" ]]; then
+            node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
+          else
+            echo "Target branch predates routing. Require the full Linux lane."
+            echo 'applicable=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  durable-work:
+    needs: route-durable-work
+    if: needs.route-durable-work.outputs.applicable == 'true'
+    uses: ./.github/workflows/linux-source-qualification.yml
+
+  stability-checks:
     # Fork heads run with a read-only token on a GitHub-hosted runner.
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
@@ -47,6 +86,8 @@ jobs:
         run: pnpm lint
       - name: Check authorization, audit access, and credential lifecycle
         run: node scripts/ci/run-security-regressions.mjs
+      - name: Check durable-work workflow and lifecycle harness
+        run: node --test scripts/ci/durable-work-acceptance.test.mjs scripts/ci/durable-work-policy.test.mjs scripts/__tests__/e2e-update-migrations.test.mjs
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
@@ -452,3 +493,23 @@ jobs:
           pnpm --filter @groktopus/server typecheck
           pnpm --filter @groktopus/hermes-proprio-adapter build
           node scripts/run-tsc.mjs -p server/tsconfig.build.json
+
+  smoke:
+    if: ${{ always() && github.repository == 'groktopus/proprio' }}
+    needs: [stability-checks, route-durable-work, durable-work]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require smoke tests and applicable qualification
+        env:
+          STABILITY_RESULT: ${{ needs.stability-checks.result }}
+          ROUTING_RESULT: ${{ needs.route-durable-work.result }}
+          APPLICABLE: ${{ needs.route-durable-work.outputs.applicable }}
+          DURABLE_WORK_RESULT: ${{ needs.durable-work.result }}
+        run: |
+          test "$STABILITY_RESULT" = success
+          test "$ROUTING_RESULT" = success
+          case "$APPLICABLE:$DURABLE_WORK_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Durable-work gate failed ($APPLICABLE:$DURABLE_WORK_RESULT)" >&2; exit 1 ;;
+          esac

@@ -39,6 +39,38 @@ repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
 
+### Durable-work acceptance
+
+The required `smoke` job combines Stability smoke with [Linux source
+qualification](../.github/workflows/linux-source-qualification.yml) when
+[the target branch's routing rules](../scripts/ci/durable-work-acceptance.mjs)
+match the PR diff. The router compares GitHub's comparison commit with its
+target-branch parent and verifies the PR head. During bootstrap it requires
+Linux qualification for every PR whose base predates the policy. Both
+execution jobs use read-only permissions and check out the exact PR head.
+
+The separate [trusted policy workflow](../.github/workflows/durable-work-policy.yml)
+uses the default branch and the GitHub API to classify all changed paths. It
+checks the qualification job for the open PR's current head and publishes
+`trusted durable-work acceptance`. The workflow reads run metadata only. It
+does not check out PR code or use PR artifacts. Add that status to the main
+ruleset after validating both an applicable run and an unrelated PR.
+
+If the PR changes the workflow or its routing and report checks, run the
+Linux workflow on `main` with its PR number and exact head SHA. The trusted
+policy uses that default-branch run as evidence. To qualify a source candidate
+outside a PR, leave both inputs empty and select the candidate ref.
+
+The Linux lane requires a source build, a fresh disposable agent run, native
+PostgreSQL 18 backup and restore into a fresh target, and named runner recovery
+cases. A managed update builds a Git payload and restarts a real systemd user
+service. The check verifies the running commit and a saved database record
+after the update and after rollback to the original commit. The existing
+simulated backup and restart cases also run in Stability smoke. The Linux job
+summary retains both revisions and the executed case outcomes. The active-work
+schema migration and browser acceptance remain tracked in
+[#127](https://github.com/groktopus/proprio/issues/127).
+
 ### Standalone sandbox-provider dependencies
 
 `.github/workflows/sandbox-providers.yml` checks same-repository PRs that touch

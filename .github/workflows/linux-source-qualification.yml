@@ -1,33 +1,41 @@
 name: Linux source qualification
+run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inputs.pr_number, inputs.test_head) || 'Linux source qualification' }}
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/linux-source-qualification.yml
-      - scripts/ci/linux-source-qualification.mjs
-      - tests/runner-recovery/README.md
-      - packages/proprio-runner/protocol/manifest.json
-    types: [opened, synchronize, reopened, ready_for_review]
+    inputs:
+      pr_number:
+        description: Pull request number for a default-branch acceptance run
+        type: string
+      test_head:
+        description: Exact pull request head SHA to qualify
+        type: string
+  workflow_call:
 
 permissions:
   contents: read
 
-concurrency:
-  group: linux-source-qualification-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   source-and-runner:
-    if: github.repository == 'groktopus/proprio' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
+      - name: Validate manual qualification subject
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TEST_HEAD: ${{ inputs.test_head }}
+        shell: bash
+        run: |
+          if [[ -n "$PR_NUMBER" || -n "$TEST_HEAD" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main && "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          fi
       - name: Check out the exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -36,7 +44,7 @@ jobs:
           package-manager-cache: false
       - name: Verify head and install locked dependencies
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git rev-parse HEAD
@@ -47,6 +55,32 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+      - name: Execute managed update and rollback on Linux
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || (inputs.test_head && github.sha) }}
+          NEXT_SHA: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          E2E_UPDATE_NEXT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          runner_uid="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$runner_uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$runner_uid.service"
+          systemctl --user import-environment PATH
+          export E2E_UPDATE_BASE_REF="${BASE_SHA:-$(git rev-parse HEAD^)}"
+          export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
+          export E2E_UPDATE_REQUIRE_PROBE=0
+          export E2E_BOOTSTRAP_CLI="$PWD/cli/src/index.ts"
+          export E2E_BOOTSTRAP_NODE_LOADER="$PWD/cli/node_modules/tsx/dist/loader.mjs"
+          export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          bash scripts/e2e-update-migrations.sh
       - name: Build the source checkout
         run: |
           rustc --version
@@ -68,16 +102,64 @@ jobs:
             ip link set lo up
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
+      - name: Check native fresh-target restore
+        env:
+          PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
+          PROPRIO_PSQL_PATH: /usr/lib/postgresql/18/bin/psql
+        run: |
+          restore_report="$RUNNER_TEMP/durable-work-restore.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$restore_report" \
+            packages/db/src/backup-lib.test.ts
+          node --input-type=module - "$restore_report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/db/src/backup-lib.test.ts': [
+              'restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with pg_dump',
+            ],
+          });
+          JS
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
-          pnpm test:runner-recovery
-          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+          controller_report="$RUNNER_TEMP/durable-work-controller.json"
+          pnpm test:runner-recovery --maxWorkers 1 --reporter=default --reporter=json --outputFile="$controller_report"
+          report="$RUNNER_TEMP/durable-work-runner.json"
+          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
+          node --input-type=module - "$report" "$controller_report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts': [
+              'adopts the in-flight turn when a restart lands just after turn.start (t77)',
+              'finalizes the durable proposed result when the runner and provider die before the turn terminal',
+            ],
+          });
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[3], 'utf8')), {
+            'server/src/services/native-runtime/native-safe-replacement.test.ts': [
+              'preserves saved work and a queued request at a controlled recovery boundary (verified)',
+              'preserves saved work and a queued request at a controlled recovery boundary (unproven)',
+              'preserves saved work and a queued request at a controlled recovery boundary (unknown_action)',
+            ],
+          });
+          JS
           pnpm exec vitest run --maxWorkers 1 \
             server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
             server/src/services/native-runtime/native-codex-runner.integration.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
+      - name: Retain case reports for the tested revision
+        if: always()
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+        run: |
+          echo "Linux durable-work qualification for \`$EXPECTED_HEAD\`." >> "$GITHUB_STEP_SUMMARY"
+          for report in "$RUNNER_TEMP"/durable-work-*.json; do
+            if [[ -f "$report" ]]; then
+              jq -r '.testResults[].assertionResults[] | [.status, .fullName] | @tsv' "$report" \
+                | awk -F '\t' '$1 != "pending" && $1 != "skipped" {print "- " $1 " — " $2}' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
