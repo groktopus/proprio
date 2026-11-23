@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
+    # Fork heads run with a read-only token on a GitHub-hosted runner.
+    if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
