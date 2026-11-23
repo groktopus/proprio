@@ -1,7 +1,15 @@
 name: Linux source qualification
+run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inputs.pr_number, inputs.test_head) || 'Linux source qualification' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number for a default-branch acceptance run
+        type: string
+      test_head:
+        description: Exact pull request head SHA to qualify
+        type: string
   workflow_call:
 
 permissions:
@@ -13,10 +21,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Validate manual qualification subject
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TEST_HEAD: ${{ inputs.test_head }}
+        shell: bash
+        run: |
+          if [[ -n "$PR_NUMBER" || -n "$TEST_HEAD" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main && "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          fi
       - name: Check out the exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -25,7 +43,7 @@ jobs:
           package-manager-cache: false
       - name: Verify head and install locked dependencies
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git rev-parse HEAD
@@ -57,7 +75,17 @@ jobs:
             ip link set lo up
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
-      - name: Check managed rollback and fresh-target restore
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+      - name: Check managed rollback and native fresh-target restore
+        env:
+          PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
+          PROPRIO_PSQL_PATH: /usr/lib/postgresql/18/bin/psql
         run: |
           update_report="$RUNNER_TEMP/durable-work-update.json"
           restore_report="$RUNNER_TEMP/durable-work-restore.json"
@@ -77,7 +105,7 @@ jobs:
           });
           assertRequiredVitestTests(readReport(process.argv[3]), {
             'packages/db/src/backup-lib.test.ts': [
-              'preserves identity generation, sequence options and progress in JavaScript backups',
+              'restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with pg_dump',
             ],
           });
           JS
@@ -85,12 +113,13 @@ jobs:
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
-          pnpm test:runner-recovery
+          controller_report="$RUNNER_TEMP/durable-work-controller.json"
+          pnpm test:runner-recovery --maxWorkers 1 --reporter=default --reporter=json --outputFile="$controller_report"
           report="$RUNNER_TEMP/durable-work-runner.json"
           pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
-          node --input-type=module - "$report" <<'JS'
+          node --input-type=module - "$report" "$controller_report" <<'JS'
           import { readFileSync } from 'node:fs';
           import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
           assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
@@ -99,9 +128,28 @@ jobs:
               'finalizes the durable proposed result when the runner and provider die before the turn terminal',
             ],
           });
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[3], 'utf8')), {
+            'server/src/services/native-runtime/native-safe-replacement.test.ts': [
+              'preserves saved work and a queued request at a controlled recovery boundary (verified)',
+              'preserves saved work and a queued request at a controlled recovery boundary (unproven)',
+              'preserves saved work and a queued request at a controlled recovery boundary (unknown_action)',
+            ],
+          });
           JS
           pnpm exec vitest run --maxWorkers 1 \
             server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
             server/src/services/native-runtime/native-codex-runner.integration.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
+      - name: Retain case reports for the tested revision
+        if: always()
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+        run: |
+          echo "Linux durable-work qualification for \`$EXPECTED_HEAD\`." >> "$GITHUB_STEP_SUMMARY"
+          for report in "$RUNNER_TEMP"/durable-work-*.json; do
+            if [[ -f "$report" ]]; then
+              jq -r '.testResults[].assertionResults[] | [.status, .fullName] | @tsv' "$report" \
+                | awk -F '\t' '$1 != "pending" && $1 != "skipped" {print "- " $1 " — " $2}' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done

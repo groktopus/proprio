@@ -32,7 +32,7 @@ pnpm lockfile. Its checks include:
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
 
-The workflow has read-only repository permissions and a 15-minute timeout. It
+The workflow has read-only repository permissions and a 25-minute timeout. It
 is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
@@ -42,24 +42,32 @@ persistence. GitHub can require a maintainer to approve a fork workflow run.
 
 The required `smoke` job combines Stability smoke with [Linux source
 qualification](../.github/workflows/linux-source-qualification.yml) when
-[the routing rules](../scripts/ci/durable-work-acceptance.mjs) match the PR
-diff. The rules cover managed install and update, backup and restore, database
-migrations, and runner or controller recovery. They also cover the qualification
-workflows and shared inputs such as the lockfile. The route job compares GitHub's PR comparison commit
-with its target-branch parent and verifies the named PR head.
-Qualification checks out and logs the exact head before building.
+[the target branch's routing rules](../scripts/ci/durable-work-acceptance.mjs)
+match the PR diff. The router compares GitHub's comparison commit with its
+target-branch parent and verifies the PR head. During bootstrap it requires
+Linux qualification for every PR whose base predates the policy. Both
+execution jobs use read-only permissions and check out the exact PR head.
 
-For an applicable PR, the source build and disposable Linux agent run must
-succeed. Named managed rollback, fresh-target PostgreSQL restore and runner
-restart tests must report passing assertions. Missing, skipped or failed
-qualification fails `smoke` for an applicable change. For an unrelated PR,
-the router records that qualification does not apply and `smoke` checks the
-focused Stability smoke results. Both jobs have read-only permissions and
-use no secrets. Maintain the routing fixtures when adding a relevant entry point.
+The separate [trusted policy workflow](../.github/workflows/durable-work-policy.yml)
+uses the default branch and the GitHub API to classify all changed paths. It
+checks the qualification job for the open PR's current head and publishes
+`trusted durable-work acceptance`. The workflow reads run metadata only. It
+does not check out PR code or use PR artifacts. Add that status to the main
+ruleset after validating both an applicable run and an unrelated PR.
 
-Maintainers can also run Linux source qualification on demand for a candidate
-ref. The active-work migration, browser evidence, and publication gate are
-tracked in [#127](https://github.com/groktopus/proprio/issues/127).
+If the PR changes the workflow or its routing and report checks, run the
+Linux workflow on `main` with its PR number and exact head SHA. The trusted
+policy uses that default-branch run as evidence. To qualify a source candidate
+outside a PR, leave both inputs empty and select the candidate ref.
+
+The initial Linux lane requires a source build, a fresh disposable Linux agent
+run and named cases for rollback, fresh-target PostgreSQL restore and runner
+recovery. The update cases use a real temporary install store with simulated
+Git resolution, backup and restart. The restore case requires a native
+PostgreSQL 18 dump and restore into a fresh target. The job summary retains
+the tested SHA and reported case outcomes. The executed managed update and
+rollback, active-work migration, and browser acceptance are tracked in
+[#127](https://github.com/groktopus/proprio/issues/127).
 
 ### Standalone sandbox-provider dependencies
 

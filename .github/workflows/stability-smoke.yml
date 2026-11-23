@@ -21,24 +21,32 @@ jobs:
     outputs:
       applicable: ${{ steps.route.outputs.applicable }}
     steps:
-      - name: Check out the PR comparison commit
+      - name: Check out the trusted target policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: target-policy
+          persist-credentials: false
+      - name: Read GitHub's PR comparison commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          path: pr-comparison
           fetch-depth: 2
           persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          package-manager-cache: false
       - name: Route durable-work acceptance
         id: route
+        working-directory: pr-comparison
         env:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          node --test scripts/ci/durable-work-acceptance.test.mjs
-          node scripts/ci/durable-work-acceptance.mjs route "$GITHUB_SHA" "$PR_HEAD"
+          policy=../target-policy/scripts/ci/durable-work-acceptance.mjs
+          if [[ -f "$policy" ]]; then
+            node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
+          else
+            echo "Target branch predates routing. Require the full Linux lane."
+            echo 'applicable=true' >> "$GITHUB_OUTPUT"
+          fi
 
   durable-work:
     needs: route-durable-work
@@ -49,7 +57,7 @@ jobs:
     # Fork heads run with a read-only token on a GitHub-hosted runner.
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out the exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -400,11 +408,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Check out the exact pull request head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
       - name: Require smoke tests and applicable qualification
         env:
           STABILITY_RESULT: ${{ needs.stability-checks.result }}
@@ -414,4 +417,7 @@ jobs:
         run: |
           test "$STABILITY_RESULT" = success
           test "$ROUTING_RESULT" = success
-          node scripts/ci/durable-work-acceptance.mjs gate "$APPLICABLE" "$DURABLE_WORK_RESULT"
+          case "$APPLICABLE:$DURABLE_WORK_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Durable-work gate failed ($APPLICABLE:$DURABLE_WORK_RESULT)" >&2; exit 1 ;;
+          esac
