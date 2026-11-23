@@ -290,7 +290,7 @@ else
   ACTIVE_MODE="complete"
   [ "$active_run_required" = 1 ] && ACTIVE_MODE="hold"
   cat > "$ACTIVE_SCRIPT" <<'NODE'
-import { existsSync, mkdirSync, openSync, closeSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const marker = process.argv[2];
 const issueId = process.argv[3];
@@ -298,8 +298,13 @@ const origin = process.argv[4];
 const output = process.argv[5];
 const mode = process.argv[6];
 const checkpoint = join(process.cwd(), "qualification-checkpoint.txt");
+const processIdentity = join(process.cwd(), "qualification-process.json");
 mkdirSync(process.cwd(), { recursive: true });
 if (!existsSync(checkpoint)) writeFileSync(checkpoint, `checkpoint for ${issueId}\n`, { flag: "wx" });
+const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+if (!processStartTicks) throw new Error("Could not record the qualification process start identity");
+writeFileSync(processIdentity, `${JSON.stringify({ pid: process.pid, startTicks: processStartTicks })}\n`);
 let created = false;
 try {
   const fd = openSync(marker, "wx");
@@ -374,10 +379,13 @@ NODE
     || { fail_ "4g task workspace is readable"; exit 1; }
   ACTIVE_WORKSPACE_CWD="$(jq -er '.cwd' <<<"$ACTIVE_WORKSPACE_BEFORE")" || { fail_ "4g workspace path exists"; exit 1; }
   ACTIVE_CHECKPOINT="$ACTIVE_WORKSPACE_CWD/qualification-checkpoint.txt"
+  ACTIVE_PROCESS_IDENTITY="$ACTIVE_WORKSPACE_CWD/qualification-process.json"
   [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
+    && [ -f "$ACTIVE_PROCESS_IDENTITY" ] \
+    && jq -e '(.pid | type) == "number" and .pid > 1 and (.startTicks | type) == "string" and (.startTicks | length) > 0' "$ACTIVE_PROCESS_IDENTITY" >/dev/null \
     && [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
-    && pass "4g task run saved one effect and a workspace checkpoint" \
-    || { fail_ "4g task run checkpoint and effect"; exit 1; }
+    && pass "4g task run saved one effect, its process identity, and a workspace checkpoint" \
+    || { fail_ "4g task run checkpoint, process identity, and effect"; exit 1; }
   if [ "$active_run_required" = 1 ]; then
     RECOVERY_STARTED_MS="$(( $(date +%s%3N) ))"
     pass "4h schema-upgrade run is active before candidate migration ($ACTIVE_RUN_ID)"
@@ -460,6 +468,59 @@ else
   [ "$installed_commit" = "$next_commit" ] && pass "7b install manifest matches the running candidate" \
     || { fail_ "7b candidate manifest"; exit 1; }
   verify_record && pass "7c candidate reads the saved base record" || { fail_ "7c candidate record continuity"; exit 1; }
+  if [ "$active_run_required" = 1 ]; then
+    ACTIVE_PROCESS_PID="$(jq -er '.pid' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "7d recorded process PID"; exit 1; }
+    ACTIVE_PROCESS_START="$(jq -er '.startTicks' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "7d recorded process start identity"; exit 1; }
+    ACTIVE_PROCESS_STAT="$(cat "/proc/$ACTIVE_PROCESS_PID/stat" 2>/dev/null || true)"
+    if [ -n "$ACTIVE_PROCESS_STAT" ]; then
+      ACTIVE_PROCESS_REST="${ACTIVE_PROCESS_STAT##*) }"
+      read -r -a ACTIVE_PROCESS_FIELDS <<<"$ACTIVE_PROCESS_REST"
+      ACTIVE_PROCESS_STATE="${ACTIVE_PROCESS_FIELDS[0]:-}"
+      ACTIVE_PROCESS_CURRENT_START="${ACTIVE_PROCESS_FIELDS[19]:-}"
+      if [ "$ACTIVE_PROCESS_STATE" != Z ] && [ "$ACTIVE_PROCESS_CURRENT_START" = "$ACTIVE_PROCESS_START" ]; then
+        fail_ "7d original process is stopped (pid $ACTIVE_PROCESS_PID still has its recorded start identity)"
+        exit 1
+      fi
+    fi
+    pass "7d original process identity stopped after service replacement (pid $ACTIVE_PROCESS_PID)"
+  fi
+  if [ "$active_run_required" = 1 ]; then
+    reconciliation_deadline=$(( $(date +%s) + 180 ))
+    ACTIVE_RECOVERY_ACTION_ID=""
+    ACTIVE_ORIGINAL_RUN_AFTER=""
+    while [ "$(date +%s)" -lt "$reconciliation_deadline" ]; do
+      ACTIVE_ORIGINAL_RUN_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_ACTIONS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_ACTION_ID="$(jq -er --arg run "$ACTIVE_RUN_ID" '[.actions[] | select(.cause == "legacy_execution_requires_reconciliation" and .evidence.runId == $run and .evidence.automaticRecovery.replay == "blocked")] | .[0].id // empty' <<<"$ACTIVE_RECOVERY_ACTIONS" 2>/dev/null || true)"
+      if [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
+        && jq -e '.status == "interrupted" or .status == "failed"' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null 2>&1; then
+        break
+      fi
+      ACTIVE_RECOVERY_ACTION_ID=""
+      sleep 1
+    done
+    [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
+      || { fail_ "7d stopped original run has an explicit no-replay reconciliation action"; exit 1; }
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d original run is terminal before board reconciliation"; exit 1; }
+    RECOVERY_EVIDENCE="I verified that the original process PID and start identity stopped. The process saved one checkpoint and idempotency marker but not the completion comment. The outcome is mixed; Retry reads the marker and delivers the comment once."
+    RESOLUTION_BODY="$(jq -n --arg actionId "$ACTIVE_RECOVERY_ACTION_ID" --arg runId "$ACTIVE_RUN_ID" --arg evidence "$RECOVERY_EVIDENCE" \
+      '{actionId:$actionId,outcome:"restored",sourceIssueStatus:"todo",resolutionNote:"Confirmed the interrupted process stopped after saving its idempotency marker but before delivering task output.",executionReconciliation:{runId:$runId,providerStopped:true,actionOutcome:"mixed",outcomeEvidence:$evidence}}')"
+    RESOLUTION_RESPONSE="$(curl --fail --silent --show-error --max-time 10 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions/resolve" \
+      -H "Origin: $origin" -H 'Content-Type: application/json' --data "$RESOLUTION_BODY")" \
+      || { fail_ "7d board reconciliation of the stopped process"; exit 1; }
+    jq -e --arg action "$ACTIVE_RECOVERY_ACTION_ID" '.issue.status == "todo" and .recoveryAction.id == $action and .recoveryAction.status == "resolved"' \
+      <<<"$RESOLUTION_RESPONSE" >/dev/null \
+      || { fail_ "7d explicit mixed-outcome reconciliation restores the task"; exit 1; }
+    RETRY_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+    RETRY_BODY="$(jq -n --arg key "$RETRY_KEY" --arg runId "$ACTIVE_RUN_ID" '{idempotencyKey:$key,observedRunId:$runId,retryAction:"move_forward"}')"
+    RETRY_RESPONSE="$(curl --fail --silent --show-error --max-time 10 "$origin/api/issues/$ACTIVE_ISSUE_ID/retry" \
+      -H "Origin: $origin" -H 'Content-Type: application/json' --data "$RETRY_BODY")" \
+      || { fail_ "7d ordinary task Retry after reconciliation"; exit 1; }
+    jq -e '.accepted == true' <<<"$RETRY_RESPONSE" >/dev/null \
+      || { fail_ "7d ordinary task Retry was accepted"; exit 1; }
+    pass "7d board reconciled the stopped process and accepted the normal Retry"
+  fi
   recovery_deadline=$(( $(date +%s) + 180 ))
   ACTIVE_RUNS_AFTER=""
   ACTIVE_LIVE_AFTER=""
@@ -488,7 +549,7 @@ else
     || { fail_ "7d task retains its execution workspace"; exit 1; }
   jq -e --arg id "$ACTIVE_WORKSPACE_ID" --arg cwd "$ACTIVE_WORKSPACE_CWD" '.id == $id and .cwd == $cwd' <<<"$ACTIVE_WORKSPACE_AFTER" >/dev/null \
     || { fail_ "7d execution workspace identity and path are retained"; exit 1; }
-  jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "succeeded" or .status == "interrupted")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+  jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
     || { fail_ "7d original run reached an allowed terminal recovery state"; exit 1; }
   [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
     || { fail_ "7e workspace checkpoint survives update"; exit 1; }

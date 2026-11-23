@@ -44,6 +44,19 @@ test("qualification can run the exact tested CLI against the installed base payl
   assert.match(workflow, /E2E_UPDATE_USE_BOOTSTRAP_CLI=1/);
 });
 
+test("active process recovery requires board reconciliation before normal Retry", () => {
+  const source = readFileSync(script, "utf8");
+  assert.match(source, /legacy_execution_requires_reconciliation/);
+  assert.match(source, /providerStopped:true,actionOutcome:"mixed"/);
+  assert.match(source, /qualification-process\.json/);
+  assert.match(source, /ACTIVE_PROCESS_CURRENT_START/);
+  assert.match(source, /ACTIVE_PROCESS_STATE.*!= Z/);
+  assert.match(source, /recovery-actions\/resolve/);
+  assert.match(source, /idempotencyKey:\$key,observedRunId:\$runId,retryAction:"move_forward"/);
+  assert.match(source, /api\/issues\/\$ACTIVE_ISSUE_ID\/retry/);
+  assert.match(source, /\.accepted == true/);
+});
+
 test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagnostics", () => {
   const source = readFileSync(script, "utf8");
   assert.match(source, /status:\"todo\"/);
