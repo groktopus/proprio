@@ -77,6 +77,50 @@ describeEmbeddedPostgres("teams catalog install with no caller adapter overrides
     return new Map(rows.map((row) => [row.name, row]));
   }
 
+  it("previews the native Codex default and installs the same runtime", async () => {
+    vi.stubEnv("PROPRIO_TEAMS_CATALOG_DEFAULT_ADAPTER_TYPE", "codex_local");
+    try {
+      const companyId = await seedEmptyCompany();
+      const svc = teamsCatalogService(db);
+      const options = { include: { projects: false, issues: false } };
+      const preview = await svc.previewCatalogTeamImport(companyId, "core-exec-team", options);
+      expect(preview.errors).toEqual([]);
+      expect(preview.portabilityPreview.manifest.agents.map(agent => agent.adapterType)).toEqual(["process", "process", "process"]);
+      expect(preview.agentRuntimes).toHaveLength(3);
+      for (const runtime of preview.agentRuntimes) {
+        expect(runtime).toMatchObject({
+          requestedAdapterType: "codex_local", adapterType: "proprio_runner",
+          provider: "codex", defaulted: true, error: null,
+        });
+      }
+      expect(preview.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/default to codex_local/)]));
+      await svc.installCatalogTeam(companyId, "core-exec-team", options);
+      const saved = await db.select().from(agents).where(eq(agents.companyId, companyId));
+      expect(saved).toHaveLength(3);
+      for (const agent of saved) expect(agent).toMatchObject({ adapterType: "proprio_runner", adapterConfig: { provider: "codex" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("surfaces an unavailable default in preview before installation writes agents", async () => {
+    vi.stubEnv("PROPRIO_TEAMS_CATALOG_DEFAULT_ADAPTER_TYPE", "unavailable_catalog_adapter");
+    try {
+      const companyId = await seedEmptyCompany();
+      const svc = teamsCatalogService(db);
+      const options = { include: { projects: false, issues: false } };
+      const preview = await svc.previewCatalogTeamImport(companyId, "core-exec-team", options);
+      expect(preview.errors).toEqual(expect.arrayContaining([expect.stringMatching(/unavailable_catalog_adapter/)]));
+      expect(preview.agentRuntimes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ adapterType: null, requestedAdapterType: "unavailable_catalog_adapter", error: expect.any(String) }),
+      ]));
+      await expect(svc.installCatalogTeam(companyId, "core-exec-team", options)).rejects.toMatchObject({ status: 422 });
+      expect(await db.select().from(agents).where(eq(agents.companyId, companyId))).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("installs core-exec-team end-to-end with no caller overrides and creates 3 native Claude agents", async () => {
     const companyId = await seedEmptyCompany();
     const svc = teamsCatalogService(db);
@@ -137,13 +181,20 @@ describeEmbeddedPostgres("teams catalog install with no caller adapter overrides
     const companyId = await seedEmptyCompany();
     const svc = teamsCatalogService(db);
 
-    await svc.installCatalogTeam(companyId, "core-exec-team", {
-      collisionStrategy: "rename",
+    const options = {
+      collisionStrategy: "rename" as const,
       include: { projects: false, issues: false },
       adapterOverrides: {
         cto: { adapterType: "opencode_local", adapterConfig: { model: "anthropic/claude-opus-4" } },
       },
+    };
+    const preview = await svc.previewCatalogTeamImport(companyId, "core-exec-team", options);
+    expect(preview.agentRuntimes.find((runtime) => runtime.slug === "cto")).toEqual({
+      slug: "cto", requestedAdapterType: "opencode_local", adapterType: "proprio_runner",
+      provider: "opencode", defaulted: false, error: null,
     });
+    expect(preview.agentRuntimes.filter((runtime) => runtime.defaulted)).toHaveLength(2);
+    await svc.installCatalogTeam(companyId, "core-exec-team", options);
 
     const byName = await listAdapterTypesByName(companyId, "CTO");
     expect(byName.size).toBe(3);

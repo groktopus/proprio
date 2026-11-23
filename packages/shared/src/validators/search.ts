@@ -6,6 +6,7 @@ import {
   COMPANY_SEARCH_EXTRACT_SCOPES,
   COMPANY_SEARCH_SCOPES,
   COMPANY_SEARCH_SORTS,
+  COMPANY_SEARCH_UNASSIGNED,
 } from "../types/search.js";
 
 export const COMPANY_SEARCH_MAX_QUERY_LENGTH = 200;
@@ -105,8 +106,9 @@ function parseAssigneeAgentId(value: unknown, ctx: z.RefinementCtx): string | nu
   const normalized = parseOptionalString(value, ctx, "assigneeAgentId");
   if (normalized === undefined) return undefined;
   if (normalized.toLowerCase() === "null") return null;
+  if (normalized === COMPANY_SEARCH_UNASSIGNED) return normalized;
   if (!isUuidLike(normalized)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "assigneeAgentId must be a UUID or 'null'" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "assigneeAgentId must be a UUID, 'null', or 'unassigned'" });
     return undefined;
   }
   return normalized;

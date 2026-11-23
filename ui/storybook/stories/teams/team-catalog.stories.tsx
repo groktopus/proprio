@@ -114,6 +114,7 @@ export function makePreview(errors: string[] = []): CatalogTeamImportPreviewResu
       warnings: ["Skill acme/growth-playbook will be imported from an external GitHub source."],
       errors,
     },
+    agentRuntimes: [],
     skillPreparations: [
       { type: "catalog", ref: "engineering/code-review", agentSlugs: ["cto"], action: "already_in_package", catalogSkillId: "skill-1", catalogSkillKey: "engineering/code-review", sourceLocator: null, sourceRef: null, reason: null },
       { type: "github", ref: "acme/growth-playbook@v1.2.0", agentSlugs: ["cmo"], action: "external_import_required", catalogSkillId: null, catalogSkillKey: null, sourceLocator: "github.com/acme/growth-playbook", sourceRef: "v1.2.0", reason: "Resolved from GitHub at install time" },

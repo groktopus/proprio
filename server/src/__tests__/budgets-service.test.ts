@@ -248,6 +248,55 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       .toMatchObject({ status: "resolved", resolvedAt: expect.any(Date) });
   });
 
+  it.each([20, 125])("retires the closed monthly incident with %i cents spent this month", async spent => {
+    const { companyId, agentId, projectId } = await createBudgetFixture();
+    const now = new Date();
+    const windowStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const previousStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const budget = { companyId, metric: "billed_cents", hardStopEnabled: true, isActive: true };
+    const [monthly, lifetime] = await db.insert(budgetPolicies).values([
+      { ...budget, scopeType: "project", scopeId: projectId, windowKind: "calendar_month_utc", amount: 100 },
+      { ...budget, scopeType: "company", scopeId: companyId, windowKind: "lifetime", amount: 10 },
+    ]).returning();
+    const [previousApproval] = await db.insert(approvals).values({
+      companyId, type: "budget_override_required", status: "pending", payload: {},
+    }).returning();
+    const [previous] = await db.insert(budgetIncidents).values({
+      companyId, policyId: monthly.id, scopeType: monthly.scopeType, scopeId: monthly.scopeId,
+      metric: monthly.metric, windowKind: monthly.windowKind, windowStart: previousStart, windowEnd: windowStart,
+      thresholdType: "hard", amountLimit: 100, amountObserved: 125, status: "open", approvalId: previousApproval.id,
+    }).returning();
+    await db.update(projects).set({ pauseReason: "budget", pausedAt: previousStart }).where(eq(projects.id, projectId));
+    await insertCostEvent({ companyId, agentId, projectId, costCents: spent, occurredAt: now });
+
+    const service = budgetService(db);
+    await service.reconcileScope(companyId, "company", companyId);
+    expect(await service.reconcilePolicies()).toEqual({ nextCursor: null });
+    const overCap = spent >= 100;
+    for (let read = 0; read < 2; read += 1) {
+      const overview = await service.overview(companyId);
+      const monthlyIncidents = overview.activeIncidents.filter(incident => incident.policyId === monthly.id);
+      expect(monthlyIncidents).toHaveLength(overCap ? 1 : 0);
+      if (overCap) expect(monthlyIncidents[0]).toMatchObject({ windowStart, approvalStatus: "pending" });
+      expect(overview.activeIncidents.filter(incident => incident.policyId === lifetime.id)).toHaveLength(1);
+      expect(overview.pendingApprovalCount).toBe(overCap ? 2 : 1);
+      expect(overview.pausedProjectCount).toBe(overCap ? 1 : 0);
+      expect(await service.reconcilePolicies()).toEqual({ nextCursor: null });
+    }
+
+    expect((await db.select().from(budgetIncidents).where(eq(budgetIncidents.id, previous.id)))[0])
+      .toMatchObject({ status: "resolved", resolvedAt: expect.any(Date) });
+    expect((await db.select().from(approvals).where(eq(approvals.id, previousApproval.id)))[0])
+      .toMatchObject({ status: "cancelled" });
+    if (overCap) {
+      await expect(service.resolveIncident(companyId, previous.id, { action: "raise_budget_and_resume", amount: 200 }, "board-user"))
+        .rejects.toThrow("This budget incident belongs to a closed accounting window");
+      expect((await db.select().from(projects).where(eq(projects.id, projectId)))[0]).toMatchObject({
+        pauseReason: "budget", pausedAt: previousStart,
+      });
+    }
+  });
+
   it("rejects another company's agent or project before allowing a no-policy invocation", async () => {
     const own = await createBudgetFixture();
     const other = await createBudgetFixture();
