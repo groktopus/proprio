@@ -1,5 +1,5 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { pluginJobs, pluginJobRuns, type Db } from "@groktopus/db";
+import { pluginJobs, pluginJobRuns, withDedicatedDbConnection, type Db } from "@groktopus/db";
 import { pluginJobStore, type PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import type { createDeliveryWorkCoordinator } from "./delivery-work-coordinator.js";
@@ -12,6 +12,41 @@ import { logger } from "../middleware/logger.js";
 type Job = typeof pluginJobs.$inferSelect;
 type Trigger = "schedule" | "manual" | "retry";
 type Coordinator = ReturnType<typeof createDeliveryWorkCoordinator>;
+type JobTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+const outstandingStatuses = ["pending", "queued", "running"] as const;
+
+function pluginJobLockKey(jobId: string) {
+  return `proprio:plugin-job:${jobId}`;
+}
+
+async function lockPluginJob(tx: JobTransaction, jobId: string): Promise<boolean> {
+  const [row] = await tx.execute<{ locked: boolean }>(sql`
+    select pg_try_advisory_xact_lock(hashtextextended(${pluginJobLockKey(jobId)}, 0)) as locked
+  `);
+  return row?.locked === true;
+}
+
+async function withPluginJobOwnership(db: Db, jobId: string, run: (locked: boolean) => Promise<void>) {
+  await withDedicatedDbConnection(db, async connection => {
+    const session = await connection.$client.reserve();
+    const key = pluginJobLockKey(jobId);
+    let locked = false;
+    try {
+      const [owner] = await session<{ locked: boolean }[]>`
+        select pg_try_advisory_lock(hashtextextended(${key}, 0)) as locked
+      `;
+      locked = owner?.locked === true;
+      await run(locked);
+    } finally {
+      try {
+        if (locked) await session`select pg_advisory_unlock(hashtextextended(${key}, 0))`;
+      } finally {
+        session.release();
+      }
+    }
+  });
+}
+
 
 export interface PluginJobSchedulerOptions {
   isBackgroundWorkEnabled?: () => boolean;
@@ -52,6 +87,8 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
   const activeJobs = new Set<string>();
   const pendingSettlements = new Map<string, { persist: () => Promise<void>; running?: Promise<void> }>();
   const inFlight = new Set<Promise<unknown>>();
+  const ownedExecutions = new Set<Promise<void>>();
+  const releaseSettledExecution = new Map<string, () => void>();
   const subscriptions = new Map<string, () => void>();
   const unregistered = new Set<string>();
   let worker: ReturnType<typeof registerDeadlineWork> | undefined;
@@ -74,7 +111,10 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
     if (!entry) return;
     entry.running ??= entry.persist().finally(() => { entry.running = undefined; });
     await entry.running;
-    if (pendingSettlements.get(jobId) === entry) pendingSettlements.delete(jobId);
+    if (pendingSettlements.get(jobId) === entry) {
+      pendingSettlements.delete(jobId);
+      releaseSettledExecution.get(jobId)?.();
+    }
   }
 
   async function execute(job: Job, runId: string, trigger: Trigger) {
@@ -106,41 +146,102 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
       }
     }) });
     try { await settle(job.id); }
-    finally { activeJobs.delete(job.id); worker?.wake(); }
+    finally { activeJobs.delete(job.id); }
+  }
+
+  /** Caller holds the job row and advisory lock. A running record may have
+   * reached its worker, so skip its overdue scheduled occurrence. */
+  async function reconcileInterrupted(tx: JobTransaction, job: Job, now: Date): Promise<Job> {
+    const priorRuns = await tx.select().from(pluginJobRuns).where(and(
+      eq(pluginJobRuns.jobId, job.id), eq(pluginJobRuns.pluginId, job.pluginId),
+      inArray(pluginJobRuns.status, [...outstandingStatuses]),
+    )).for("update");
+    const store = pluginJobStore(tx);
+    let skipOwedOccurrence = false;
+    for (const run of priorRuns) {
+      const mayHaveDispatched = run.status === "running" || run.startedAt !== null;
+      await store.completeRun(run.id, {
+        status: mayHaveDispatched ? "failed" : "cancelled",
+        error: mayHaveDispatched
+          ? "Previous scheduler stopped before recording a result. The outcome is unknown."
+          : "Previous scheduler stopped before dispatch.",
+        durationMs: run.startedAt ? Math.max(0, now.getTime() - run.startedAt.getTime()) : null,
+      });
+      if (mayHaveDispatched && run.trigger === "schedule") skipOwedOccurrence = true;
+    }
+    if (!skipOwedOccurrence || !job.nextRunAt || job.nextRunAt > now) return job;
+    const nextRunAt = nextCron(job.schedule, now);
+    await store.updateRunTimestamps(job.id, job.lastRunAt ?? new Date(0), nextRunAt);
+    return { ...job, nextRunAt };
+  }
+
+  function retryForeignOwnerAt(job: Job, now = Date.now()) {
+    const retry = Math.max(now + tickIntervalMs, job.nextRunAt?.getTime() ?? 0);
+    next = next === null ? retry : Math.min(next, retry);
   }
 
   async function dispatch(job: Job, trigger: Trigger, signal?: AbortSignal): Promise<TriggerJobResult | null> {
-    // Reserve synchronously at the one dispatch boundary. A refresh may have
-    // yielded since filtering its snapshot; it cannot borrow a manual run's slot.
-    if (activeJobs.has(job.id) || pendingSettlements.has(job.id)) {
+    // Reserve synchronously before waiting on the database. The advisory lock
+    // extends ownership to other processes until the result is durable.
+    if (activeJobs.has(job.id) || pendingSettlements.has(job.id) || releaseSettledExecution.has(job.id)) {
       if (trigger !== "schedule") throw new Error(`Job "${job.jobKey}" is already running`);
       return null;
     }
     if (trigger === "schedule" && activeJobs.size >= maxConcurrentJobs) return null;
     activeJobs.add(job.id);
-    try {
+    let accept!: (result: TriggerJobResult | null) => void;
+    let refuse!: (error: unknown) => void;
+    const admitted = new Promise<TriggerJobResult | null>((resolve, reject) => {
+      accept = resolve;
+      refuse = reject;
+    });
+    let releaseSettlement!: () => void;
+    const settled = new Promise<void>(resolve => { releaseSettlement = resolve; });
+    const ownership = withPluginJobOwnership(db, job.id, async locked => {
+      if (!locked) {
+        if (trigger !== "schedule") throw new Error(`Job "${job.jobKey}" is already running`);
+        retryForeignOwnerAt(job);
+        accept(null);
+        return;
+      }
       const run = await db.transaction(async tx => {
         const [current] = await tx.select().from(pluginJobs).where(eq(pluginJobs.id, job.id)).for("update");
         if (!current || current.status !== "active" || signal?.aborted || !canRun() || unregistered.has(job.pluginId)
           || !workerManager.isRunning(job.pluginId)) return null;
         if (trigger === "schedule" && (current.schedule !== job.schedule
           || current.nextRunAt?.getTime() !== job.nextRunAt?.getTime())) return null;
-        const [outstanding] = await tx.select({ id: pluginJobRuns.id }).from(pluginJobRuns).where(and(
-          eq(pluginJobRuns.jobId, job.id), inArray(pluginJobRuns.status, ["pending", "queued", "running"]),
-        )).limit(1);
-        if (outstanding) return null;
+        const reconciled = await reconcileInterrupted(tx, current, new Date());
+        if (trigger === "schedule" && reconciled.nextRunAt?.getTime() !== current.nextRunAt?.getTime()) return null;
         return pluginJobStore(tx).createRun({ jobId: job.id, pluginId: job.pluginId, trigger });
       });
       if (!run) {
-        activeJobs.delete(job.id);
         worker?.wake();
         if (trigger !== "schedule") throw new Error(`Job "${job.jobKey}" is no longer available`);
-        return null;
+        accept(null);
+        return;
       }
+
+      releaseSettledExecution.set(job.id, releaseSettlement);
       const completion = track(execute(job, run.id, trigger));
-      void completion.catch(err => { log.error({ err, jobId: job.id }, "plugin job settlement deferred"); worker?.wake(); });
-      return { runId: run.id, jobId: job.id };
-    } catch (err) { activeJobs.delete(job.id); throw err; }
+      accept({ runId: run.id, jobId: job.id });
+      try { await completion; }
+      catch (err) {
+        log.error({ err, jobId: job.id }, "plugin job settlement deferred");
+        worker?.wake();
+      }
+      if (pendingSettlements.has(job.id)) await settled;
+    });
+    ownedExecutions.add(ownership);
+    const release = () => {
+      ownedExecutions.delete(ownership);
+      activeJobs.delete(job.id);
+      if (releaseSettledExecution.delete(job.id)) worker?.wake();
+    };
+    void ownership.then(release, error => {
+      release();
+      refuse(error);
+    });
+    return admitted;
   }
 
   async function refresh(signal?: AbortSignal) {
@@ -150,14 +251,23 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
       && !activeJobs.has(job.id) && !pendingSettlements.has(job.id) && job.schedule && !validateCron(job.schedule));
     const outstanding = runnable.length === 0 ? [] : await db.select({ jobId: pluginJobRuns.jobId })
       .from(pluginJobRuns).where(and(inArray(pluginJobRuns.jobId, runnable.map(job => job.id)),
-        inArray(pluginJobRuns.status, ["pending", "queued", "running"])));
+        inArray(pluginJobRuns.status, [...outstandingStatuses])));
     const blocked = new Set(outstanding.map(run => run.jobId));
     const now = new Date();
     const dispatches: Promise<unknown>[] = [];
     next = null;
-    for (const job of runnable) {
+    for (const candidate of runnable) {
       if (!canRun() || signal?.aborted) break;
-      if (blocked.has(job.id) || activeJobs.has(job.id) || pendingSettlements.has(job.id)) continue;
+      if (activeJobs.has(candidate.id) || pendingSettlements.has(candidate.id)) continue;
+      const job = blocked.has(candidate.id) ? await db.transaction(async tx => {
+        if (!await lockPluginJob(tx, candidate.id)) return null;
+        const [current] = await tx.select().from(pluginJobs).where(eq(pluginJobs.id, candidate.id)).for("update");
+        return current?.status === "active" ? reconcileInterrupted(tx, current, now) : null;
+      }) : candidate;
+      if (!job) {
+        retryForeignOwnerAt(candidate, now.getTime());
+        continue;
+      }
       if (!job.nextRunAt) {
         const deadline = nextCron(job.schedule, now);
         if (!deadline) continue;
@@ -208,6 +318,7 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
       const results = await track(Promise.allSettled([...pendingSettlements.keys()].map(settle)));
       const failures = results.filter(result => result.status === "rejected");
       if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Plugin job completion persistence failed during shutdown");
+      await Promise.allSettled([...ownedExecutions]);
     },
     async registerPlugin(pluginId) {
       unregistered.delete(pluginId);
@@ -225,11 +336,12 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
       subscriptions.get(pluginId)?.(); subscriptions.delete(pluginId);
       worker?.wake();
       const runs = await db.select().from(pluginJobRuns).where(and(
-        eq(pluginJobRuns.pluginId, pluginId), inArray(pluginJobRuns.status, ["pending", "queued", "running"]),
+        eq(pluginJobRuns.pluginId, pluginId), inArray(pluginJobRuns.status, [...outstandingStatuses]),
       ));
       for (const run of runs) {
         if (activeJobs.has(run.jobId) || pendingSettlements.has(run.jobId)) continue;
         await db.transaction(async tx => {
+          if (!await lockPluginJob(tx, run.jobId)) return;
           const [current] = await tx.select().from(pluginJobRuns).where(eq(pluginJobRuns.id, run.id)).for("update");
           // A completion may have committed after the discovery read. Never
           // overwrite its result, or the result still retained for persistence.
@@ -247,10 +359,6 @@ export function createPluginJobScheduler(options: PluginJobSchedulerOptions): Pl
         if (!job) throw new Error(`Job not found: ${jobId}`);
         if (job.status !== "active") throw new Error(`Job "${job.jobKey}" is not active (status: ${job.status})`);
         if (activeJobs.has(jobId) || pendingSettlements.has(jobId)) throw new Error(`Job "${job.jobKey}" is already running`);
-        const runs = await db.select({ id: pluginJobRuns.id }).from(pluginJobRuns).where(and(
-          eq(pluginJobRuns.jobId, jobId), inArray(pluginJobRuns.status, ["pending", "queued", "running"]),
-        )).limit(1);
-        if (runs.length) throw new Error(`Job "${job.jobKey}" already has a running execution`);
         if (unregistered.has(job.pluginId) || !workerManager.isRunning(job.pluginId)) throw new Error(`Worker for plugin "${job.pluginId}" is not running`);
         const result = await dispatch(job, trigger);
         if (!result) throw new Error(`Job "${job.jobKey}" is no longer available`);

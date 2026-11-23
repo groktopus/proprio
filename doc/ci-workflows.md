@@ -19,6 +19,7 @@ workspace from the frozen pnpm lockfile, and runs:
 - the standalone release-registry test suite;
 - native heartbeat replay cadence and settlement callback consumers;
 - late live-settlement metadata regressions;
+- recovery of interrupted plugin jobs and preservation of active owners;
 - the server typecheck, Hermes adapter build, and server TypeScript build compilation.
 
 Named PostgreSQL and selected regression cases must report a passing result.

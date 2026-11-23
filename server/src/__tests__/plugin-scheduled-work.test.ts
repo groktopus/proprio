@@ -13,6 +13,12 @@ import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { idleWorkSnapshot } from "../services/task-admission.js";
 
+function latch() {
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  return { ready, release };
+}
+
 const external = resolveExternalTestDatabaseUrl("PROPRIO_PLUGIN_SCHEDULE_TEST_DATABASE_URL");
 const support = external ? { supported: true } : await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("plugin job scheduling without idle polling", () => {
@@ -104,6 +110,69 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     expect(await runs()).toHaveLength(15);
     expect(rpc).not.toHaveBeenCalled();
   });
+  it.each(["queued", "running"] as const)("reconciles an interrupted %s plugin run after startup", async (status) => {
+    const row = await due("interrupted");
+    const originalDeadline = (await pluginJobStore(db).getJobById(row.id))!.nextRunAt!;
+    const interrupted = await pluginJobStore(db).createRun({ jobId: row.id, pluginId, trigger: "schedule" });
+    if (status === "running") await pluginJobStore(db).markRunning(interrupted.id);
+
+    await start();
+    await vi.waitFor(async () => {
+      expect(await pluginJobStore(db).getRunById(interrupted.id)).toMatchObject({
+        status: status === "running" ? "failed" : "cancelled",
+        finishedAt: expect.any(Date),
+        error: status === "running" ? expect.stringMatching(/outcome is unknown/i) : expect.stringMatching(/before dispatch/i),
+      });
+    });
+    if (status === "queued") {
+      await completed(1);
+      expect(rpc.mock.calls[0][2]).toMatchObject({ job: { trigger: "schedule", scheduledAt: originalDeadline.toISOString() } });
+    } else {
+      expect(rpc).not.toHaveBeenCalled();
+    }
+
+    await scheduler!.triggerJob(row.id);
+    await completed(2);
+    expect(rpc.mock.calls.at(-1)![2]).toMatchObject({ job: { trigger: "manual" } });
+    await settled();
+    const next = (await pluginJobStore(db).getJobById(row.id))!.nextRunAt!;
+    expect(next.getTime()).toBeGreaterThan(originalDeadline.getTime());
+    await vi.advanceTimersByTimeAsync(Math.max(0, next.getTime() - Date.now()));
+    await vi.waitFor(async () => expect(rpc.mock.calls.at(-1)?.[2]).toMatchObject({
+      job: { trigger: "schedule", scheduledAt: next.toISOString() },
+    }));
+  });
+
+  it("keeps another scheduler's live plugin run intact", async () => {
+    const firstEntered = latch();
+    const release = latch();
+    const row = await due("active-on-another-scheduler");
+    rpc.mockImplementationOnce(async () => { firstEntered.release(); await release.ready; return {}; });
+    await start();
+    await firstEntered.ready;
+
+    const secondRpc = vi.fn(async () => ({}));
+    const second = createPluginJobScheduler({ db, jobStore: pluginJobStore(db),
+      workerManager: { isRunning: () => true, call: secondRpc, getWorker: () => events } as unknown as PluginWorkerManager });
+    const coordinator2 = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, canReconcile: () => true,
+      onError: error => errors.push(error) });
+    try {
+      await second.start(coordinator2);
+      await second.registerPlugin(pluginId);
+      await second.tick();
+      await expect(second.triggerJob(row.id)).rejects.toThrow(/already/);
+      expect(await runs()).toMatchObject([{ status: "running", finishedAt: null, error: null }]);
+      expect(secondRpc).not.toHaveBeenCalled();
+      release.release();
+      await completed(1);
+      expect(await runs()).toHaveLength(1);
+    } finally {
+      release.release();
+      await second.stop();
+      await coordinator2.stop();
+    }
+  });
+
   it("honors a saved deadline inside the notification batching window", async () => {
     const row = await job();
     const deadline = new Date(Date.now() + 10_000);
@@ -228,6 +297,11 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     try {
       await expect(scheduler!.stop()).rejects.toThrow("Plugin job completion persistence failed during shutdown");
       expect((await runs())[0].status).toBe("running");
+      const [run] = await runs();
+      const [ownership] = await db.execute<{ locked: boolean }>(
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${`proprio:plugin-job:${run.jobId}`}, 0)) as locked`,
+      );
+      expect(ownership.locked).toBe(false);
     } finally { await db.execute(sql`drop trigger plugin_settlement_failure on plugin_job_runs`); }
     await scheduler!.stop();
     expect((await runs())[0].status).toBe("succeeded");
@@ -377,10 +451,30 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     expect((await runs())[0]).toMatchObject({ status: "failed", error: "plugin rejected job" });
     await settled(); expect(coordinator!.nextWakeAt()! > Date.now()).toBe(true);
   });
-  it("does not replay an unresolved run left by another process", async () => {
-    const row = await due(); await pluginJobStore(db).createRun({ jobId: row.id, pluginId, trigger: "schedule" });
-    await start(); await quiet(); expect(rpc).not.toHaveBeenCalled();
-    const [run] = await runs(); await pluginJobStore(db).completeRun(run.id, { status: "cancelled" }); await completed();
+  it("defers a queued run that another process still owns", async () => {
+    const row = await due();
+    const holding = latch();
+    const release = latch();
+    const owner = db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`proprio:plugin-job:${row.id}`}, 0))`);
+      holding.release();
+      await release.ready;
+    });
+    try {
+      await holding.ready;
+      const run = await pluginJobStore(db).createRun({ jobId: row.id, pluginId, trigger: "schedule" });
+      await start();
+      await settled();
+      expect(await pluginJobStore(db).getRunById(run.id)).toMatchObject({ status: "queued", finishedAt: null });
+      expect(rpc).not.toHaveBeenCalled();
+      await pluginJobStore(db).completeRun(run.id, { status: "cancelled" });
+      release.release();
+      await owner;
+      await completed();
+    } finally {
+      release.release();
+      await owner;
+    }
   });
   it("fills released capacity from completion without a poll", async () => {
     await due("one"); await due("two"); let release!: () => void;
