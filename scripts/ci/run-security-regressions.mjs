@@ -38,17 +38,17 @@ const runnerTests = {
 
 const reportDir = mkdtempSync(join(tmpdir(), 'proprio-security-tests-'));
 try {
+  const serverPattern = Object.values(serverTests).flat().map((title) => RegExp.escape(title)).join('|');
   const suites = [
-    { name: 'server', pnpmArgs: [], required: serverTests },
-    { name: 'runner', pnpmArgs: ['--filter', '@groktopus/proprio-runner'], required: runnerTests },
+    { name: 'server', pnpmArgs: [], required: serverTests, testArgs: ['-t', serverPattern] },
+    { name: 'runner', pnpmArgs: ['--filter', '@groktopus/proprio-runner'], required: runnerTests, testArgs: [] },
   ];
-  for (const { name, pnpmArgs, required } of suites) {
+  for (const { name, pnpmArgs, required, testArgs } of suites) {
     const reportPath = join(reportDir, `${name}.json`);
-    const pattern = Object.values(required).flat().map((title) => RegExp.escape(title)).join('|');
     const result = spawnSync('pnpm', [
       ...pnpmArgs, 'exec', 'vitest', 'run', '--maxWorkers', '1',
       '--reporter=default', '--reporter=json', `--outputFile=${reportPath}`,
-      ...Object.keys(required).map((file) => resolve(file)), '-t', pattern,
+      ...Object.keys(required).map((file) => resolve(file)), ...testArgs,
     ], { stdio: 'inherit' });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`Security regression run failed: ${name}`);
