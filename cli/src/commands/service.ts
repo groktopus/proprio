@@ -1,3 +1,4 @@
+import { createHmac, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as p from "@clack/prompts";
@@ -8,8 +9,16 @@ import { detectServiceManager, type ServiceManager, type ServiceStatus } from ".
 import { ensureServiceShim } from "../onboard-service.js";
 import { buildLocalHealthUrl } from "../utils/health-url.js";
 
+import {
+  MANAGED_RESTART_LOCK_FILENAME,
+  MANAGED_RESTART_PROBE_HEADER,
+  MANAGED_RESTART_PROOF_HEADER,
+  managedRestartProbeMessage,
+} from "@groktopus/shared/service-restart-probe";
+
 type CommonOptions = { instance?: string; json?: boolean };
-type HealthResult = { ok: boolean; serverVersion: string | null; error?: string };
+type HealthResult = { ok: boolean; serverVersion: string | null; commit: string | null; error?: string };
+type ReplacementProbe = { pid: number; lockToken: string };
 
 function output(value: unknown, json: boolean | undefined): void {
   if (json) console.log(JSON.stringify(value, null, 2));
@@ -30,25 +39,56 @@ function healthUrl(instanceId: string): string {
   return buildLocalHealthUrl(config?.server.host, config?.server.port ?? 3100);
 }
 
-async function probeHealth(instanceId: string): Promise<HealthResult> {
+async function probeHealth(instanceId: string, replacement?: ReplacementProbe): Promise<HealthResult> {
   try {
-    const response = await fetch(healthUrl(instanceId), { signal: AbortSignal.timeout(2_000) });
-    const body = await response.json() as { status?: unknown; serverVersion?: unknown; version?: unknown };
-    return { ok: response.ok && body.status === "ok", serverVersion: typeof body.serverVersion === "string" ? body.serverVersion : typeof body.version === "string" ? body.version : null };
+    const challenge = replacement ? `${replacement.pid}:${randomUUID()}` : null;
+    const response = await fetch(healthUrl(instanceId), {
+      signal: AbortSignal.timeout(2_000),
+      redirect: "error",
+      ...(challenge ? { headers: { [MANAGED_RESTART_PROBE_HEADER]: challenge } } : {}),
+    });
+    const body = await response.json() as { status?: unknown; serverVersion?: unknown; version?: unknown; commit?: unknown };
+    const serverVersion = typeof body.serverVersion === "string" ? body.serverVersion : typeof body.version === "string" ? body.version : null;
+    const commit = typeof body.commit === "string" ? body.commit.toLowerCase() : null;
+    const ok = response.ok && body.status === "ok";
+    if (replacement && challenge) {
+      const expected = createHmac("sha256", replacement.lockToken)
+        .update(managedRestartProbeMessage(challenge, ok, serverVersion, commit)).digest("hex");
+      if (response.headers.get(MANAGED_RESTART_PROOF_HEADER) !== expected) {
+        return { ok: false, serverVersion, commit, error: "health response did not come from the managed replacement" };
+      }
+    }
+    return { ok, serverVersion, commit };
   } catch (error) {
-    return { ok: false, serverVersion: null, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, serverVersion: null, commit: null, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-async function waitForHealth(instanceId: string, expectedVersion: string | null, timeoutMs = 60_000): Promise<HealthResult> {
-  const deadline = Date.now() + timeoutMs;
-  let last: HealthResult = { ok: false, serverVersion: null };
+async function waitForReplacement(
+  manager: ServiceManager,
+  instanceId: string,
+  previousPid: number | null,
+  lockToken: string,
+  expectedVersion: string | null,
+  expectedCommit: string | null,
+): Promise<{ status: ServiceStatus & { pid: number }; health: HealthResult }> {
+  const deadline = Date.now() + 60_000;
+  let reason = "supervisor reported no active replacement";
   while (Date.now() < deadline) {
-    last = await probeHealth(instanceId);
-    if (last.ok && (!expectedVersion || last.serverVersion === expectedVersion)) return last;
+    const status = await manager.status();
+    if (status.active && status.pid && status.pid !== previousPid) {
+      const health = await probeHealth(instanceId, { pid: status.pid, lockToken });
+      if (health.ok && (!expectedVersion || health.serverVersion === expectedVersion)
+        && (!expectedCommit || health.commit === expectedCommit)) {
+        return { status: { ...status, pid: status.pid }, health };
+      }
+      reason = health.error ?? `reported version ${health.serverVersion ?? "unknown"} and commit ${health.commit ?? "unknown"}`;
+    } else {
+      reason = status.active ? "supervisor reported no new process ID" : "supervisor reported the service inactive";
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`Proprio service did not become healthy${expectedVersion ? ` at version ${expectedVersion}` : ""}: ${last.error ?? `reported ${last.serverVersion ?? "no version"}`}`);
+  throw new Error(`Proprio managed replacement did not become healthy${expectedVersion ? ` at version ${expectedVersion}` : ""}${expectedCommit ? ` at commit ${expectedCommit}` : ""}: ${reason}`);
 }
 
 export function resolveRestartExpectedVersion(expectedVersion: string | null | undefined): string | null {
@@ -57,12 +97,12 @@ export function resolveRestartExpectedVersion(expectedVersion: string | null | u
 
 export async function withHotRestartLock<T>(
   instanceId: string,
-  callback: () => Promise<T>,
+  callback: (lockToken: string) => Promise<T>,
   options: { timeoutMs?: number; pollMs?: number; isProcessAlive?: (pid: number) => boolean } = {},
 ): Promise<T> {
   const instanceRoot = resolveProprioInstanceRoot(instanceId);
-  const lockPath = path.join(instanceRoot, "hot-restart.lock");
-  const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const lockPath = path.join(instanceRoot, MANAGED_RESTART_LOCK_FILENAME);
+  const token = `${process.pid}:${Date.now()}:${randomUUID()}`;
   const deadline = Date.now() + (options.timeoutMs ?? 120_000);
   const pollMs = options.pollMs ?? 100;
   const isProcessAlive = options.isProcessAlive ?? ((pid: number) => {
@@ -105,7 +145,7 @@ export async function withHotRestartLock<T>(
   }
 
   try {
-    return await callback();
+    return await callback(token);
   } finally {
     try {
       if ((await fs.readFile(lockPath, "utf8")).trim() === token) {
@@ -135,13 +175,22 @@ async function writeHotRestartIntent(status: ServiceStatus, instanceId: string, 
   return { requestedAt };
 }
 
-async function waitForRestartReport(instanceId: string, requestedAt: string, timeoutMs = 10_000): Promise<unknown | null> {
+async function waitForRestartReport(
+  instanceId: string,
+  requestedAt: string,
+  previousPid: number,
+  replacementPid: number,
+  timeoutMs = 10_000,
+): Promise<unknown | null> {
   const reportPath = path.join(resolveProprioInstanceRoot(instanceId), "hot-restart-report.json");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const report = JSON.parse(await fs.readFile(reportPath, "utf8")) as { requestedAt?: unknown };
-      if (report.requestedAt === requestedAt) return report;
+      const report = JSON.parse(await fs.readFile(reportPath, "utf8")) as {
+        requestedAt?: unknown; previousServerPid?: unknown; newServerPid?: unknown;
+      };
+      if (report.requestedAt === requestedAt && report.previousServerPid === previousPid
+        && report.newServerPid === replacementPid) return report;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -150,16 +199,37 @@ async function waitForRestartReport(instanceId: string, requestedAt: string, tim
   return null;
 }
 
-export async function restartManagedService(input: { instanceId?: string; expectedVersion?: string | null; waitForDrain?: boolean } = {}): Promise<{ status: ServiceStatus; health: HealthResult; report: unknown | null }> {
+export async function restartManagedService(input: {
+  instanceId?: string;
+  expectedVersion?: string | null;
+  expectedCommit?: string;
+  waitForDrain?: boolean;
+  startIfInactive?: boolean;
+} = {}): Promise<{ status: ServiceStatus; health: HealthResult; report: unknown | null }> {
   const instanceId = resolveProprioInstanceId(input.instanceId);
-  return withHotRestartLock(instanceId, async () => {
+  return withHotRestartLock(instanceId, async lockToken => {
     const detection = await detectServiceManager({ instanceId });
     if (!detection.supported) throw new Error(detection.reason);
-    const before = await detection.manager.status();
-    const intent = await writeHotRestartIntent(before, instanceId, input.waitForDrain ?? false);
-    await detection.manager.restart();
-    const health = await waitForHealth(instanceId, resolveRestartExpectedVersion(input.expectedVersion));
-    return { status: await detection.manager.status(), health, report: await waitForRestartReport(instanceId, intent.requestedAt) };
+    const { manager } = detection;
+    const before = await manager.status();
+    if (!before.installed) throw new Error(`Cannot restart ${before.serviceName}: the service is not installed.`);
+    const intent = !before.active && input.startIfInactive
+      ? null
+      : await writeHotRestartIntent(before, instanceId, input.waitForDrain ?? false);
+    if (intent) await manager.restart();
+    else await manager.start();
+    const { status, health } = await waitForReplacement(
+      manager, instanceId, before.pid, lockToken,
+      resolveRestartExpectedVersion(input.expectedVersion), input.expectedCommit?.toLowerCase() ?? null,
+    );
+    const report = intent && before.pid
+      ? await waitForRestartReport(instanceId, intent.requestedAt, before.pid, status.pid)
+      : null;
+    const current = await manager.status();
+    if (!current.active || current.pid !== status.pid) {
+      throw new Error("Proprio managed replacement stopped or changed before restart validation completed.");
+    }
+    return { status: current, health, report };
   });
 }
 
