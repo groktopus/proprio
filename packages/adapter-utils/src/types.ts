@@ -104,6 +104,9 @@ export interface AdapterExecutionResult {
    * affects settlement. This never overrides a durable terminal outcome or
    * proves physical termination. */
   completionObserved?: true;
+  /** Evidence of an observed provider exit. The host must bind it to a
+   * pending Stop. This says nothing about side effects or session recovery. */
+  providerStopObserved?: { provider: "hermes_gateway"; remoteRunId: string; gatewayVersion: string };
   /** Positive evidence for retrying bootstrap; absent evidence never authorizes replay. */
   executionRecovery?: { kind: "bootstrap"; providerWorkStarted: false } | {
     kind: "interrupted";
