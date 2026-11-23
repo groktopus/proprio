@@ -157,6 +157,7 @@ export const routineRuns = pgTable(
     triggerPayload: jsonb("trigger_payload").$type<Record<string, unknown>>(),
     createdByRunId: text("created_by_run_id"),
     dispatchFingerprint: text("dispatch_fingerprint"),
+    assignmentWakePending: boolean("assignment_wake_pending").notNull().default(false),
     linkedIssueId: uuid("linked_issue_id").references(() => issues.id, { onDelete: "set null" }),
     coalescedIntoRunId: uuid("coalesced_into_run_id"),
     failureReason: text("failure_reason"),

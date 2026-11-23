@@ -77,11 +77,67 @@ describe("bridge exec", () => {
     expect(exec).toHaveBeenCalledTimes(1);
     expect(exec.mock.calls[0]?.[1]).toMatchObject({
       cwd: "/",
-      timeout: 5_000,
+      timeout: 10_000,
       stream: true,
       onOutput: expect.any(Function),
     });
     expect(onOutput).toHaveBeenCalledWith("stdout", "hello\n");
+  });
+
+  it.each(["named", "default"] as const)("cleans up a streamed deadline using the %s strategy", async (sessionStrategy) => {
+    vi.useFakeTimers();
+    try {
+      const exec = vi.fn((_command, _options) => new Promise(() => {}));
+      const sandbox = {
+        exec,
+        getSession: vi.fn().mockResolvedValue({ exec }),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        deleteSession: vi.fn().mockResolvedValue(undefined),
+      };
+      const onOutput = vi.fn();
+      const execution = executeInSandbox({
+        sandbox: sandbox as never,
+        command: "fixture",
+        sessionStrategy,
+        sessionId: "fixture-session",
+        timeoutMs: 2_000,
+        onOutput,
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(execution).resolves.toMatchObject({ exitCode: null, timedOut: true });
+      exec.mock.calls[0]?.[1].onOutput("stderr", "late output");
+      expect(onOutput).not.toHaveBeenCalled();
+      if (sessionStrategy === "named") {
+        expect(sandbox.deleteSession).toHaveBeenCalledExactlyOnceWith("fixture-session");
+        expect(sandbox.destroy).not.toHaveBeenCalled();
+      } else {
+        expect(sandbox.destroy).toHaveBeenCalledOnce();
+        expect(sandbox.deleteSession).not.toHaveBeenCalled();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a streamed command's exit 124 without cleanup", async () => {
+    const exec = vi.fn(async (_command, options) => {
+      await options.onOutput("stderr", "Command timed out after 2000ms\n");
+      return { exitCode: 124 };
+    });
+    const sandbox = {
+      getSession: vi.fn().mockResolvedValue({ exec }),
+      deleteSession: vi.fn(),
+    };
+    await expect(executeInSandbox({
+      sandbox: sandbox as never,
+      command: "fixture",
+      sessionStrategy: "named",
+      timeoutMs: 2_000,
+      onOutput: vi.fn(),
+    })).resolves.toMatchObject({ exitCode: 124, timedOut: false });
+    expect(sandbox.deleteSession).not.toHaveBeenCalled();
   });
 
   it("stages stdin through a sandbox temp file and redirects from it", async () => {

@@ -208,6 +208,7 @@ export async function materializeNativeRuntimeSkills(
   context: NativeRuntimeContextSnapshot | null,
   skillsHome: string,
   dependencies: {
+    cloneFiles?: boolean;
     /** Internal test seam for failed staging cleanup coverage. */
     removeTree?: (path: string) => Promise<void>;
     /** Internal test seam for publication failure coverage. */
@@ -265,6 +266,7 @@ export async function materializeNativeRuntimeSkills(
       const target = safeMaterializationTarget(stagingHome, skill.runtimeName);
       await cp(skill.bundle.rootPath, target, {
         recursive: true,
+        ...(dependencies.cloneFiles ? { mode: constants.COPYFILE_FICLONE } : {}),
         force: false,
         errorOnExist: true,
         dereference: false,
@@ -338,10 +340,19 @@ export async function prepareIsolatedCodexHome(input: {
   sourceCodexHome?: string | null;
   apiKey?: string | null;
 }): Promise<void> {
-  await materializeNativeRuntimeSkills(
-    input.context,
-    join(input.codexHome, "skills"),
-  );
+  try {
+    // Copy-on-write cloning keeps distinct inodes and falls back to a regular
+    // copy across filesystems or on local/remote storage without clone support.
+    await materializeNativeRuntimeSkills(input.context, join(input.codexHome, "skills"), { cloneFiles: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOSPC" || code === "EDQUOT") {
+      throw Object.assign(new Error("Native Codex could not stage assigned skills because local storage or quota is full.", {
+        cause: error,
+      }), { code });
+    }
+    throw error;
+  }
 
   const providerConfig = await managedCodexProviderConfig(input.sourceCodexHome);
   await writeIsolatedCodexConfig(input, providerConfig);

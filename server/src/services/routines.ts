@@ -13,6 +13,7 @@ import type { Db } from "@groktopus/db";
 import {
   agents,
   activityLog,
+  agentWakeupRequests,
   companies,
   companyMemberships,
   companySecretBindings,
@@ -1348,6 +1349,7 @@ export function routineService(
     status: string;
     issueId?: string | null;
     nextRunAt?: Date | null;
+    requireLatestTrigger?: boolean;
   }, executor: Db = db) {
     await executor
       .update(routines)
@@ -1356,7 +1358,8 @@ export function routineService(
         lastEnqueuedAt: input.issueId ? input.triggeredAt : undefined,
         updatedAt: new Date(),
       })
-      .where(eq(routines.id, input.routineId));
+      .where(and(eq(routines.id, input.routineId),
+        input.requireLatestTrigger ? eq(routines.lastTriggeredAt, input.triggeredAt) : undefined));
 
     if (input.triggerId) {
       await executor
@@ -1367,7 +1370,8 @@ export function routineService(
           nextRunAt: input.nextRunAt === undefined ? undefined : input.nextRunAt,
           updatedAt: new Date(),
         })
-        .where(eq(routineTriggers.id, input.triggerId));
+        .where(and(eq(routineTriggers.id, input.triggerId),
+          input.requireLatestTrigger ? eq(routineTriggers.lastFiredAt, input.triggeredAt) : undefined));
     }
   }
 
@@ -1657,7 +1661,7 @@ export function routineService(
       .then((rows) => rows[0]?.issues ?? null);
     if (executionBoundIssue) return executionBoundIssue;
 
-    return executor
+    const executionContextIssue = await executor
       .select()
       .from(issues)
       .innerJoin(
@@ -1681,6 +1685,23 @@ export function routineService(
       .orderBy(desc(issues.updatedAt), desc(issues.createdAt))
       .limit(1)
       .then((rows) => rows[0]?.issues ?? null);
+
+    if (executionContextIssue) return executionContextIssue;
+    // The task and its routine receipt commit before the heartbeat queue can
+    // see them. Treat this first-wake window as active so another dispatch
+    // cannot enqueue a second task while admission is pending.
+    return executor.select({ issue: issues }).from(issues)
+      .innerJoin(routineRuns, and(sql`${routineRuns.id}::text = ${issues.originRunId}`, eq(routineRuns.companyId, issues.companyId),
+        eq(routineRuns.linkedIssueId, issues.id), eq(routineRuns.status, "issue_created"),
+        eq(routineRuns.assignmentWakePending, true)))
+      .where(and(
+        eq(issues.companyId, routine.companyId), eq(issues.originKind, originKind), eq(issues.originId, originId),
+        eq(issues.status, "todo"), isNull(issues.executionRunId), visibleIssueCondition(),
+        ...(fingerprintCondition ? [fingerprintCondition] : []),
+        sql`not exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${issues.companyId}
+          and ${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issues.id}::text)`,
+      ))
+      .orderBy(desc(issues.createdAt)).limit(1).then(rows => rows[0]?.issue ?? null);
   }
 
   async function finalizeRun(runId: string, patch: Partial<typeof routineRuns.$inferInsert>, executor: Db = db) {
@@ -1866,7 +1887,12 @@ export function routineService(
     const idempotentRunId = input.routineIdempotency && input.idempotencyKey
       ? routineScopedRunId(input.routine.id, input.source, input.idempotencyKey) : null;
     let reusedExistingRun = false;
-    const run = await db.transaction(async (tx) => {
+    const afterCommit: {
+      assignment?: NonNullable<Parameters<typeof queueIssueAssignmentWakeup>[0]>;
+      originalIssue?: Awaited<ReturnType<typeof issueSvc.create>>;
+      nextRunAt?: Date | null;
+    } = {};
+    let run = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       await tx.execute(
         sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
@@ -1884,6 +1910,8 @@ export function routineService(
           : input.routine.updatedByAgentId ?? (input.routine.updatedByUserId ? null : input.routine.createdByAgentId));
       const interactionActorCompanyId = interactionActorAgentId ? await tx.select({ companyId: agents.companyId }).from(agents)
         .where(eq(agents.id, interactionActorAgentId)).then(rows => rows[0]?.companyId) : undefined;
+      await tx.select({ id: companies.id }).from(companies)
+        .where(eq(companies.id, input.routine.companyId)).for("no key update");
       await assertAgentInteraction(tx, { companyId: input.routine.companyId, actorAgentId: interactionActorAgentId,
         actorCompanyId: interactionActorCompanyId,
         operation: "assign", targetAgentId: assigneeAgentId, parentIssueId: input.routine.parentIssueId,
@@ -2011,7 +2039,7 @@ export function routineService(
         }
 
         try {
-          createdIssue = await issueSvc.create(input.routine.companyId, {
+          createdIssue = await tx.transaction(savepoint => issueService(savepoint as unknown as Db).create(input.routine.companyId, {
             projectId,
             projectWorkspaceId,
             goalId: input.routine.goalId,
@@ -2036,7 +2064,7 @@ export function routineService(
             executionWorkspaceId: input.executionWorkspaceId ?? null,
             executionWorkspacePreference: input.executionWorkspacePreference ?? null,
             executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
-          });
+          }, savepoint));
         } catch (error) {
           const isOpenExecutionConflict =
             !!error &&
@@ -2073,8 +2101,10 @@ export function routineService(
           return updated ?? createdRun;
         }
 
-        // Keep the dispatch lock until the issue is linked to a queued heartbeat run.
-        await queueIssueAssignmentWakeup({
+        // Assignment admission uses the pool and must only read visible tasks.
+        afterCommit.originalIssue = createdIssue;
+        afterCommit.nextRunAt = nextRunAt;
+        afterCommit.assignment = {
           heartbeat,
           issue: createdIssue,
           reason: "issue_assigned",
@@ -2084,11 +2114,13 @@ export function routineService(
           requestedByActorType: interactionActorAgentId ? "agent" : input.actor?.userId ? "user" : input.source === "schedule" ? "system" : undefined,
           requestedByActorId: interactionActorAgentId ?? input.actor?.userId ?? null,
           requestedByActorCompanyId: interactionActorCompanyId,
+          idempotencyKey: `routine-dispatch:${createdRun.id}`,
           rethrowOnError: true,
-        });
+        };
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: createdIssue.id,
+          assignmentWakePending: true,
         }, txDb);
         await updateRoutineTouchedState({
           routineId: input.routine.id,
@@ -2122,6 +2154,71 @@ export function routineService(
         return failed ?? createdRun;
       }
     });
+
+    if (run.status === "issue_created" && afterCommit.assignment && afterCommit.originalIssue) {
+      try {
+        await queueIssueAssignmentWakeup(afterCommit.assignment);
+      } catch (error) {
+        const originalIssue = afterCommit.originalIssue;
+        run = await db.transaction(async tx => {
+          const txDb = tx as unknown as Db;
+          await tx.select({ id: routines.id }).from(routines).where(and(
+            eq(routines.companyId, input.routine.companyId), eq(routines.id, input.routine.id),
+          )).for("update");
+          const [current] = await tx.select().from(issues).where(and(
+            eq(issues.companyId, originalIssue.companyId), eq(issues.id, originalIssue.id),
+          )).for("update");
+          const [[otherRun], [wakeReceipt]] = await Promise.all([
+            tx.select({ id: routineRuns.id }).from(routineRuns).where(and(
+              eq(routineRuns.companyId, originalIssue.companyId), eq(routineRuns.linkedIssueId, originalIssue.id),
+              ne(routineRuns.id, run.id),
+            )).limit(1),
+            tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, originalIssue.companyId),
+              eq(agentWakeupRequests.agentId, assigneeAgentId),
+              eq(agentWakeupRequests.idempotencyKey, `routine-dispatch:${run.id}`),
+            )).limit(1),
+          ]);
+          if (wakeReceipt || current?.executionRunId) return run;
+
+          // A queue failure is safe to compensate only while nothing else
+          // has adopted or edited the committed task.
+          const canRemove = current && !otherRun &&
+            current.statusVersion === originalIssue.statusVersion &&
+            current.assigneeAgentId === originalIssue.assigneeAgentId &&
+            current.checkoutRunId === originalIssue.checkoutRunId &&
+            current.updatedAt.getTime() === originalIssue.updatedAt.getTime();
+          if (canRemove) {
+            await notifyApprovalWork(txDb, current.companyId);
+            await notifyDecisionTargetIssueRemoval(txDb, current.id);
+            await notifyStatusCardIssueChange(txDb, current.companyId);
+            await tx.delete(issues).where(eq(issues.id, current.id));
+          }
+          const failed = await finalizeRun(run.id, {
+            status: "failed",
+            assignmentWakePending: false,
+            linkedIssueId: canRemove ? null : current?.id ?? null,
+            failureReason: error instanceof Error ? error.message : String(error),
+            completedAt: new Date(),
+          }, txDb);
+          await updateRoutineTouchedState({
+            routineId: input.routine.id,
+            triggerId: input.trigger?.id ?? null,
+            triggeredAt: run.triggeredAt,
+            status: "failed",
+            nextRunAt: afterCommit.nextRunAt,
+            requireLatestTrigger: true,
+          }, txDb);
+          return failed ?? run;
+        });
+      }
+      if (run.assignmentWakePending) {
+        const [settled] = await db.update(routineRuns).set({ assignmentWakePending: false }).where(and(
+          eq(routineRuns.companyId, run.companyId), eq(routineRuns.id, run.id),
+        )).returning();
+        run = settled ?? run;
+      }
+    }
 
     if (!reusedExistingRun && (input.source === "schedule" || input.source === "webhook")) {
       const actorId = input.source === "schedule" ? "routine-scheduler" : "routine-webhook";
