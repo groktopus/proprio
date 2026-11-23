@@ -18,7 +18,10 @@ import { routeApp } from "./helpers/route-test-harness.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 
-it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserves the Hermes %s outcome without inventing provider termination through Stop", async (remoteStatus) => {
+it.skipIf(!support.supported).each(["unknown stop", "completed", "verified stop"] as const)(
+  "settles the Hermes Gateway operator Stop with %s", async (scenario) => {
+  const verified = scenario === "verified stop";
+  const remoteStatus = scenario === "completed" ? "completed" : "cancelled";
   const dbFixture = await startEmbeddedPostgresTestDatabase("proprio-hermes-operator-stop-");
   const db = createDb(dbFixture.connectionString);
   const heartbeat = heartbeatService(db, { runtimeEnv: { ...process.env, PROPRIO_IN_WORKTREE: "false" } });
@@ -42,6 +45,9 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     if (url.hostname !== "hermes-fixture.test") throw new Error(`Unexpected outbound fetch: ${url.hostname}`);
     const method = init?.method ?? "GET";
     calls.push({ method, path: url.pathname, redirect: init?.redirect });
+    if (method === "GET" && url.pathname === "/health/detailed") {
+      return json({ platform: "hermes-agent", version: verified ? "0.23.3" : "0.23.2" });
+    }
     if (method === "POST" && url.pathname === "/v1/runs") return json({ run_id: remoteRunId, status: "running" });
     if (method === "GET" && url.pathname === `/v1/runs/${remoteRunId}/events`) {
       observedEventSubscription = true;
@@ -89,8 +95,8 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     await vi.waitFor(() => expect(observedEventSubscription).toBe(true), { timeout: 10_000 });
     await db.update(issues).set({ checkoutRunId: run.id }).where(eq(issues.id, issue.id));
     const stop = await request(app).post(`/api/heartbeat-runs/${run.id}/cancel`).send({});
-    expect(stop.status, JSON.stringify(stop.body)).toBe(409);
-    expect(stop.body.error).toContain("provider termination could not be verified");
+    expect(stop.status, JSON.stringify(stop.body)).toBe(verified ? 200 : 409);
+    if (!verified) expect(stop.body.error).toContain("provider termination could not be verified");
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     const [stored] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     expect(calls.filter(call => call.method === "POST")).toEqual([
@@ -99,21 +105,24 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     ]);
     expect(remoteCancellationObserved).toBe(true);
     const [task] = await db.select().from(issues).where(eq(issues.id, issue.id));
-    expect(task).toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+    const expectedLock = verified ? null : run.id;
+    expect(task).toMatchObject({ executionRunId: expectedLock, checkoutRunId: expectedLock });
     if (remoteStatus === "completed") {
       const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id));
       expect(comments).toEqual(expect.arrayContaining([expect.objectContaining({ body: "The completed reply", authorAgentId: agentId })]));
     }
     expect(stored?.status).toBe(remoteStatus === "completed" ? "succeeded" : "cancelled");
-    expect(stored?.resultJson?.executionCancellation).toMatchObject({ state: "requested" });
+    expect(stored?.resultJson?.executionCancellation).toMatchObject(verified
+      ? { state: "acknowledged", proof: "hermes_gateway_worker_exit", remoteRunId, gatewayVersion: "0.23.3" }
+      : { state: "requested" });
     expect(stored?.resultJson?.conversationContinuation).toBeUndefined();
     expect(legacyExecutionNeedsReconciliation(stored!)).toBe(true);
-    expect(await agentExecutionsHaveStopped(db, [agentId])).toBe(false);
+    expect(await agentExecutionsHaveStopped(db, [agentId])).toBe(verified);
     await expect(issueService(db).addComment(issue.id, "ordinary revoked write", { agentId, runId: run.id }))
       .rejects.toThrow("cannot post a reply");
     await heartbeat.reapOrphanedRuns({ skipRetainedNativeSessionCleanup: true, skipNativeStatusWakeIntents: true });
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0])
-      .toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+      .toMatchObject({ executionRunId: expectedLock, checkoutRunId: expectedLock });
     expect(calls.filter(call => call.method === "POST" && call.path === "/v1/runs")).toHaveLength(1);
     const followup = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id } });
@@ -121,7 +130,7 @@ it.skipIf(!support.supported).each(["cancelled", "completed"] as const)("preserv
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
     expect(calls.filter(call => call.method === "POST" && call.path === "/v1/runs")).toHaveLength(1);
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0])
-      .toMatchObject({ executionRunId: run.id, checkoutRunId: run.id });
+      .toMatchObject({ executionRunId: expectedLock, checkoutRunId: expectedLock });
     if (remoteStatus === "completed") {
       await db.update(heartbeatRuns).set({ resultJson: { ...stored!.resultJson,
         freshContinuationSupersededAt: new Date().toISOString() } }).where(eq(heartbeatRuns.id, run.id));

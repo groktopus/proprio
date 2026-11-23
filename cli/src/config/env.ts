@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv, parse as parseEnvFileContents } from "dotenv";
-import { updateEnvFileContents, writeEnvFileAtomicallyIfChanged } from "@groktopus/shared/env-file";
+import { shouldLoadWorkingDirectoryEnv, updateEnvFileContents, writeEnvFileAtomicallyIfChanged } from "@groktopus/shared/env-file";
 import { resolveConfigPath } from "./store.js";
 
 const JWT_SECRET_ENV_KEY = "PROPRIO_AGENT_JWT_SECRET";
@@ -51,6 +51,17 @@ export function resolveAgentJwtEnvFile(configPath?: string): string {
 
 export function loadProprioEnvFile(configPath?: string): void {
   loadAgentJwtEnvFile(resolveEnvFilePath(configPath));
+}
+
+export function loadDeploymentEnv(configPath: string): void {
+  const instanceEnvPath = resolveEnvFilePath(configPath);
+  loadAgentJwtEnvFile(instanceEnvPath);
+  const cwdEnvPath = path.resolve(process.cwd(), ".env");
+  const cwdEnvExists = fs.existsSync(cwdEnvPath);
+  const isProprioEnvFile = cwdEnvExists && fs.existsSync(instanceEnvPath)
+    ? fs.realpathSync(cwdEnvPath) === fs.realpathSync(instanceEnvPath)
+    : cwdEnvPath === instanceEnvPath;
+  if (shouldLoadWorkingDirectoryEnv({ cwdEnvExists, isProprioEnvFile })) loadAgentJwtEnvFile(cwdEnvPath);
 }
 
 export function loadAgentJwtEnvFile(filePath = resolveEnvFilePath()): void {

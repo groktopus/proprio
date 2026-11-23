@@ -47,7 +47,8 @@ This metadata is not a restore verification.
 JavaScript backups read catalog definitions and rows in one repeatable-read,
 read-only transaction. They hold table read locks while capturing the source, so
 concurrent row updates cannot pair old data with new constraints. Ordinary-table
-CHECK and exclusion constraints are rebuilt after data loading. Inheritance and
+CHECK and exclusion constraints are rebuilt after data loading. Unique
+constraints retain PostgreSQL options such as `NULLS NOT DISTINCT`. Inheritance and
 partition topology remain outside this serializer's supported scope.
 
 Constraint parsing uses a catalog-only search path and normalized string-literal

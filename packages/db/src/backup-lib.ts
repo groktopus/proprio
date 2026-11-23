@@ -318,7 +318,7 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, label: string):
 
   const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    child.once("close", (code, signal) => resolve({ code, signal }));
   });
 
   if (result.signal) {
@@ -435,10 +435,14 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
     ? createReadStream(opts.backupFile).pipe(createGunzip())
     : createReadStream(opts.backupFile);
 
-  await Promise.all([
-    pipeline(input, child.stdin),
+  const [processResult, streamResult] = await Promise.allSettled([
     waitForChildExit(child, psqlBin),
+    pipeline(input, child.stdin),
   ]);
+  // psql can close its input on a statement error. Keep its SQL diagnostic
+  // instead of racing it against the resulting EPIPE from the stream.
+  if (processResult.status === "rejected") throw processResult.reason;
+  if (streamResult.status === "rejected") throw streamResult.reason;
 }
 
 async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
@@ -912,19 +916,20 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       constraint_name: string;
       schema_name: string;
       tablename: string;
-      column_names: string[];
+      definition: string;
+      columns: string[];
     }[]>`
       SELECT c.conname AS constraint_name,
              n.nspname AS schema_name,
              t.relname AS tablename,
-             array_agg(a.attname ORDER BY array_position(c.conkey, a.attnum)) AS column_names
+             pg_get_constraintdef(c.oid) AS definition,
+             ARRAY(SELECT a.attname FROM unnest(c.conkey) AS k(attnum)
+               JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum) AS columns
       FROM pg_constraint c
       JOIN pg_class t ON t.oid = c.conrelid
       JOIN pg_namespace n ON n.oid = t.relnamespace
-      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
       WHERE c.contype = 'u'
         AND ${sql.unsafe(nonSystemSchemaPredicate("n.nspname"))}
-      GROUP BY c.conname, n.nspname, t.relname
       ORDER BY n.nspname, t.relname, c.conname
     `;
     const uniques = allUniqueConstraints.filter((entry) => includedTableNames.has(tableKey(entry.schema_name, entry.tablename)));
@@ -932,8 +937,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     if (uniques.length > 0) {
       emit("-- Unique constraints");
       for (const u of uniques) {
-        const cols = u.column_names.map((c) => `"${c}"`).join(", ");
-        emitStatement(`ALTER TABLE ${quoteQualifiedName(u.schema_name, u.tablename)} ADD CONSTRAINT "${u.constraint_name}" UNIQUE (${cols});`);
+        emitStatement(`ALTER TABLE ${quoteQualifiedName(u.schema_name, u.tablename)} ADD CONSTRAINT ${quoteIdentifier(u.constraint_name)} ${u.definition};`);
       }
       emit("");
     }
@@ -1109,6 +1113,16 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     // a NOT VALID check can have pre-existing rows that it would reject on insert.
     // Use the same catalog-only schema path for deparsing and replay, rather than the
     // restoring session's search_path.
+    for (const constraint of uniques) {
+      const key = tableKey(constraint.schema_name, constraint.tablename);
+      const nullified = nullifiedColumnsByTable.get(key);
+      if (!nullified?.size || excludedTableNames.has(key) || (tableRowCounts.get(key) ?? 0) < 2) continue;
+      if (constraint.definition.startsWith("UNIQUE NULLS NOT DISTINCT ") &&
+          constraint.columns.some(column => nullified.has(column))) {
+        throw new Error(`backup_transform_constraint_conflict: cannot certify unique constraint ${key}.${constraint.constraint_name} after nullification`);
+      }
+    }
+
     const transformedChecks = nullifiedColumnsByTable.size > 0 ? await sql<{
       schema_name: string; tablename: string; constraint_name: string; expression: string;
     }[]>`SELECT n.nspname AS schema_name, t.relname AS tablename, c.conname AS constraint_name,

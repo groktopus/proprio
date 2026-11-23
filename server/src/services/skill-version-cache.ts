@@ -1,3 +1,4 @@
+import { isSkillVersionCacheId, resolveSkillVersionCachePaths } from "@groktopus/adapter-utils/skill-version-cache-paths";
 import { skillPackageStore, skillVersionMetadataColumns } from "./skill-package-store.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -18,7 +19,6 @@ import { withWorkspaceLockKeepalive } from "./native-runtime/native-workspace-lo
 
 export const SKILL_VERSION_CACHE_IDLE_MS = 60 * 60 * 1000;
 const locks = new AsyncLocalStorage<Array<{ db: Db; companyId: string }>>();
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export class SkillCacheBusy extends Error {}
 /** Hold through publication AND durable run pinning, not just file creation. */
 export async function withSkillVersionCacheLock<T>(db: Db, companyId: string, action: () => Promise<T>, tryOnly = false): Promise<T> {
@@ -48,13 +48,7 @@ export async function withSkillVersionCacheLock<T>(db: Db, companyId: string, ac
 }
 
 export function skillVersionCachePaths(companyId: string, skillId: string, versionId: string) {
-  if (![companyId, skillId, versionId].every(value => uuid.test(value))) throw new Error("Invalid skill cache identity");
-  const root = path.join(resolveProprioInstanceRoot(), "skills", companyId);
-  return {
-    root,
-    directory: path.join(root, "__versions__", skillId, versionId),
-    access: path.join(root, "__version_access__", skillId, `${versionId}.json`),
-  };
+  return resolveSkillVersionCachePaths(resolveProprioInstanceRoot(), companyId, skillId, versionId);
 }
 
 /** Never traverse a symlink below the configured instance root. */
@@ -164,7 +158,7 @@ export async function protectedVersions(db: Db, companyId: string, targetSkill?:
               && ["succeeded", "failed", "timed_out", "cancelled", "interrupted"].includes(status)) continue;
             return unknown();
           }
-          if (!uuid.test(skill.versionId)) return unknown();
+          if (!isSkillVersionCacheId(skill.versionId)) return unknown();
           add(skill.versionId);
         }
         continue;
@@ -173,7 +167,7 @@ export async function protectedVersions(db: Db, companyId: string, targetSkill?:
     // Legacy/incomplete preparation is not proof that no skill is in use.
     if (!pins || typeof pins !== "object" || Array.isArray(pins)) return unknown();
     for (const version of Object.values(pins)) {
-      if (typeof version !== "string" || !uuid.test(version)) return unknown();
+      if (typeof version !== "string" || !isSkillVersionCacheId(version)) return unknown();
       add(version);
     }
   }

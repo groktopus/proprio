@@ -4483,7 +4483,15 @@ export function toolAccessService(
         .set({
           name: input.name ?? existing.name,
           description: input.description ?? existing.description,
-          status: input.status ?? existing.status,
+          ...(input.status !== undefined ? {
+            status: input.status,
+            archivedAt: sql`case when exists (
+              select 1 from ${toolConnections}
+              where ${toolConnections.companyId} = ${existing.companyId}
+                and ${toolConnections.applicationId} = ${applicationId}
+                and ${toolConnections.connectionPurpose} = 'ai'
+            ) then null else ${toolApplications.archivedAt} end`,
+          } : {}),
           pluginId: input.pluginId ?? existing.pluginId,
           ownerAgentId: input.ownerAgentId ?? existing.ownerAgentId,
           ownerUserId: input.ownerUserId ?? existing.ownerUserId,

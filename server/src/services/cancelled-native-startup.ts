@@ -13,7 +13,7 @@ import { hasVerifiedWorkspaceRepair } from "./workspace-recovery-receipt.js";
 import { readFailedPreparationSettlement } from "./failed-preparation-settlement.js";
 import { failedPreparationOwnsBoundedRetry } from "./failed-preparation-retry.js";
 import { hasVerifiedPreparationLog } from "./verified-preparation-log.js";
-import { executionStartedEventPredicate, isPreDispatchResourceWait, noRetainedExecutionPredicate } from "./pre-dispatch-execution-evidence.js";
+import { executionStartedEventPredicate, hasStartupExecutionEvidence, isPreDispatchResourceWait, noRetainedExecutionPredicate } from "./pre-dispatch-execution-evidence.js";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect,
   "id" | "companyId" | "status" | "startedAt" | "finishedAt" | "runtimeMode" |
@@ -63,7 +63,7 @@ async function failedNativePreparation(db: Db, run: Run, coordinator: Coordinato
   const [result] = await db.select({ id: nativeRunResults.id }).from(nativeRunResults).where(and(
     eq(nativeRunResults.companyId, run.companyId), eq(nativeRunResults.runId, run.id),
   )).limit(1);
-  if (result || await nativeStartupHasExecutionEvidence(db, run)) return false;
+  if (result || await hasStartupExecutionEvidence(db, [run])) return false;
   if (!leases.length && run.runnerProfileJson?.remoteWorkspace == null) return !historicalRetryAncestor;
   const issueId = run.nativeIssueId ?? run.issueId ?? run.contextSnapshot?.issueId;
   return typeof issueId === "string" && leases.length > 0 && leases.every(lease => lease.issueId === issueId
@@ -165,7 +165,7 @@ export async function isInterruptedNativePreparation(db: Db, run: Run): Promise<
   const [result] = await db.select({ id: nativeRunResults.id }).from(nativeRunResults).where(and(
     eq(nativeRunResults.companyId, run.companyId), eq(nativeRunResults.runId, run.id),
   )).limit(1);
-  if (coordinator || result || await nativeStartupHasExecutionEvidence(db, run)) return false;
+  if (coordinator || result || await hasStartupExecutionEvidence(db, [run])) return false;
   const leases = await db.select().from(environmentLeases).where(and(
     eq(environmentLeases.companyId, run.companyId), eq(environmentLeases.heartbeatRunId, run.id),
   ));
@@ -311,13 +311,5 @@ export async function isCancelledNativeStartup(db: Db, run: Run, coordinator: Co
       : !hasRemoteTerminationReceipt(lease)))) return false;
   // Reject contradictory retained evidence, including a crash after a launch
   // request but before the PID callback. Provider events never certify a stop.
-  return !await nativeStartupHasExecutionEvidence(db, run);
-}
-
-async function nativeStartupHasExecutionEvidence(db: Db, run: Run) {
-  const [execution] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents).where(and(
-    eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
-    executionStartedEventPredicate(),
-  )).limit(1);
-  return Boolean(execution);
+  return !await hasStartupExecutionEvidence(db, [run]);
 }

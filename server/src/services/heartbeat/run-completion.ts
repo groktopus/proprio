@@ -674,6 +674,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       ),
     };
 
+    const observedStop = adapterResult.providerStopObserved;
+    const verifiedGatewayStop = outcome === "cancelled" && signal.aborted &&
+      !(signal.reason instanceof LegacyControllerLeaseLostError) && !isHeartbeatRunTerminalStatus(latestRun?.status) &&
+      agent.adapterType === "hermes_gateway" && runHasPendingStop(latestRun) &&
+      observedStop?.provider === "hermes_gateway" &&
+      observedStop.remoteRunId === adapterResult.sessionParams?.hermesRunId;
     const persistedResultJson = cancellationResultJson(latestRun ?? run, outcome, mergeHeartbeatRunResultJson(
       mergeRunStopMetadataForAgent(agent, outcome, {
         resultJson: mergeAdapterRecoveryMetadata({
@@ -688,6 +694,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               ? { executionRecovery: adapterResult.executionRecovery }
               : {}),
             ...(outcome === "cancelled" ? controllerLeaseLossResultJson(signal) : {}),
+            ...(verifiedGatewayStop ? { executionCancellation: {
+              ...parseObject(latestRun?.resultJson?.executionCancellation),
+              state: "acknowledged",
+              acknowledgedAt: new Date().toISOString(),
+              proof: "hermes_gateway_worker_exit",
+              ...observedStop,
+            } } : {}),
             ...(failureCause ? { failureCause } : {}),
             configFreshness: configFreshnessResultMetadata,
           },
@@ -696,6 +709,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         }),
         errorCode: runErrorCode,
         errorMessage: runErrorMessage,
+        ...(verifiedGatewayStop ? { conversationContinuationEligible: false } : {}),
       }),
       adapterResult.summary ?? null,
     ), runErrorCode, runErrorMessage);
