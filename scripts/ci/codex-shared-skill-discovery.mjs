@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,11 @@ async function createRepository(revision) {
 
 async function createAssignment(name, { repository, files }) {
   const home = join(root, "assignments", name);
-  const skill = join(home, ".agents", "skills", skillName);
+  // Codex reports the resolved wrapper path. Keep it outside the denied
+  // discovery and private home paths so commands can use its sibling files.
+  const skill = join(root, "wrappers", name, skillName);
+  const skills = join(home, ".agents", "skills");
+  await mkdir(skills, { recursive: true });
   await mkdir(skill, { recursive: true });
   for (const file of files) {
     if (file.path.startsWith(REPOSITORY_CONTENT_DIR + sep)) continue;
@@ -40,6 +44,7 @@ async function createAssignment(name, { repository, files }) {
     await writeFile(path, file.content, { mode: 0o444 });
   }
   await symlink(repository, join(skill, REPOSITORY_CONTENT_DIR), "dir");
+  await symlink(skill, join(skills, skillName), "dir");
   return { home, skill, files, repository };
 }
 
@@ -56,7 +61,7 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
     PROPRIO_RUNNER_NETWORK_ACCESS: process.env.PROPRIO_TEST_ISOLATED_NETWORK === "1" ? "enabled" : undefined,
   };
   const readOnlyRoots = codexExecutableReadOnlyRoots(environment, codex);
-  if (assignment) readOnlyRoots.push(assignment.repository);
+  if (assignment) readOnlyRoots.push(assignment.skill, assignment.repository);
   let diagnostics = "";
   const transport = new ProcessCodexAppServerTransport({
     command: codex,
@@ -77,20 +82,21 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
     const matches = listing.data.flatMap(entry => entry.skills).filter(skill => skill.name === skillName);
     assert.equal(matches.length, assignment ? 1 : 0, `${session} discovery count`);
     if (assignment) {
-      assert.equal(await realpath(matches[0].path), await realpath(join(assignment.skill, "SKILL.md")));
+      assert.equal(matches[0].path, await realpath(join(assignment.skill, "SKILL.md")));
       for (const file of assignment.files) {
-        assert.equal(await readFile(join(dirname(matches[0].path), file.path), "utf8"), file.content);
+        const read = await command("/bin/cat", join(dirname(matches[0].path), file.path));
+        assert.equal(read.exitCode, 0, JSON.stringify(read));
+        assert.equal(read.stdout, file.content);
       }
       const selected = await realpath(join(assignment.skill, rootFile));
-      const read = await command("/bin/cat", selected);
-      assert.equal(read.exitCode, 0, JSON.stringify(read));
-      assert.equal(read.stdout, await readFile(selected, "utf8"));
       const changeMode = await command("/bin/chmod", "600", selected);
       assert.notEqual(changeMode.exitCode, 0, "The Codex sandbox must refuse permission changes on a shared file");
       assert.equal((await stat(selected)).mode & 0o777, 0o444);
     }
     const outsideRead = await command("/bin/cat", join(outsideAssignment.repository, "shared.txt"));
     assert.notEqual(outsideRead.exitCode, 0, "The Codex sandbox must refuse files outside the assigned revision");
+    const privateRead = await command("/bin/cat", join(privateHome, "config.toml"));
+    assert.notEqual(privateRead.exitCode, 0, "The Codex sandbox must refuse access to the private configuration");
     console.log(`${session}: verified private config, ${matches.length} matching skills, and sandbox permissions`);
   } catch (error) {
     throw new Error(`Codex skill qualification failed for ${session}: ${diagnostics}`, { cause: error });
@@ -109,6 +115,8 @@ try {
   const alternate = await createAssignment("alternate", await createRepository("alternate-revision"));
   assert.equal(await realpath(join(first.skill, rootFile)), await realpath(join(second.skill, rootFile)));
   await verifyDiscovery(workspace, "session-one", first, alternate);
+  await rm(first.home, { recursive: true });
+  await rm(first.skill, { recursive: true });
   await verifyDiscovery(workspace, "session-two", second, alternate);
   await verifyDiscovery(workspace, "session-alternate", alternate, first);
   await verifyDiscovery(workspace, "session-without-assignment", null, first);
