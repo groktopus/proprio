@@ -428,14 +428,14 @@ export function createLocalAgentProcessBoundary(options: LocalAgentProcessBounda
     const result = await pending;
     if (result === "unsupported" && !warnedUnsupported) {
       warnedUnsupported = true;
-      logger.warn("This platform cannot identify the local process behind a request, so implicit local board access is not limited to operator processes");
+      logger.warn("Could not identify the local process behind a request. Implicit board access requires process attribution.");
     }
     return result;
   }
 
   async function grantsImplicitBoard(socket: (LocalPeerSocket & object) | null | undefined): Promise<boolean> {
     if (!socket) return false;
-    return await classify(socket) !== "agent_run";
+    return await classify(socket) === "operator";
   }
 
   return { classify, grantsImplicitBoard };
