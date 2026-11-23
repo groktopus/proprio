@@ -12,6 +12,7 @@ import { FixtureRegistry } from "./fixture-registry.js";
 import { isImmutableDaytonaImage } from "./catalog.js";
 import { TASK_TITLE_BUDGET_CENTS } from "./task-titles.js";
 import { CHAT_FEATURE_SUITE, CHAT_FEATURE_BUDGET_CENTS } from "./chat-feature-cases.js";
+import { SESSION_GOAL_RECOVERY_BUDGET_CENTS, SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
 import { codexSubscriptionAgentConfig, stageCodexSubscriptionFixture } from "./codex-subscription-fixture.js";
 import { caseReceiptTask, CASE_RECEIPT_BUDGET_CENTS, CASE_RECEIPT_RUN_TIMEOUT_MS } from "./case-receipt-cases.js";
 import { stageGrokSubscriptionFixture } from "./grok-subscription-fixture.js";
@@ -227,6 +228,7 @@ export async function setupLiveFixtures(input: {
           || (execution.suite.id === "everyday-workflows" && (["hire-reuse", "delegate-feedback"].includes(execution.task.id)
             || isEverydayReliabilityCase(execution.task.id))) ? NATIVE_COMPLETION_BUDGET_CENTS
           : execution.suite.id === "task-titles" ? TASK_TITLE_BUDGET_CENTS
+          : execution.suite.id === SESSION_GOAL_RECOVERY_SUITE ? SESSION_GOAL_RECOVERY_BUDGET_CENTS
           : ["cursor-cloud", "stock-harness", "task-workspaces", "case-handoffs", "feedback-persistence", "daytona-restart-continuity", "remote-workspace-storage", "rolling-web-deployment"].includes(execution.suite.id) ? 1_000 : 0,
       });
       await input.onCompanyCreated?.(company.id);
@@ -424,7 +426,8 @@ export async function setupLiveFixtures(input: {
           setupProbe.defaultRunner = selected.defaultRunner;
         }
       }
-      if (["stock-harness", "native-connection-guidance", "feedback-persistence", "daytona-restart-continuity", "remote-workspace-storage", "rolling-web-deployment"].includes(execution.suite.id)
+      if (execution.suite.id === SESSION_GOAL_RECOVERY_SUITE
+        || ["stock-harness", "native-connection-guidance", "feedback-persistence", "daytona-restart-continuity", "remote-workspace-storage", "rolling-web-deployment"].includes(execution.suite.id)
         || (execution.suite.id === "everyday-workflows" && (["hire-reuse", "delegate-feedback"].includes(execution.task.id)
           || isEverydayReliabilityCase(execution.task.id)))) {
         agent.budgetMonthlyCents = 1_000;
