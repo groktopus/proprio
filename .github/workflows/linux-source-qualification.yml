@@ -77,6 +77,7 @@ jobs:
           export E2E_UPDATE_BASE_REF="${BASE_SHA:-$(git rev-parse HEAD^)}"
           export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
           export E2E_UPDATE_REQUIRE_PROBE=0
+          export E2E_UPDATE_USE_BOOTSTRAP_CLI=1
           export E2E_BOOTSTRAP_CLI="$PWD/cli/src/index.ts"
           export E2E_BOOTSTRAP_NODE_LOADER="$PWD/cli/node_modules/tsx/dist/loader.mjs"
           export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"

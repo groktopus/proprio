@@ -25,6 +25,7 @@
 #   E2E_BOOTSTRAP_NODE_LOADER optional Node loader for a workspace source entry point
 #   E2E_SERVICE_TIMEOUT_SECS  service active/health wait (default 300)
 #   E2E_UPDATE_REQUIRE_PROBE  0 for an exact-commit lifecycle check without a probe migration
+#   E2E_UPDATE_USE_BOOTSTRAP_CLI  1 to run update commands with the exact tested CLI source
 #   E2E_UPDATE_NEXT_REPO      GitHub repository containing NEXT (default: E2E_REPO)
 #   E2E_UPDATE_STEP_SUMMARY   optional path to GitHub Actions step summary
 set -uo pipefail
@@ -34,9 +35,18 @@ BASE_REF="${E2E_UPDATE_BASE_REF:?E2E_UPDATE_BASE_REF is required}"
 NEXT_REF="${E2E_UPDATE_NEXT_REF:?E2E_UPDATE_NEXT_REF is required}"
 E2E_SERVICE_TIMEOUT_SECS="${E2E_SERVICE_TIMEOUT_SECS:-300}"
 probe="${E2E_UPDATE_REQUIRE_PROBE:-1}"
+use_bootstrap_cli="${E2E_UPDATE_USE_BOOTSTRAP_CLI:-0}"
 NEXT_REPO="${E2E_UPDATE_NEXT_REPO:-$E2E_REPO}"
 if [[ "$probe" != 0 && "$probe" != 1 ]]; then
   echo "E2E_UPDATE_REQUIRE_PROBE must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$use_bootstrap_cli" != 0 && "$use_bootstrap_cli" != 1 ]]; then
+  echo "E2E_UPDATE_USE_BOOTSTRAP_CLI must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$use_bootstrap_cli" = 1 && ( -z "${E2E_BOOTSTRAP_CLI:-}" || -z "${E2E_BOOTSTRAP_NODE_LOADER:-}" ) ]]; then
+  echo "E2E_UPDATE_USE_BOOTSTRAP_CLI=1 requires E2E_BOOTSTRAP_CLI and E2E_BOOTSTRAP_NODE_LOADER" >&2
   exit 2
 fi
 if [[ "$probe" = 0 && ( ! "$BASE_REF" =~ ^[0-9a-f]{40}$ || ! "$NEXT_REF" =~ ^[0-9a-f]{40}$ || "$BASE_REF" = "$NEXT_REF" ) ]]; then
@@ -63,6 +73,15 @@ pass()  { RESULTS+=("PASS  $1"); printf '\033[1;32mPASS\033[0m %s\n' "$1"; }
 fail_() { RESULTS+=("FAIL  $1"); printf '\033[1;31mFAIL\033[0m %s\n' "$1"; FAILED=1; }
 
 shim() { "$SHIM" "$@"; }
+update_cli() {
+  if [ "$use_bootstrap_cli" = 1 ]; then
+    local executable="$STORE/current/node_modules/proprio/dist/index.js"
+    E2E_MANAGED_EXECUTABLE="$executable" \
+      node --import "$E2E_BOOTSTRAP_NODE_LOADER" "$PWD/scripts/ci/managed-update-command.mjs" "$@"
+  else
+    shim "$@"
+  fi
+}
 current_target() { readlink "$STORE/current" 2>/dev/null || echo "<missing>"; }
 backup_count() { ls "$BACKUP_DIR" 2>/dev/null | grep -c -E '\.sql(\.gz)?$'; }
 newest_backup() { ls -t "$BACKUP_DIR"/*.sql* 2>/dev/null | head -1; }
@@ -152,6 +171,11 @@ bootstrap() {
   node "${node_args[@]}" "$BOOTSTRAP_CLI" "$@"
 }
 
+if [ "$use_bootstrap_cli" = 1 ] && [ -z "${E2E_BOOTSTRAP_CLI:-}" ]; then
+  echo "E2E_UPDATE_USE_BOOTSTRAP_CLI=1 requires E2E_BOOTSTRAP_CLI" >&2
+  exit 2
+fi
+
 bootstrap --version >/dev/null || { fail_ "1d bootstrap CLI smoke"; exit 1; }
 pass "1 bootstrap CLI ready"
 
@@ -222,8 +246,12 @@ node -e '
   fs.writeFileSync(p, JSON.stringify(m, null, 2));
 ' "$STORE/install.json" "$tracked_ref" "$NEXT_REPO" && pass "5a tracked ref updated in install.json" || fail_ "5a tracked ref update"
 
-CHECK_JSON="$(shim update --check --json)"; CHECK_EXIT=$?
+CHECK_JSON="$(update_cli update --check --json)"; CHECK_EXIT=$?
 printf '%s\n' "$CHECK_JSON"
+if [ "$use_bootstrap_cli" = 1 ] && ! jq -e '.mode == "managed"' <<<"$CHECK_JSON" >/dev/null; then
+  fail_ "5b exact candidate updater recognizes the installed managed executable"
+  exit 1
+fi
 if [ "$CHECK_EXIT" -ne 10 ]; then
   fail_ "5b update --check sees the new commit (got exit $CHECK_EXIT)"
   exit 1
@@ -235,7 +263,7 @@ fi
 pass "5b update --check sees the new commit (exit 10)"
 
 note "6. update --yes (backup -> build new payload -> flip -> restart service)"
-if shim update --yes > "$HOME/e2e-upd-update.log" 2>&1; then
+if update_cli update --yes > "$HOME/e2e-upd-update.log" 2>&1; then
   pass "6a update --yes exits 0"
 else
   tail -40 "$HOME/e2e-upd-update.log"; fail_ "6a update --yes exits 0"; exit 1
@@ -300,7 +328,7 @@ else
 fi
 
 note "9. rollback: old payload must still boot against the migrated database"
-if shim update --rollback; then
+if update_cli update --rollback; then
   pass "9a update --rollback exits 0"
 else
   fail_ "9a update --rollback exits 0"

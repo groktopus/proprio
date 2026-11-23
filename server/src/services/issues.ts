@@ -12243,7 +12243,7 @@ export function issueService(db: Db) {
         const goalBinding = resolveNextIssueGoalId({
           currentProjectId: receiptExisting.projectId,
           currentGoalId: receiptExisting.goalId,
-          currentGoalOrigin: effectiveIssueGoalOrigin(receiptExisting),
+          currentGoalOrigin: receiptExisting.goalOrigin,
           currentGoalOriginGoalId: receiptExisting.goalOriginGoalId,
           currentProjectGoalId,
           projectId:
