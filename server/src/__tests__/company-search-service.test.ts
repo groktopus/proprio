@@ -570,6 +570,31 @@ describeEmbeddedPostgres("companySearchService", () => {
     expect(result.results[0]?.snippets).toEqual([]);
   });
 
+  it.each(["assignment needle", ""])("finds only issues with no assignee (q=%j)", async (q) => {
+    const companyId = await createCompany();
+    const agentId = await createAgent(companyId);
+    const unassigned = await createIssue(companyId, { title: "Assignment needle open" });
+    const human = await createIssue(companyId, {
+      title: "Assignment needle human",
+      assigneeUserId: "user-1",
+    });
+    const agent = await createIssue(companyId, {
+      title: "Assignment needle agent",
+      assigneeAgentId: agentId,
+    });
+    const search = (assignee: Record<string, string>) =>
+      svc.search(companyId, companySearchQuerySchema.parse({ q, scope: "issues", ...assignee }));
+
+    const result = await search({ assigneeAgentId: "unassigned" });
+    expect(result.results.map((row) => row.id)).toEqual([unassigned]);
+    expect(result.countsByType.issue).toBe(1);
+    expect(result.filterOptionCounts.status.todo).toBe(1);
+    expect((await search({ assigneeAgentId: "null" })).results.map((row) => row.id).sort())
+      .toEqual([unassigned, human].sort());
+    expect((await search({ assigneeUserId: "user-1" })).results.map((row) => row.id)).toEqual([human]);
+    expect((await search({ assigneeAgentId: agentId })).results.map((row) => row.id)).toEqual([agent]);
+  });
+
   it("returns zero-result loosen data and suppresses agent/project rows while issue filters are active", async () => {
     const companyId = await createCompany();
     await createAgent(companyId, { name: "Needle agent", capabilities: "Needle capabilities" });

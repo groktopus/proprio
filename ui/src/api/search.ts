@@ -1,3 +1,4 @@
+import { COMPANY_SEARCH_UNASSIGNED } from "@groktopus/shared";
 import type { CompanySearchResponse, CompanySearchScope, CompanySearchSort, IssuePriority, IssueDisplayStatus } from "@groktopus/shared";
 import { api } from "./client";
 
@@ -30,7 +31,9 @@ export const searchApi = {
     if (params.offset !== undefined) search.set("offset", String(params.offset));
     appendMulti(search, "displayStatus", params.status);
     appendMulti(search, "priority", params.priority);
-    if (params.assigneeAgentId !== undefined) search.set("assigneeAgentId", params.assigneeAgentId ?? "null");
+    if (params.assigneeAgentId !== undefined) {
+      search.set("assigneeAgentId", params.assigneeAgentId ?? COMPANY_SEARCH_UNASSIGNED);
+    }
     if (params.assigneeUserId !== undefined) search.set("assigneeUserId", params.assigneeUserId);
     if (params.projectId !== undefined) search.set("projectId", params.projectId);
     if (params.labelId !== undefined) search.set("labelId", params.labelId);
