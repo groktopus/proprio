@@ -1349,6 +1349,7 @@ export function routineService(
     status: string;
     issueId?: string | null;
     nextRunAt?: Date | null;
+    requireLatestTrigger?: boolean;
   }, executor: Db = db) {
     await executor
       .update(routines)
@@ -1357,7 +1358,8 @@ export function routineService(
         lastEnqueuedAt: input.issueId ? input.triggeredAt : undefined,
         updatedAt: new Date(),
       })
-      .where(eq(routines.id, input.routineId));
+      .where(and(eq(routines.id, input.routineId),
+        input.requireLatestTrigger ? eq(routines.lastTriggeredAt, input.triggeredAt) : undefined));
 
     if (input.triggerId) {
       await executor
@@ -1368,7 +1370,8 @@ export function routineService(
           nextRunAt: input.nextRunAt === undefined ? undefined : input.nextRunAt,
           updatedAt: new Date(),
         })
-        .where(eq(routineTriggers.id, input.triggerId));
+        .where(and(eq(routineTriggers.id, input.triggerId),
+          input.requireLatestTrigger ? eq(routineTriggers.lastFiredAt, input.triggeredAt) : undefined));
     }
   }
 
@@ -2172,6 +2175,7 @@ export function routineService(
             )).limit(1),
             tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.companyId, originalIssue.companyId),
+              eq(agentWakeupRequests.agentId, assigneeAgentId),
               eq(agentWakeupRequests.idempotencyKey, `routine-dispatch:${run.id}`),
             )).limit(1),
           ]);
@@ -2180,6 +2184,9 @@ export function routineService(
           // A queue failure is safe to compensate only while nothing else
           // has adopted or edited the committed task.
           const canRemove = current && !otherRun &&
+            current.statusVersion === originalIssue.statusVersion &&
+            current.assigneeAgentId === originalIssue.assigneeAgentId &&
+            current.checkoutRunId === originalIssue.checkoutRunId &&
             current.updatedAt.getTime() === originalIssue.updatedAt.getTime();
           if (canRemove) {
             await notifyApprovalWork(txDb, current.companyId);
@@ -2200,6 +2207,7 @@ export function routineService(
             triggeredAt: run.triggeredAt,
             status: "failed",
             nextRunAt: afterCommit.nextRunAt,
+            requireLatestTrigger: true,
           }, txDb);
           return failed ?? run;
         });

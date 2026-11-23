@@ -2659,6 +2659,31 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(routineIssues).toHaveLength(0);
   });
 
+  it("retains a committed task another dispatch coalesced into before a wake failure", async () => {
+    let rejectWake!: (error: Error) => void;
+    const queued = new Promise<never>((_resolve, reject) => { rejectWake = reject; });
+    void queued.catch(() => undefined);
+    const wakeup = vi.fn(() => queued);
+    const { routine, svc } = await seedFixture({ wakeup });
+    const first = svc.runRoutine(routine.id, { source: "manual", idempotencyKey: "first" });
+    void first.catch(() => undefined);
+    try {
+      await vi.waitFor(() => expect(wakeup).toHaveBeenCalledOnce());
+      const second = await svc.runRoutine(routine.id, { source: "manual", idempotencyKey: "second" });
+      expect(second).toMatchObject({ status: "coalesced", linkedIssueId: expect.any(String) });
+      rejectWake(new Error("queue unavailable"));
+      await expect(first).resolves.toMatchObject({
+        status: "failed", linkedIssueId: second.linkedIssueId, assignmentWakePending: false,
+      });
+      expect((await db.select({ id: issues.id }).from(issues).where(eq(issues.originId, routine.id))))
+        .toEqual([{ id: second.linkedIssueId }]);
+      expect(wakeup).toHaveBeenCalledOnce();
+    } finally {
+      rejectWake(new Error("fixture wake finished"));
+      await first.catch(() => undefined);
+    }
+  });
+
   it("accepts standard second-precision webhook timestamps for HMAC triggers", async () => {
     const { routine, svc } = await seedFixture();
     const { trigger, secretMaterial } = await svc.createTrigger(
