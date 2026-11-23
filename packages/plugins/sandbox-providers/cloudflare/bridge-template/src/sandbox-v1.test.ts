@@ -48,7 +48,7 @@ function fixture() {
       method,
       headers: { Authorization: `Bearer ${auth}` },
       body: method === "POST" ? JSON.stringify(body) : undefined,
-    }), env);
+    }), env, { waitUntil: (promise: Promise<unknown>) => { void promise; } } as ExecutionContext);
   }
   return { object, request, container, storage, getByName };
 }
@@ -150,9 +150,9 @@ it("rejects queued same-session commands after destruction without restarting th
     body: JSON.stringify(body),
   }));
   const command = { command: "sleep", sessionStrategy: "named", sessionId: "queue" };
-  const executing = await inner("/execute", command);
+  const executing = await inner("/execute", { ...command, commandId: "first" });
   await ready;
-  const queued = await inner("/execute", command);
+  const queued = await inner("/execute", { ...command, commandId: "queued" });
   expect(test.container.exec).toHaveBeenCalledTimes(1);
   await inner("/destroy");
   finish(143);

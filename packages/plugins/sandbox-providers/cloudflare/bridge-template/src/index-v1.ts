@@ -38,7 +38,7 @@ async function readCommand(response: Response, onOutput: BridgeCommand["onOutput
   }
 }
 
-function runtime(env: Env): ResolveBridgeLease {
+function runtime(env: Env, ctx: ExecutionContext): ResolveBridgeLease {
   return async (id, settings) => {
     const stub = env.ProprioSandboxV1.getByName(id);
     const request = (route: string, body?: unknown, signal?: AbortSignal) => stub.fetch(
@@ -59,16 +59,28 @@ function runtime(env: Env): ResolveBridgeLease {
         return response.json<boolean>();
       },
       execute: async ({ signal, onOutput, ...command }) => {
-        return readCommand(await request("/execute", command, signal), onOutput);
+        signal?.throwIfAborted();
+        const commandId = crypto.randomUUID();
+        const cancel = () => {
+          ctx.waitUntil(request("/cancel", { commandId }).then(response => {
+            if (!response.ok) throw new Error("Cloudflare Durable Object command cancellation failed");
+          }).catch(error => console.error("Cloudflare command cancellation failed", error)));
+        };
+        signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          return await readCommand(await request("/execute", { ...command, commandId }, signal), onOutput);
+        } finally {
+          signal?.removeEventListener("abort", cancel);
+        }
       },
     };
   };
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
-      return await handleBridgeRequest(request, env.BRIDGE_AUTH_TOKEN, runtime(env));
+      return await handleBridgeRequest(request, env.BRIDGE_AUTH_TOKEN, runtime(env, ctx));
     } catch (error) {
       return Response.json({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }

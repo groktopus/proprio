@@ -27,6 +27,7 @@ export class ProprioSandboxV1 extends DurableObject {
   private lifecycle = Promise.resolve();
   private containerEpoch = 0;
   private leaseEpoch = 0;
+  private readonly cancellations = new Map<string, AbortController>();
   private readonly commandsBySession = new Map<string, Promise<void>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -123,12 +124,19 @@ export class ProprioSandboxV1 extends DurableObject {
       });
       return Response.json(present);
     }
+    if (route === "/cancel") {
+      const { commandId } = await request.json<{ commandId: string }>();
+      this.cancellations.get(commandId)?.abort();
+      return new Response(null, { status: 204 });
+    }
     if (route !== "/execute") return new Response(null, { status: 404 });
-    const input = await request.json<ContainerCommand>();
+    const { commandId, ...input } = await request.json<ContainerCommand & { commandId: string }>();
+    if (this.cancellations.has(commandId)) return new Response(null, { status: 409 });
     // The private Worker-to-Durable-Object transport streams both output and
     // the terminal record. The public route still owns the existing SSE API.
     const encoder = new TextEncoder();
     const cancellation = new AbortController();
+    this.cancellations.set(commandId, cancellation);
     const disconnect = () => cancellation.abort();
     request.signal.addEventListener("abort", disconnect, { once: true });
     if (request.signal.aborted) disconnect();
@@ -140,9 +148,12 @@ export class ProprioSandboxV1 extends DurableObject {
         };
         void this.scheduleCommand(input, cancellation.signal, (channel, data) => send({ type: channel, data }))
           .then(result => send({ type: "complete", result }), error => {
-            send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+            if (!cancellation.signal.aborted) {
+              send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+            }
           })
           .finally(() => {
+            this.cancellations.delete(commandId);
             request.signal.removeEventListener("abort", disconnect);
             try { controller.close(); } catch { /* the consumer canceled the stream */ }
           });
