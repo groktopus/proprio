@@ -223,8 +223,10 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
 import {
+  resolveIssueGoalBinding,
   resolveIssueGoalId,
   resolveNextIssueGoalId,
+  type IssueGoalOrigin,
 } from "./issue-goal-fallback.js";
 import { getRunLogStore, isRunLogStoreType } from "./run-log-store.js";
 import { recoverSettledNativeRunLog } from "./native-runtime/native-run-log-recovery.js";
@@ -5302,6 +5304,7 @@ const issueListSelect = {
   projectId: issues.projectId,
   projectWorkspaceId: issues.projectWorkspaceId,
   goalId: issues.goalId,
+  goalOrigin: issues.goalOrigin,
   parentId: issues.parentId,
   visibility: issues.visibility,
   privacyRootIssueId: issues.privacyRootIssueId,
@@ -10170,6 +10173,7 @@ export function issueService(db: Db) {
                 ? parent.projectWorkspaceId
                 : undefined),
         goalId: issueData.goalId ?? parent.goalId,
+        goalOrigin: issueData.goalOrigin ?? (issueData.goalId ? "explicit" : parent.goalOrigin),
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId:
           issueData.trustExplicitResponsibleUserId === true,
@@ -10828,6 +10832,13 @@ export function issueService(db: Db) {
         });
 
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
+        if (issueData.goalId) {
+          const [selectedGoal] = await tx
+            .select({ id: goals.id })
+            .from(goals)
+            .where(and(eq(goals.id, issueData.goalId), eq(goals.companyId, companyId)));
+          if (!selectedGoal) throw notFound("Goal not found");
+        }
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference =
@@ -11179,6 +11190,13 @@ export function issueService(db: Db) {
               .then((rows) => rows.length > 0));
           if (!originPublic) originIssueId = null;
         }
+        const goalBinding = resolveIssueGoalBinding({
+          projectId: issueData.projectId,
+          goalId: issueData.goalId,
+          goalOrigin: issueData.goalOrigin,
+          projectGoalId,
+          defaultGoalId: defaultCompanyGoal?.id ?? null,
+        });
         const values = {
           ...issueData,
           workspaceSelection: workspaceIntent,
@@ -11194,12 +11212,8 @@ export function issueService(db: Db) {
           responsibleUserId,
           requestDepth: clampIssueRequestDepth(issueData.requestDepth),
           originKind: issueData.originKind ?? "manual",
-          goalId: resolveIssueGoalId({
-            projectId: issueData.projectId,
-            goalId: issueData.goalId,
-            projectGoalId,
-            defaultGoalId: defaultCompanyGoal?.id ?? null,
-          }),
+          goalId: goalBinding.goalId,
+          goalOrigin: goalBinding.goalOrigin,
           projectWorkspaceId,
           executionWorkspaceId,
           executionWorkspacePreference,
@@ -11513,6 +11527,7 @@ export function issueService(db: Db) {
             projectWorkspaceId,
             executionWorkspaceSettings,
             goalId,
+            goalOrigin: "inherited",
             responsibleUserId: null,
             requestDepth: clampIssueRequestDepth(undefined),
             originKind: "manual",
@@ -12198,6 +12213,13 @@ export function issueService(db: Db) {
             : Promise.resolve(new Map<string, IssueRelationSummaryMap>()),
         ]);
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
+        if (issueData.goalId) {
+          const [selectedGoal] = await tx
+            .select({ id: goals.id })
+            .from(goals)
+            .where(and(eq(goals.id, issueData.goalId), eq(goals.companyId, existing.companyId)));
+          if (!selectedGoal) throw notFound("Goal not found");
+        }
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
           getProjectDefaultGoalId(
@@ -12209,15 +12231,18 @@ export function issueService(db: Db) {
           ),
         ]);
 
-        patch.goalId = resolveNextIssueGoalId({
+        const goalBinding = resolveNextIssueGoalId({
           currentProjectId: existing.projectId,
           currentGoalId: existing.goalId,
+          currentGoalOrigin: existing.goalOrigin as IssueGoalOrigin,
           currentProjectGoalId,
           projectId: issueData.projectId,
           goalId: issueData.goalId,
           projectGoalId: nextProjectGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,
         });
+        patch.goalId = goalBinding.goalId;
+        patch.goalOrigin = goalBinding.goalOrigin;
         // Ownership changes invalidate observed handoff versions even if status
         // stays the same, including an A -> B -> A assignment race.
         if (issueData.status === "done" || issueData.status === "cancelled") {

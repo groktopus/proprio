@@ -11,6 +11,8 @@ import {
   heartbeatRuns,
   issueCreateIdempotencyKeys,
   issues,
+  goals,
+  projects,
 } from "@groktopus/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -48,6 +50,8 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
     await db.delete(activityLog);
     await db.delete(issueCreateIdempotencyKeys);
     await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(goals);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -286,6 +290,90 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
 
     expect(recreatedOld.body.id).not.toBe(oldIssueId);
     expect(recreatedClosed.body.id).not.toBe(closedIssueId);
+  });
+
+  it("preserves explicit task goals and moves inherited goals through the issue API", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const app = createApp();
+    const [goalA, goalB, goalC] = await db.insert(goals).values([
+      { companyId, title: "Goal A", level: "company", status: "active" },
+      { companyId, title: "Goal B", level: "company", status: "active" },
+      { companyId, title: "Goal C", level: "company", status: "active" },
+    ]).returning();
+    const [projectA, projectB] = await db.insert(projects).values([
+      { companyId, name: "Project A", goalId: goalA!.id },
+      { companyId, name: "Project B", goalId: goalB!.id },
+    ]).returning();
+    const [foreignGoal] = await db.insert(goals).values({
+      companyId: otherCompanyId,
+      title: "Foreign goal",
+      level: "company",
+      status: "active",
+    }).returning();
+
+    await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Cross-company goal", goalId: foreignGoal!.id, allowDuplicate: true })
+      .expect(404);
+
+    const explicit = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Explicit A", projectId: projectA!.id, goalId: goalA!.id, allowDuplicate: true })
+      .expect(201);
+    const inherited = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Inherited A", projectId: projectA!.id, allowDuplicate: true })
+      .expect(201);
+
+    await request(app).patch(`/api/issues/${explicit.body.id}`)
+      .send({ goalId: foreignGoal!.id }).expect(404);
+
+    await request(app).patch(`/api/issues/${explicit.body.id}`)
+      .send({ projectId: projectB!.id }).expect(200);
+    await request(app).patch(`/api/issues/${inherited.body.id}`)
+      .send({ projectId: projectB!.id }).expect(200);
+
+    const [explicitRow] = await db.select().from(issues).where(eq(issues.id, explicit.body.id));
+    const [inheritedRow] = await db.select().from(issues).where(eq(issues.id, inherited.body.id));
+    expect(explicitRow).toMatchObject({ goalId: goalA!.id, goalOrigin: "explicit", projectId: projectB!.id });
+    expect(inheritedRow).toMatchObject({ goalId: goalB!.id, goalOrigin: "inherited", projectId: projectB!.id });
+
+    const detail = await request(app).get(`/api/issues/${explicit.body.id}`).expect(200);
+    const context = await request(app).get(`/api/issues/${explicit.body.id}/heartbeat-context`).expect(200);
+    expect(detail.body.goalId).toBe(goalA!.id);
+    expect(context.body.issue.goalId).toBe(detail.body.goalId);
+
+    await request(app).patch(`/api/issues/${explicit.body.id}`)
+      .send({ projectId: projectA!.id, goalId: goalC!.id }).expect(200);
+    let changed = await db.select().from(issues).where(eq(issues.id, explicit.body.id)).then((rows) => rows[0]!);
+    expect(changed).toMatchObject({ projectId: projectA!.id, goalId: goalC!.id, goalOrigin: "explicit" });
+    await request(app).patch(`/api/issues/${explicit.body.id}`)
+      .send({ projectId: projectB!.id, goalId: null }).expect(200);
+    changed = await db.select().from(issues).where(eq(issues.id, explicit.body.id)).then((rows) => rows[0]!);
+    expect(changed).toMatchObject({ projectId: projectB!.id, goalId: goalB!.id, goalOrigin: "inherited" });
+  });
+
+  it("keeps legacy rows with unknown origin on the prior fallback heuristic", async () => {
+    const companyId = await seedCompany();
+    const app = createApp();
+    const [goalA, goalB] = await db.insert(goals).values([
+      { companyId, title: "Legacy A", level: "company", status: "active" },
+      { companyId, title: "Legacy B", level: "company", status: "active" },
+    ]).returning();
+    const [projectA, projectB] = await db.insert(projects).values([
+      { companyId, name: "Legacy Project A", goalId: goalA!.id },
+      { companyId, name: "Legacy Project B", goalId: goalB!.id },
+    ]).returning();
+    const [legacy] = await db.insert(issues).values({
+      companyId, title: "Legacy task", projectId: projectA!.id, goalId: goalA!.id,
+    }).returning();
+    expect(legacy!.goalOrigin).toBe("unknown");
+
+    await request(app).patch(`/api/issues/${legacy!.id}`)
+      .send({ projectId: projectB!.id }).expect(200);
+    const [moved] = await db.select().from(issues).where(eq(issues.id, legacy!.id));
+    expect(moved).toMatchObject({ goalId: goalB!.id, goalOrigin: "unknown" });
   });
 
   it("stores the request run header on manual creates", async () => {

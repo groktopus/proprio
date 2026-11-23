@@ -779,6 +779,7 @@ async function materializeDecisionEffect(input: {
       projectId: input.issue.projectId,
       projectWorkspaceId: input.issue.projectWorkspaceId,
       goalId: input.issue.goalId,
+      goalOrigin: input.issue.goalOrigin,
       parentId: input.issue.id,
       title: effect.summary,
       status: "todo",

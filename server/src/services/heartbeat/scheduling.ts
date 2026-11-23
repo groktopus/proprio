@@ -149,6 +149,7 @@ export function createHeartbeatScheduling(
     companyId: issues.companyId,
     projectId: issues.projectId,
     goalId: issues.goalId,
+    goalOrigin: issues.goalOrigin,
     identifier: issues.identifier,
     title: issues.title,
     status: issues.status,
@@ -171,6 +172,7 @@ export function createHeartbeatScheduling(
     companyId: string;
     projectId: string | null;
     goalId: string | null;
+    goalOrigin: "explicit" | "inherited" | "unknown";
     identifier: string | null;
     title: string;
     status: string;
@@ -341,6 +343,7 @@ export function createHeartbeatScheduling(
           parentDepthPolicy: "allow_nested",
           projectId: input.claimed.projectId,
           goalId: input.claimed.goalId,
+          goalOrigin: input.claimed.goalOrigin,
           assigneeAgentId: input.claimed.assigneeAgentId,
           originKind: RECOVERY_ORIGIN_KINDS.strandedIssueRecovery,
           originId: input.claimed.id,

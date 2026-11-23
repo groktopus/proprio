@@ -2496,7 +2496,7 @@ export function issueThreadInteractionService(
   async function mergedPullRequestConfirmationPage(scope?: MergeConfirmationScope, after?: string) {
     const rows = await db.select({ interaction: issueThreadInteractions, issue: {
       id: issues.id, companyId: issues.companyId, projectId: issues.projectId, goalId: issues.goalId,
-      status: issues.status, assigneeAgentId: issues.assigneeAgentId,
+      goalOrigin: issues.goalOrigin, status: issues.status, assigneeAgentId: issues.assigneeAgentId,
     } }).from(issueThreadInteractions).innerJoin(issues, and(
       eq(issueThreadInteractions.issueId, issues.id), eq(issueThreadInteractions.companyId, issues.companyId),
     )).where(and(
@@ -5489,6 +5489,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
+        goalOrigin?: "explicit" | "inherited" | "unknown";
         status?: string;
       },
       interactionId: string,
@@ -5565,6 +5566,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
+        goalOrigin?: "explicit" | "inherited" | "unknown";
         status?: string;
       },
       interactionId: string,
@@ -5724,6 +5726,7 @@ export function issueThreadInteractionService(
             ...resolveChatTaskAssignment(task, sourceConversation?.conversationAgentId),
             projectId: task.projectId ?? issue.projectId,
             goalId: task.goalId ?? issue.goalId,
+            goalOrigin: task.goalId ? "explicit" : issue.goalOrigin ?? "unknown",
             billingCode: task.billingCode ?? null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,

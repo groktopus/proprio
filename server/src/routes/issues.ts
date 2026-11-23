@@ -13174,6 +13174,9 @@ export function issueRoutes(
               goalId:
                 rawCreateBody.goalId ??
                 watchdogProductBugFollowUp.sourceIssue.goalId,
+              goalOrigin: rawCreateBody.goalId
+                ? "explicit"
+                : watchdogProductBugFollowUp.sourceIssue.goalOrigin,
               billingCode:
                 rawCreateBody.billingCode ??
                 watchdogProductBugFollowUp.sourceIssue.billingCode,

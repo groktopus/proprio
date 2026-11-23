@@ -1418,6 +1418,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           parentDepthPolicy: "allow_nested",
           projectId: input.sourceIssue.projectId,
           goalId: input.sourceIssue.goalId,
+          goalOrigin: input.sourceIssue.goalOrigin,
           billingCode: input.sourceIssue.billingCode,
           originFingerprint: input.classification.stopFingerprint,
         }) ?? fallback
@@ -1473,6 +1474,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         parentDepthPolicy: "allow_nested",
         projectId: input.sourceIssue.projectId,
         goalId: input.sourceIssue.goalId,
+        goalOrigin: input.sourceIssue.goalOrigin,
         assigneeAgentId: input.watchdog.watchdogAgentId,
         originKind: TASK_WATCHDOG_ORIGIN_KIND,
         originId: input.sourceIssue.id,

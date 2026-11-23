@@ -1,5 +1,20 @@
 type MaybeId = string | null | undefined;
 
+export type IssueGoalOrigin = "explicit" | "inherited" | "unknown";
+
+export function resolveIssueGoalBinding(input: {
+  projectId: MaybeId;
+  goalId: MaybeId;
+  goalOrigin?: IssueGoalOrigin;
+  projectGoalId?: MaybeId;
+  defaultGoalId: MaybeId;
+}): { goalId: string | null; goalOrigin: IssueGoalOrigin } {
+  return {
+    goalId: resolveIssueGoalId(input),
+    goalOrigin: input.goalOrigin ?? (input.goalId ? "explicit" : "inherited"),
+  };
+}
+
 export function resolveIssueGoalId(input: {
   projectId: MaybeId;
   goalId: MaybeId;
@@ -19,7 +34,8 @@ export function resolveNextIssueGoalId(input: {
   goalId?: MaybeId;
   projectGoalId?: MaybeId;
   defaultGoalId: MaybeId;
-}): string | null {
+  currentGoalOrigin?: IssueGoalOrigin;
+}): { goalId: string | null; goalOrigin: IssueGoalOrigin } {
   const projectId =
     input.projectId !== undefined ? input.projectId : input.currentProjectId;
   const projectGoalId =
@@ -35,7 +51,18 @@ export function resolveNextIssueGoalId(input: {
   };
 
   if (input.goalId !== undefined) {
-    return input.goalId ?? resolveFallbackGoalId(projectId, projectGoalId);
+    return {
+      goalId: input.goalId ?? resolveFallbackGoalId(projectId, projectGoalId),
+      goalOrigin: input.goalId ? "explicit" : "inherited",
+    };
+  }
+
+  if (input.currentGoalOrigin === "explicit") {
+    return { goalId: input.currentGoalId ?? null, goalOrigin: "explicit" };
+  }
+
+  if (input.currentGoalOrigin === "inherited") {
+    return { goalId: resolveFallbackGoalId(projectId, projectGoalId), goalOrigin: "inherited" };
   }
 
   const currentFallbackGoalId = resolveFallbackGoalId(
@@ -45,12 +72,12 @@ export function resolveNextIssueGoalId(input: {
   const nextFallbackGoalId = resolveFallbackGoalId(projectId, projectGoalId);
 
   if (!input.currentGoalId) {
-    return nextFallbackGoalId;
+    return { goalId: nextFallbackGoalId, goalOrigin: "unknown" };
   }
 
   if (input.currentGoalId === currentFallbackGoalId) {
-    return nextFallbackGoalId;
+    return { goalId: nextFallbackGoalId, goalOrigin: "unknown" };
   }
 
-  return input.currentGoalId;
+  return { goalId: input.currentGoalId, goalOrigin: "unknown" };
 }
