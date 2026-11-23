@@ -3,14 +3,15 @@ name: Stability smoke
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
 
 concurrency:
   group: stability-smoke-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # A title or body edit can queue smoke but should not interrupt a running check.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
   smoke:
