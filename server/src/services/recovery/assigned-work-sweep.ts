@@ -1,3 +1,4 @@
+import { SESSION_GOAL_RECOVERY_OPEN_CONTROLS } from "../heartbeat/session-goal-recovery.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import {
@@ -97,6 +98,8 @@ export type AssignedWorkDeps = {
     source: "automation" | "assignment"; triggerDetail: "system"; reason: string;
     payload: Record<string, unknown>; requestedByActorType: "system"; requestedByActorId: null;
     contextSnapshot: Record<string, unknown>;
+    idempotencyKey?: string;
+    sessionGoalRecovery?: { sessionId: string; revision: number };
   }) => Promise<{ id: string } | null>;
   /** Runs this process executes now. */
   liveRunExecutions?: Readonly<{ has(id: string): boolean }>;
@@ -256,9 +259,15 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
       database.selectDistinct({ issueId: caseHandoffs.issueId }).from(caseHandoffs).where(and(eq(caseHandoffs.companyId, companyId),
         inArray(caseHandoffs.issueId, ids), eq(caseHandoffs.destinationKind, "agent"),
         inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))),
-      database.select({ taskKey: agentTaskSessions.taskKey, agentId: agentTaskSessions.agentId, goalStatus: agentTaskSessions.goalStatus,
-        goalDesiredState: agentTaskSessions.goalDesiredState })
-        .from(agentTaskSessions).where(and(eq(agentTaskSessions.companyId, companyId), inArray(agentTaskSessions.taskKey, ids),
+      database.select({ taskKey: agentTaskSessions.taskKey, agentId: agentTaskSessions.agentId,
+        sessionId: agentTaskSessions.id, revision: agentTaskSessions.goalRevision,
+        goalStatus: agentTaskSessions.goalStatus, goalDesiredState: agentTaskSessions.goalDesiredState,
+        openControl: sql<boolean>`exists (select 1 from agent_session_goal_actions ga
+          where ga.company_id = ${agentTaskSessions.companyId} and ga.session_id = ${agentTaskSessions.id}
+            and ga.status in (${sql.join(SESSION_GOAL_RECOVERY_OPEN_CONTROLS.map(status => sql`${status}`), sql`, `)}))` })
+        .from(agentTaskSessions).innerJoin(agents, and(eq(agents.id, agentTaskSessions.agentId),
+          eq(agents.companyId, agentTaskSessions.companyId), eq(agents.adapterType, agentTaskSessions.adapterType)))
+        .where(and(eq(agentTaskSessions.companyId, companyId), inArray(agentTaskSessions.taskKey, ids),
           sql`${agentTaskSessions.goalStatus} is not null`, sql`${agentTaskSessions.goalStatus} <> 'complete'`)),
       database.select({ issueId: issueThreadInteractions.issueId, count: sql<number>`count(*)::int` }).from(issueThreadInteractions)
         .where(and(eq(issueThreadInteractions.companyId, companyId), inArray(issueThreadInteractions.issueId, ids),
@@ -444,9 +453,11 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         pendingWakes: (wakeCounts.get(issue.id) ?? 0) + (chatWakeIds.has(issue.id) ? 1 : 0),
         nativeRecoveryPending: nativeIds.has(issue.id),
         pendingHandoff: handoffIds.has(issue.id),
-        // Only a goal that is running and still wanted running starts turns by
-        // itself; a paused, blocked or stopped goal waits for its person.
-        sessionGoal: goal ? (goal.goalStatus === "active" && goal.goalDesiredState !== "paused" ? "active" : "paused") : null,
+        // The persisted objective cannot start a turn by itself. Only its
+        // open control outbox or an independently proven execution path can.
+        sessionGoal: goal ? (goal.openControl ? "control_pending"
+          : goal.goalStatus === "active" && goal.goalDesiredState === "active" ? "active" : "paused") : null,
+        sessionGoalBinding: goal ? { sessionId: goal.sessionId, revision: goal.revision } : undefined,
         interruption: interruption ? { responsibility: interruption.responsibility, state: interruption.state,
           userAction: interruption.userAction, nextRetryAt: interruption.nextRetryAt, canRetry: interruption.canRetry } : null,
         pendingInteractions: interactionCounts.get(issue.id) ?? 0,
@@ -689,14 +700,18 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
     }
     const release = async () => { if (slot && !slot.heldUntil) await slot.release(); };
     const continuedBefore = await wakeBecameFreshContinuation(db, issue.companyId, issue.id);
+    const goal = claimed.sessionGoalRecovery;
+    const wakeReason = goal ? "goal_control" : facts.latestRun ? "issue_continuation_needed" : "issue_assigned";
     const run = await deps.enqueueWakeup(issue.assigneeAgentId!, {
-      source: facts.latestRun ? "automation" : "assignment", triggerDetail: "system",
-      reason: facts.latestRun ? "issue_continuation_needed" : "issue_assigned",
-      payload: { issueId: issue.id, mutation: "assigned_work_invariant" },
+      source: goal || facts.latestRun ? "automation" : "assignment", triggerDetail: "system",
+      reason: wakeReason,
+      payload: { issueId: issue.id, mutation: "assigned_work_invariant", ...(goal ? { intent: "goal_recovery" } : {}) },
       requestedByActorType: "system", requestedByActorId: null,
-      contextSnapshot: { issueId: issue.id, taskId: issue.id, wakeReason: facts.latestRun ? "issue_continuation_needed" : "issue_assigned",
+      contextSnapshot: { issueId: issue.id, taskId: issue.id, wakeReason,
         source: ASSIGNED_WORK_CONTINUATION_SOURCE, assignedWorkViolation: claimed.reason,
-        ...(facts.latestRun ? { previousRunId: facts.latestRun.id } : {}) },
+        ...(facts.latestRun ? { previousRunId: facts.latestRun.id } : {}),
+        ...(goal ? { taskKey: issue.id, resumeSessionGoalHeartbeat: true, skipIssueComment: true } : {}) },
+      ...(goal ? { sessionGoalRecovery: goal, idempotencyKey: `assigned_goal_recovery:${claimed.activityId}` } : {}),
     }).catch(error => {
       logger.warn({ err: error, companyId: issue.companyId, issueId: issue.id }, "assigned-work continuation was not admitted");
       return null;
@@ -810,7 +825,8 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
     verdict: Extract<AssignedWorkVerdict, { kind: "violation" }>; reason: ViolationReason;
     restoredTo: "todo" | "in_progress" | "in_review" | null; restoredStatusVersion: number | null;
     blockedTransitionAt: Date | null; unblockDescriptor: IssueRow["unblockDescriptor"]; blockedOwnerNotifiedAt: Date | null;
-    stalledFence: { version: string; attachedWakes: number } | null };
+    stalledFence: { version: string; attachedWakes: number } | null;
+    sessionGoalRecovery?: AssignedWorkFacts["sessionGoalBinding"] };
 
   /**
    * The durable, serialized claim. Under the task's row lock it loads the
@@ -880,6 +896,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
       }, publications);
       const next = continuationAllowance([at, ...attempts.started], at, [at, ...attempts.all]);
       return { kind: "claimed" as const, activityId: activity.id, publications, verdict, reason: verdict.reason, stalledFence,
+        sessionGoalRecovery: fresh.sessionGoal === "active" ? fresh.sessionGoalBinding : undefined,
         restoredTo, restoredStatusVersion, blockedTransitionAt: current.blockedTransitionAt,
         unblockDescriptor: current.unblockDescriptor, blockedOwnerNotifiedAt: current.blockedOwnerNotifiedAt,
         nextCheckAt: next.allowed ? new Date(at.getTime() + 90_000) : next.retryAt };

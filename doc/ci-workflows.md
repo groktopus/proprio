@@ -32,7 +32,7 @@ pnpm lockfile. Its checks include:
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
 
-The workflow has read-only repository permissions and a 15-minute timeout. It
+The workflow has read-only repository permissions and a 25-minute timeout. It
 is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
