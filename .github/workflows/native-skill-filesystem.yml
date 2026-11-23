@@ -36,10 +36,15 @@ jobs:
         run: |
           npm install --global --ignore-scripts pnpm@9.15.4
           pnpm install --frozen-lockfile --ignore-scripts
-          if ! command -v mkfs.btrfs; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends btrfs-progs
-          fi
+      - name: Install the stock Linux sandbox prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends btrfs-progs bubblewrap apparmor-profiles
+          # Load the distro profile for the specific packaged binary. Leave the
+          # runner's system-wide restrictions and the app's filesystem policy on.
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          test "$(readlink -f "$(command -v bwrap)")" = /usr/bin/bwrap
+          timeout 10s /usr/bin/bwrap --unshare-user --ro-bind / / --cap-drop ALL /bin/true
       - name: Build the native runner and synthetic Codex provider
         run: |
           pnpm --filter @groktopus/proprio-runner build:typescript
