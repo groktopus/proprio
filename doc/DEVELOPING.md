@@ -404,8 +404,8 @@ pnpm lint
 ```
 
 This checks `server/src`, `ui/src`, and `cli/src` with the shared Oxlint configuration.
-Oxlint errors fail the command; the existing warning backlog does not. A first run
-may need registry access to download the pinned Oxlint version with `pnpm dlx`.
+Oxlint errors fail the command. The existing warning backlog does not. Install
+workspace dependencies before running the linter.
 
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.
