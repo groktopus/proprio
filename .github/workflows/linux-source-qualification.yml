@@ -1,0 +1,77 @@
+name: Linux source qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/linux-source-qualification.yml
+      - scripts/ci/linux-source-qualification.mjs
+      - tests/runner-recovery/README.md
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-source-qualification-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  source-and-runner:
+    if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Verify head and install locked dependencies
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git rev-parse HEAD
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          # Restore only the embedded Postgres package symlinks for test fixtures.
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Build the source checkout
+        run: |
+          rustc --version
+          cargo --version
+          pnpm preflight:workspace-links
+          pnpm --filter proprio build
+          pnpm --filter @groktopus/ui build
+          pnpm --filter @groktopus/proprio-runner build
+          pnpm --filter @groktopus/proprio-runner run build:runner-binaries
+          pnpm --filter @groktopus/server prepare:ui-dist
+          pnpm --filter @groktopus/server build
+          node cli/dist/index.js --version
+      - name: Run a synthetic agent in a fresh source instance
+        run: |
+          command -v strace
+          temp_home="$(mktemp -d "$RUNNER_TEMP/proprio-source.XXXXXX")"
+          sudo unshare --net -- bash -e -c '
+            ip link set lo up
+            exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
+          ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
+      - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
+        run: |
+          test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
+          test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
+          pnpm test:runner-recovery
+          pnpm exec vitest run --maxWorkers 1 \
+            packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts \
+            packages/proprio-runner/src/live/runnerd-codex-transport-settlement.test.ts \
+            server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
+            server/src/services/workspace-recovery-disk-full.test.ts
