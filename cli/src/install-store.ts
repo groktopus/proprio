@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { resolveProprioHomeDir } from "./config/home.js";
 
 export const INSTALL_MANIFEST_VERSION = 1;
@@ -24,6 +26,9 @@ export type InstallRecord = {
 
 export type InstallManifest = InstallRecord & {
   schemaVersion: typeof INSTALL_MANIFEST_VERSION;
+  activationId?: string;
+  // Present while an update has yet to complete service validation.
+  recoveryFallback?: InstallRecord;
   previous: InstallRecord[];
 };
 
@@ -164,7 +169,7 @@ export function assertManagedInstallStore(paths = resolveInstallStorePaths()): I
 export async function withInstallStoreLock<T>(
   callback: () => Promise<T>,
   paths = resolveInstallStorePaths(),
-  options: { initialize?: boolean | "existing-only" } = {},
+  options: { initialize?: boolean | "existing-only"; waitTimeoutMs?: number } = {},
 ): Promise<T> {
   if (options.initialize === "existing-only") {
     // Validate instead of creating or chmod'ing a store for cache-only work.
@@ -183,35 +188,44 @@ export async function withInstallStoreLock<T>(
       return (error as NodeJS.ErrnoException).code === "EPERM";
     }
   };
-  const acquire = (): void => {
+  const tryAcquire = (): string | null => {
     const temporaryPath = `${paths.lockPath}.${token}.tmp`;
     try {
       fs.writeFileSync(temporaryPath, `${token}\n`, { mode: 0o600, flag: "wx" });
       try {
         fs.linkSync(temporaryPath, paths.lockPath);
-        return;
+        return null;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      const owner = fs.readFileSync(paths.lockPath, "utf8").trim();
+      let owner: string;
+      try {
+        owner = fs.readFileSync(paths.lockPath, "utf8").trim();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        fs.rmSync(temporaryPath, { force: true });
+        return tryAcquire();
+      }
       const ownerPid = Number.parseInt(owner.split(":", 1)[0] ?? "", 10);
       if (Number.isInteger(ownerPid) && ownerPid > 0 && !processIsAlive(ownerPid)) {
         fs.rmSync(paths.lockPath);
         fs.rmSync(temporaryPath, { force: true });
-        acquire();
-        return;
+        return tryAcquire();
       }
       const ownerLabel = Number.isInteger(ownerPid) && ownerPid > 0 ? ` (pid ${ownerPid})` : "";
-      throw new Error(
-        `Another managed install is already running${ownerLabel}. ` +
-        `If no install process is active, remove the stale lock at ${paths.lockPath} and retry.`,
-      );
+      return `Another managed install is already running${ownerLabel}. ` +
+        `If no install process is active, remove the stale lock at ${paths.lockPath} and retry.`;
     } finally {
       fs.rmSync(temporaryPath, { force: true });
     }
   };
 
-  acquire();
+  const deadline = performance.now() + (options.waitTimeoutMs ?? 0);
+  for (let busy = tryAcquire(); busy; busy = tryAcquire()) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error(busy);
+    await delay(Math.min(100, remaining));
+  }
   try {
     return await callback();
   } finally {
@@ -317,7 +331,8 @@ export function flipCurrentAtomic(
 export function buildNextManifest(
   record: InstallRecord,
   current: InstallManifest | null,
-): InstallManifest {
+  options: { validatingUpdate?: boolean } = {},
+): InstallManifest & { activationId: string } {
   const candidates: InstallRecord[] = current
     ? [
         {
@@ -342,7 +357,11 @@ export function buildNextManifest(
     )
     .slice(0, 2);
 
-  return { schemaVersion: INSTALL_MANIFEST_VERSION, ...record, previous };
+  const recoveryFallback = options.validatingUpdate ? current?.recoveryFallback ?? candidates[0] : undefined;
+  return {
+    schemaVersion: INSTALL_MANIFEST_VERSION, ...record, activationId: randomUUID(), previous,
+    ...(recoveryFallback && { recoveryFallback }),
+  };
 }
 
 export function pruneInstallPayloads(
@@ -350,7 +369,8 @@ export function pruneInstallPayloads(
   paths = resolveInstallStorePaths(),
 ): string[] {
   const retained = new Set(
-    [manifest, ...manifest.previous].map((record) => path.resolve(record.payloadPath)),
+    [manifest, ...manifest.previous, ...(manifest.recoveryFallback ? [manifest.recoveryFallback] : [])]
+      .map((record) => path.resolve(record.payloadPath)),
   );
   const removed: string[] = [];
   for (const source of ["npm", "git"] as const) {

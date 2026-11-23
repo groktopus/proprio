@@ -359,6 +359,7 @@ describe("process lookups for a mixed batch", () => {
     const agent = { remoteAddress: "127.0.0.1", remotePort: 1002, localAddress: "127.0.0.1", localPort: 3100 };
     const [hiddenResult, agentResult] = await Promise.all([boundary.classify(hidden), boundary.classify(agent)]);
     expect(hiddenResult).toBe("unsupported");
+    expect(await boundary.grantsImplicitBoard(hidden)).toBe(false);
     expect(agentResult).toBe("agent_run");
     expect(await boundary.grantsImplicitBoard(agent)).toBe(false);
   });

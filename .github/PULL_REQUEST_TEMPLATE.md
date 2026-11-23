@@ -69,6 +69,11 @@
 <!--
   What could go wrong? Mention migration safety, breaking changes,
   behavioral shifts, or "Low risk" if genuinely minor.
+
+  If this change crosses a trust boundary, identify the actor, authority,
+  and data. Name the enforcement point, the denial test, the expected audit
+  evidence, and the owner of any residual risk. Link the relevant boundary in
+  doc/SECURE-ENGINEERING.md.
 -->
 
 -

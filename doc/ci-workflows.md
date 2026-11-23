@@ -8,11 +8,14 @@ It is not a specification for centrally managed workflows or past CI setups.
 ### Stability smoke
 
 `.github/workflows/stability-smoke.yml` runs for pull requests targeting `main`
-when the pull request comes from a branch in this repository. It checks out the
-exact pull-request head without persisting checkout credentials, installs the
-workspace from the frozen pnpm lockfile, and runs:
+from forks and branches in this repository, including PRs retargeted to
+`main`. It checks out the exact PR head, verifies the event SHA without
+persisting checkout credentials, and installs the workspace from the frozen
+pnpm lockfile. Its checks include:
 
-- `pnpm lint` for server, UI, and CLI source;
+- `pnpm lint` for server, UI, and CLI source using the locked workspace version of Oxlint;
+- the named authorization, credential lifecycle, and audit cases described in
+  [Secure engineering](SECURE-ENGINEERING.md);
 - the `AGENTS.md` local-link check and its Node test suite;
 - the CLI service-onboarding test;
 - managed service restart and same-version Git update validation;
@@ -30,10 +33,11 @@ workspace from the frozen pnpm lockfile, and runs:
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
 
-The workflow has read-only repository permissions and a 15-minute timeout. It
+The workflow has read-only repository permissions and a 25-minute timeout. It
 is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
-Fork pull requests do not run the smoke job.
+Fork runs use no secrets, a read-only token, and checkout without credential
+persistence. GitHub can require a maintainer to approve a fork workflow run.
 
 ### Standalone sandbox-provider dependencies
 
@@ -56,16 +60,18 @@ prove package compatibility and the executed tests, not live cloud acceptance.
 ### Droid Auto Review
 
 `.github/workflows/droid-review.yml` invokes Factory Droid's automatic review
-and security review for non-draft pull requests when they are opened, reopened,
-or marked ready for review. Its external action needs write permissions to
-publish reviews and comments. Review the workflow permissions and action version
-before changing them; this workflow is not a substitute for test checks.
+and security review for non-draft, same-repository pull requests when they are
+opened, reopened, or marked ready for review. The job gives its GitHub token
+read access to contents and write access to pull requests for review comments.
 
 ### Droid Tag
 
 `.github/workflows/droid.yml` invokes Factory Droid when a pull request, issue,
-review, or comment contains `@droid`. It uses write permissions to respond to
-requests and comments. It is event-driven assistance, not a required CI lane.
+review, or comment contains `@droid`. The job checks that both the original actor
+and rerun actor are the maintainer before checkout or credential setup. Update
+this check when repository ownership changes. Its token has contents read and
+write permissions for issues and pull requests. Both workflows pin the Factory
+action and checkout to commit SHAs and use the workflow token with OIDC disabled.
 
 Both workflows use `openai/gpt-6.2-sol` through Nous Portal for code and security
 reviews. The runner registers the model in Droid's user settings and reads
@@ -83,7 +89,7 @@ Use `--base <ref>` to override the locally recorded default branch.
 
 The repository contains test-selection, test-duration, CI profiling, sharding,
 and incremental verification utilities. Their presence does not mean the
-three workflows above currently run a full source/test matrix. Changes that add
+tracked workflows currently run a full source/test matrix. Changes that add
 or restore broader CI must update this page from the workflow definitions and
 identify the checks actually required on `main`.
 

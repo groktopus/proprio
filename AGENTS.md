@@ -96,6 +96,11 @@ preflight", "Start Dev", "Quick Health Checks", and "Database in Dev" in
    - Budget hard-stop auto-pause behavior
    - Activity logging for mutating actions
 
+   When changing a durable state transition, identify its authoritative record
+   and owning operation. Enforce the invariant at the write boundary and define
+   what happens if a competing writer wins, the process stops mid-operation, or
+   the caller retries.
+
 4. **Keep behavior with its owning module.**
    Provider protocols, payload parsing, and feature-specific sequencing belong to the module that owns them. Shared code uses narrow, normalized contracts. Explain any substantive change outside the owning module. See [`rules/module-boundaries.mdc`](rules/module-boundaries.mdc).
 
@@ -147,6 +152,9 @@ Follow these rules:
   run merely to prepare a PR, resume a chat, or repeat unchanged passing
   verification. A selected local pass does not replace required CI, release
   qualification, browser acceptance, or a local/platform-specific regression.
+- **Exercise failures that can lose, duplicate, or strand work.** Test the
+  relevant failure or race through the normal entry point. Assert what was
+  persisted and what the operator sees.
 - **Evidence expires.** After edits or a rebase, rerun affected checks and
   invalidate evidence whose inputs or required coverage changed. Failed or
   interrupted attempts are never passes.

@@ -22,12 +22,13 @@ running the [agent worktree preflight](#agent-worktree-preflight).
 ## CI
 
 Pull requests targeting `main` run the **Stability smoke** workflow for
-same-repository branches. It installs the frozen workspace dependencies and
+same-repository branches and forks. It installs the frozen workspace dependencies and
 runs onboarding, cost-summary, backup, chat, native replay, and settlement
 regressions. It also typechecks the server and compiles affected packages. The
-**Droid Auto Review** workflow reviews non-draft pull requests; neither workflow
+**Droid Auto Review** workflow reviews non-draft pull requests from
+same-repository branches. Neither workflow
 replaces the focused verification below or broader qualification required for
-release. Fork pull requests do not run the stability smoke job.
+release. GitHub can require workflow approval for first-time external contributors.
 
 The repository also keeps CI workflow routing, test-selection, and performance
 measurement policy in [CI workflows](ci-workflows.md). That document may include
@@ -403,8 +404,8 @@ pnpm lint
 ```
 
 This checks `server/src`, `ui/src`, and `cli/src` with the shared Oxlint configuration.
-Oxlint errors fail the command; the existing warning backlog does not. A first run
-may need registry access to download the pinned Oxlint version with `pnpm dlx`.
+Oxlint errors fail the command. The existing warning backlog does not. Install
+workspace dependencies before running the linter.
 
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.

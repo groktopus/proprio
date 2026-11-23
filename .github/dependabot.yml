@@ -42,3 +42,17 @@ updates:
         patterns:
           - "*"
     open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/packages/proprio-runner/runner"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/docker/daytona-runner"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

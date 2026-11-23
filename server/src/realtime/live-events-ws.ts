@@ -1,13 +1,14 @@
 import { createLiveEventDelivery, sharedDeliveryRead, type LiveDeliveryReads } from "./live-event-delivery.js";
+import { boardRequestHost, trustedBoardRequestOrigin } from "../middleware/board-mutation-guard.js";
 import { localAgentProcessBoundary } from "../middleware/local-agent-process-boundary.js";
 import { skillAccessService } from "../services/skill-access.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
-import { agentApiKeys, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@groktopus/db";
+import { agentApiKeys, authSessions, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@groktopus/db";
 import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@groktopus/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
@@ -58,6 +59,7 @@ import { canActorReadCase } from "../services/case-access.js";
 interface UpgradeContext {
   actor: AuthorizationActor;
   apiKeyId?: string;
+  sessionId?: string;
   companyId: string;
   actorType: "board" | "agent";
   actorId: string;
@@ -138,16 +140,39 @@ function headersFromIncomingMessage(req: IncomingMessage): Headers {
   return headers;
 }
 
+type UpgradeAuthorizationOptions = {
+  deploymentMode: DeploymentMode;
+  resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
+  /** Optional resolver for trusted Cloud proxy headers. */
+  resolveCloudActor?: (req: IncomingMessage) => Promise<CloudUpgradeActor | null>;
+  trustProxy?: (address: string, hop: number) => boolean;
+  publicOrigin?: string | null;
+  localHostnames?: ReadonlySet<string>;
+};
+
+function allowsAmbientBrowserUpgrade(req: IncomingMessage, opts: UpgradeAuthorizationOptions): boolean {
+  const originHeader = req.headers.origin;
+  if (originHeader === undefined) return req.headers["sec-fetch-site"] === undefined;
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const host = boardRequestHost(req.headers.host, typeof forwardedHost === "string" ? forwardedHost : undefined,
+    req.socket?.remoteAddress, opts.trustProxy);
+  const origin = trustedBoardRequestOrigin({
+    origin: originHeader,
+    host,
+    configuredOrigin: process.env.PROPRIO_PUBLIC_URL?.trim() || opts.publicOrigin,
+  });
+  if (!origin) return false;
+  if (opts.deploymentMode !== "local_trusted") return true;
+  const hostname = new URL(origin).hostname.replace(/^\[|\]$/g, "");
+  return opts.localHostnames?.has(hostname) ?? ["localhost", "127.0.0.1", "::1"].includes(hostname);
+}
+
 async function authorizeUpgrade(
   db: Db,
   req: IncomingMessage,
   companyId: string,
   url: URL,
-  opts: {
-    deploymentMode: DeploymentMode;
-    resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
-    resolveCloudActor?: (req: IncomingMessage) => Promise<CloudUpgradeActor | null>;
-  },
+  opts: UpgradeAuthorizationOptions,
 ): Promise<UpgradeContext | null> {
   const queryToken = url.searchParams.get("token")?.trim() ?? "";
   const authToken = parseBearerToken(req.headers.authorization);
@@ -155,6 +180,7 @@ async function authorizeUpgrade(
 
   // Browser board context has no bearer token in local_trusted and authenticated modes.
   if (!token) {
+    if (!allowsAmbientBrowserUpgrade(req, opts)) return null;
     if (opts.deploymentMode === "local_trusted") {
       if (!(await localAgentProcessBoundary().grantsImplicitBoard(req.socket))) return null;
       return {
@@ -191,7 +217,8 @@ async function authorizeUpgrade(
 
     const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
     const userId = session?.user?.id;
-    if (!userId) return null;
+    const sessionId = session?.session?.id;
+    if (!userId || !sessionId || session.session?.userId !== userId) return null;
 
     const [roleRow, memberships] = await Promise.all([
       db
@@ -218,6 +245,7 @@ async function authorizeUpgrade(
       companyId,
       actorType: "board",
       actorId: userId,
+      sessionId,
       actor: { type: "board", userId, source: "session", companyIds: memberships.map(m => m.companyId) },
     };
   }
@@ -250,16 +278,8 @@ async function authorizeUpgrade(
 export function setupLiveEventsWebSocketServer(
   server: HttpServer,
   db: Db,
-  opts: {
-    deploymentMode: DeploymentMode;
+  opts: UpgradeAuthorizationOptions & {
     subscribeInvalidation?: (companyId: string, resync: () => void) => () => void;
-    resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
-    /**
-     * Resolves a Cloud-proxied browser's identity from the trusted
-     * x-proprio-cloud-* headers on the upgrade request. Wired by managed
-     * deployments; self-hosted instances leave it unset.
-     */
-    resolveCloudActor?: (req: IncomingMessage) => Promise<CloudUpgradeActor | null>;
   },
 ) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
@@ -315,6 +335,16 @@ export function setupLiveEventsWebSocketServer(
           const active = await db.select({ id: agentApiKeys.id }).from(agentApiKeys)
             .where(and(eq(agentApiKeys.id, context!.apiKeyId), isNull(agentApiKeys.revokedAt))).limit(1);
           return active.length > 0;
+        }
+        const { sessionId, actorId } = context!;
+        if (sessionId) {
+          const [activeSession] = await db.select({ id: authSessions.id }).from(authSessions)
+            .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, actorId),
+              gt(authSessions.expiresAt, new Date()))).limit(1);
+          if (!activeSession) {
+            socket.close(1008, "session inactive");
+            return false;
+          }
         }
         const membership = await db.select({ id: companyMemberships.id }).from(companyMemberships)
           .where(and(eq(companyMemberships.companyId, context!.companyId), eq(companyMemberships.principalType, "user"),
@@ -446,7 +476,7 @@ export function setupLiveEventsWebSocketServer(
     }
 
     const onRawSocketError = (err: Error) => {
-      logger.warn({ err, path: req.url }, "live websocket upgrade socket error");
+      logger.warn({ err, path: "/api/companies/:companyId/events/ws" }, "live websocket upgrade socket error");
     };
     const cleanupRawSocketListeners = () => {
       socket.off("error", onRawSocketError);
@@ -461,7 +491,13 @@ export function setupLiveEventsWebSocketServer(
       return;
     }
 
-    const url = new URL(req.url, "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(req.url, "http://localhost");
+    } catch {
+      rejectUpgrade(socket, "400 Bad Request", "invalid url");
+      return;
+    }
     const companyId = parseCompanyId(url.pathname);
     if (!companyId) {
       closeUpgradeSocket(socket);
@@ -470,11 +506,7 @@ export function setupLiveEventsWebSocketServer(
 
     // Upgrade admission precedes this async authentication. An idle hold or
     // socket close must not make its accepted database writes disappear.
-    void trackIdleWork(authorizeUpgrade(db, req, companyId, url, {
-      deploymentMode: opts.deploymentMode,
-      resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
-      resolveCloudActor: opts.resolveCloudActor,
-    })
+    void trackIdleWork(authorizeUpgrade(db, req, companyId, url, opts)
       .then((context) => {
         if (!context) {
           rejectUpgrade(socket, "403 Forbidden", "forbidden");
@@ -495,7 +527,7 @@ export function setupLiveEventsWebSocketServer(
         });
       })
       .catch((err) => {
-        logger.error({ err, path: req.url }, "failed websocket upgrade authorization");
+        logger.error({ err, path: "/api/companies/:companyId/events/ws" }, "failed websocket upgrade authorization");
         rejectUpgrade(socket, "500 Internal Server Error", "upgrade failed");
       }));
   });

@@ -254,6 +254,19 @@ When you change the data model:
 Then update every layer that the change affects: `packages/shared` types and
 validators, `server` routes and services, and `ui` API clients and pages.
 
+### Competing migration processes
+
+The migration command and server startup acquire the same PostgreSQL session
+lock before they repair migration history or apply migrations. The default
+lock wait is 60 seconds. Set `PROPRIO_MIGRATION_LOCK_TIMEOUT_MS` to a positive
+integer to change the wait in milliseconds. This setting covers lock
+acquisition. Migration execution can continue beyond that time.
+
+If the process reports `MIGRATION_LOCK_TIMEOUT`, it did not start work under
+that lock. Wait for the active migrator to finish, then retry the command or
+restart the server. Inspect migration history before retrying an error that
+occurred after a migration started.
+
 ### Migration compatibility with the running release
 
 Proprio Cloud starts a new release while the previous one is still serving

@@ -199,19 +199,30 @@ async function waitForRestartReport(
   return null;
 }
 
-export async function restartManagedService(input: {
+type ManagedRestartInput = {
   instanceId?: string;
   expectedVersion?: string | null;
   expectedCommit?: string;
   waitForDrain?: boolean;
   startIfInactive?: boolean;
-} = {}): Promise<{ status: ServiceStatus; health: HealthResult; report: unknown | null }> {
+};
+type ManagedRestartResult = { status: ServiceStatus; health: HealthResult; report: unknown | null };
+
+export function restartManagedService(input?: ManagedRestartInput): Promise<ManagedRestartResult>;
+export function restartManagedService(input: ManagedRestartInput & { skipIfInactive: true }): Promise<ManagedRestartResult | null>;
+export async function restartManagedService(
+  input: ManagedRestartInput & { skipIfInactive?: true } = {},
+): Promise<ManagedRestartResult | null> {
   const instanceId = resolveProprioInstanceId(input.instanceId);
   return withHotRestartLock(instanceId, async lockToken => {
     const detection = await detectServiceManager({ instanceId });
-    if (!detection.supported) throw new Error(detection.reason);
+    if (!detection.supported) {
+      if (input.skipIfInactive) return null;
+      throw new Error(detection.reason);
+    }
     const { manager } = detection;
     const before = await manager.status();
+    if (input.skipIfInactive && !before.active) return null;
     if (!before.installed) throw new Error(`Cannot restart ${before.serviceName}: the service is not installed.`);
     const intent = !before.active && input.startIfInactive
       ? null

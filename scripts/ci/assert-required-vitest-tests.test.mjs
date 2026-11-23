@@ -17,3 +17,21 @@ test('rejects missing or ambiguous files', () => {
   const file = report([{ title: 'database round trip', status: 'passed' }]).testResults[0];
   assert.throws(() => assertRequiredVitestTests({ testResults: [file, file] }, required));
 });
+
+test('distinguishes equal titles in parameterized suites by full name', () => {
+  const report = {
+    testResults: [{
+      name: '/repo/server/security.test.ts',
+      assertionResults: [
+        { title: 'denies access', fullName: 'v1 denies access', status: 'passed' },
+        { title: 'denies access', fullName: 'v2 denies access', status: 'skipped' },
+      ],
+    }],
+  };
+  assert.doesNotThrow(() => assertRequiredVitestTests(report, {
+    'server/security.test.ts': ['v1 denies access'],
+  }));
+  assert.throws(() => assertRequiredVitestTests(report, {
+    'server/security.test.ts': ['v1 denies access', 'v2 denies access'],
+  }), /v2 denies access/);
+});

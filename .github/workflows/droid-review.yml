@@ -8,21 +8,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   droid-review:
-    if: github.event.pull_request.draft == false
+    if: >-
+      github.repository == 'groktopus/proprio' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
-      issues: write
-      id-token: write
-      actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
+          persist-credentials: false
       - name: Configure Nous Portal model
         shell: bash
         env:
@@ -47,8 +50,9 @@ jobs:
           }
           FACTORY_JSON
       - name: Run Droid Auto Review
-        uses: Factory-AI/droid-action@main
+        uses: Factory-AI/droid-action@260eac443df653198ed70e9ea9d32980cfabde23 # v13
         with:
+          github_token: ${{ github.token }}
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           automatic_review: true
           automatic_security_review: true
