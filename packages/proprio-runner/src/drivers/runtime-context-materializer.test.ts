@@ -246,6 +246,55 @@ describe("runtime context materialization", () => {
     }, 30_000,
   );
 
+  it.skipIf(process.platform !== "linux" || skillFilesystem !== "ext4")(
+    "shares an ext4 repository across sessions with different skill assignments", async () => {
+      const root = await mkdtemp(join(tmpdir(), "proprio-codex-shared-repository-"));
+      roots.push(root);
+      expect(execFileSync("findmnt", ["--noheadings", "--output", "FSTYPE", "--target", root], { encoding: "utf8" }).trim())
+        .toBe("ext4");
+      const repoFile = join(".proprio-repository", "skills", "unassigned-sibling", "data.bin");
+      const pinnedBytes = randomBytes(8 * 1024 * 1024);
+      const otherBytes = randomBytes(pinnedBytes.length);
+
+      async function assignedSkill(name: string, revision: number, bytes: Buffer) {
+        const bundle = join(root, `source-${name}-${revision}`);
+        await mkdir(dirname(join(bundle, repoFile)), { recursive: true });
+        await writeFile(join(bundle, "SKILL.md"), `# ${name}\n`);
+        await writeFile(join(bundle, repoFile), bytes);
+        const skill = context(bundle, root, name).skills[0]!;
+        return { ...skill, versionId: `${name}-version-${revision}` };
+      }
+
+      const first = await assignedSkill("first", 1, pinnedBytes);
+      const second = await assignedSkill("second", 1, pinnedBytes);
+      const alternate = await assignedSkill("first", 2, otherBytes);
+      const homes = [join(root, "session-one"), join(root, "session-two"), join(root, "session-alternate")];
+      const assignments = [[first, second], [second], [alternate]];
+      await Promise.all(assignments.map((skills, i) => {
+        const assigned = context(skills[0]!.bundle.rootPath, root);
+        assigned.skills = skills;
+        assigned.aggregateDigest = canonicalNativeRuntimeContextDigest(assigned);
+        return prepareIsolatedCodexHome({ context: assigned, codexHome: homes[i]!, colocateRepositoryFiles: true });
+      }));
+
+      const copies = assignments.flatMap((skills, i) => skills.map(
+        skill => join(homes[i]!, "skills", skill.runtimeName, repoFile),
+      ));
+      const stats = await Promise.all(copies.map(file => stat(file)));
+      expect(stats[0]!.ino).toBe(stats[1]!.ino);
+      expect(stats[1]!.ino).toBe(stats[2]!.ino);
+      expect(stats[2]!.ino).not.toBe(stats[3]!.ino);
+      const unique = new Map(stats.map(stat => [stat.ino, stat]));
+      expect([...unique.values()].reduce((sum, stat) => sum + stat.blocks * 512, 0)).toBe(2 * pinnedBytes.length);
+      expect((await readFile(copies[3]!)).equals(otherBytes)).toBe(true);
+
+      await releaseMaterializedNativeRuntimeSkills(join(homes[0]!, "skills"));
+      await prepareIsolatedCodexRecoveryHome({ codexHome: homes[1]! });
+      expect((await readFile(copies[2]!)).equals(pinnedBytes)).toBe(true);
+      expect((await stat(copies[2]!)).mode & 0o222).toBe(0);
+    }, 30_000,
+  );
+
   it("preserves a managed provider while excluding ambient auth, hooks, and tool configuration", async () => {
     const root = await mkdtemp(join(tmpdir(), "proprio-routing-home-"));
     roots.push(root);

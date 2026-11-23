@@ -57,7 +57,7 @@ jobs:
             sudo chown "$(id -u):$(id -g)" "$scratch/mount"
             TMPDIR="$scratch/mount" PROPRIO_TEST_CODEX_SKILL_FILESYSTEM="$filesystem" \
               pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
-              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging'
+              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging|shares an ext4 repository'
             if [ "$filesystem" = ext4 ]; then
               TMPDIR="$scratch/mount" PROPRIO_TEST_NATIVE_SKILL_EXT4=1 \
                 pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
