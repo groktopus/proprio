@@ -28,6 +28,8 @@
  *     leader closes or crashes (its lease expires and a follower reclaims it).
  */
 
+import { browserStorage } from "./browser-storage";
+
 // ---------------------------------------------------------------------------
 // Leader election (pure, injectable — the tested core)
 // ---------------------------------------------------------------------------
@@ -420,11 +422,12 @@ export function createSharedChannel(name: string): SharedChannel {
       /* fall through */
     }
   }
-  if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+  const storage = browserStorage();
+  if (storage) {
     let counter = 0;
     const relayKey = `${name}:relay`;
     return createStorageRelayShared(relayKey, {
-      storage: localStorage,
+      storage,
       onStorage(cb) {
         const listener = (ev: StorageEvent) => cb(ev.key, ev.newValue);
         window.addEventListener("storage", listener);
@@ -477,12 +480,13 @@ export function sharedPollingChannelName(companyId: string): string {
 }
 
 export function getSharedPollingTabId(): string {
-  if (typeof sessionStorage !== "undefined") {
+  const storage = browserStorage("sessionStorage");
+  if (storage) {
     try {
-      const existing = sessionStorage.getItem(TAB_ID_STORAGE_KEY);
+      const existing = storage.getItem(TAB_ID_STORAGE_KEY);
       if (existing) return existing;
       const next = createRandomId();
-      sessionStorage.setItem(TAB_ID_STORAGE_KEY, next);
+      storage.setItem(TAB_ID_STORAGE_KEY, next);
       return next;
     } catch {
       /* fall through */
@@ -504,15 +508,16 @@ function getBrowserVisible(): boolean {
 }
 
 function createBrowserLeaseStore(companyId: string): LeaseStore | null {
-  if (typeof localStorage === "undefined") return null;
+  const storage = browserStorage();
+  if (!storage) return null;
   try {
     const probeKey = `proprio:shared-poll:${sanitizeCompanyId(companyId)}:probe`;
-    localStorage.setItem(probeKey, "1");
-    localStorage.removeItem(probeKey);
+    storage.setItem(probeKey, "1");
+    storage.removeItem(probeKey);
   } catch {
     return null;
   }
-  return createLeaseStore(localStorage, sharedPollingLeaseKey(companyId));
+  return createLeaseStore(storage, sharedPollingLeaseKey(companyId));
 }
 
 /**

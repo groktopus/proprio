@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { describe, expect, it, vi } from "vitest";
 import {
   loadTaskCollectionPreferences,
   saveTaskCollectionPreferences,
@@ -30,6 +32,33 @@ const normalizeColumns = (value: unknown): Column[] => Array.isArray(value)
   : columns;
 
 describe("task collection preferences", () => {
+  const location = { companyId: "company-a", collectionKey: "tasks" };
+  const loadOptions = {
+    ...location,
+    defaultViewState: defaults,
+    defaultColumns: columns,
+    normalizeViewState,
+    normalizeColumns,
+  };
+  const defaultPreferences = { viewState: defaults, columns, migrated: false, source: "default" };
+  const denied = () => { throw new DOMException("Storage access denied", "SecurityError"); };
+
+  it("uses defaults when obtaining browser storage throws", () => {
+    const storage = vi.spyOn(window, "localStorage", "get").mockImplementation(denied);
+    try {
+      expect(loadTaskCollectionPreferences(loadOptions)).toEqual(defaultPreferences);
+      expect(() => saveTaskCollectionPreferences(location, { viewState: defaults, columns })).not.toThrow();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it("uses defaults after a denied read and ignores a denied write", () => {
+    const storage = { getItem: denied, setItem: denied };
+    expect(loadTaskCollectionPreferences({ ...loadOptions, storage })).toEqual(defaultPreferences);
+    expect(() => saveTaskCollectionPreferences(location, { viewState: defaults, columns }, storage)).not.toThrow();
+  });
+
   it("migrates legacy view and column keys into a versioned company scope", () => {
     const storage = new MemoryStorage();
     storage.setItem("legacy:view", JSON.stringify({ sort: "created", filters: ["active"] }));
