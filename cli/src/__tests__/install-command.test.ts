@@ -96,6 +96,38 @@ describe("managed install commands", () => {
     ]);
   });
 
+  it("resolves an exact public SHA over isolated Git transport after anonymous API rate limiting", async () => {
+    const sha = "c".repeat(40);
+    const runCommand = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) => {
+      if (file === "curl") throw new Error("The requested URL returned error: 403");
+      if (file === "git" && args[0] === "-C" && args.at(-1) === "FETCH_HEAD^{commit}") {
+        expect(options?.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_ALLOW_PROTOCOL: "https" });
+        expect(options?.env).not.toHaveProperty("GH_TOKEN");
+        expect(options?.env).not.toHaveProperty("GITHUB_TOKEN");
+        expect(options?.env?.HOME).toContain("proprio-public-ref-");
+        return { stdout: `${sha}\n`, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await expect(resolveGitHubRef("groktopus/proprio", `${sha}^0`, runCommand)).resolves.toBe(sha);
+    expect(runCommand.mock.calls.map(([file]) => file)).toEqual(["curl", "git", "git", "git"]);
+    const fetch = runCommand.mock.calls[2]?.[1];
+    expect(fetch).toContain("--depth=1");
+    expect(fetch).toContain("https://github.com/groktopus/proprio.git");
+    expect(fetch).toContain(sha);
+  });
+
+  it("does not use the public SHA fallback for named refs or authenticated requests", async () => {
+    const runCommand = vi.fn(async () => { throw new Error("The requested URL returned error: 403"); });
+    await expect(resolveGitHubRef("groktopus/proprio", "main", runCommand)).rejects.toThrow("returned error: 403");
+    expect(runCommand).toHaveBeenCalledOnce();
+
+    process.env.GH_TOKEN = "credential-present";
+    await expect(resolveGitHubRef("groktopus/proprio", "d".repeat(40), runCommand)).rejects.toThrow("returned error: 403");
+    expect(runCommand).toHaveBeenCalledTimes(2);
+  });
+
   it("supports fork overrides and classifies SHA refs as pinned", () => {
     expect(resolveGitInstallRequest({ ref: "feature/test", repo: "HenkDz/proprio" })).toEqual({ repo: "HenkDz/proprio", ref: "feature/test", pinned: false });
     expect(resolveGitInstallRequest({ ref: "abcdef1" })).toEqual({ repo: "groktopus/proprio", ref: "abcdef1", pinned: true });

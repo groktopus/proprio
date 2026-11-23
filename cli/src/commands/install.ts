@@ -181,7 +181,42 @@ async function runGitHubCurl(
 }
 
 export async function resolveGitHubRef(repo: string, ref: string, runCommand: CommandRunner): Promise<string> {
-  const result = await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--header", "Accept: application/vnd.github+json", "--header", "User-Agent: proprio-install", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--header", "Accept: application/vnd.github+json", "--header", "User-Agent: proprio-install", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+    const shaAlias = /^(?:[0-9a-f]{40})(?:\^0)?$/i.exec(ref);
+    if (token || !shaAlias || !/(?:returned error: (?:403|429)|API rate limit exceeded|secondary rate limit)/i.test(detail)) throw error;
+
+    // GitHub's anonymous REST quota is shared by hosted runners. When it is
+    // exhausted, resolve only immutable full SHAs through Git's public smart
+    // transport. Isolate HOME and disable credential helpers/prompts so this
+    // fallback cannot pick up credentials from a developer or runner account.
+    const sha = ref.replace(/\^0$/, "").toLowerCase();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-public-ref-"));
+    const repoPath = path.join(tempRoot, "repo.git");
+    const isolatedHome = path.join(tempRoot, "home");
+    fs.mkdirSync(isolatedHome, { mode: 0o700 });
+    const env = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: isolatedHome,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_ALLOW_PROTOCOL: "https",
+    };
+    try {
+      await runCommand("git", ["init", "--bare", repoPath], { env, maxBuffer: 4 * 1024 * 1024 });
+      await runCommand("git", ["-C", repoPath, "-c", "credential.helper=", "-c", "core.askPass=", "fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", `https://github.com/${repo}.git`, sha], { env, maxBuffer: 4 * 1024 * 1024 });
+      const fetched = await runCommand("git", ["-C", repoPath, "rev-parse", "FETCH_HEAD^{commit}"], { env, maxBuffer: 1024 * 1024 });
+      if (fetched.stdout.trim().toLowerCase() !== sha) throw new Error(`GitHub returned a different commit while resolving ${repo}@${ref}.`);
+      return sha;
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
   let sha: unknown;
   try { sha = (JSON.parse(result.stdout) as { sha?: unknown }).sha; } catch { throw new Error(`GitHub returned an invalid response while resolving ${repo}@${ref}.`); }
   if (typeof sha !== "string" || !/^[0-9a-f]{40}$/i.test(sha)) throw new Error(`GitHub did not return a full commit SHA for ${repo}@${ref}.`);
