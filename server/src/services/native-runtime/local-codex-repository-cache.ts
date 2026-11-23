@@ -1,12 +1,12 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readdir, realpath, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { withDirectoryPublicationLock } from "@groktopus/adapter-utils/workspace-restore-merge";
 import { logger } from "../../middleware/logger.js";
 import { removeRuntimeAssetTree, RUNTIME_ASSET_RETENTION_MS } from "./runtime-asset-retention.js";
 
 const digestPattern = /^[a-f0-9]{64}$/u;
-const stagingPattern = /^\.repository-staging-([a-f0-9]{64})-[\w-]+$/u;
+const unpublishedPattern = /^\.repository-(?:staging|retired)-([a-f0-9]{64})-[\w-]+$/u;
 const nextSweep = new Map<string, number>();
 const sweepIntervalMs = 60 * 60_000;
 
@@ -51,7 +51,8 @@ async function pruneExpiredRepositories(company: string) {
   const cutoff = Date.now() - RUNTIME_ASSET_RETENTION_MS;
   let removed = 0;
   for (const name of await readdir(company)) {
-    const digest = digestPattern.test(name) ? name : stagingPattern.exec(name)?.[1];
+    const published = digestPattern.test(name);
+    const digest = published ? name : unpublishedPattern.exec(name)?.[1];
     if (!digest) continue;
     const candidate = join(company, name);
     const info = await plainDirectory(candidate);
@@ -59,7 +60,14 @@ async function pruneExpiredRepositories(company: string) {
     const didRemove = await withDirectoryPublicationLock(join(company, digest), async () => {
       const current = await plainDirectory(candidate);
       if (!current || current.mtimeMs >= cutoff || await hasSessionReferences(candidate)) return false;
-      await removeRuntimeAssetTree(candidate);
+      let retired = candidate;
+      if (published) {
+        // Remove the cache key atomically before changing or deleting bytes.
+        // A dead sweeper can leave only an unpublished tree to reap later.
+        retired = join(company, `.repository-retired-${digest}-${randomUUID()}`);
+        await rename(candidate, retired);
+      }
+      await removeRuntimeAssetTree(retired);
       return true;
     });
     if (didRemove && ++removed >= 16) break;

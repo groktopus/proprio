@@ -341,7 +341,21 @@ describe("runtime context materialization", () => {
       const next = join(nextHome, "skills", "assigned", dependency);
       expect(await readFile(next, "utf8")).toBe("pinned sibling bytes");
       expect((await stat(next)).ino).toBe((await stat(cached)).ino);
-      expect((await stat(next)).mode & 0o222).toBe(0);
+      const retained = await stat(next);
+      expect(retained.mode & 0o222).toBe(0);
+
+      // A detached anchor must also leave any existing hard link intact.
+      // Change only the cache directory metadata and its name for the file.
+      await chmod(entry, 0o700);
+      await chmod(dirname(cached), 0o700);
+      await rm(cached);
+      const finalHome = join(root, "final-home");
+      await prepareIsolatedCodexHome({ context: assigned, codexHome: finalHome, useSharedRepository });
+      expect(await readFile(next, "utf8")).toBe("pinned sibling bytes");
+      expect((await stat(next)).mode).toBe(retained.mode);
+      const finalCopy = join(finalHome, "skills", "assigned", dependency);
+      expect(await readFile(finalCopy, "utf8")).toBe("pinned sibling bytes");
+      expect((await stat(finalCopy)).ino).not.toBe(retained.ino);
     }, 30_000,
   );
 

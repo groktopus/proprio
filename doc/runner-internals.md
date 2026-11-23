@@ -42,7 +42,9 @@ The controller locks each cache entry while publishing or linking it. A retained
 session keeps its own references, so deleting a different session leaves its
 files readable during recovery. At most once an hour per active company, reuse
 can trigger a cleanup pass. That pass removes expired trees and interrupted
-publications only when no session still holds a link.
+publications only when no session still holds a link. Eviction detaches the
+cache key atomically before removing files. The next launch can rebuild the
+key from the pinned bundle after interrupted cleanup.
 
 To roll back, stop the controller and restore the previous Proprio build.
 Retained homes and archives still contain regular files at their existing paths.

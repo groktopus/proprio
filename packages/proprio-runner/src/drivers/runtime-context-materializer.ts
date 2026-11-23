@@ -184,7 +184,10 @@ async function linkSharedRepository(
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (!existing) {
+    if (existing && !existing.isDirectory()) {
+      throw new Error("shared runtime repository cache entry must be a directory");
+    }
+    if (!existing || await repositoryTreeDigest(repository, true) !== digest) {
       const staging = await mkdtemp(join(dirname(repository), `.repository-staging-${digest}-`));
       try {
         await cp(source, staging, { recursive: true, force: false });
@@ -192,13 +195,16 @@ async function linkSharedRepository(
         if (await repositoryTreeDigest(staging, true) !== digest) {
           throw new Error("runtime repository asset changed while publishing skills");
         }
+        if (existing) {
+          // A previous in-place eviction can leave an incomplete entry.
+          // Detach it without chmod or edits to files linked by old homes.
+          await rename(repository, join(dirname(repository), `.repository-retired-${digest}-${randomUUID()}`));
+        }
         await rename(staging, repository);
       } catch (error) {
         await removeMaterializedTree(staging, path => rm(path, { recursive: true, force: true })).catch(() => undefined);
         throw error;
       }
-    } else if (!existing.isDirectory() || await repositoryTreeDigest(repository, true) !== digest) {
-      throw new Error("shared runtime repository does not match its pinned content");
     }
     try {
       await linkRepositoryFiles(repository, destination);
