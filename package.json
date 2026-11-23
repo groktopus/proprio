@@ -21,6 +21,8 @@
     "build-storybook": "pnpm --filter @groktopus/ui build-storybook",
     "build": "pnpm run preflight:workspace-links && pnpm -r build",
     "build:feature-catalog": "node cli/node_modules/tsx/dist/cli.mjs scripts/generate-feature-catalog.ts",
+    "docs:api:generate": "node --import ./server/node_modules/tsx/dist/loader.mjs scripts/generate-openapi.mjs",
+    "docs:api:check": "node --import ./server/node_modules/tsx/dist/loader.mjs scripts/generate-openapi.mjs --check",
     "typecheck": "pnpm run preflight:workspace-links && pnpm -r typecheck",
     "typecheck:build-gaps": "pnpm run preflight:workspace-links && pnpm --filter @groktopus/plugin-sdk ensure-build-deps && pnpm --filter @groktopus/server build && node scripts/run-typecheck-build-gaps.mjs",
     "test": "pnpm run test:run",

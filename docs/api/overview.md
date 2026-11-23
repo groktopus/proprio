@@ -11,6 +11,15 @@ Default: `http://localhost:3100/api`
 
 All endpoints are prefixed with `/api`.
 
+## Machine-readable API schema
+
+The OpenAPI 3.0 schema is generated from the same route and validation
+registrations used by the server and served at `/api/openapi.json`. The checked-in
+[`openapi.json`](openapi.json) is a generated snapshot for API-reference tooling
+and offline consumers. Regenerate it after changing API route documentation or
+schemas with `pnpm docs:api:generate`; validate it is current with
+`pnpm docs:api:check`.
+
 ## Authentication
 
 All requests require an `Authorization` header:
