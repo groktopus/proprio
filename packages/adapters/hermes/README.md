@@ -17,8 +17,8 @@ type keys did not change during package consolidation.
 
 At local startup, Hermes updates a skill link when it can verify that the link
 points to a previous version of the same bundled package or the same company
-skill in Proprio's version cache. The next startup applies the same check after
-a rollback. If a user file or an unrecognized link occupies the skill name,
+skill in Proprio's version cache. A bundled link can move from a retained package to the cache. Hermes records
+the verified cache link so it can return to the package during rollback. If a user file or an unrecognized link occupies the skill name,
 startup reports the occupied path and preserves it.
 
 Configure the canonical gateway base URL. Creation and Stop reject redirects, so

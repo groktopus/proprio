@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -15,6 +16,7 @@ import {
   readProprioRuntimeSkillEntries,
   resolveLegacyProprioDesiredSkillNames,
 } from "@groktopus/adapter-utils/server-utils";
+import { resolveSkillVersionCachePaths } from "@groktopus/adapter-utils/skill-version-cache-paths";
 import { fileURLToPath } from "node:url";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -220,71 +222,144 @@ async function readBundledSkillPackage(source: string, name: string) {
   if (path.resolve(source) !== path.join(root, "skills", name)) return null;
 
   try {
-    const manifest = parseObject(JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")));
+    const packageRoot = await fs.realpath(root);
+    if (await fs.realpath(source) !== path.join(packageRoot, "skills", name)) return null;
+    const manifestPath = path.join(packageRoot, "package.json");
+    const manifestStat = await fs.lstat(manifestPath);
+    if (!manifestStat.isFile() || manifestStat.size > 128 * 1024) return null;
+    if (!(await fs.lstat(path.join(source, "SKILL.md"))).isFile()) return null;
+
+    const manifest = parseObject(JSON.parse(await fs.readFile(manifestPath, "utf8")));
     const repository = parseObject(manifest.repository);
     if (
       (manifest.name !== "@groktopus/server" && manifest.name !== "@groktopus/hermes-proprio-adapter") ||
       repository.url !== "https://github.com/groktopus/proprio" ||
       typeof manifest.version !== "string" || !manifest.version
     ) return null;
-
-    // A package may itself be reached through a symlink. Its bundled skill
-    // directory and manifest must still reside inside that exact package.
-    const packageRoot = await fs.realpath(root);
-    if (await fs.realpath(source) !== path.join(packageRoot, "skills", name)) return null;
-    if (await fs.realpath(path.join(root, "package.json")) !== path.join(packageRoot, "package.json")) return null;
-    if (!(await fs.lstat(path.join(source, "SKILL.md"))).isFile()) return null;
     return { name: manifest.name, version: manifest.version };
   } catch {
     return null;
   }
 }
 
-const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+async function lstatIfPresent(filename: string) {
+  return fs.lstat(filename).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+}
 
-async function isSameCachedSkill(
-  source: string,
-  previous: string,
-  companyId: string,
-  versionId: string,
-): Promise<boolean> {
+async function readCachedSkillRoot(source: string, companyId: string, versionId: string) {
   const skillRoot = path.dirname(source);
   const skillId = path.basename(skillRoot);
-  const priorVersionId = path.basename(previous);
-  if (![companyId, skillId, versionId, priorVersionId].every(value => uuid.test(value))) return false;
-  if (path.basename(source) !== versionId || path.dirname(previous) !== skillRoot) return false;
-
   const instanceRoot = resolveProprioInstanceRootForAdapter();
-  const relativeRoot = path.join("skills", companyId, "__versions__", skillId);
-  if (skillRoot !== path.join(instanceRoot, relativeRoot)) return false;
   try {
-    const canonicalRoot = path.join(await fs.realpath(instanceRoot), relativeRoot);
-    if (await fs.realpath(skillRoot) !== canonicalRoot) return false;
-    if (await fs.realpath(source) !== path.join(canonicalRoot, versionId)) return false;
-    const oldVersion = await fs.lstat(previous).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null; // The version cache can evict old bytes.
-      throw error;
-    });
-    return oldVersion === null || oldVersion.isDirectory();
+    const { directory } = resolveSkillVersionCachePaths(instanceRoot, companyId, skillId, versionId);
+    if (directory !== source) return null;
+    const canonicalDirectory = path.join(await fs.realpath(instanceRoot), path.relative(instanceRoot, directory));
+    if (await fs.realpath(skillRoot) !== path.dirname(canonicalDirectory)) return null;
+    const stat = await lstatIfPresent(source);
+    if (stat && (!stat.isDirectory() || await fs.realpath(source) !== canonicalDirectory)) return null;
+    return skillRoot;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function bundledCacheReceiptPath(target: string) {
+  const key = createHash("sha256").update(path.basename(target)).digest("hex");
+  return path.join(path.dirname(target), `.proprio-bundled-skill-${key}.json`);
+}
+
+async function readBundledCacheReceipt(target: string) {
+  const filename = bundledCacheReceiptPath(target);
+  const stat = await lstatIfPresent(filename);
+  if (!stat?.isFile() || stat.size > 16 * 1024) return null;
+  try {
+    const receipt = parseObject(JSON.parse(await fs.readFile(filename, "utf8")));
+    return receipt.schema === "proprio.hermes.bundled-skill-link.v1" ? receipt : null;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberBundledCacheLink(target: string, companyId: string, key: string, source: string) {
+  const filename = bundledCacheReceiptPath(target);
+  const receipt = await readBundledCacheReceipt(target);
+  if (receipt?.companyId === companyId && receipt.key === key && receipt.source === source) return;
+  const payload = JSON.stringify({ schema: "proprio.hermes.bundled-skill-link.v1", companyId, key, source });
+  if (!receipt) {
+    await fs.writeFile(filename, payload, { flag: "wx", mode: 0o600 });
+    return;
+  }
+  const staging = await fs.mkdtemp(path.join(path.dirname(target), ".proprio-skill-"));
+  try {
+    const replacement = path.join(staging, "receipt.json");
+    await fs.writeFile(replacement, payload, { mode: 0o600 });
+    await fs.rename(replacement, filename);
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function resolveCheckedPreviousLink(target: string, link: string) {
+  if (link.split(/[\\/]/).includes("..")) return null;
+  const previous = path.resolve(path.dirname(target), link);
+  const expected = await fs.realpath(previous).catch(() => null);
+  const actual = await fs.realpath(target).catch(() => null);
+  return expected === actual ? previous : null;
 }
 
 async function ownsPreviousSkillLink(
   entry: ProprioSkillEntry,
+  target: string,
   companyId: string,
   source: string,
   previous: string,
+  selectedCacheRoot: string | null,
 ): Promise<boolean> {
-  if (entry.versionId) return isSameCachedSkill(source, previous, companyId, entry.versionId);
-  if (entry.key !== `groktopus/proprio/${entry.runtimeName}`) return false;
-  const [oldPackage, newPackage] = await Promise.all([
-    readBundledSkillPackage(previous, entry.runtimeName),
-    readBundledSkillPackage(source, entry.runtimeName),
-  ]);
-  return Boolean(oldPackage && newPackage &&
-    oldPackage.name === newPackage.name && oldPackage.version !== newPackage.version);
+  const bundled = entry.key === `groktopus/proprio/${entry.runtimeName}`;
+  const previousCacheRoot = await readCachedSkillRoot(previous, companyId, path.basename(previous));
+  if (selectedCacheRoot && selectedCacheRoot === previousCacheRoot) return true;
+  if (!bundled) return false;
+  if (selectedCacheRoot) return Boolean(await readBundledSkillPackage(previous, entry.runtimeName));
+
+  const selectedPackage = await readBundledSkillPackage(source, entry.runtimeName);
+  if (!selectedPackage) return false;
+  if (previousCacheRoot) {
+    const receipt = await readBundledCacheReceipt(target);
+    return receipt?.companyId === companyId && receipt.key === entry.key && receipt.source === previous;
+  }
+  const oldPackage = await readBundledSkillPackage(previous, entry.runtimeName);
+  return Boolean(oldPackage && oldPackage.name === selectedPackage.name && oldPackage.version !== selectedPackage.version);
+}
+
+function linkHermesSkill(source: string, target: string) {
+  return fs.symlink(source, target, process.platform === "win32" ? "junction" : "dir");
+}
+
+async function replaceVerifiedSkillLink(source: string, target: string, expectedLink: string, conflict: Error) {
+  const staging = await fs.mkdtemp(path.join(path.dirname(target), ".proprio-skill-"));
+  try {
+    const replacement = path.join(staging, "link");
+    await linkHermesSkill(source, replacement);
+    if (await fs.readlink(target) !== expectedLink) throw conflict;
+    if (process.platform === "win32") {
+      // Windows cannot rename a directory junction over another junction.
+      await fs.unlink(target);
+      try {
+        await fs.rename(replacement, target);
+      } catch (error) {
+        const priorSource = path.resolve(path.dirname(target), expectedLink);
+        await linkHermesSkill(priorSource, target).catch(() => {});
+        throw error;
+      }
+    } else {
+      await fs.rename(replacement, target);
+    }
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
 }
 
 async function reconcileHermesSkillLink(
@@ -292,13 +367,15 @@ async function reconcileHermesSkillLink(
   target: string,
   companyId: string,
 ): Promise<void> {
-  const current = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const current = await lstatIfPresent(target);
   const source = path.resolve(entry.source);
+  const selectedCacheRoot = entry.versionId ? await readCachedSkillRoot(source, companyId, entry.versionId) : null;
+  const rememberCache = () => selectedCacheRoot && entry.key === `groktopus/proprio/${entry.runtimeName}`
+    ? rememberBundledCacheLink(target, companyId, entry.key, source)
+    : undefined;
   if (!current) {
-    await fs.symlink(source, target);
+    await rememberCache();
+    await linkHermesSkill(source, target);
     return;
   }
   const conflict = new Error(
@@ -307,20 +384,16 @@ async function reconcileHermesSkillLink(
   if (!current.isSymbolicLink()) throw conflict;
 
   const link = await fs.readlink(target);
-  const previous = path.resolve(path.dirname(target), link);
-  if (previous === source) return;
-  if (!await ownsPreviousSkillLink(entry, companyId, source, previous)) throw conflict;
-
-  // Prepare the new link on the same filesystem so replacement leaves no gap.
-  const staging = await fs.mkdtemp(path.join(path.dirname(target), ".proprio-skill-"));
-  try {
-    const replacement = path.join(staging, "link");
-    await fs.symlink(source, replacement);
-    if (await fs.readlink(target) !== link) throw conflict;
-    await fs.rename(replacement, target);
-  } finally {
-    await fs.rm(staging, { recursive: true, force: true });
+  const previous = await resolveCheckedPreviousLink(target, link);
+  if (!previous) throw conflict;
+  if (previous === source) {
+    await rememberCache();
+    return;
   }
+  if (!await ownsPreviousSkillLink(entry, target, companyId, source, previous, selectedCacheRoot)) throw conflict;
+
+  await rememberCache();
+  await replaceVerifiedSkillLink(source, target, link, conflict);
 }
 
 export async function reconcileHermesProprioSkills(
