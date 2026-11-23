@@ -14,7 +14,7 @@
     "sandbox-0x": "npm:@cloudflare/sandbox@0.12.14"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261119.1",
+    "@cloudflare/workers-types": "^5.20261120.1",
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1",
