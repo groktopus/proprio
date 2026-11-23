@@ -8,6 +8,7 @@ import {
   nativeClaimReleaseAuthority, nativeFailureSettlementAuthority, renewNativeExecutionLeasesNow,
   renewNativeSessionExecutionLease, startNativeSessionExecutionLeaseRenewal,
 } from "./native-execution-lease.js";
+import { settleNativeFailureTask } from "./native-failure-task-settlement.js";
 import { OPERATOR_ATTESTED_CONTROLLER_HOST } from "./native-controller-host-recovery.js";
 import { NATIVE_OWNERSHIP_UNVERIFIED_ERROR_CODE } from "./native-runner-ownership.js";
 import {
@@ -256,14 +257,17 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
       if (settled.length === 0) return settled;
       await tx.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date() })
         .where(and(eq(heartbeatRuns.id, run.runId), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "running")));
-      const stillOwnsTask = failureTask?.assigneeAgentId === agentId
-        && ["in_progress", "in_review"].includes(failureTask.status)
-        && (!failureTask.executionRunId || failureTask.executionRunId === run.runId)
-        && (!failureTask.checkoutRunId || failureTask.checkoutRunId === run.runId);
-      if (stillOwnsTask) {
-        await tx.update(issues).set({ status: "blocked", executionRunId: null, checkoutRunId: null })
-          .where(and(eq(issues.id, run.issueId), eq(issues.companyId, run.companyId)));
-      }
+      await settleNativeFailureTask(tx, {
+        failureTask,
+        agentId,
+        companyId: run.companyId,
+        issueId: run.issueId,
+        runId: run.runId,
+        phase: "terminal_failure",
+        ownershipUnverified: false,
+        recoveryIssueStatus: "blocked",
+        now: new Date(),
+      });
       return settled;
     });
   }
