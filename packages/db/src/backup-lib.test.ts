@@ -211,7 +211,9 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     }
   }, 30_000);
 
-  it("restores ordinary-table CHECK and exclusion constraints from JavaScript backups", async () => {
+  const nativePgDump = process.env.PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP;
+  const constraintBackupEngines = nativePgDump ? ["fallback", "pg_dump"] : ["fallback"];
+  it.each(constraintBackupEngines)("restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with %s", async (engine) => {
     const source = await createTempDatabase();
     const target = await createSiblingDatabase(source, "constraint_restore_target");
     const sourceSql = postgres(source, { max: 1, onnotice: () => {} });
@@ -222,7 +224,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         SELECT conname AS name, contype::text AS type, convalidated AS validated,
                pg_get_constraintdef(oid) AS definition
         FROM pg_constraint
-        WHERE conrelid = 'booking.reservations'::regclass AND contype IN ('c', 'x')
+        WHERE conrelid = 'booking.reservations'::regclass AND contype IN ('c', 'u', 'x')
         ORDER BY conname
       `;
     });
@@ -240,11 +242,14 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         CREATE FUNCTION booking.explicit_context(value text) RETURNS text
           LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$ SELECT value $$;
         CREATE FUNCTION booking.allowed_state(value text) RETURNS boolean
-          LANGUAGE sql IMMUTABLE AS $$ SELECT normalize_state(value) IN ('active', 'held') $$;
+          LANGUAGE sql IMMUTABLE ${engine === "pg_dump" ? "SET search_path = booking, public" : ""}
+          AS $$ SELECT normalize_state(value) IN ('active', 'held') $$;
         CREATE TABLE booking.reservations (
           id integer PRIMARY KEY,
           state text NOT NULL,
           slot int4range NOT NULL,
+          external_id text,
+          CONSTRAINT reservation_external_unique UNIQUE NULLS NOT DISTINCT (external_id),
           CONSTRAINT reservation_state_check CHECK (booking.allowed_state(state)),
           CONSTRAINT reservation_slot_excl EXCLUDE USING gist (booking.normalize_slot(slot) WITH &&)
         );
@@ -289,18 +294,24 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       stage = "source constraint inspection";
       const original = await readConstraints(sourceSql);
       expect(original.map(({ name, type, validated }) => ({ name, type, validated }))).toEqual([
+        { name: "reservation_external_unique", type: "u", validated: true },
         { name: "reservation_id_check", type: "c", validated: false },
         { name: "reservation_slot_excl", type: "x", validated: true },
         { name: "reservation_state_check", type: "c", validated: true },
       ]);
 
       stage = "backup";
+      vi.stubEnv("PROPRIO_PG_DUMP_PATH", engine === "pg_dump"
+        ? nativePgDump
+        : path.join(createTempDir("unavailable-native-dump-"), "pg_dump"));
       const backup = await runDatabaseBackup({
         connectionString: source,
         backupDir: createTempDir("constraint-backup-"),
-        backupEngine: "javascript",
         retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
       });
+      expect(backup).toMatchObject(engine === "pg_dump"
+        ? { engine: "pg_dump", fallbackReason: null }
+        : { engine: "javascript", fallbackReason: "pg_dump_failed" });
       stage = "restore";
       await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
 
@@ -309,26 +320,34 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       const routineSettings = (sql: typeof sourceSql) => sql`SELECT p.proname, p.proconfig FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'booking' ORDER BY p.proname`;
       expect(await routineSettings(targetSql)).toEqual(await routineSettings(sourceSql));
-      // The current serializer flattens these tables; this slice must not
-      // claim or attempt to reconstruct their topology-dependent constraints.
-      const dump = gunzipSync(fs.readFileSync(backup.backupFile)).toString("utf8");
-      expect(dump).not.toMatch(/(?:inheritance|partition)_(?:parent|child)_guard/);
-      expect(dump).toContain("EXECUTE FUNCTION replay_path_probe()");
+      if (engine === "fallback") {
+        // Partition and inheritance topology require the native dump.
+        const dump = gunzipSync(fs.readFileSync(backup.backupFile)).toString("utf8");
+        expect(dump).not.toMatch(/(?:inheritance|partition)_(?:parent|child)_guard/);
+        expect(dump).toContain("EXECUTE FUNCTION replay_path_probe()");
+      }
       expect(await targetSql`SELECT tgname FROM pg_trigger WHERE tgrelid = 'booking.reservations'::regclass AND NOT tgisinternal`)
         .toEqual([{ tgname: "replay_path_probe" }]);
       expect(await targetSql`SELECT id, state FROM booking.reservations`).toEqual([{ id: 1, state: "active" }]);
-      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'blocked', int4range(10, 15))`)
+      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'held', int4range(15, 20))`)
+        .rejects.toMatchObject({ code: "23505", constraint_name: "reservation_external_unique" });
+      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'blocked', int4range(10, 15), 'specific-2')`)
         .rejects.toMatchObject({ code: "23514", constraint_name: "reservation_state_check" });
-      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'held', int4range(3, 8))`)
+      await expect(targetSql`INSERT INTO booking.reservations VALUES (2, 'held', int4range(3, 8), 'specific-3')`)
         .rejects.toMatchObject({ code: "23P01", constraint_name: "reservation_slot_excl" });
       await expect(targetSql`ALTER TABLE booking.reservations VALIDATE CONSTRAINT reservation_id_check`)
         .rejects.toMatchObject({ code: "23514", constraint_name: "reservation_id_check" });
       await targetSql`UPDATE booking.reservations SET id = 2 WHERE id = 1`;
       await targetSql`ALTER TABLE booking.reservations VALIDATE CONSTRAINT reservation_id_check`;
       expect((await readConstraints(targetSql)).find((c) => c.name === "reservation_id_check")?.validated).toBe(true);
+      // Simulate an upgrade that refers to the preserved nullable business key.
+      await targetSql.unsafe(`CREATE TABLE booking.upgrade_reference (
+        reservation_external_id text REFERENCES booking.reservations (external_id)
+      )`);
     } catch (error) {
       throw new Error(`Constraint round trip failed during ${stage}`, { cause: error });
     } finally {
+      vi.unstubAllEnvs();
       await sourceSql.end();
       await targetSql.end();
     }
