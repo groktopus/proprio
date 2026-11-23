@@ -204,6 +204,7 @@ export interface HeartbeatRuntimeExecutionInput {
     executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getStoredById">;
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "releaseForRun">;
+    recoverPendingSessionGoalActions: (requestId: string) => Promise<unknown>;
   };
   // Teardown must observe these updates immediately, including when execution later throws.
   effects: {
@@ -1183,22 +1184,36 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       ).catch(() => undefined);
     }
     if (issueRef && runGoalControlRequestId) {
-      await failRunnerGoalAction(
+      const binding = {
+        companyId: run.companyId,
+        issueId: issueRef.id,
+        agentId: agent.id,
+        adapterType: agent.adapterType,
+      };
+      const failure = await failRunnerGoalAction(
         db,
-        {
-          companyId: run.companyId,
-          issueId: issueRef.id,
-          agentId: agent.id,
-          adapterType: agent.adapterType,
-        },
+        binding,
         runGoalControlRequestId,
         adapterErr instanceof Error
           ? identityRedactor.redact(adapterErr.message)
           : "session_goal_control_failed",
-      ).catch(() => undefined);
+      ).catch(() => null);
+      if (failure?.pendingAction) {
+        try {
+          await input.services.recoverPendingSessionGoalActions(runGoalControlRequestId);
+        } catch {
+          await failRunnerGoalAction(
+            db,
+            binding,
+            runGoalControlRequestId,
+            "goal_control_reconciliation_wake_failed",
+            "ambiguous_delivery",
+          ).catch(() => undefined);
+        }
+      }
     }
     if (issueRef && runGoalReconciliationRequestId) {
-      await failRunnerGoalAction(
+      const failure = await failRunnerGoalAction(
         db,
         {
           companyId: run.companyId,
@@ -1211,7 +1226,25 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           ? identityRedactor.redact(adapterErr.message)
           : "session_goal_readback_failed",
         "ambiguous_delivery",
-      ).catch(() => undefined);
+      ).catch(() => null);
+      if (failure?.pendingAction) {
+        try {
+          await input.services.recoverPendingSessionGoalActions(runGoalReconciliationRequestId);
+        } catch {
+          await failRunnerGoalAction(
+            db,
+            {
+              companyId: run.companyId,
+              issueId: issueRef.id,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+            },
+            runGoalReconciliationRequestId,
+            "goal_control_reconciliation_wake_failed",
+            "ambiguous_delivery",
+          ).catch(() => undefined);
+        }
+      }
     }
     const nativeResumeScheduled =
       nativeRuntimeResolution.kind === "native"

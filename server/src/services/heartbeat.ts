@@ -3590,6 +3590,7 @@ export function heartbeatService(
               },
               requestId,
               "direct_adapter_goal_controller_unavailable",
+              "confirmed_rejection",
             );
           }
           throw new Error("direct_adapter_goal_controller_unavailable");
@@ -3802,6 +3803,7 @@ export function heartbeatService(
             },
             recordCurrentHeartbeatRunRuntimeProgress,
             dispatchPendingNativeStatusWakeups,
+            recoverPendingSessionGoalActions,
           },
           effects: {
             onUsageCaptureReady: (value) => { persistUsageCaptureFailure = value; },
