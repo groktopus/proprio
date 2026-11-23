@@ -113,10 +113,14 @@ echo "repo=$E2E_REPO base=$BASE_REF next=$NEXT_REPO@$NEXT_REF proprio_home=$PROP
 trap 'record_summary; cleanup' EXIT
 base_commit=""
 next_commit=""
+tracked_ref="$NEXT_REF"
 if [ "$probe" = 0 ]; then
   command -v jq >/dev/null || exit 2
   base_commit="$BASE_REF"
   next_commit="$NEXT_REF"
+  # A bare SHA pins installation. GitHub resolves SHA^0 to the exact same
+  # immutable commit while the CLI follows its tracked-ref update path.
+  tracked_ref="${NEXT_REF}^0"
 fi
 
 if [ -n "${E2E_BOOTSTRAP_CLI:-}" ] && [ -f "$E2E_BOOTSTRAP_CLI" ]; then
@@ -207,14 +211,19 @@ node -e '
   m.ref = process.argv[2];
   m.repo = process.argv[3];
   fs.writeFileSync(p, JSON.stringify(m, null, 2));
-' "$STORE/install.json" "$NEXT_REF" "$NEXT_REPO" && pass "5a tracked ref updated in install.json" || fail_ "5a tracked ref update"
+' "$STORE/install.json" "$tracked_ref" "$NEXT_REPO" && pass "5a tracked ref updated in install.json" || fail_ "5a tracked ref update"
 
-shim update --check --json; CHECK_EXIT=$?
-if [ "$CHECK_EXIT" -eq 10 ]; then
-  pass "5b update --check sees the new commit (exit 10)"
-else
+CHECK_JSON="$(shim update --check --json)"; CHECK_EXIT=$?
+printf '%s\n' "$CHECK_JSON"
+if [ "$CHECK_EXIT" -ne 10 ]; then
   fail_ "5b update --check sees the new commit (got exit $CHECK_EXIT)"
+  exit 1
 fi
+if [ "$probe" = 0 ] && ! jq -e --arg sha "$next_commit" '.targetSha == $sha' <<<"$CHECK_JSON" >/dev/null; then
+  fail_ "5b tracked reference did not resolve to the tested commit"
+  exit 1
+fi
+pass "5b update --check sees the new commit (exit 10)"
 
 note "6. update --yes (backup -> build new payload -> flip -> restart service)"
 if shim update --yes > "$HOME/e2e-upd-update.log" 2>&1; then
