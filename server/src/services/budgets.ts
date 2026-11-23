@@ -8,7 +8,7 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, inArray, sql, or, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, or, isNull, lte } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 
 import {
@@ -692,6 +692,39 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       .orderBy(desc(budgetIncidents.createdAt)));
   }
 
+  async function retireClosedMonthlyIncidents(companyId: string, scopeType: BudgetScopeType, scopeId: string) {
+    const closedWindow = and(
+      eq(budgetIncidents.companyId, companyId),
+      eq(budgetIncidents.scopeType, scopeType),
+      eq(budgetIncidents.scopeId, scopeId),
+      eq(budgetIncidents.windowKind, "calendar_month_utc"),
+      eq(budgetIncidents.status, "open"),
+      lte(budgetIncidents.windowEnd, currentUtcMonthWindow(now).start),
+    );
+    const closedIncidents = await db.select({ approvalId: budgetIncidents.approvalId })
+      .from(budgetIncidents).where(closedWindow);
+    if (closedIncidents.length === 0) return;
+
+    await notifyAttentionRetentionWork(db, { companyId, sourceKind: "budget_alert" });
+    await db.update(budgetIncidents).set({ status: "resolved", resolvedAt: now, updatedAt: now }).where(closedWindow);
+    for (const { approvalId } of closedIncidents) {
+      if (!approvalId) continue;
+      await notifyApprovalWork(db, companyId, { approvalId });
+      await db.update(approvals).set({
+        status: "cancelled",
+        decisionNote: "The budget accounting window closed",
+        decidedByUserId: "budget_service",
+        decidedAt: now,
+        updatedAt: now,
+      }).where(and(
+        eq(approvals.companyId, companyId),
+        eq(approvals.id, approvalId),
+        eq(approvals.type, "budget_override_required"),
+        inArray(approvals.status, ["pending", "revision_requested"]),
+      ));
+    }
+  }
+
   async function reconcileScope(companyId: string, scopeType: BudgetScopeType, scopeId: string,
     prepared?: { scope: ScopeRecord; policies: PolicyRow[]; observations: ObservedSpend[] }) {
     const scope = prepared?.scope ?? await resolveScopeRecord(db, scopeType, scopeId);
@@ -700,6 +733,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, scopeType), eq(budgetPolicies.scopeId, scopeId),
     ));
     const observations = prepared?.observations ?? await computeObservedSpends(db, policies, now);
+    if (policies.some(policy => policy.windowKind === "calendar_month_utc")) {
+      await retireClosedMonthlyIncidents(companyId, scopeType, scopeId);
+    }
     const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent" : "Project";
     for (const [index, policy] of policies.entries()) {
       const observed = observations[index];
@@ -1033,6 +1069,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         .then((rows) => rows[0] ?? null);
       if (!incident) throw notFound("Budget incident not found");
       if (incident.companyId !== companyId) throw notFound("Budget incident not found");
+      if (incident.windowKind === "calendar_month_utc" && incident.windowEnd <= currentUtcMonthWindow(now).start) {
+        throw unprocessable("This budget incident belongs to a closed accounting window");
+      }
 
       const policy = await getPolicyRow(incident.policyId);
       if (policy.companyId !== companyId || policy.scopeType !== incident.scopeType || policy.scopeId !== incident.scopeId) {
