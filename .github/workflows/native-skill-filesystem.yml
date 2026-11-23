@@ -55,7 +55,12 @@ jobs:
         run: |
           scratch="$(mktemp -d /tmp/pfs.XXXXXX)"
           mkdir "$scratch/mount"
-          trap 'if mountpoint -q "$scratch/mount"; then sudo umount "$scratch/mount"; fi' EXIT
+          discovery_mount="$(mktemp -d "$RUNNER_TEMP/proprio-codex.XXXXXX")"
+          cleanup() {
+            if mountpoint -q "$discovery_mount"; then sudo umount "$discovery_mount"; fi
+            if mountpoint -q "$scratch/mount"; then sudo umount "$scratch/mount"; fi
+          }
+          trap cleanup EXIT
           for filesystem in ext4 btrfs; do
             image="$scratch/$filesystem.image"
             truncate -s 256M "$image"
@@ -70,9 +75,14 @@ jobs:
               pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
               src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging'
             if [ "$filesystem" = ext4 ]; then
+              # Codex deliberately denies /tmp within its command sandbox.
+              # Give the real provider a second view of the same ext4 fixture
+              # outside /tmp. Keep the short path for runner control sockets.
+              sudo mount --bind "$scratch/mount" "$discovery_mount"
               sudo unshare --net -- runuser -u "$(id -un)" -- \
-                env TMPDIR="$scratch/mount" PATH="$PATH" PROPRIO_TEST_ISOLATED_NETWORK=1 "$(command -v node)" \
+                env TMPDIR="$discovery_mount" PATH="$PATH" PROPRIO_TEST_ISOLATED_NETWORK=1 "$(command -v node)" \
                 --import ./cli/node_modules/tsx/dist/loader.mjs scripts/ci/codex-shared-skill-discovery.mjs
+              sudo umount "$discovery_mount"
               TMPDIR="$scratch/mount" PROPRIO_TEST_NATIVE_SKILL_EXT4=1 \
                 pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
                 src/live/runnerd-restart-continuation.test.ts -t 'completes after the real runner and provider are killed'
