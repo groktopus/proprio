@@ -4,15 +4,13 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "../test-external-release-contract.mjs";
 import { fileURLToPath } from "node:url";
 
 import { CACHED_PATHS, HASHED_INPUTS, REQUIRED, RUNNER_PACKAGE, computeScope, markCurrent } from "../runner-release-crate-cache.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const script = path.join(repoRoot, "scripts/runner-release-crate-cache.mjs");
-const readWorkflow = (name) => readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
-const prWorkflow = readWorkflow("pr-trusted.yml");
-const releaseWorkflow = readWorkflow("release-verify.yml");
 
 // Slice one job out of a workflow, from its two-space-indented key to the next.
 function job(workflow, name) {
@@ -329,7 +327,8 @@ test("isolated Docker Rust stages preserve the layout of embedded schema and ide
   }
 });
 
-test("every PR reader restores the crate after the dependency cache and marks it before building", () => {
+testExternalReleaseContract("every PR reader restores the crate after the dependency cache and marks it before building", () => {
+  const prWorkflow = readExternalReleaseFile(".github/workflows/pr-trusted.yml");
   for (const [name, buildCommand] of READERS) {
     const body = job(prWorkflow, name);
     const positions = [RUST_RESTORE_STEP, KEY_STEP, RESTORE_STEP, MARK_STEP].map((stepName) => body.indexOf(`      - name: ${stepName}\n`));
@@ -357,7 +356,8 @@ test("every PR reader restores the crate after the dependency cache and marks it
   assert.doesNotMatch(prWorkflow, /actions\/cache\/save@/);
 });
 
-test("the Verify Proprio Runner job restores the crate only in the lanes that build it", () => {
+testExternalReleaseContract("the Verify Proprio Runner job restores the crate only in the lanes that build it", () => {
+  const prWorkflow = readExternalReleaseFile(".github/workflows/pr-trusted.yml");
   const body = job(prWorkflow, "verify_proprio_runner");
   const lanes = JSON.parse(readFileSync(path.join(repoRoot, ".github/ci-task-matrix.json"), "utf8"))
     .verify_proprio_runner.map((entry) => [entry.lane_label, entry.release_crate === true]);
@@ -382,7 +382,8 @@ test("the Verify Proprio Runner job restores the crate only in the lanes that bu
   }
 });
 
-test("only the master Rust lane writes the crate, after a lookup, with the readers' exact path list and key", () => {
+testExternalReleaseContract("only the master Rust lane writes the crate, after a lookup, with the readers' exact path list and key", () => {
+  const releaseWorkflow = readExternalReleaseFile(".github/workflows/release-verify.yml");
   const body = job(releaseWorkflow, "verify_proprio_runner");
   const positions = ["Verify Proprio Runner", "Warm debug dependencies for the shared Runner cache", KEY_STEP, LOOKUP_STEP, BUILD_STEP, SAVE_STEP].map((stepName) => body.indexOf(`      - name: ${stepName}\n`));
   assert.ok(positions.every((position) => position >= 0), "a writer step is missing");

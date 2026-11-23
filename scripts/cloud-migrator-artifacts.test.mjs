@@ -1,4 +1,5 @@
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "./test-external-release-contract.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -8,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { artifactBase, assertManifest, assertLockfile, buildBundle, descriptor, migrationCompatibility, validateBundle, verifyPublished, publishBundle } from "./cloud-migrator-artifacts.mjs";
+import { assertManifest, assertLockfile, buildBundle, descriptor, migrationCompatibility, validateBundle, verifyPublished, publishBundle } from "./cloud-migrator-artifacts.mjs";
 import { previewManifest, versionFor } from "./preview-artifacts.mjs";
 import { classifyMigrationSequence as classify } from "../packages/db/src/migration-compatibility.ts";
 
@@ -56,21 +57,12 @@ function fixture(t) {
     };
     writeFileSync(path.join(options.cwd, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages }));
   } });
-  const files = new Map([[`${artifactBase}/${sha}/manifest.json`, readFileSync(path.join(dir, "manifest.json"))]]);
-  for (const name of ["db", "shared"]) files.set(manifest.packages[name].url, readFileSync(path.join(dir, `${name}.tgz`)));
-  files.set(manifest.lockfile.url, readFileSync(path.join(dir, "package-lock.json")));
-  const fetchImpl = async (url, options) => {
-    assert.equal(options.redirect, "error"); assert.ok(options.signal);
-    assert.ok(files.has(url), `unexpected download: ${url}`);
-    return new Response(files.get(url));
-  };
-  return { dir, manifest, files, fetchImpl };
+  return { dir, manifest };
 }
 
-test("bundle pins the exact source pair and complete lockfile without new npm lookups", async (t) => {
-  const { dir, manifest, fetchImpl } = fixture(t);
+test("bundle pins the exact source pair and complete lockfile without new npm lookups", (t) => {
+  const { dir, manifest } = fixture(t);
   assert.deepEqual(validateBundle(dir, sha), manifest);
-  assert.deepEqual(await verifyPublished(sha, fetchImpl), manifest);
 });
 
 test("manifest publishes how each packed migration behaves under the previous release", (t) => {
@@ -93,8 +85,8 @@ test("manifest publishes how each packed migration behaves under the previous re
   assert.equal(manifest.version, 1);
 });
 
-test("migration compatibility is optional for earlier manifests and fails closed when malformed or stale", async (t) => {
-  const { dir, manifest, files, fetchImpl } = fixture(t);
+test("migration compatibility is optional for earlier manifests and fails closed when malformed or stale", (t) => {
+  const { dir, manifest } = fixture(t);
   const earlier = structuredClone(manifest); delete earlier.migrationCompatibility;
   assert.doesNotThrow(() => assertManifest(earlier, sha));
   for (const mutate of [
@@ -121,8 +113,6 @@ test("migration compatibility is optional for earlier manifests and fails closed
   const stale = structuredClone(manifest);
   stale.migrationCompatibility = migrationCompatibility(dbArchive({ ...migrations, "0001_second": 'DROP TABLE "issues";\n' }), classify);
   assertManifest(stale, sha);
-  files.set(`${artifactBase}/${sha}/manifest.json`, Buffer.from(JSON.stringify(stale)));
-  await assert.rejects(verifyPublished(sha, fetchImpl), /does not match the packed migrations/);
   writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(stale));
   assert.throws(() => validateBundle(dir, sha), /does not match the packed migrations/);
   writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(earlier));
@@ -134,8 +124,8 @@ test("migration compatibility is optional for earlier manifests and fails closed
   assert.doesNotThrow(() => assertManifest(repeated, sha));
 });
 
-test("source identity, content hashes, size, and origin fail closed", async (t) => {
-  const { dir, manifest, files, fetchImpl } = fixture(t);
+test("source identity, content hashes, size, and origin fail closed", (t) => {
+  const { dir, manifest } = fixture(t);
   for (const mutate of [
     (m) => { m.sourceSha = "b".repeat(40); },
     (m) => { m.packages.db.url = "https://evil.invalid/db.tgz"; },
@@ -144,10 +134,8 @@ test("source identity, content hashes, size, and origin fail closed", async (t) 
   ]) {
     const bad = structuredClone(manifest); mutate(bad); assert.throws(() => assertManifest(bad, sha));
   }
-  files.set(manifest.packages.db.url, Buffer.from("corrupt"));
-  await assert.rejects(verifyPublished(sha, fetchImpl), /immutable pin/);
   writeFileSync(path.join(dir, "db.tgz"), "corrupt");
-  await assert.rejects(publishBundle(dir, sha, { exec: () => assert.fail("no upload before pair validation") }));
+  assert.throws(() => validateBundle(dir, sha), /immutable pin/);
 });
 
 test("lockfile rejects mutable, foreign, linked, and mismatched dependencies", (t) => {
@@ -166,25 +154,10 @@ test("lockfile rejects mutable, foreign, linked, and mismatched dependencies", (
   }
 });
 
-test("publisher writes blobs first, marker last, and never overwrites existing objects", async (t) => {
-  const { dir, fetchImpl } = fixture(t);
-  const objects = new Set(); const uploads = [];
-  const exec = (cmd, args) => {
-    assert.equal(cmd, "aws");
-    const arg = (key) => args[args.indexOf(key) + 1];
-    if (args[1] === "list-objects-v2") return JSON.stringify({ Contents: objects.has(arg("--prefix")) ? [{ Key: arg("--prefix") }] : [] });
-    assert.equal(args[1], "put-object"); assert.equal(arg("--if-none-match"), "*");
-    objects.add(arg("--key")); uploads.push(arg("--key")); return "{}";
-  };
-  await publishBundle(dir, sha, { exec, fetchImpl });
-  assert.equal(uploads.length, 4); assert.equal(uploads.at(-1), `cloud-migrators/v1/${sha}/manifest.json`);
-  await publishBundle(dir, sha, { exec, fetchImpl }); assert.equal(uploads.length, 4);
-});
-
-test("download failures and oversized objects never count as available", async (t) => {
-  fixture(t);
-  for (const status of [403, 404, 500]) await assert.rejects(verifyPublished(sha, async () => new Response(null, { status })), /download failed/);
-  await assert.rejects(verifyPublished(sha, async () => new Response(Buffer.alloc(32 * 1024 * 1024 + 1))), /size limit/);
+test("source checkout refuses migrator publication without a configured publisher", async () => {
+  const expected = /no configured cloud migrator artifact publisher/;
+  await assert.rejects(verifyPublished(sha), expected);
+  await assert.rejects(publishBundle("migrator", sha), expected);
 });
 
 test("real npm ci installs the new pair from pinned archives with an empty cache", async (t) => {
@@ -209,13 +182,13 @@ test("real npm ci installs the new pair from pinned archives with an empty cache
   for (const name of ["db", "shared"]) assert.equal(JSON.parse(readFileSync(path.join(dir, `node_modules/@groktopus/${name}/package.json`))).version, manifest.packageVersion);
 });
 
-test("AWS trust is master-only and publication policy cannot overwrite objects", () => {
-  const read = (name) => JSON.parse(readFileSync(new URL(`../.github/cloud-migrator-deploy/${name}.json`, import.meta.url)));
+testExternalReleaseContract("AWS trust is master-only and publication policy cannot overwrite objects", () => {
+  const read = (name) => JSON.parse(readExternalReleaseFile(`.github/cloud-migrator-deploy/${name}.json`));
   assert.equal(read("trust-policy").Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"], "repo:groktopus/proprio:ref:refs/heads/master");
   const policy = read("upload-policy").Statement;
   assert.deepEqual(policy.map((s) => s.Action), ["s3:PutObject", "s3:ListBucket"]);
   assert.equal(policy[0].Condition.StringEquals["s3:if-none-match"], "*");
-  const workflow = readFileSync(new URL("../.github/workflows/cloud-migrator-artifacts.yml", import.meta.url), "utf8");
+  const workflow = readExternalReleaseFile(".github/workflows/cloud-migrator-artifacts.yml");
   assert.ok(!workflow.includes("pull_request") && !workflow.includes("self-hosted") && !workflow.includes("runs-on/fleet="));
   assert.equal((workflow.match(/id-token: write/g) ?? []).length, 1);
   assert.equal((workflow.match(/attestations: write/g) ?? []).length, 1);

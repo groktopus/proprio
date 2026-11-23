@@ -76,8 +76,8 @@ test("guard flags a publishFromCi:true package depending on a publishFromCi:fals
   ]);
 
   assert.equal(problems.length, 1);
-  assert.match(problems[0], /@proprio\/server/);
-  assert.match(problems[0], /@proprio\/skills-catalog/);
+  assert.match(problems[0], /@groktopus\/server/);
+  assert.match(problems[0], /@groktopus\/skills-catalog/);
 });
 
 test("guard inspects optional and peer dependency sections too", () => {

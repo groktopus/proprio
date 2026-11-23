@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { readExternalReleaseFile, testExternalReleaseContract } from '../test-external-release-contract.mjs';
 import { fileURLToPath } from 'node:url';
 import { PUBLIC_INSTALL_ROOTS, publicInstallClosure, publicRegistryDependencies } from '../public-install-closure.mjs';
 
@@ -48,8 +49,8 @@ test('the warm-up refuses to run without the cache the verifier will read', () =
   assert.match(result.stderr, /PROPRIO_PUBLIC_INSTALL_NPM_CACHE/);
 });
 
-test('the Build lane warms the cache before pnpm build and hands the same directory to the verifier', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/pr-trusted.yml', import.meta.url), 'utf8');
+testExternalReleaseContract('the Build lane warms the cache before pnpm build and hands the same directory to the verifier', () => {
+  const workflow = readExternalReleaseFile('.github/workflows/pr-trusted.yml');
   const build = workflow.slice(workflow.indexOf('\n  build:\n'), workflow.indexOf('\n  verify_serialized_server:\n'));
   const position = fragment => { const index = build.indexOf(fragment); assert.notEqual(index, -1, `Build job must contain ${fragment}`); return index; };
   const warm = position('PROPRIO_PUBLIC_INSTALL_NPM_CACHE="$RUNNER_TEMP/public-install-npm-cache" node scripts/warm-public-install-npm-cache.mjs');
@@ -57,6 +58,9 @@ test('the Build lane warms the cache before pnpm build and hands the same direct
   assert.ok(build.includes('set +e\n'), 'a failed warm-up still records its status, so the verifier never waits it out');
   const verify = position('export PROPRIO_PUBLIC_INSTALL_NPM_CACHE="$RUNNER_TEMP/public-install-npm-cache"');
   assert.ok(verify < position('node scripts/verify-grok-npm-install.mjs'));
+});
+
+test('the verifier reuses the public-install cache when configured', () => {
   const verifier = readFileSync(new URL('../verify-grok-npm-install.mjs', import.meta.url), 'utf8');
   assert.ok(verifier.includes("const cache = process.env.PROPRIO_PUBLIC_INSTALL_NPM_CACHE ? resolve(process.env.PROPRIO_PUBLIC_INSTALL_NPM_CACHE) : join(root, 'cache');"));
 });

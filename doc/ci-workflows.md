@@ -76,6 +76,23 @@ three workflows above currently run a full source/test matrix. Changes that add
 or restore broader CI must update this page from the workflow definitions and
 identify the checks actually required on `main`.
 
+## Release registry tests
+
+Run `pnpm test:release-registry` for the package, registry, and release tooling
+owned by this checkout. The suite uses test archives and does not require an
+external workflow checkout. Proprio's source distribution has no configured
+preview or cloud-migrator publisher. The standalone tests cover local packaging
+and validation, plus the error returned by unconfigured distribution commands.
+
+The suite also retains wiring assertions for workflows and deployment policy
+stored outside this repository. To check them, set `PROPRIO_RELEASE_WORKFLOW_ROOT`
+to the root of the owning checkout before running the same command. Without that
+path, the test output lists those assertions as skipped. With a path, missing
+workflow or policy inputs fail the relevant assertion.
+
+Run `pnpm test:scale-ramp` for the separate capacity-test harness. Its hosted
+target fixtures require the deployment's test-host policy.
+
 ## Security configuration status
 
 Workflow YAML and repository security settings are separate controls.
