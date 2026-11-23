@@ -27,7 +27,7 @@ each one).
   Do not stash and forget; do not leave files behind. If commits are missing,
   make them.
 * Commit messages must end with exactly:
-  `Co-Authored-By: Proprio <noreply@paperclip.ing>`
+  `Co-Authored-By: Proprio <noreply@groktop.us>`
 
 ## 2. Get changes cleanly on top of master
 
