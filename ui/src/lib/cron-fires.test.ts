@@ -49,6 +49,16 @@ describe("nextCronFires", () => {
     ]);
   });
 
+  it("matches the persisted scheduler deadline for the reported reference time", () => {
+    const after = new Date("2026-11-16T10:00:00Z");
+    const fires = nextCronFires("0 9 1 * 1", 3, { after, timeZone: "UTC" });
+    expect(fires.map((date) => date.toISOString())).toEqual([
+      "2026-11-23T09:00:00.000Z",
+      "2026-11-30T09:00:00.000Z",
+      "2026-12-01T09:00:00.000Z",
+    ]);
+  });
+
   it("interprets cron fields in the trigger timezone", () => {
     // 14:00 in New York (EDT, UTC-4 in June) is 18:00 UTC.
     const after = new Date("2026-06-09T10:00:00Z");
