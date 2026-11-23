@@ -73,8 +73,16 @@ Worker entry points, runs the bridge tests, and builds the 1.0 Worker and
 container with Wrangler's dry-run mode. CI also starts the Worker through
 `wrangler dev --local` and exercises the authenticated HTTP API against a
 Docker container on the runner. Local results cover the source and process
-behavior. Live scheduling, alarm timing, and Cloudflare service routing
-still require staging.
+behavior, including explicit Stop and command deadlines. Live scheduling,
+alarm timing, and Cloudflare service routing still require staging.
+
+The local Wrangler proxy did not notify the Worker when the test client
+closed its TCP socket. The probe observed a late write from the child
+process. Use the authenticated Stop route for cancellation. To repeat the
+passive-disconnect probe on a machine with Docker, run
+`node ../../../../../scripts/ci/verify-cloudflare-bridge-v1.mjs --probe-passive-disconnect`
+from this directory. The probe exits with a failure if the child writes
+after disconnect. [Ubuntu diagnostic](https://github.com/groktopus/proprio/actions/runs/45114890542/job/137495363862)
 
 Use a staging Worker and container application with unique names. On staging,
 verify an authenticated acquire and resume, separate named and default session

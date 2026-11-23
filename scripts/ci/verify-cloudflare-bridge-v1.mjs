@@ -155,47 +155,50 @@ try {
   assert.equal(stoppedLease.error, "sandbox_state_lost");
   console.log("Local Worker verified auth, acquire, resume, stdin, SSE, session scope, process-group timeout, Stop, release, and lost-state detection.");
 
-  lease = await json("/leases/acquire", { ...requestLease, runId: "disconnect" }, { timeoutMs: 90_000 });
-  const requestBody = JSON.stringify({
-    providerLeaseId: lease.providerLeaseId,
-    command: "sh",
-    args: ["-c", "printf disconnect-ready; (sleep 2; touch /tmp/proprio-after-disconnect) & wait"],
-    streamOutput: true,
-  });
-  const incoming = await new Promise((resolve, reject) => {
-    const outgoing = httpRequest(base + "/exec", {
-      method: "POST",
-      agent: false,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(requestBody),
-      },
-    }, resolve);
-    outgoing.once("error", reject);
-    outgoing.setTimeout(10_000, () => outgoing.destroy(new Error("Timed out before disconnect fixture output")));
-    outgoing.end(requestBody);
-  });
-  assert.equal(incoming.statusCode, 200);
-  const socket = incoming.socket;
-  const disconnected = once(socket, "close");
-  const reader = Readable.toWeb(incoming).getReader();
-  try {
-    await waitForOutput(reader, "disconnect-ready");
-    socket.destroy();
-    await disconnected;
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-  await delay(2300);
-  const noLateWrite = await json("/exec", {
-    providerLeaseId: lease.providerLeaseId, command: "test", args: ["!", "-e", "/tmp/proprio-after-disconnect"],
-  });
-  assert.equal(noLateWrite.exitCode, 0, "a child process wrote after the loopback TCP socket was closed");
-  await json("/leases/release", { providerLeaseId: lease.providerLeaseId });
   lease = undefined;
-  console.log("Local Worker stopped a command after the client closed its TCP socket.");
+  if (process.argv.includes("--probe-passive-disconnect")) {
+    lease = await json("/leases/acquire", { ...requestLease, runId: "disconnect" }, { timeoutMs: 90_000 });
+    const requestBody = JSON.stringify({
+      providerLeaseId: lease.providerLeaseId,
+      command: "sh",
+      args: ["-c", "printf disconnect-ready; (sleep 2; touch /tmp/proprio-after-disconnect) & wait"],
+      streamOutput: true,
+    });
+    const incoming = await new Promise((resolve, reject) => {
+      const outgoing = httpRequest(base + "/exec", {
+        method: "POST",
+        agent: false,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(requestBody),
+        },
+      }, resolve);
+      outgoing.once("error", reject);
+      outgoing.setTimeout(10_000, () => outgoing.destroy(new Error("Timed out before disconnect fixture output")));
+      outgoing.end(requestBody);
+    });
+    assert.equal(incoming.statusCode, 200);
+    const socket = incoming.socket;
+    const disconnected = once(socket, "close");
+    const reader = Readable.toWeb(incoming).getReader();
+    try {
+      await waitForOutput(reader, "disconnect-ready");
+      socket.destroy();
+      await disconnected;
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+    await delay(2300);
+    const noLateWrite = await json("/exec", {
+      providerLeaseId: lease.providerLeaseId, command: "test", args: ["!", "-e", "/tmp/proprio-after-disconnect"],
+    });
+    assert.equal(noLateWrite.exitCode, 0, "a child process wrote after the loopback TCP socket was closed");
+    await json("/leases/release", { providerLeaseId: lease.providerLeaseId });
+    lease = undefined;
+    console.log("Local Worker stopped a command after the client closed its TCP socket.");
+  }
 } catch (error) {
   console.error(log);
   throw error;
