@@ -137,8 +137,7 @@ export function rollbackManagedInstall(paths = resolveInstallStorePaths()): Inst
   const target = manifest.previous[0];
   if (!target) throw new Error("No previous managed payload is available for rollback.");
   if (!fs.existsSync(target.payloadPath)) throw new Error(`Previous payload is missing: ${target.payloadPath}`);
-  const current: InstallRecord = { source: manifest.source, version: manifest.version, channel: manifest.channel, payloadPath: manifest.payloadPath, repo: manifest.repo, ref: manifest.ref, sha: manifest.sha, installedAt: manifest.installedAt };
-  const next: InstallManifest = { schemaVersion: manifest.schemaVersion, ...target, previous: [current, ...manifest.previous.slice(1)].slice(0, 2) };
+  const next = buildNextManifest(target, manifest);
   const oldTarget = fs.readlinkSync(paths.currentPath);
   flipCurrentAtomic(target.payloadPath, paths);
   try { writeInstallManifestAtomic(next, paths); } catch (error) { flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); throw error; }
@@ -152,22 +151,44 @@ async function defaultConfirm(message: string): Promise<boolean> {
 }
 function emit(options: UpdateOptions, value: Record<string, unknown>, message: string): void { if (options.json) console.log(JSON.stringify(value, null, 2)); else console.log(message); }
 
-async function rollbackAfterServiceValidationFailure(
+async function validateManagedActivation(
   paths: InstallStorePaths,
-  restartActiveService: RestartActiveService,
-  validationError: unknown,
-  payloadLabel: string,
-): Promise<never> {
-  const rolledBack = await withInstallStoreLock(async () => rollbackManagedInstall(paths), paths);
+  activation: InstallManifest & { activationId: string },
+  restart: RestartActiveService,
+): Promise<boolean> {
+  const payloadLabel = activation.source === "git" ? "Updated git payload" : "Updated payload";
+  const superseded = () => readInstallManifest(paths)?.activationId !== activation.activationId;
+  let restarted: boolean;
   try {
-    await restartActiveService(rolledBack.version, { startIfInactive: true, ...(rolledBack.sha ? { expectedCommit: rolledBack.sha } : {}) });
-  } catch (restartError) {
-    throw new Error(
-      `${payloadLabel} failed service validation and was rolled back to ${rolledBack.version}, but the rolled-back service also failed to restart.`,
-      { cause: new AggregateError([validationError, restartError]) },
-    );
+    restarted = activation.sha
+      ? await restart(activation.version, { expectedCommit: activation.sha })
+      : await restart(activation.version);
+  } catch (validationError) {
+    return withInstallStoreLock(async () => {
+      if (superseded()) {
+        throw new Error(`${payloadLabel} failed service validation after its activation was superseded.`, {
+          cause: validationError,
+        });
+      }
+      const rolledBack = rollbackManagedInstall(paths);
+      try {
+        await restart(rolledBack.version, {
+          startIfInactive: true,
+          ...(rolledBack.sha ? { expectedCommit: rolledBack.sha } : {}),
+        });
+      } catch (restartError) {
+        throw new Error(
+          `${payloadLabel} failed service validation and was rolled back to ${rolledBack.version}, but the rolled-back service also failed to restart.`,
+          { cause: new AggregateError([validationError, restartError]) },
+        );
+      }
+      throw new Error(`${payloadLabel} failed service validation and was rolled back to ${rolledBack.version}.`, {
+        cause: validationError,
+      });
+    }, paths);
   }
-  throw new Error(`${payloadLabel} failed service validation and was rolled back to ${rolledBack.version}.`, { cause: validationError });
+  if (superseded()) throw new Error(`${payloadLabel} activation was superseded during service validation.`);
+  return restarted;
 }
 
 export async function updateCommand(options: UpdateOptions, overrides: Partial<Dependencies> = {}): Promise<void> {
@@ -205,21 +226,11 @@ export async function updateCommand(options: UpdateOptions, overrides: Partial<D
       const payload = await installGitPayload(manifest.repo!, targetSha, runCommand, paths);
       writeManagedShim(paths);
       const record: InstallRecord = { source: "git", version: payload.version, channel: "pinned", repo: manifest.repo, ref: manifest.ref, sha: targetSha, payloadPath: payload.payloadPath, installedAt: (overrides.now?.() ?? new Date()).toISOString() };
-      const next = buildNextManifest(record, manifest); const oldTarget = fs.readlinkSync(paths.currentPath); flipCurrentAtomic(payload.payloadPath, paths);
+      const next = buildNextManifest(record, readInstallManifest(paths)); const oldTarget = fs.readlinkSync(paths.currentPath); flipCurrentAtomic(payload.payloadPath, paths);
       try { writeInstallManifestAtomic(next, paths); } catch (error) { flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); throw error; }
-      pruneInstallPayloads(next, paths); return payload;
+      pruneInstallPayloads(next, paths); return { ...payload, activation: next };
     }, paths);
-    let restarted: boolean;
-    try {
-      restarted = await (overrides.restartActiveService ?? restartActiveManagedService)(installed.version, { expectedCommit: targetSha });
-    } catch (error) {
-      return rollbackAfterServiceValidationFailure(
-        paths,
-        overrides.restartActiveService ?? restartActiveManagedService,
-        error,
-        "Updated git payload",
-      );
-    }
+    const restarted = await validateManagedActivation(paths, installed.activation, overrides.restartActiveService ?? restartActiveManagedService);
     emit(options, { mode, source: "git", changed: true, currentSha: manifest.sha, targetSha, reused: installed.reused, restarted }, pc.yellow(`Updated unreleased git payload ${manifest.sha.slice(0, 12)} → ${targetSha.slice(0, 12)} from ${manifest.repo}@${manifest.ref}${restarted ? " and restarted the active service" : ""}.`));
     return;
   }
@@ -261,20 +272,10 @@ export async function updateCommand(options: UpdateOptions, overrides: Partial<D
     const payload = await installNpmPayload(targetVersion, runCommand, paths);
     writeManagedShim(paths);
     const record: InstallRecord = { source: "npm", version: targetVersion, channel: request.channel, payloadPath: payload.payloadPath, installedAt: (overrides.now?.() ?? new Date()).toISOString() };
-    const next = buildNextManifest(record, manifest); const oldTarget = fs.readlinkSync(paths.currentPath); flipCurrentAtomic(payload.payloadPath, paths);
+    const next = buildNextManifest(record, readInstallManifest(paths)); const oldTarget = fs.readlinkSync(paths.currentPath); flipCurrentAtomic(payload.payloadPath, paths);
     try { writeInstallManifestAtomic(next, paths); } catch (error) { flipCurrentAtomic(path.resolve(paths.cliRoot, oldTarget), paths); throw error; }
-    pruneInstallPayloads(next, paths); return payload;
+    pruneInstallPayloads(next, paths); return { ...payload, activation: next };
   }, paths);
-  let restarted: boolean;
-  try {
-    restarted = await (overrides.restartActiveService ?? restartActiveManagedService)(targetVersion);
-  } catch (error) {
-    return rollbackAfterServiceValidationFailure(
-      paths,
-      overrides.restartActiveService ?? restartActiveManagedService,
-      error,
-      "Updated payload",
-    );
-  }
+  const restarted = await validateManagedActivation(paths, installed.activation, overrides.restartActiveService ?? restartActiveManagedService);
   emit(options, { mode, currentVersion, targetVersion, changed: true, reused: installed.reused, restarted }, pc.green(`Updated proprio ${currentVersion} → ${targetVersion}${restarted ? " and restarted the active service" : ""}. Run \`proprio update --rollback\` for an instant payload rollback.`));
 }

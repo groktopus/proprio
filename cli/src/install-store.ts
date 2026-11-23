@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveProprioHomeDir } from "./config/home.js";
@@ -24,6 +25,7 @@ export type InstallRecord = {
 
 export type InstallManifest = InstallRecord & {
   schemaVersion: typeof INSTALL_MANIFEST_VERSION;
+  activationId?: string;
   previous: InstallRecord[];
 };
 
@@ -317,7 +319,7 @@ export function flipCurrentAtomic(
 export function buildNextManifest(
   record: InstallRecord,
   current: InstallManifest | null,
-): InstallManifest {
+): InstallManifest & { activationId: string } {
   const candidates: InstallRecord[] = current
     ? [
         {
@@ -342,7 +344,7 @@ export function buildNextManifest(
     )
     .slice(0, 2);
 
-  return { schemaVersion: INSTALL_MANIFEST_VERSION, ...record, previous };
+  return { schemaVersion: INSTALL_MANIFEST_VERSION, ...record, activationId: randomUUID(), previous };
 }
 
 export function pruneInstallPayloads(

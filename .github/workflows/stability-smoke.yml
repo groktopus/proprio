@@ -104,7 +104,7 @@ jobs:
       - name: Check managed restart and same-version updates
         run: |
           pnpm exec vitest run cli/src/__tests__/managed-service-restart.test.ts cli/src/__tests__/service-health-check.test.ts server/src/__tests__/managed-restart-health.test.ts
-          pnpm exec vitest run cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update'
+          pnpm exec vitest run cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update|preserves a newer managed Git activation'
       - name: Check database backup CLI output
         run: pnpm exec vitest run cli/src/__tests__/db-backup.test.ts
       - name: Check cost summaries and database backups
