@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   assets,
@@ -24,8 +24,14 @@ import { companyPortabilityService } from "../services/company-portability.js";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
 import type { ImportIssueWorkProductRow } from "../services/import-write-types.js";
-import type { CompanyPortabilityFileEntry } from "@groktopus/shared";
+import type { CompanyPortabilityFileEntry, CompanyPortabilityImport } from "@groktopus/shared";
 import { randomUUID } from "node:crypto";
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createLocalDiskStorageProvider } from "../storage/local-disk-provider.js";
+import { createStorageService } from "../storage/service.js";
 
 // This suite proves the company-import writers batch their inserts: it runs a
 // real import against embedded Postgres and counts the SQL insert statements
@@ -231,6 +237,7 @@ describeEmbeddedPostgres("company import batches inserts", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let db!: ReturnType<typeof createDb>;
   let counts!: InsertCounts;
+  let storageDirectory: string | undefined;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("proprio-import-batching-");
@@ -240,10 +247,69 @@ describeEmbeddedPostgres("company import batches inserts", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+    if (storageDirectory) await rm(storageDirectory, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     counts.reset();
+  });
+
+  it("rolls back a failed new-company import and retries without duplicating tasks", async () => {
+    const existingCompany = (await db.insert(companies).values({
+      name: "Existing import data", issuePrefix: "ATO",
+    }).returning())[0]!;
+    const existingTask = (await db.insert(issues).values({
+      companyId: existingCompany.id, title: "Task from an earlier import",
+    }).returning())[0]!;
+    const name = "Atomic import retry";
+    const bundle = buildSyntheticBundle({ issueCount: 1, commentsPerIssue: 0, documentsPerIssue: 1 });
+    bundle.files[".proprio.yaml"] += 'company:\n  logoPath: "images/company-logo.png"\n';
+    bundle.files["images/company-logo.png"] = {
+      encoding: "base64", data: Buffer.from("synthetic logo").toString("base64"), contentType: "image/png",
+    };
+    storageDirectory = await mkdtemp(path.join(tmpdir(), "import-atomic-assets-"));
+    const storage = createStorageService(createLocalDiskStorageProvider(storageDirectory));
+    const existingObject = await storage.putFile({
+      companyId: existingCompany.id, namespace: "assets/general", originalFilename: "earlier.png",
+      contentType: "image/png", body: Buffer.from("earlier"),
+    });
+    const put = vi.spyOn(storage, "putFile");
+    const input: CompanyPortabilityImport = {
+      source: { type: "inline", rootPath: bundle.rootPath, files: bundle.files },
+      include: { company: true, agents: false, projects: false, issues: true },
+      target: { mode: "new_company", newCompanyName: name },
+      collisionStrategy: "rename",
+    };
+    const service = companyPortabilityService(db, storage);
+    const targets = () => db.select().from(companies).where(eq(companies.name, name));
+    await db.execute(sql`
+      create function test_reject_import_document() returns trigger language plpgsql as $$
+      begin raise exception 'fixture rejects import document'; end;
+      $$
+    `);
+    try {
+      await db.execute(sql`
+        create trigger test_reject_import_document before insert on issue_documents
+        for each row execute function test_reject_import_document()
+      `);
+      await expect(service.importBundle(input, "board-import-owner")).rejects.toThrow();
+    } finally {
+      await db.execute(sql`drop trigger if exists test_reject_import_document on issue_documents`);
+      await db.execute(sql`drop function test_reject_import_document()`);
+    }
+
+    expect(await targets()).toEqual([]);
+    expect(put).toHaveBeenCalledOnce();
+    const failedLogo = await put.mock.results[0]!.value;
+    await expect(storage.headObject(put.mock.calls[0]![0].companyId, failedLogo.objectKey)).resolves.toEqual({ exists: false });
+    await expect(storage.headObject(existingCompany.id, existingObject.objectKey)).resolves.toMatchObject({ contentLength: 7 });
+    const retry = await service.importBundle(input, "board-import-owner");
+    expect(await targets()).toMatchObject([{ id: retry.company.id }]);
+    const importedTasks = await db.select().from(issues).where(eq(issues.companyId, retry.company.id));
+    expect(importedTasks).toMatchObject([{ title: "Task 1" }]);
+    expect(await db.select().from(issueDocuments).where(eq(issueDocuments.issueId, importedTasks[0]!.id)))
+      .toMatchObject([{ key: "spec" }]);
+    expect(await db.select().from(issues).where(eq(issues.id, existingTask.id))).toEqual([existingTask]);
   });
 
   it("imports many issues with a bounded number of issue-insert statements", async () => {
