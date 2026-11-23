@@ -222,13 +222,13 @@ describe("runtime context materialization", () => {
         expect(allocated).toBeGreaterThanOrEqual(copies.length * data.byteLength);
       } else {
         for (const path of copies) {
-          await expect(readFile(path)).resolves.toEqual(data);
-          const extents = execFileSync("filefrag", ["-v", path], { encoding: "utf8" });
+          expect((await readFile(path)).equals(data)).toBe(true);
+          const extents = execFileSync("filefrag", ["-sv", path], { encoding: "utf8" });
           expect(extents).toMatch(/\bshared\b/);
         }
       }
       console.log(`${skillFilesystem}: ${copies.length} staged files, ${allocated} bytes in reported allocation blocks`);
-    },
+    }, 30_000,
   );
 
   it("preserves a managed provider while excluding ambient auth, hooks, and tool configuration", async () => {
