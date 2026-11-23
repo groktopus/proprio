@@ -1,3 +1,5 @@
+import { browserStorage } from "./browser-storage";
+
 export const TASK_COLLECTION_PREFERENCES_CHANGED = "proprio:task-collection-preferences-changed";
 
 export const TASK_COLLECTION_PREFERENCES_VERSION = 1 as const;
@@ -27,11 +29,6 @@ export interface LoadTaskCollectionPreferenceOptions<TViewState, TColumn extends
   defaultColumns: TColumn[];
   normalizeViewState: (value: unknown) => TViewState;
   normalizeColumns: (value: unknown) => TColumn[];
-}
-
-function browserStorage(): StorageLike | null {
-  if (typeof localStorage === "undefined") return null;
-  return localStorage;
 }
 
 function parseStoredJson(storage: StorageLike, key: string | undefined): unknown {

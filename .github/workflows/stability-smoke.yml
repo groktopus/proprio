@@ -161,6 +161,8 @@ jobs:
             ],
           });
           JS
+      - name: Check Inbox and shared polling with denied browser storage
+        run: pnpm exec vitest run --maxWorkers 1 ui/src/lib/task-collection-preferences.test.ts ui/src/lib/cross-tab-poll.test.ts ui/src/hooks/useSharedPolling.test.ts ui/src/hooks/useSharedPollingSnapshot.test.tsx ui/src/pages/Inbox.test.tsx
       - name: Check late live settlement metadata
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
       - name: Typecheck server and build affected packages
