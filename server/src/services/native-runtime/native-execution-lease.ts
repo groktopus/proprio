@@ -126,14 +126,18 @@ export async function lockNativeExecutionLeaseForReacquire(tx: Pick<Db, "execute
   return false;
 }
 
-type NativeSettlementAuthorityInput = {
+type NativeExecutionOwner = {
   runId: string; companyId: string; issueId: string; leaseOwner: string; attempt: number;
-  controller: NativeControllerIdentity; controllerGeneration: number; remote: boolean;
+  controller: NativeControllerIdentity;
+};
+
+type NativeSettlementAuthorityInput = NativeExecutionOwner & {
+  controllerGeneration: number; remote: boolean;
 };
 
 type NativeSettlementTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
-function nativeSettlementOwnerCondition(input: NativeSettlementAuthorityInput): SQL {
+function nativeExecutionOwnerCondition(input: NativeExecutionOwner): SQL {
   return and(
     eq(nativeRunFinalizations.runId, input.runId),
     eq(nativeRunFinalizations.companyId, input.companyId),
@@ -156,7 +160,7 @@ export async function nativeFailureSettlementAuthority(
 ): Promise<SQL> {
   await lockNativeExecutionLeaseForReacquire(tx, { ...input, preResultOnly: true });
   return and(
-    nativeSettlementOwnerCondition(input),
+    nativeExecutionOwnerCondition(input),
     eq(nativeRunFinalizations.controllerGeneration, input.controllerGeneration),
     isNull(nativeRunFinalizations.resultId),
     nativeExecutionLeaseHeldCondition({ remote: input.remote, controllerGeneration: input.controllerGeneration }),
@@ -173,7 +177,7 @@ export async function nativeClaimReleaseAuthority(
 ): Promise<SQL> {
   await lockNativeExecutionLeaseForReacquire(tx, input);
   return and(
-    nativeSettlementOwnerCondition(input),
+    nativeExecutionOwnerCondition(input),
     nativeExecutionLeaseHeldCondition({ remote: input.remote, controllerGeneration: input.controllerGeneration, relinquishAccepted: true }),
   )!;
 }
@@ -378,17 +382,7 @@ async function renewNativeSessionExecutionLeaseDeadline(
       })
       .where(
         and(
-          eq(nativeRunFinalizations.runId, input.runId),
-          eq(nativeRunFinalizations.companyId, input.companyId),
-          eq(nativeRunFinalizations.issueId, input.issueId),
-          eq(nativeRunFinalizations.leaseOwner, input.leaseOwner),
-          eq(nativeRunFinalizations.attempt, input.attempt),
-          eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-          eq(nativeRunFinalizations.controllerPid, controller.pid),
-          eq(
-            nativeRunFinalizations.controllerProcessStartedAt,
-            controller.processStartedAt,
-          ),
+          nativeExecutionOwnerCondition({ ...input, controller }),
           nativeExecutionLeaseHeldCondition({ remote: !input.reacquire,
             controllerGeneration: input.reacquire?.controllerGeneration }),
         ),
