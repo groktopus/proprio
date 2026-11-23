@@ -10,6 +10,7 @@ export const ISSUE_CONTINUATION_SUMMARY_TITLE = "Continuation Summary";
 export const ISSUE_CONTINUATION_SUMMARY_MAX_BODY_CHARS = 8_000;
 const SUMMARY_SECTION_MAX_CHARS = 1_200;
 const PATH_CANDIDATE_RE = /(?:^|[\s`"'(])((?:server|ui|packages|doc|scripts|\.github)\/[A-Za-z0-9._/-]+)/g;
+const GENERATED_REVIEW_WAIT = "Wait for reviewer feedback or approval before continuing executor work.";
 const WAITING_FOR_REVIEW_OR_APPROVAL_RE =
   /\bwait(?:ing)? for\b.{0,160}\b(?:review(?:er)?(?: feedback)?|approval|board|human|user|operator)\b/i;
 
@@ -102,12 +103,13 @@ function inferMode(issue: IssueSummaryInput, run: RunSummaryInput) {
 
 function inferNextAction(issue: IssueSummaryInput, run: RunSummaryInput, previousNextAction: string | null) {
   if (issue.status === "done") return "Review the completed issue output and close any remaining follow-up comments.";
-  if (issue.status === "in_review") return "Wait for reviewer feedback or approval before continuing executor work.";
+  if (issue.status === "in_review") return GENERATED_REVIEW_WAIT;
   if (run.status === "failed" || run.status === "timed_out") {
     return "Inspect the failed run, fix the cause, and resume from the most recent concrete action above.";
   }
   if (run.status === "cancelled") return "Confirm the cancellation reason before starting another run.";
-  return previousNextAction ?? "Resume implementation from the acceptance criteria, latest comments, and this summary.";
+  return (previousNextAction === GENERATED_REVIEW_WAIT ? null : previousNextAction)
+    ?? "Resume implementation from the acceptance criteria, latest comments, and this summary.";
 }
 
 function bulletList(items: string[], empty: string) {
@@ -128,9 +130,15 @@ export function extractContinuationSummaryNextAction(body: string | null | undef
   return extractPreviousNextAction(body);
 }
 
-export function continuationSummaryParksExecutor(body: string | null | undefined) {
+export function continuationSummaryParksExecutor(body: string | null | undefined, currentIssueStatus?: string) {
   const nextAction = extractContinuationSummaryNextAction(body);
   if (!nextAction) return false;
+  const header = body?.split(/^## /m, 1)[0];
+  const snapshotStatus = header?.match(/^- Status: ([a-z_]+)\s*$/m)?.[1];
+  if (currentIssueStatus && snapshotStatus
+    && (snapshotStatus !== currentIssueStatus || (currentIssueStatus === "in_progress" && nextAction === GENERATED_REVIEW_WAIT))) {
+    return false;
+  }
   return WAITING_FOR_REVIEW_OR_APPROVAL_RE.test(nextAction);
 }
 

@@ -657,23 +657,23 @@ export function createPostgresRunDispatchAdapter(
 
     const continuationParkApplies = Boolean(
       issue &&
-        issue.status === "in_progress" &&
-        !wakeCommentId &&
-        !hasResolvedInteractionEvidence &&
-        (wakeReason === "issue_continuation_needed" || retryReason === "issue_continuation_needed"),
+      (issue.status === "in_progress" || issue.status === "in_review") &&
+      !wakeCommentId &&
+      !hasResolvedInteractionEvidence &&
+      (wakeReason === "issue_continuation_needed" || retryReason === "issue_continuation_needed"),
     );
     let continuationSummaryBody: string | null = null;
     let continuationParksExecutor = false;
-    if (continuationParkApplies) {
-      const queuedWake = parseObject(context.proprioWake);
-      const queuedContinuationSummary =
-        readNonEmptyString(parseObject(context.proprioContinuationSummary).body) ??
-        readNonEmptyString(parseObject(queuedWake.continuationSummary).body);
-      const currentContinuationSummary = queuedContinuationSummary
-        ? null
-        : await getIssueContinuationSummaryDocument(dbOrTx, issueId);
-      continuationSummaryBody = queuedContinuationSummary ?? currentContinuationSummary?.body ?? null;
-      continuationParksExecutor = continuationSummaryParksExecutor(continuationSummaryBody);
+    if (issue && continuationParkApplies) {
+      const executionState = parseIssueExecutionState(issue.executionState);
+      continuationParksExecutor = issue.status === "in_review"
+        || executionState?.status === "pending"
+        || Boolean(executionState?.reviewRequest);
+      if (!continuationParksExecutor) {
+        const summary = await getIssueContinuationSummaryDocument(dbOrTx, issueId);
+        continuationSummaryBody = summary?.body ?? null;
+        continuationParksExecutor = continuationSummaryParksExecutor(continuationSummaryBody, issue.status);
+      }
     }
 
     const recoveryActionId = readNonEmptyString(context.recoveryActionId);
@@ -717,7 +717,8 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
-      pendingResponse: issue && (input.conversationContinuation || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")
+      pendingResponse: issue && (continuationParkApplies || input.conversationContinuation
+        || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")
         ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
         : null,
       issueFound: issue !== null,

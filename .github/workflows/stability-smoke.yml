@@ -283,6 +283,23 @@ jobs:
             ],
           });
           JS
+      - name: Check automatic continuation against current review state
+        run: |
+          report="$RUNNER_TEMP/current-review-results.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts server/src/__tests__/issue-continuation-summary.test.ts \
+            -t 'checks the current .* gate|drops the generated review wait'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts': ['resolved', 'review', 'approval', 'response']
+              .map(gate => `checks the current ${gate} gate before dispatching an automatic continuation`),
+            'server/src/__tests__/issue-continuation-summary.test.ts': [
+              'drops the generated review wait when execution returns to in progress',
+            ],
+          });
+          JS
       - name: Check native settlement callback consumers
         run: |
           node --test scripts/ci/assert-required-vitest-tests.test.mjs

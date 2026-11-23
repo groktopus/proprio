@@ -133,6 +133,18 @@ describe("issue continuation summaries", () => {
     expect(body).not.toContain(providerText);
   });
 
+  it("drops the generated review wait when execution returns to in progress", () => {
+    const issue = { id: "issue-1", identifier: null, title: "Complete delivery", description: null, status: "in_review", priority: "medium" };
+    const run = { id: "run-1", status: "succeeded", error: null };
+    const agent = { id: "agent-1", name: "Executor", adapterType: null };
+    const previousSummaryBody = buildContinuationSummaryMarkdown({ issue, run, agent });
+    expect(continuationSummaryParksExecutor(previousSummaryBody)).toBe(true);
+    const reopened = buildContinuationSummaryMarkdown({
+      issue: { ...issue, status: "in_progress" }, run, agent, previousSummaryBody,
+    });
+    expect(continuationSummaryParksExecutor(reopened)).toBe(false);
+  });
+
   it("does not park executor work when the next action is still runnable", () => {
     const body = [
       "# Continuation Summary",

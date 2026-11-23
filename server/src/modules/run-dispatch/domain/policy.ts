@@ -571,7 +571,7 @@ export function decideQueuedRunStaleness(
       stale: true,
       errorCode: "issue_continuation_waiting_on_review",
       reason:
-        "Cancelled because the continuation summary says the executor should wait for reviewer feedback or approval before more work starts",
+        "Cancelled because the task is waiting for reviewer feedback or approval before more work starts",
       details: {
         issueId: facts.issueId,
         wakeReason: facts.wakeReason,
