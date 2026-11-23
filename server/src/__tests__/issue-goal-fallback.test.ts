@@ -3,6 +3,7 @@ import {
   resolveIssueGoalBinding,
   resolveIssueGoalId,
   resolveNextIssueGoalId,
+  effectiveIssueGoalOrigin,
 } from "../services/issue-goal-fallback.ts";
 
 describe("issue goal fallback", () => {
@@ -36,6 +37,29 @@ describe("issue goal fallback", () => {
         defaultGoalId: "goal-1",
       }),
     ).toBe("goal-2");
+  });
+
+  it("resolves copied inherited goals against the destination project", () => {
+    expect(resolveIssueGoalBinding({
+      projectId: "project-b",
+      goalId: "goal-a",
+      goalOrigin: "inherited",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+    })).toEqual({ goalId: "goal-b", goalOrigin: "inherited" });
+  });
+
+  it("invalidates provenance when an older writer changes the goal ID", () => {
+    expect(effectiveIssueGoalOrigin({
+      goalId: "new-goal",
+      goalOrigin: "explicit",
+      goalOriginGoalId: "old-goal",
+    })).toBe("unknown");
+    expect(effectiveIssueGoalOrigin({
+      goalId: "same-goal",
+      goalOrigin: "explicit",
+      goalOriginGoalId: "same-goal",
+    })).toBe("explicit");
   });
 
   it("does not force a company goal when the project has no goal", () => {

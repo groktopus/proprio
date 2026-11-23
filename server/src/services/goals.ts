@@ -16,6 +16,17 @@ const deletionMessages = {
   record: "Other records still reference this goal. Remove those links or archive the goal.",
 };
 
+export async function getGoalIdInCompany(
+  db: GoalReader,
+  companyId: string,
+  goalId: string | null | undefined,
+): Promise<string | null> {
+  if (!goalId) return null;
+  const [goal] = await db.select({ id: goals.id }).from(goals)
+    .where(and(eq(goals.id, goalId), eq(goals.companyId, companyId))).limit(1);
+  return goal?.id ?? null;
+}
+
 function goalInUse(relationship: keyof typeof deletionMessages) {
   return conflict(deletionMessages[relationship], { code: "goal_in_use", relationship });
 }

@@ -417,6 +417,51 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
     expect(afterInherited).toMatchObject({ projectId: projectB!.id, goalId: goalB!.id, goalOrigin: "inherited", title: "Concurrent inherited after wait" });
   });
 
+  it("rejects a foreign explicit goal before stopping the issue's live run", async () => {
+    const companyId = await seedCompany();
+    const otherCompanyId = await seedCompany();
+    const app = createApp();
+    const [foreignGoal] = await db.insert(goals).values({
+      companyId: otherCompanyId,
+      title: "Foreign live-run goal",
+      level: "company",
+      status: "active",
+    }).returning();
+    const created = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Live-run task", allowDuplicate: true })
+      .expect(201);
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Live-run owner",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running" });
+    await db.update(issues).set({
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      executionRunId: runId,
+      checkoutRunId: runId,
+    }).where(eq(issues.id, created.body.id));
+
+    await request(app).patch(`/api/issues/${created.body.id}`)
+      .send({ status: "done", projectId: null, goalId: foreignGoal!.id })
+      .expect(404);
+
+    const [taskAfter] = await db.select().from(issues).where(eq(issues.id, created.body.id));
+    const [runAfter] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(taskAfter).toMatchObject({ status: "in_progress", executionRunId: runId });
+    expect(runAfter?.status).toBe("running");
+  });
+
   it("keeps legacy rows with unknown origin on the prior fallback heuristic", async () => {
     const companyId = await seedCompany();
     const app = createApp();
@@ -437,6 +482,43 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
       .send({ projectId: projectB!.id }).expect(200);
     const [moved] = await db.select().from(issues).where(eq(issues.id, legacy!.id));
     expect(moved).toMatchObject({ goalId: goalB!.id, goalOrigin: "unknown" });
+  });
+
+  it("invalidates provenance when a mixed-version writer changes goalId", async () => {
+    const companyId = await seedCompany();
+    const app = createApp();
+    const [goalA, goalB] = await db.insert(goals).values([
+      { companyId, title: "Mixed-version A", level: "company", status: "active" },
+      { companyId, title: "Mixed-version B", level: "company", status: "active" },
+    ]).returning();
+    const [projectA, projectB] = await db.insert(projects).values([
+      { companyId, name: "Mixed-version Project A", goalId: goalA!.id },
+      { companyId, name: "Mixed-version Project B", goalId: goalB!.id },
+    ]).returning();
+    const created = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Mixed-version task", projectId: projectA!.id, goalId: goalA!.id, allowDuplicate: true })
+      .expect(201);
+
+    // Simulate an older server that only knows about goal_id. Its write leaves
+    // the marker associated with A behind while changing the live choice to B.
+    await db.update(issues).set({ goalId: goalB!.id })
+      .where(eq(issues.id, created.body.id));
+    await request(app).get(`/api/issues/${created.body.id}`).expect(200)
+      .then((response) => {
+        expect(response.body.goalOrigin).toBe("unknown");
+        expect(response.body).not.toHaveProperty("goalOriginGoalId");
+      });
+
+    await request(app).patch(`/api/issues/${created.body.id}`)
+      .send({ projectId: projectB!.id }).expect(200);
+    const [moved] = await db.select().from(issues).where(eq(issues.id, created.body.id));
+    expect(moved).toMatchObject({
+      projectId: projectB!.id,
+      goalId: goalB!.id,
+      goalOrigin: "unknown",
+      goalOriginGoalId: goalB!.id,
+    });
   });
 
   it("stores the request run header on manual creates", async () => {

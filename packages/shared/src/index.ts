@@ -1190,6 +1190,7 @@ export type {
   IssueInboxArchiveFilter,
   IssueSummary,
   Issue,
+  IssueGoalOrigin,
   IssueVisibility,
   IssuePrivacyConstraints,
   IssueAccessGrant,

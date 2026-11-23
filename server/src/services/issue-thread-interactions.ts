@@ -40,6 +40,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
+import type { IssueGoalOrigin } from "@groktopus/shared";
 import {
   agents,
   assets,
@@ -2496,7 +2497,7 @@ export function issueThreadInteractionService(
   async function mergedPullRequestConfirmationPage(scope?: MergeConfirmationScope, after?: string) {
     const rows = await db.select({ interaction: issueThreadInteractions, issue: {
       id: issues.id, companyId: issues.companyId, projectId: issues.projectId, goalId: issues.goalId,
-      goalOrigin: issues.goalOrigin, status: issues.status, assigneeAgentId: issues.assigneeAgentId,
+      status: issues.status, assigneeAgentId: issues.assigneeAgentId,
     } }).from(issueThreadInteractions).innerJoin(issues, and(
       eq(issueThreadInteractions.issueId, issues.id), eq(issueThreadInteractions.companyId, issues.companyId),
     )).where(and(
@@ -5489,7 +5490,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
-        goalOrigin?: "explicit" | "inherited" | "unknown";
+        goalOrigin?: IssueGoalOrigin;
         status?: string;
       },
       interactionId: string,
@@ -5566,7 +5567,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
-        goalOrigin?: "explicit" | "inherited" | "unknown";
+        goalOrigin?: IssueGoalOrigin;
         status?: string;
       },
       interactionId: string,

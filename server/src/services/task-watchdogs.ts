@@ -25,6 +25,7 @@ import { parseObject } from "../adapters/utils.js";
 import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
+import { effectiveIssueGoalOrigin } from "./issue-goal-fallback.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
 
@@ -1513,11 +1514,14 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
   async function evaluateWatchdog(row: IssueWatchdogRow, opts: { runId?: string | null; onDeferredDeadline?: (at: number) => void } = {}) {
     const watchdog = await markTerminalWatchdogIssueReviewed(row, opts);
-    const sourceIssue = await db
+    const sourceRow = await db
       .select()
       .from(issues)
       .where(and(eq(issues.companyId, watchdog.companyId), eq(issues.id, watchdog.issueId), visibleIssueCondition()))
       .then((rows) => rows[0] ?? null);
+    const sourceIssue = sourceRow
+      ? { ...sourceRow, goalOrigin: effectiveIssueGoalOrigin(sourceRow) }
+      : null;
     if (!sourceIssue || sourceIssue.originKind === TASK_WATCHDOG_ORIGIN_KIND) {
       return { state: "skipped" as const, reason: "watched_issue_not_applicable" };
     }

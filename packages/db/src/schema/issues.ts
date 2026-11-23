@@ -21,7 +21,7 @@ import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projectWorkspaces } from "./project_workspaces.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
-import type { IssueReviewPolicy, IssueUnblockDescriptor, SourceTrustMetadata, TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "@groktopus/shared";
+import type { IssueGoalOrigin, IssueReviewPolicy, IssueUnblockDescriptor, SourceTrustMetadata, TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "@groktopus/shared";
 
 export const issues = pgTable(
   "issues",
@@ -39,7 +39,11 @@ export const issues = pgTable(
     goalId: uuid("goal_id").references(() => goals.id),
     // `unknown` identifies pre-migration rows and raw writers that do not know
     // whether the resolved goal came from a caller or a project/company default.
-    goalOrigin: text("goal_origin").$type<"explicit" | "inherited" | "unknown">().notNull().default("unknown"),
+    goalOrigin: text("goal_origin").$type<IssueGoalOrigin>().notNull().default("unknown"),
+    // Snapshot of the goal ID to which goalOrigin applies. Older app versions
+    // can update goal_id without knowing about provenance; a mismatch makes
+    // the provenance unknown rather than applying stale intent to the new ID.
+    goalOriginGoalId: uuid("goal_origin_goal_id"),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
     visibility: text("visibility").notNull().default("open"),
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),

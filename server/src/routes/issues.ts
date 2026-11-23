@@ -219,6 +219,7 @@ import {
   executionWorkspaceService,
   enrichWorkProductMetadataWithDiff,
   goalService,
+  getGoalIdInCompany,
   heartbeatService,
   issueApprovalService,
   issueRecoveryActionService,
@@ -14727,6 +14728,15 @@ export function issueRoutes(
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
         ...updateFields
       } = req.body;
+      // Reject a foreign explicit goal before this route can stop a live run
+      // or apply other execution-control side effects. The service validates
+      // again under its owning write transaction.
+      if (typeof updateFields.goalId === "string") {
+        if (!await getGoalIdInCompany(db, existing.companyId, updateFields.goalId)) {
+          res.status(404).json({ error: "Goal not found" });
+          return;
+        }
+      }
       if (commentBody && req.actor.type === "agent") {
         await assertAgentInteraction(db, { companyId: existing.companyId, actorAgentId: req.actor.agentId,
           operation: "comment", issueId: existing.id, texts: [commentBody] });

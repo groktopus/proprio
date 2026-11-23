@@ -8,6 +8,7 @@ import { nativeSha256 } from "../../native-runtime/canonical.js";
 import { PhotonAnswerValidationError, nativePhotonInteraction, photonResponseCommand, parsePhotonQuestionAnswer, type PhotonPromptReceipt, type PhotonInteractionBinding, type PhotonDraft } from "../../photon/interactions.js";
 import { validateNativeQuestionResponseInput } from "../../native-runtime/native-question-bridge.js";
 import type { AskUserQuestionsAnswer, AskUserQuestionsInteraction, IssueThreadInteraction } from "@groktopus/shared";
+import { effectiveIssueGoalOrigin } from "../../issue-goal-fallback.js";
 import { PhotonError, photonFailure } from "../../photon/cloud.js";
 import { PhotonChatAdapter, photonThreadId } from "../../photon/adapter.js";
 
@@ -635,7 +636,7 @@ export function createPhotonEvents(db: Db, options: PhotonEventsOptions) {
         };
         if (decision === "accept")
           await issueThreadInteractionService(db).acceptInteraction(
-            issue,
+            { ...issue, goalOrigin: effectiveIssueGoalOrigin(issue) },
             interaction.id,
             {},
             { userId: principal.userId },
