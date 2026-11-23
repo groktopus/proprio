@@ -7,7 +7,9 @@ import type {
   AdapterSkillSnapshot,
 } from "@groktopus/adapter-utils";
 import {
-  ensureProprioSkillSymlink,
+  parseObject,
+  resolveProprioInstanceRootForAdapter,
+  type ProprioSkillEntry,
   isProprioSkillSourceMissing,
   readInstalledSkillTargets,
   readProprioRuntimeSkillEntries,
@@ -213,8 +215,117 @@ export async function listHermesSkills(
   return buildHermesSkillSnapshot(ctx.config);
 }
 
+async function readBundledSkillPackage(source: string, name: string) {
+  const root = path.resolve(source, "../..");
+  if (path.resolve(source) !== path.join(root, "skills", name)) return null;
+
+  try {
+    const manifest = parseObject(JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")));
+    const repository = parseObject(manifest.repository);
+    if (
+      (manifest.name !== "@groktopus/server" && manifest.name !== "@groktopus/hermes-proprio-adapter") ||
+      repository.url !== "https://github.com/groktopus/proprio" ||
+      typeof manifest.version !== "string" || !manifest.version
+    ) return null;
+
+    // A package may itself be reached through a symlink. Its bundled skill
+    // directory and manifest must still reside inside that exact package.
+    const packageRoot = await fs.realpath(root);
+    if (await fs.realpath(source) !== path.join(packageRoot, "skills", name)) return null;
+    if (await fs.realpath(path.join(root, "package.json")) !== path.join(packageRoot, "package.json")) return null;
+    if (!(await fs.lstat(path.join(source, "SKILL.md"))).isFile()) return null;
+    return { name: manifest.name, version: manifest.version };
+  } catch {
+    return null;
+  }
+}
+
+const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+async function isSameCachedSkill(
+  source: string,
+  previous: string,
+  companyId: string,
+  versionId: string,
+): Promise<boolean> {
+  const skillRoot = path.dirname(source);
+  const skillId = path.basename(skillRoot);
+  const priorVersionId = path.basename(previous);
+  if (![companyId, skillId, versionId, priorVersionId].every(value => uuid.test(value))) return false;
+  if (path.basename(source) !== versionId || path.dirname(previous) !== skillRoot) return false;
+
+  const instanceRoot = resolveProprioInstanceRootForAdapter();
+  const relativeRoot = path.join("skills", companyId, "__versions__", skillId);
+  if (skillRoot !== path.join(instanceRoot, relativeRoot)) return false;
+  try {
+    const canonicalRoot = path.join(await fs.realpath(instanceRoot), relativeRoot);
+    if (await fs.realpath(skillRoot) !== canonicalRoot) return false;
+    if (await fs.realpath(source) !== path.join(canonicalRoot, versionId)) return false;
+    const oldVersion = await fs.lstat(previous).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null; // The version cache can evict old bytes.
+      throw error;
+    });
+    return oldVersion === null || oldVersion.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function ownsPreviousSkillLink(
+  entry: ProprioSkillEntry,
+  companyId: string,
+  source: string,
+  previous: string,
+): Promise<boolean> {
+  if (entry.versionId) return isSameCachedSkill(source, previous, companyId, entry.versionId);
+  if (entry.key !== `groktopus/proprio/${entry.runtimeName}`) return false;
+  const [oldPackage, newPackage] = await Promise.all([
+    readBundledSkillPackage(previous, entry.runtimeName),
+    readBundledSkillPackage(source, entry.runtimeName),
+  ]);
+  return Boolean(oldPackage && newPackage &&
+    oldPackage.name === newPackage.name && oldPackage.version !== newPackage.version);
+}
+
+async function reconcileHermesSkillLink(
+  entry: ProprioSkillEntry,
+  target: string,
+  companyId: string,
+): Promise<void> {
+  const current = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  const source = path.resolve(entry.source);
+  if (!current) {
+    await fs.symlink(source, target);
+    return;
+  }
+  const conflict = new Error(
+    `Cannot reconcile Hermes skill "${entry.key}" because ${target} is occupied by another installation.`,
+  );
+  if (!current.isSymbolicLink()) throw conflict;
+
+  const link = await fs.readlink(target);
+  const previous = path.resolve(path.dirname(target), link);
+  if (previous === source) return;
+  if (!await ownsPreviousSkillLink(entry, companyId, source, previous)) throw conflict;
+
+  // Prepare the new link on the same filesystem so replacement leaves no gap.
+  const staging = await fs.mkdtemp(path.join(path.dirname(target), ".proprio-skill-"));
+  try {
+    const replacement = path.join(staging, "link");
+    await fs.symlink(source, replacement);
+    if (await fs.readlink(target) !== link) throw conflict;
+    await fs.rename(replacement, target);
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+
 export async function reconcileHermesProprioSkills(
   config: Record<string, unknown>,
+  companyId: string,
   requestedDesiredSkills?: string[],
 ): Promise<string[]> {
   const availableEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
@@ -233,16 +344,7 @@ export async function reconcileHermesProprioSkills(
   for (const entry of availableEntries) {
     if (!desiredSet.has(entry.key) || isProprioSkillSourceMissing(entry)) continue;
     const target = path.join(skillsHome, entry.runtimeName);
-    await ensureProprioSkillSymlink(entry.source, target);
-    const linkedSource = await fs.readlink(target).catch(() => null);
-    const resolvedSource = linkedSource
-      ? path.resolve(path.dirname(target), linkedSource)
-      : null;
-    if (resolvedSource !== path.resolve(entry.source)) {
-      throw new Error(
-        `Cannot reconcile Hermes skill "${entry.key}" because ${target} is occupied by another installation.`,
-      );
-    }
+    await reconcileHermesSkillLink(entry, target, companyId);
   }
 
   for (const [name, installedEntry] of installed.entries()) {
@@ -259,7 +361,7 @@ export async function syncHermesSkills(
   ctx: AdapterSkillContext,
   desiredSkills: string[],
 ): Promise<AdapterSkillSnapshot> {
-  await reconcileHermesProprioSkills(ctx.config, desiredSkills);
+  await reconcileHermesProprioSkills(ctx.config, ctx.companyId, desiredSkills);
   return buildHermesSkillSnapshot(ctx.config);
 }
 

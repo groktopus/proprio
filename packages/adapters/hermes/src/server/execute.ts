@@ -367,7 +367,7 @@ export async function execute(
   // library calls that did not opt into Proprio runtime skills.
   if (Object.prototype.hasOwnProperty.call(config, "proprioRuntimeSkills")) {
     try {
-      const selectedSkills = await reconcileHermesProprioSkills(config);
+      const selectedSkills = await reconcileHermesProprioSkills(config, ctx.agent.companyId);
       if (selectedSkills.length > 0) {
         await ctx.onLog(
           "stdout",

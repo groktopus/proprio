@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import {
   createHermesGatewayServerAdapter,
@@ -90,6 +90,131 @@ test("Hermes keeps the operational Proprio skill linked after an empty replaceme
     expect(snapshot?.desiredSkills).toContain("groktopus/proprio/proprio");
     expect((await fs.lstat(path.join(home, ".hermes", "skills", "proprio"))).isSymbolicLink()).toBe(true);
   } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("Hermes starts across retained package upgrades and rollback", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-hermes-core-upgrade-"));
+  try {
+    const makePackage = async (version: string, name = "@groktopus/server") => {
+      const root = path.join(home, `package-${version}`);
+      const source = path.join(root, "skills", "proprio");
+      await fs.mkdir(source, { recursive: true });
+      await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
+        name,
+        version,
+        repository: { url: "https://github.com/groktopus/proprio" },
+      }));
+      await fs.writeFile(path.join(source, "SKILL.md"), version);
+      return source;
+    };
+    const oldSource = await makePackage("1.0.0");
+    const newSource = await makePackage("1.1.0");
+    const unrelated = await makePackage("1.2.0", "my-hermes-skills");
+    const target = path.join(home, ".hermes", "skills", "proprio");
+    const command = path.join(home, "hermes");
+    await fs.writeFile(command, "#!/bin/sh\nprintf 'ok\\n'\n", { mode: 0o700 });
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.symlink(oldSource, target);
+    const adapter = createServerAdapter();
+    const start = (source: string) => adapter.execute({
+      runId: "hermes-package-upgrade",
+      agent: {
+        id: "11111111-1111-4111-8111-111111111111",
+        companyId: "22222222-2222-4222-8222-222222222222",
+        name: "Hermes",
+        adapterType: "hermes_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command,
+        cwd: home,
+        provider: "auto",
+        env: { HOME: home },
+        proprioRuntimeSkills: [{ key: "groktopus/proprio/proprio", runtimeName: "proprio", source }],
+      },
+      context: {},
+      onLog: async () => undefined,
+    });
+
+    await expect(start(newSource)).resolves.toMatchObject({ exitCode: 0 });
+    expect(await fs.readlink(target)).toBe(newSource);
+    const installed = await fs.lstat(target);
+    await expect(start(newSource)).resolves.toMatchObject({ exitCode: 0 });
+    expect((await fs.lstat(target)).ino).toBe(installed.ino);
+
+    await expect(start(oldSource)).resolves.toMatchObject({ exitCode: 0 });
+    expect(await fs.readlink(target)).toBe(oldSource);
+    expect(await fs.readFile(path.join(newSource, "SKILL.md"), "utf8")).toBe("1.1.0");
+
+    await fs.unlink(target);
+    await fs.symlink(unrelated, target);
+    await expect(start(newSource)).rejects.toThrow("occupied by another installation");
+    expect(await fs.readlink(target)).toBe(unrelated);
+
+    await fs.unlink(target);
+    const dangling = path.join(home, "removed-user-skill");
+    await fs.symlink(dangling, target);
+    await expect(start(newSource)).rejects.toThrow("occupied by another installation");
+    expect(await fs.readlink(target)).toBe(dangling);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("Hermes updates a link to a retained version of the same company skill", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-hermes-cache-upgrade-"));
+  const companyId = "22222222-2222-4222-8222-222222222222";
+  const skillId = "33333333-3333-4333-8333-333333333333";
+  const oldId = "44444444-4444-4444-8444-444444444444";
+  const newId = "55555555-5555-4555-8555-555555555555";
+  const skillRoot = path.join(home, "instances", "test", "skills", companyId, "__versions__", skillId);
+  const oldSource = path.join(skillRoot, oldId);
+  const newSource = path.join(skillRoot, newId);
+  const target = path.join(home, ".hermes", "skills", "proprio");
+
+  vi.stubEnv("PROPRIO_HOME", home);
+  vi.stubEnv("PROPRIO_INSTANCE_ID", "test");
+  try {
+    for (const directory of [oldSource, newSource]) {
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, "SKILL.md"), "# Proprio\n");
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.symlink(oldSource, target);
+    const adapter = createServerAdapter();
+    const sync = (source: string, versionId: string) => adapter.syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId,
+      config: {
+        env: { HOME: home },
+        proprioRuntimeSkills: [{
+          key: "groktopus/proprio/proprio",
+          runtimeName: "proprio",
+          source,
+          versionId,
+        }],
+      },
+    }, []);
+
+    await sync(newSource, newId);
+    expect(await fs.readlink(target)).toBe(newSource);
+    await sync(oldSource, oldId);
+    expect(await fs.readlink(target)).toBe(oldSource);
+    await fs.rm(oldSource, { recursive: true });
+    await sync(newSource, newId);
+    expect(await fs.readlink(target)).toBe(newSource);
+
+    await fs.unlink(target);
+    const foreignSource = path.join(skillRoot, "..", "66666666-6666-4666-8666-666666666666", oldId);
+    await fs.symlink(foreignSource, target);
+    await expect(sync(newSource, newId)).rejects.toThrow("occupied by another installation");
+    expect(await fs.readlink(target)).toBe(foreignSource);
+  } finally {
+    vi.unstubAllEnvs();
     await fs.rm(home, { recursive: true, force: true });
   }
 });

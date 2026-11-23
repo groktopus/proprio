@@ -15,6 +15,12 @@ and Proprio should start `hermes chat` for each heartbeat. Choose
 another host, in Docker, or behind a private-network/TLS endpoint. The adapter
 type keys did not change during package consolidation.
 
+At local startup, Hermes updates a skill link when it can verify that the link
+points to a previous version of the same bundled package or the same company
+skill in Proprio's version cache. The next startup applies the same check after
+a rollback. If a user file or an unrecognized link occupies the skill name,
+startup reports the occupied path and preserves it.
+
 Configure the canonical gateway base URL. Creation and Stop reject redirects, so
 a redirected create cannot start work on a route that Stop cannot reach.
 
