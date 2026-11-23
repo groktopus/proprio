@@ -89,7 +89,7 @@ Proprio now treats **bind** as a separate concern from auth:
 
 ## `authenticated + private`
 
-- login required. Live event delivery stops when the browser session expires or is revoked.
+- login required. On self-hosted instances, live event delivery stops when the browser session expires or is revoked.
 - low-friction URL handling (`auto` base URL mode)
 - private-host trust policy required
 - Better Auth request rate limiting is off by default for private mode to keep local/LAN repair loops from locking out the operator; set `PROPRIO_AUTH_RATE_LIMIT_ENABLED=true` to opt in
@@ -97,7 +97,7 @@ Proprio now treats **bind** as a separate concern from auth:
 
 ## `authenticated + public`
 
-- login required. Live event delivery stops when the browser session expires or is revoked.
+- login required. On self-hosted instances, live event delivery stops when the browser session expires or is revoked.
 - explicit public URL required
 - stricter deployment checks and failures in doctor
 - Better Auth request rate limiting is on by default; set `PROPRIO_AUTH_RATE_LIMIT_ENABLED=false` only when an explicit front-door limiter covers the deployment
