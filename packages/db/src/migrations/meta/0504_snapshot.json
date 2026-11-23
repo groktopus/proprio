@@ -1,6 +1,6 @@
 {
-  "id": "00aaeb32-9423-4cdd-ae8d-dc721ac83170",
-  "prevId": "3ea0a4c2-54f0-43fd-8c27-bcde98e3dd82",
+  "id": "5fb5de1f-d8d1-4312-bbf8-f7c1fedd18b0",
+  "prevId": "7ef590bd-dacb-421f-8b7c-2795e9b313b4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -35950,6 +35950,27 @@
           "method": "btree",
           "with": {}
         },
+        "heartbeat_runs_company_id_uq": {
+          "name": "heartbeat_runs_company_id_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
         "heartbeat_runs_company_wake_comment_idx": {
           "name": "heartbeat_runs_company_wake_comment_idx",
           "columns": [
@@ -43531,6 +43552,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "goal_origin": {
+          "name": "goal_origin",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unknown'"
+        },
         "parent_id": {
           "name": "parent_id",
           "type": "uuid",
@@ -44667,19 +44695,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_project_id_projects_id_fk": {
-          "name": "issues_project_id_projects_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_project_workspace_id_project_workspaces_id_fk": {
           "name": "issues_project_workspace_id_project_workspaces_id_fk",
           "tableFrom": "issues",
@@ -44706,19 +44721,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_parent_id_issues_id_fk": {
-          "name": "issues_parent_id_issues_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "issues",
-          "columnsFrom": [
-            "parent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_privacy_root_issue_id_issues_id_fk": {
           "name": "issues_privacy_root_issue_id_issues_id_fk",
           "tableFrom": "issues",
@@ -44738,45 +44740,6 @@
           "tableTo": "issues",
           "columnsFrom": [
             "privacy_parent_issue_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_assignee_agent_id_agents_id_fk": {
-          "name": "issues_assignee_agent_id_agents_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "assignee_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "issues_checkout_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_checkout_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "checkout_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_execution_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_execution_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "execution_run_id"
           ],
           "columnsTo": [
             "id"
@@ -44822,6 +44785,81 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "issues_project_company_fk": {
+          "name": "issues_project_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "company_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_parent_company_fk": {
+          "name": "issues_parent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "company_id",
+            "parent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_assignee_agent_company_fk": {
+          "name": "issues_assignee_agent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "company_id",
+            "assignee_agent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_checkout_run_company_fk": {
+          "name": "issues_checkout_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "checkout_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "issues_execution_run_company_fk": {
+          "name": "issues_execution_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "execution_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -44840,6 +44878,10 @@
         "issues_visibility_check": {
           "name": "issues_visibility_check",
           "value": "\"issues\".\"visibility\" in ('open', 'private')"
+        },
+        "issues_goal_origin_check": {
+          "name": "issues_goal_origin_check",
+          "value": "\"issues\".\"goal_origin\" in ('explicit', 'inherited', 'unknown')"
         },
         "issues_conversation_identity_check": {
           "name": "issues_conversation_identity_check",
@@ -52761,6 +52803,23 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "responsibilities_owned_area_fk": {
+          "name": "responsibilities_owned_area_fk",
+          "tableFrom": "responsibilities",
+          "tableTo": "responsibility_areas",
+          "columnsFrom": [
+            "company_id",
+            "owner_user_id",
+            "area_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "owner_user_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -52802,6 +52861,12 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "title": {
           "name": "title",
@@ -52879,11 +52944,44 @@
           "method": "btree",
           "with": {}
         },
-        "responsibility_areas_company_title_uq": {
-          "name": "responsibility_areas_company_title_uq",
+        "responsibility_areas_identity_uq": {
+          "name": "responsibility_areas_identity_uq",
           "columns": [
             {
               "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "responsibility_areas_owner_title_uq": {
+          "name": "responsibility_areas_owner_title_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_user_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -53190,6 +53288,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "skill_id": {
+          "name": "skill_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -53280,6 +53384,28 @@
           "method": "btree",
           "with": {}
         },
+        "responsibility_links_responsibility_skill_uq": {
+          "name": "responsibility_links_responsibility_skill_uq",
+          "columns": [
+            {
+              "expression": "responsibility_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "skill_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"responsibility_links\".\"skill_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "responsibility_links_project_idx": {
           "name": "responsibility_links_project_idx",
           "columns": [
@@ -53315,6 +53441,21 @@
           "columns": [
             {
               "expression": "routine_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "responsibility_links_skill_idx": {
+          "name": "responsibility_links_skill_idx",
+          "columns": [
+            {
+              "expression": "skill_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -53391,6 +53532,19 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "responsibility_links_skill_id_company_skills_id_fk": {
+          "name": "responsibility_links_skill_id_company_skills_id_fk",
+          "tableFrom": "responsibility_links",
+          "tableTo": "company_skills",
+          "columnsFrom": [
+            "skill_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -53399,7 +53553,7 @@
       "checkConstraints": {
         "responsibility_links_single_target_check": {
           "name": "responsibility_links_single_target_check",
-          "value": "(\"responsibility_links\".\"project_id\" is not null)::int + (\"responsibility_links\".\"issue_id\" is not null)::int + (\"responsibility_links\".\"routine_id\" is not null)::int = 1"
+          "value": "(\"responsibility_links\".\"project_id\" is not null)::int + (\"responsibility_links\".\"issue_id\" is not null)::int + (\"responsibility_links\".\"routine_id\" is not null)::int + (\"responsibility_links\".\"skill_id\" is not null)::int = 1"
         }
       },
       "isRLSEnabled": false
@@ -54358,6 +54512,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "assignment_wake_pending": {
+          "name": "assignment_wake_pending",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "linked_issue_id": {
           "name": "linked_issue_id",
