@@ -44,3 +44,9 @@ Before adding another live crash-recovery story, specify the supported recovery
 path, prove its fault boundary, perform the recovery action, then independently
 verify saved work, pending input, and a usable final result. Until that journey
 is qualified, do not score arbitrary process termination as a model failure.
+
+## Linux source checkout
+
+The [Linux source qualification workflow](../../.github/workflows/linux-source-qualification.yml) builds the CLI, UI, server, and native runner from a pinned source checkout on Ubuntu. It starts the built server in a disposable home and a loopback-only network namespace, drives one synthetic agent through the HTTP API, and checks that its local output appears once. The server process trace detects non-loopback network attempts during this journey. The CLI bundle gets a syntax check and the source CLI runs through its workspace launcher. The workflow can also run on demand.
+
+The same job runs the native Codex fixture with the compiled runner and a synthetic provider. It exercises process termination and checkpoint recovery, cancellation, and injected disk-full errors. The source HTTP journey and native restart fixture use different entry points. The disk-full cases inject errors in controlled paths. A job pass records that scope for its Git revision.
