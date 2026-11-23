@@ -13,6 +13,7 @@ import {
   bigint,
   boolean,
   check,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { projects } from "./projects.js";
@@ -34,7 +35,7 @@ export const issues = pgTable(
     conversationState: text("conversation_state").$type<"active" | "waiting">(),
     conversationSessionGeneration: integer("conversation_session_generation").notNull().default(0),
     conversationBoundaryCommentId: uuid("conversation_boundary_comment_id"),
-    projectId: uuid("project_id").references(() => projects.id),
+    projectId: uuid("project_id"),
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     // `unknown` identifies pre-migration rows and raw writers that do not know
@@ -44,7 +45,7 @@ export const issues = pgTable(
     // can update goal_id without knowing about provenance; a mismatch makes
     // the provenance unknown rather than applying stale intent to the new ID.
     goalOriginGoalId: uuid("goal_origin_goal_id"),
-    parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
+    parentId: uuid("parent_id"),
     visibility: text("visibility").notNull().default("open"),
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),
     privacyParentIssueId: uuid("privacy_parent_issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
@@ -58,10 +59,10 @@ export const issues = pgTable(
     harnessKind: text("harness_kind"),
     priority: text("priority").notNull().default("medium"),
     reviewPolicy: text("review_policy").$type<IssueReviewPolicy>(),
-    assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id),
+    assigneeAgentId: uuid("assignee_agent_id"),
     assigneeUserId: text("assignee_user_id"),
-    checkoutRunId: uuid("checkout_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
-    executionRunId: uuid("execution_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
+    checkoutRunId: uuid("checkout_run_id"),
+    executionRunId: uuid("execution_run_id"),
     executionAgentNameKey: text("execution_agent_name_key"),
     executionLockedAt: timestamp("execution_locked_at", { withTimezone: true }),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id),
@@ -121,6 +122,33 @@ export const issues = pgTable(
       and ${table.status} not in ('done', 'cancelled')
     )`),
     companyIdUq: unique("issues_company_id_uq").on(table.companyId, table.id),
+    projectCompanyFk: foreignKey({
+      columns: [table.companyId, table.projectId],
+      foreignColumns: [projects.companyId, projects.id],
+      name: "issues_project_company_fk",
+    }),
+    parentCompanyFk: foreignKey({
+      columns: [table.companyId, table.parentId],
+      foreignColumns: [table.companyId, table.id],
+      name: "issues_parent_company_fk",
+    }),
+    assigneeAgentCompanyFk: foreignKey({
+      columns: [table.companyId, table.assigneeAgentId],
+      foreignColumns: [agents.companyId, agents.id],
+      name: "issues_assignee_agent_company_fk",
+    }),
+    // Migration 0504 uses column-targeted SET NULL so a run delete clears
+    // only the optional run link while retaining the issue's company identity.
+    checkoutRunCompanyFk: foreignKey({
+      columns: [table.companyId, table.checkoutRunId],
+      foreignColumns: [heartbeatRuns.companyId, heartbeatRuns.id],
+      name: "issues_checkout_run_company_fk",
+    }).onDelete("set null"),
+    executionRunCompanyFk: foreignKey({
+      columns: [table.companyId, table.executionRunId],
+      foreignColumns: [heartbeatRuns.companyId, heartbeatRuns.id],
+      name: "issues_execution_run_company_fk",
+    }).onDelete("set null"),
     companyStatusIdx: index("issues_company_status_idx").on(table.companyId, table.status),
     companyHarnessKindIdx: index("issues_company_harness_kind_idx").on(table.companyId, table.harnessKind),
     assigneeStatusIdx: index("issues_company_assignee_status_idx").on(
