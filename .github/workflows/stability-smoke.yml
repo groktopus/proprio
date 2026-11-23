@@ -167,6 +167,20 @@ jobs:
           JS
       - name: Check late live settlement metadata
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
+      - name: Check closed budget windows and current holds
+        run: |
+          test_file=server/src/__tests__/budgets-service.test.ts
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/budget-rollover.json" "$test_file" -t 'retires the closed monthly incident'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'budget-rollover.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'retires the closed monthly incident with 20 cents spent this month',
+            'retires the closed monthly incident with 125 cents spent this month',
+          ] });
+          JS
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
       - name: Typecheck server and build affected packages
