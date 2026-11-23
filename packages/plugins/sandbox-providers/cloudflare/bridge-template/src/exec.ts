@@ -5,6 +5,7 @@ import { cleanupTimedOutExecution, resolveExecutionTarget, type SessionStrategy 
 
 // Leave the SDK a fallback deadline if the bridge cannot perform cleanup.
 const STREAM_TIMEOUT_GRACE_MS = 5_000;
+const MAX_STREAM_DEADLINE_MS = 2_147_483_647 - STREAM_TIMEOUT_GRACE_MS;
 
 class StreamExecutionTimeout extends Error {}
 
@@ -125,7 +126,7 @@ export async function executeInSandbox(params: BridgeExecuteParams) {
     const { timeoutMs } = params;
     // SDK 0.12.14 resolves streamed timeouts with a normal exit code 124.
     // Own the streaming deadline so command output cannot trigger cleanup.
-    const streamDeadline = onOutput && timeoutMs !== undefined && timeoutMs > 0
+    const streamDeadline = onOutput && timeoutMs !== undefined && timeoutMs > 0 && timeoutMs <= MAX_STREAM_DEADLINE_MS
       ? new Promise<never>((_resolve, reject) => {
           streamTimer = setTimeout(() => {
             streamDeadlineReached = true;
