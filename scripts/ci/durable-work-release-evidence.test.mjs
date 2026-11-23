@@ -132,4 +132,3 @@ test("requires an explicit not-applicable migration case only when no migration 
     sourceSha, baseSha, runId: 55, attempt: 2, migrationRequired: true,
   }));
 });
-
