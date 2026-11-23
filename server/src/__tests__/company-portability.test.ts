@@ -568,7 +568,7 @@ describe("company portability", () => {
       parseGitHubSourceUrl("https://github.com/paperclipai/companies?ref=feature%2Fdemo&path=gstack"),
     ).toEqual({
       hostname: "github.com",
-      owner: "proprio",
+      owner: "paperclipai",
       repo: "companies",
       ref: "feature/demo",
       basePath: "gstack",
@@ -583,7 +583,7 @@ describe("company portability", () => {
       ),
     ).toEqual({
       hostname: "github.com",
-      owner: "proprio",
+      owner: "paperclipai",
       repo: "companies",
       ref: "abc123",
       basePath: "gstack",
