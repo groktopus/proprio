@@ -17,6 +17,7 @@ export type DatabaseBackupHealthStatus = {
   status: "ok" | "warning";
   backupDir: string;
   maxAgeHours: number;
+  currentBackup?: { trigger: "manual" | "scheduled" | "idle"; startedAt: string; ageMs: number } | null;
   latestBackup: {
     name: string;
     path: string;
@@ -39,6 +40,7 @@ export type InspectDatabaseBackupHealthOptions = {
   alertFile?: string;
   alertFiles?: string[];
   now?: Date;
+  getCurrentBackup?: () => DatabaseBackupHealthStatus["currentBackup"];
 };
 
 function roundHours(value: number): number {
@@ -146,6 +148,7 @@ export function inspectDatabaseBackupHealth(
     status: warnings.length > 0 ? "warning" : "ok",
     backupDir: opts.backupDir,
     maxAgeHours,
+    ...(opts.getCurrentBackup ? { currentBackup: opts.getCurrentBackup() } : {}),
     latestBackup,
     lastFailure,
     warnings,

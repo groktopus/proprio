@@ -1020,6 +1020,7 @@ async function startServerWithDatabaseTeardown(
           maxAgeHours: databaseBackupMaxAgeHours,
           alertFile: databaseBackupAlertFile,
           alertFiles: databaseBackupAlertFiles,
+          getCurrentBackup: runServerDatabaseBackup.status,
         }
       : undefined,
     deploymentMode: config.deploymentMode,

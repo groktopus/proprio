@@ -16,24 +16,34 @@ export function createDatabaseBackupOwner(options: {
   backupDir: string;
   getRetention: () => Promise<BackupRetentionPolicy>;
   logger: BackupLogger;
+  timeoutMs?: number;
 }) {
-  let databaseBackupInFlight = false;
-  return async (
+  const timeoutMs = options.timeoutMs ?? 60 * 60 * 1000;
+  let current: { trigger: InstanceDatabaseBackupTrigger; startedAt: Date } | null = null;
+  const status = () => current && {
+    trigger: current.trigger,
+    startedAt: current.startedAt.toISOString(),
+    ageMs: Math.max(0, Date.now() - current.startedAt.getTime()),
+  };
+  const run = async (
     trigger: InstanceDatabaseBackupTrigger,
   ): Promise<InstanceDatabaseBackupRunResult | null> => {
-    if (databaseBackupInFlight) {
+    if (current) {
       const message = "Database backup already in progress";
       if (trigger === "scheduled") {
-        options.logger.warn("Skipping scheduled database backup because a previous backup is still running");
+        options.logger.warn(`Skipping scheduled database backup because a previous backup is still running (${status()!.ageMs} ms)`);
         return null;
       }
       throw conflict(message);
     }
 
-    databaseBackupInFlight = true;
-    const finishIdleBackup = beginIdleTrackedWork();
     const startedAt = new Date();
-    const startedAtMs = Date.now();
+    const startedAtMs = startedAt.getTime();
+    current = { trigger, startedAt };
+    const finishIdleBackup = beginIdleTrackedWork();
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(new Error(`Database backup exceeded ${timeoutMs} ms`)), timeoutMs);
+    timer.unref();
     const label = trigger === "manual" ? "Manual" : trigger === "idle" ? "Pre-sleep" : "Automatic";
     try {
       if (trigger === "idle") await markIdleBackupWakeRequired(options.backupDir);
@@ -46,7 +56,8 @@ export function createDatabaseBackupOwner(options: {
         backupDir: options.backupDir,
         retention,
         filenamePrefix: "proprio",
-        verifyBeforePrune: verifyCheckpoint ? verifyIdleDatabaseBackup : undefined,
+        signal: abort.signal,
+        verifyBeforePrune: verifyCheckpoint ? file => verifyIdleDatabaseBackup(file, abort.signal) : undefined,
       });
       if (verifyCheckpoint) {
         if (trigger !== "idle") await clearIdleBackupWakeRequired(options.backupDir);
@@ -80,8 +91,10 @@ export function createDatabaseBackupOwner(options: {
       options.logger.error({ err, backupDir: options.backupDir, trigger }, `${label} database backup failed`);
       throw err;
     } finally {
-      databaseBackupInFlight = false;
+      clearTimeout(timer);
+      current = null;
       finishIdleBackup();
     }
   };
+  return Object.assign(run, { status });
 }

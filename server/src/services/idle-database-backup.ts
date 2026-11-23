@@ -27,7 +27,7 @@ export async function markIdleBackupWakeRequired(directory: string): Promise<voi
 /** Read the entire archive to verify the gzip trailer, then persist its bytes
  * and directory entry before allowing compute to stop. The backup runner
  * retains its in-flight receipt until this function settles. */
-export async function verifyIdleDatabaseBackup(backupFile: string): Promise<void> {
+export async function verifyIdleDatabaseBackup(backupFile: string, signal?: AbortSignal): Promise<void> {
   const handle = await open(backupFile, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
@@ -37,6 +37,7 @@ export async function verifyIdleDatabaseBackup(backupFile: string): Promise<void
       createReadStream(backupFile, { fd: handle.fd, autoClose: false }),
       createGunzip(),
       new Writable({ write(chunk, _encoding, done) { bytes += chunk.length; done(); } }),
+      { signal },
     );
     if (bytes === 0) throw new Error("Idle backup archive contains no SQL");
     await handle.sync();

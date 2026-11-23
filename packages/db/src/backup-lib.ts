@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
@@ -28,7 +28,8 @@ export type RunDatabaseBackupOptions = {
   excludeTables?: string[];
   nullifyColumns?: Record<string, string[]>;
   backupEngine?: "auto" | "pg_dump" | "javascript";
-  /** Optional durability gate. A rejected archive must not prune history. */
+  signal?: AbortSignal;
+  /** Check the staged archive before publication. A rejection preserves history. */
   verifyBeforePrune?: (backupFile: string) => Promise<void>;
 };
 
@@ -332,7 +333,9 @@ async function runPgDumpBackup(opts: {
   connectionString: string;
   backupFile: string;
   connectTimeout: number;
+  signal?: AbortSignal;
 }): Promise<void> {
+  opts.signal?.throwIfAborted();
   const pgDumpBin = process.env.PROPRIO_PG_DUMP_PATH || "pg_dump";
   const child = spawn(
     pgDumpBin,
@@ -357,10 +360,32 @@ async function runPgDumpBackup(opts: {
     throw new Error("pg_dump did not expose stdout");
   }
 
-  await Promise.all([
-    pipeline(child.stdout, createGzip(), createWriteStream(opts.backupFile)),
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const stopChild = () => {
+    child.kill("SIGKILL");
+    child.stderr?.destroy();
+  };
+  const streamCancellation = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, streamCancellation.signal])
+    : streamCancellation.signal;
+  opts.signal?.addEventListener("abort", stopChild, { once: true });
+  const stages = [
     waitForChildExit(child, pgDumpBin),
-  ]);
+    pipeline(child.stdout, createGzip(), createWriteStream(opts.backupFile), { signal }),
+  ];
+  try {
+    await Promise.all(stages);
+  } catch (error) {
+    stopChild();
+    streamCancellation.abort();
+    await Promise.allSettled(stages);
+    opts.signal?.throwIfAborted();
+    throw error;
+  } finally {
+    await closed;
+    opts.signal?.removeEventListener("abort", stopChild);
+  }
 }
 
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
@@ -541,6 +566,8 @@ export function createBufferedTextFileWriter(filePath: string, maxBufferedBytes 
 }
 
 export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise<RunDatabaseBackupResult> {
+  const { signal } = opts;
+  signal?.throwIfAborted();
   const filenamePrefix = opts.filenamePrefix ?? "proprio";
   const retention = opts.retention;
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
@@ -550,19 +577,34 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
-  let sqlClosed = false;
-  const closeSql = async () => {
-    if (sqlClosed) return;
-    sqlClosed = true;
-    await sql.end();
-  };
+  let sqlClosing: Promise<void> | undefined;
+  const closeSql = (timeout = signal?.aborted ? 0 : 1) => sqlClosing ??= Promise.resolve(sql.end({ timeout }));
+  const abortSql = () => { void closeSql(0).catch(() => {}); };
+
   mkdirSync(opts.backupDir, { recursive: true });
-  // Initial and final sleep checks can run within the same second. A failed
-  // second checkpoint must never overwrite the first verified recovery point.
-  const checkpointSuffix = opts.verifyBeforePrune ? `-${randomUUID()}` : "";
-  const sqlFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}${checkpointSuffix}.sql`);
-  const backupFile = `${sqlFile}.gz`;
+  // Keep partial output out of health checks and retention. Concurrent
+  // one-off and server-owned jobs also get a separate final archive name.
+  const fileStem = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}-${randomUUID()}`);
+  const sqlFile = `${fileStem}.sql.partial`;
+  const stagedArchive = `${fileStem}.sql.gz.partial`;
+  const backupFile = `${fileStem}.sql.gz`;
   const writer = createBufferedTextFileWriter(sqlFile);
+
+  async function publish(engine: RunDatabaseBackupResult["engine"], fallbackReason: RunDatabaseBackupResult["fallbackReason"]) {
+    const sizeBytes = statSync(stagedArchive).size;
+    await opts.verifyBeforePrune?.(stagedArchive);
+    signal?.throwIfAborted();
+    renameSync(stagedArchive, backupFile);
+    if (opts.verifyBeforePrune) {
+      // The verification fsync covered the staged bytes. Persist their final name.
+      const directory = await openFile(opts.backupDir, "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+    const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
+    return { backupFile, sizeBytes, prunedCount, engine, fallbackReason };
+  }
+
+  signal?.addEventListener("abort", abortSql, { once: true });
 
   try {
     if (backupEngine === "pg_dump" || (backupEngine === "auto" && canUsePgDump)) {
@@ -572,30 +614,27 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         await closeSql();
         await runPgDumpBackup({
           connectionString: opts.connectionString,
-          backupFile,
+          backupFile: stagedArchive,
           connectTimeout,
+          signal,
         });
         dumped = true;
       } catch (error) {
-        if (existsSync(backupFile)) {
-          try { unlinkSync(backupFile); } catch { /* ignore */ }
-        }
+        signal?.throwIfAborted();
+        if (existsSync(stagedArchive)) unlinkSync(stagedArchive);
         if (backupEngine === "pg_dump") {
           throw error;
         }
         effectiveBackupEngine = "javascript";
         sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
-        sqlClosed = false;
+        sqlClosing = undefined;
       }
       if (dumped) {
         // Only an engine failure can select the JavaScript fallback. Once
         // pg_dump succeeds, archive verification or persistence failures
         // must retain their original error and must not reuse a closed writer.
         await writer.abort();
-        const sizeBytes = statSync(backupFile).size;
-        await opts.verifyBeforePrune?.(backupFile);
-        const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
-        return { backupFile, sizeBytes, prunedCount, engine: "pg_dump", fallbackReason: null };
+        return await publish("pg_dump", null);
       }
     }
 
@@ -1184,34 +1223,24 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
     // Compress the SQL file with gzip
     const sqlReadStream = createReadStream(sqlFile);
-    const gzWriteStream = createWriteStream(backupFile);
-    await pipeline(sqlReadStream, createGzip(), gzWriteStream);
+    const gzWriteStream = createWriteStream(stagedArchive);
+    await pipeline(sqlReadStream, createGzip(), gzWriteStream, { signal });
     unlinkSync(sqlFile);
+    await closeSql();
 
-    const sizeBytes = statSync(backupFile).size;
-    await opts.verifyBeforePrune?.(backupFile);
-    const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
-
-    return {
-      backupFile,
-      sizeBytes,
-      prunedCount,
-      engine: "javascript",
-      // Auto only changes to effective JavaScript after a pg_dump path failure.
-      // Intentional JavaScript selection is not a fallback.
-      fallbackReason: backupEngine === "auto" && effectiveBackupEngine === "javascript" ? "pg_dump_failed" : null,
-    };
+    // Intentional JavaScript selection is not a fallback.
+    return await publish("javascript",
+      backupEngine === "auto" && effectiveBackupEngine === "javascript" ? "pg_dump_failed" : null);
   } catch (error) {
     await writer.abort();
-    if (existsSync(backupFile)) {
-      try { unlinkSync(backupFile); } catch { /* ignore */ }
+    if (existsSync(stagedArchive)) {
+      try { unlinkSync(stagedArchive); } catch { /* keep the original error */ }
     }
-    if (existsSync(sqlFile)) {
-      try { unlinkSync(sqlFile); } catch { /* ignore */ }
-    }
+    signal?.throwIfAborted();
     throw error;
   } finally {
     await closeSql();
+    signal?.removeEventListener("abort", abortSql);
   }
 }
 
