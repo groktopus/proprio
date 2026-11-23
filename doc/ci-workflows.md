@@ -64,11 +64,10 @@ requests and comments. It is event-driven assistance, not a required CI lane.
 
 Install the pinned package manager and workspace dependencies using the setup
 instructions in [DEVELOPING.md](DEVELOPING.md). The ordinary local verification
-entry point is `pnpm verify --base origin/main`; it selects affected Vitest files conservatively
+entry point is `pnpm verify`. It selects affected Vitest files conservatively
 and may report that broader verification is needed. Follow the verification
 instructions in `AGENTS.md` and `doc/DEVELOPING.md` for the relevant change.
-Pass the base explicitly because the current default resolver only tries
-`origin/master` and `master`.
+Use `--base <ref>` to override the locally recorded default branch.
 
 The repository contains test-selection, test-duration, CI profiling, sharding,
 and incremental verification utilities. Their presence does not mean the

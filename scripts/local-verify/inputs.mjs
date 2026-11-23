@@ -23,7 +23,14 @@ export function localEnvironment(env = process.env) {
 
 export function comparison(root, requestedBase) {
   let base;
-  for (const ref of requestedBase ? [requestedBase] : ["origin/master", "master"]) {
+  const refs = requestedBase ? [requestedBase] : [
+    "refs/remotes/origin/HEAD",
+    "refs/remotes/origin/main",
+    "refs/heads/main",
+    "refs/remotes/origin/master",
+    "refs/heads/master",
+  ];
+  for (const ref of refs) {
     try {
       const commit = git(root, "rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`).trim();
       base = git(root, "merge-base", "HEAD", commit).trim();

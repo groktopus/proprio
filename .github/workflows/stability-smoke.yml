@@ -43,6 +43,8 @@ jobs:
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
       - name: Validate contributor instructions and adapter boundaries
         run: pnpm check:agents && pnpm test:check-agents && pnpm check:no-git-push
+      - name: Check the verifier's default branch selection
+        run: node --test --test-name-pattern='implicit verification|the remote default' scripts/__tests__/local-verify.test.mjs
       - name: Verify generated API documentation
         run: pnpm docs:api:check
       - name: Check service onboarding

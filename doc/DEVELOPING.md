@@ -39,9 +39,7 @@ Contributor checks include `pnpm check:agents` for local links referenced by
 `AGENTS.md` and `pnpm check:no-git-push` for adapter/runtime remote-push
 boundaries. After installing pre-commit and the workspace dependencies, run `pre-commit
 install` to enable commit hooks. Use `pre-commit run --all-files` to run them on
-the current checkout. These focused checks do not replace
-`pnpm verify --base origin/main`. Pass the base explicitly: the current default
-resolver only tries the historical `master` refs.
+the current checkout. These focused checks do not replace `pnpm verify`.
 
 ## Start Dev
 
@@ -470,13 +468,15 @@ Use the local verification entry point for ordinary issue work:
 ```sh
 pnpm verify
 pnpm verify --explain
-pnpm verify --base origin/master
+pnpm verify --base origin/main
 ```
 
 The command compares the actual working tree with the merge base of the supplied
 local ref, including committed, staged, unstaged, deleted, renamed, and untracked
-paths. The default ref is local `origin/master`, falling back to `master`; it does
-not fetch. Tests read the current working-tree bytes. CI must still verify the
+paths. Without an override, it tries the locally recorded `origin/HEAD`, then
+`origin/main`, `main`, `origin/master`, and `master` in that order. It uses
+local Git refs and performs no network fetch. Tests read the current working-tree
+bytes. CI must still verify the
 final committed revision. The task/input policy, conservative import and file-read
 graph, exact Vitest specifications, and stable test runner are shared with CI.
 Serialized server tests retain their owner. Native server tests remain in local
