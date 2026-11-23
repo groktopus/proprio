@@ -167,6 +167,25 @@ jobs:
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
+      - name: Check goal hierarchy cycle prevention and recovery
+        run: |
+          goal_test=server/src/__tests__/goal-parent-company-validation.test.ts
+          tree_test=ui/src/components/GoalTree.test.tsx
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/goal-cycle-results.json" "$goal_test" "$tree_test"
+          node --input-type=module - "$goal_test" "$tree_test" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'goal-cycle-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            [process.argv[2]]: [
+              'rejects self-parenting and moves under immediate or deeper descendants',
+              'allows clearing a parent to repair an already-cyclic hierarchy',
+              'rejects one of two concurrent edits that would jointly form a cycle',
+            ],
+            [process.argv[3]]: ['keeps goals in a saved cycle and their descendants visible'],
+          });
+          JS
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs

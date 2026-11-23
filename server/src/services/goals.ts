@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { goals } from "@groktopus/db";
 import { updateGoalSchema, type UpdateGoal } from "@groktopus/shared";
@@ -81,7 +81,7 @@ export function goalService(db: Db) {
     update: (id: string, data: UpdateGoal) =>
       db.transaction(async (tx) => {
         const [existing] = await tx.select({ companyId: goals.companyId }).from(goals)
-          .where(eq(goals.id, id)).for("no key update");
+          .where(eq(goals.id, id));
         if (!existing) return null;
         const parsed = updateGoalSchema.safeParse(data);
         if (!parsed.success) {
@@ -92,11 +92,42 @@ export function goalService(db: Db) {
           throw unprocessable("Goal company cannot be changed");
         }
         const patch = parsed.data;
+        const inCompany = and(eq(goals.id, id), eq(goals.companyId, existing.companyId));
+        if (patch.parentId !== undefined) {
+          // Serialize parent changes before taking goal row locks. A competing
+          // move must see the first move's committed ancestry.
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`proprio:goal-tree:${existing.companyId}`}, 0))`);
+        }
+        const [locked] = await tx.select({ id: goals.id }).from(goals)
+          .where(inCompany).for("no key update");
+        if (!locked) return null;
+
         await assertParentCompany(tx, existing.companyId, patch.parentId);
+        if (patch.parentId) {
+          // UNION stops traversal even if an older client saved a cycle.
+          const [ancestry] = await tx.execute<{ contains_goal: boolean; reaches_root: boolean }>(sql`
+            with recursive ancestors(id, parent_id) as (
+              select id, parent_id from ${goals}
+              where company_id = ${existing.companyId} and id = ${patch.parentId}
+              union
+              select parent.id, parent.parent_id from ${goals} parent
+              join ancestors on ancestors.parent_id = parent.id
+              where parent.company_id = ${existing.companyId}
+            )
+            select bool_or(id = ${id}) as contains_goal, bool_or(parent_id is null) as reaches_root
+            from ancestors
+          `);
+          if (ancestry.contains_goal) {
+            throw unprocessable("A goal cannot be moved under itself or one of its descendants");
+          }
+          if (!ancestry.reaches_root) {
+            throw unprocessable("Repair the proposed parent's goal hierarchy before moving this goal");
+          }
+        }
         return tx
           .update(goals)
           .set({ ...patch, updatedAt: new Date() })
-          .where(eq(goals.id, id))
+          .where(inCompany)
           .returning()
           .then((rows) => rows[0] ?? null);
       }),
