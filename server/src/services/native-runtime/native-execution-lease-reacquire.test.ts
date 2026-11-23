@@ -30,6 +30,7 @@ const GENERATION = 1;
 describeEmbeddedPostgres("native execution lease taken back after a host sleep", () => {
   let db!: ReturnType<typeof createDb>;
   let owner!: ReturnType<typeof createDb>;
+  let observer!: ReturnType<typeof createDb>;
   let stopDatabase: (() => Promise<void>) | undefined;
   let companyId!: string;
   let agentId!: string;
@@ -40,6 +41,7 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
     stopDatabase = started.cleanup;
     db = createDb(started.connectionString);
     owner = createDb(started.connectionString);
+    observer = createDb(started.connectionString);
     companyId = randomUUID();
     agentId = randomUUID();
     workerId = randomUUID();
@@ -56,6 +58,7 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
   afterAll(async () => {
     if (owner) await closeLivenessDb(owner, 1).catch(() => undefined);
     await owner?.$client.end({ timeout: 1 });
+    await observer?.$client.end({ timeout: 1 });
     await db?.$client.end({ timeout: 1 });
     await stopDatabase?.();
   });
@@ -290,15 +293,54 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
 
   it("keeps a reassigned task intact when the same failure-settlement operation wins", async () => {
     const run = await seedSleptRun("reassigned-before-failure");
-    await db.update(issues).set({ assigneeAgentId: workerId, status: "todo", executionRunId: null, checkoutRunId: null })
+    // Keep status and run IDs independently eligible so assignee ownership is
+    // the reason the production settlement operation must preserve the task.
+    await db.update(issues).set({
+      assigneeAgentId: workerId,
+      status: "in_progress",
+      executionRunId: run.runId,
+      checkoutRunId: run.runId,
+    })
       .where(eq(issues.id, run.issueId));
 
     expect(await settleFailureAsOwner(run)).toHaveLength(1);
     const [savedTask] = await db.select().from(issues).where(eq(issues.id, run.issueId));
-    expect(savedTask).toMatchObject({ assigneeAgentId: workerId, status: "todo", executionRunId: null, checkoutRunId: null });
+    expect(savedTask).toMatchObject({ assigneeAgentId: workerId, status: "in_progress", executionRunId: run.runId, checkoutRunId: run.runId });
     expect(await row(run.runId)).toMatchObject({ phase: "retryable_failure", leaseOwner: null });
     const [savedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.runId));
     expect(savedRun).toMatchObject({ status: "failed" });
+  });
+
+  it("preserves successor run links when the failed run no longer owns execution", async () => {
+    const run = await seedSleptRun("successor-runs-before-failure");
+    const successorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: successorRunId,
+      companyId,
+      agentId,
+      status: "running",
+      runtimeMode: "native",
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      contextSnapshot: { issueId: run.issueId },
+    });
+    await db.update(issues).set({
+      assigneeAgentId: agentId,
+      status: "in_progress",
+      executionRunId: successorRunId,
+      checkoutRunId: successorRunId,
+    }).where(eq(issues.id, run.issueId));
+
+    expect(await settleFailureAsOwner(run)).toHaveLength(1);
+    const [savedTask] = await db.select().from(issues).where(eq(issues.id, run.issueId));
+    expect(savedTask).toMatchObject({
+      assigneeAgentId: agentId,
+      status: "in_progress",
+      executionRunId: successorRunId,
+      checkoutRunId: successorRunId,
+    });
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorRunId));
+    expect(successor?.status).toBe("running");
   });
 
   it("lets failure settlement write a resumable failure under its own restart claim", async () => {
@@ -367,6 +409,9 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
 
   it("keeps a concurrently accepted result and its live claim when failure settlement loses", async () => {
     const run = await seedSleptRun("accepted-during-failure-settlement");
+    await db.update(nativeRunFinalizations).set({ leaseExpiresAt: sql`clock_timestamp() + interval '5 minutes'` })
+      .where(eq(nativeRunFinalizations.runId, run.runId));
+    const claimExpiry = (await row(run.runId)).leaseExpiresAt!;
     const [result] = await db.transaction(async tx => {
       await tx.execute(sql`set local session_replication_role = replica`);
       return tx.insert(nativeRunResults).values({ companyId, issueId: run.issueId, runId: run.runId,
@@ -388,29 +433,56 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
         .where(eq(nativeRunFinalizations.runId, run.runId));
       markAccepted();
       await mayCommitAcceptance;
-    });
-    await acceptedLocked;
+    }).then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
 
-    const settling = settleFailureAsOwner(run);
-    const waitingOnAcceptance = async () => (await db.execute<{ count: number }>(sql`
+    const settling = settleFailureAsOwner(run).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    try {
+      const setup = await Promise.race([
+        acceptedLocked.then(() => ({ ready: true as const })),
+        accepting.then((outcome) => ({ ready: false as const, outcome })),
+      ]);
+      if (!setup.ready) {
+        if (!setup.outcome.ok) throw setup.outcome.error;
+        throw new Error("Acceptance fixture committed before reaching its lock barrier");
+      }
+      const waitingOnAcceptance = async () => (await observer.execute<{ count: number }>(sql`
       select count(*)::int as count from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock'
         and ${acceptancePid} = any(pg_blocking_pids(pid))
-    `))[0]!.count;
-    try {
-      await expect.poll(waitingOnAcceptance, { timeout: 5000 }).toBe(1);
+      `))[0]!.count;
+      const contention = await Promise.race([
+        expect.poll(waitingOnAcceptance, { timeout: 5000 }).toBe(1)
+          .then(() => ({ kind: "blocked" as const }), (error: unknown) => ({ kind: "poll_error" as const, error })),
+        settling.then((outcome) => ({ kind: "settled" as const, outcome })),
+      ]);
+      if (contention.kind === "poll_error") throw contention.error;
+      if (contention.kind === "settled") {
+        if (!contention.outcome.ok) throw contention.outcome.error;
+        throw new Error("Failure settlement completed before accepted-result lock contention");
+      }
       releaseAcceptance();
-      await accepting;
-      expect(await settling).toHaveLength(0);
+      const accepted = await accepting;
+      if (!accepted.ok) throw accepted.error;
+      const settled = await settling;
+      if (!settled.ok) throw settled.error;
+      expect(settled.value).toHaveLength(0);
     } finally {
       releaseAcceptance();
       await accepting;
-      await Promise.allSettled([settling]);
+      await settling;
     }
 
     const saved = await row(run.runId);
     expect(saved).toMatchObject({ phase: "workspace_finalizing", resultId: result!.id,
       leaseOwner: run.leaseOwner, recoveryState: null });
+    expect(saved.leaseExpiresAt?.getTime()).toBe(claimExpiry.getTime());
+    expect(saved.leaseExpiresAt!.getTime()).toBeGreaterThan(Date.now());
     const [savedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.runId));
     expect(savedRun).toMatchObject({ status: "running" });
   });
