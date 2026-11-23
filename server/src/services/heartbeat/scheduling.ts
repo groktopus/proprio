@@ -70,6 +70,20 @@ import type { NativeSessionGoalControl } from "../../vendor/proprio-runner/index
 type HeartbeatQueue = ReturnType<typeof createHeartbeatQueue>;
 type RunPreparation = ReturnType<typeof createHeartbeatRunPreparation>;
 
+export interface PendingSessionGoalActionRecoveryScope {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  requestId: string;
+}
+
+export interface PendingSessionGoalActionRecoveryResult {
+  scanned: number;
+  enqueued: number;
+  alreadyQueued: number;
+  invalid: number;
+}
+
 export interface HeartbeatSchedulingDependencies
   extends Pick<HeartbeatRetryDependencies, "getRun" | "getAgent" | "getWorktreeExecutionCutoff">,
     Pick<HeartbeatQueue, "enqueueWakeup" | "parseHeartbeatPolicy" | "nextTimerHeartbeatAt" | "claimDueTimerHeartbeat">,
@@ -1212,7 +1226,9 @@ export function createHeartbeatScheduling(
     return { scanned: sessions.length, enqueued };
   }
 
-  async function recoverPendingSessionGoalActions(requestId?: string) {
+  async function recoverPendingSessionGoalActions(
+    scope?: PendingSessionGoalActionRecoveryScope,
+  ): Promise<PendingSessionGoalActionRecoveryResult> {
     if ((await getSchedulingSuppression()).suppressed) {
       return { scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0 };
     }
@@ -1256,7 +1272,10 @@ export function createHeartbeatScheduling(
             "delivered",
             "reconciling",
           ]),
-          requestId ? eq(agentSessionGoalActions.requestId, requestId) : undefined,
+          scope ? eq(agentTaskSessions.companyId, scope.companyId) : undefined,
+          scope ? eq(agentTaskSessions.taskKey, scope.issueId) : undefined,
+          scope ? eq(agentTaskSessions.agentId, scope.agentId) : undefined,
+          scope ? eq(agentSessionGoalActions.requestId, scope.requestId) : undefined,
         ),
       )
       .orderBy(asc(agentSessionGoalActions.createdAt));

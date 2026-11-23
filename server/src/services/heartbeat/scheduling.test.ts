@@ -110,8 +110,8 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     await db.execute(sql`truncate table companies restart identity cascade`);
   });
 
-  async function fixture(adapterType = "proprio_runner") {
-    const [company] = await db.insert(companies).values({ name: "Scheduling", issuePrefix: "SCH" }).returning();
+  async function fixture(adapterType = "proprio_runner", issuePrefix = "SCH") {
+    const [company] = await db.insert(companies).values({ name: "Scheduling", issuePrefix }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Scheduled agent", adapterType, createdAt: dueAt }).returning();
     const [issue] = await db.insert(issues).values({
       companyId: company.id, title: "Check deployment", status: "in_progress", assigneeAgentId: agent.id,
@@ -557,7 +557,7 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
       },
     }).returning();
     await db.update(agentTaskSessions).set({ goalAuthorityRevision: 6 }).where(eq(agentTaskSessions.id, active.id));
-    expect(await f.scheduler.recoverPendingSessionGoalActions(requestId)).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
+    expect(await f.scheduler.recoverPendingSessionGoalActions({ companyId: f.company.id, issueId: f.issue.id, agentId: f.agent.id, requestId })).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
     expect(f.deps.enqueueWakeup).toHaveBeenCalledWith(f.agent.id, expect.objectContaining({
       idempotencyKey: `goal_control_reconciliation:${action!.id}:1`,
       contextSnapshot: expect.objectContaining({
@@ -568,6 +568,58 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     const context = f.deps.enqueueWakeup.mock.calls[0]![1]!.contextSnapshot as Record<string, unknown>;
     expect(context).not.toHaveProperty("runnerGoalControl");
     expect(context).not.toHaveProperty("goalControlRequestId");
+  });
+
+  it("scopes targeted goal readback when another company reuses the request id", async () => {
+    const first = await fixture();
+    const second = await fixture("proprio_runner", "SCH2");
+    const requestId = randomUUID();
+    for (const f of [first, second]) {
+      const active = await session(f);
+      await db.insert(agentSessionGoalActions).values({
+        companyId: f.company.id,
+        sessionId: active.id,
+        requestId,
+        action: "clear",
+        status: "reconciling",
+        payloadJson: { requestId, action: "clear" },
+        resultJson: {
+          goalActionControl: {
+            previousDesiredState: "active",
+            acceptedRevision: 7,
+            acceptedAuthorityRevision: 7,
+            observationSourceId: null,
+            observationCursor: null,
+          },
+          reconciliation: {
+            state: "required",
+            attempts: 1,
+            failureAuthorityRevision: 7,
+            observationSourceId: null,
+            observationCursor: null,
+          },
+        },
+      });
+    }
+
+    expect(await first.scheduler.recoverPendingSessionGoalActions({
+      companyId: first.company.id,
+      issueId: first.issue.id,
+      agentId: first.agent.id,
+      requestId,
+    })).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
+    expect(first.deps.enqueueWakeup).toHaveBeenCalledTimes(1);
+    expect(first.deps.enqueueWakeup).toHaveBeenCalledWith(first.agent.id, expect.objectContaining({
+      payload: { issueId: first.issue.id, requestId, intent: "goal_control_reconciliation" },
+    }));
+    expect(second.deps.enqueueWakeup).not.toHaveBeenCalled();
+    const actions = await db.select({ companyId: agentSessionGoalActions.companyId, status: agentSessionGoalActions.status })
+      .from(agentSessionGoalActions).orderBy(agentSessionGoalActions.companyId);
+    expect(actions).toHaveLength(2);
+    expect(actions).toEqual(expect.arrayContaining([
+      { companyId: first.company.id, status: "reconciling" },
+      { companyId: second.company.id, status: "reconciling" },
+    ]));
   });
 
   it("surfaces a terminal goal failure when reconciliation admission is skipped", async () => {
