@@ -452,7 +452,20 @@ async function runPgDumpBackup(opts: {
 
 function openRestoreInput(backupFile: string) {
   const raw = createReadStream(backupFile);
-  return backupFile.endsWith(".gz") ? raw.compose(createGunzip()) : raw;
+  if (!backupFile.endsWith(".gz")) return { stream: raw, close: () => { raw.destroy(); } };
+
+  const stream = createGunzip();
+  // Consumers observe read and decompression errors on the output stream.
+  // Keep the upstream pipeline owned until cleanup, including an intentionally
+  // short breakpoint probe or a psql process that closes stdin on an SQL error.
+  const finished = pipeline(raw, stream).catch(() => undefined);
+  return {
+    stream,
+    async close() {
+      stream.destroy();
+      await finished;
+    },
+  };
 }
 
 class RestoreInputError extends Error {}
@@ -483,7 +496,8 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
 
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   const processExit = waitForChildExit(child, psqlBin);
-  const input = pipeline(openRestoreInput(opts.backupFile), child.stdin).catch(async (error: NodeJS.ErrnoException) => {
+  const source = openRestoreInput(opts.backupFile);
+  const input = pipeline(source.stream, child.stdin).catch(async (error: NodeJS.ErrnoException) => {
     // psql can close stdin on a SQL error. Keep its stderr and exit status.
     if (error.code === "EPIPE" || error.code === "ERR_STREAM_PREMATURE_CLOSE" || error.code === "ERR_STREAM_DESTROYED") {
       throw error;
@@ -492,6 +506,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
     throw new RestoreInputError("Failed to read the restore input", { cause: error });
   });
   const [processResult, streamResult] = await Promise.allSettled([processExit, input, closed]);
+  await source.close();
 
   if (streamResult.status === "rejected" && streamResult.reason instanceof RestoreInputError) throw streamResult.reason;
   if (processResult.status === "rejected") throw processResult.reason;
@@ -499,23 +514,23 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
 }
 
 async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
-  const stream = openRestoreInput(backupFile);
+  const { stream, close } = openRestoreInput(backupFile);
   let text = "";
 
   try {
-    for await (const chunk of stream) {
+    for await (const chunk of stream.iterator({ destroyOnReturn: false })) {
       text += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
       if (text.includes(STATEMENT_BREAKPOINT)) return true;
       if (Buffer.byteLength(text, "utf8") >= BACKUP_BREAKPOINT_DETECT_BYTES) return false;
     }
     return text.includes(STATEMENT_BREAKPOINT);
   } finally {
-    stream.destroy();
+    await close();
   }
 }
 
 async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
-  const stream = openRestoreInput(backupFile);
+  const { stream, close } = openRestoreInput(backupFile);
   stream.setEncoding("utf8");
   const isBreakpoint = (line: string) => line === STATEMENT_BREAKPOINT || line === `${STATEMENT_BREAKPOINT}\r`;
   let lineFragments: string[] = [];
@@ -530,7 +545,7 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
   try {
     // LF frames the backup; a legacy CRLF breakpoint is also accepted.
     // Preserve all other line endings, which may be part of a SQL literal.
-    for await (const chunk of stream) {
+    for await (const chunk of stream.iterator({ destroyOnReturn: false })) {
       let offset = 0;
       for (let newline = chunk.indexOf("\n"); newline !== -1; newline = chunk.indexOf("\n", offset)) {
         const part = chunk.slice(offset, newline);
@@ -552,7 +567,7 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     const trailingStatement = flushStatement();
     if (trailingStatement.length > 0) yield trailingStatement;
   } finally {
-    stream.destroy();
+    await close();
   }
 }
 
