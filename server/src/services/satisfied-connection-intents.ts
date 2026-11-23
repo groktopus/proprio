@@ -1,10 +1,11 @@
+import { hasPendingLinkedIssueApproval } from "./issue-approvals.js";
 import { notifyIssueReviewState } from "./issue-review-state-notifications.js";
 import { notifyChatConfirmationResolution } from "./chat-confirmation-notifications.js";
 import { enqueueTerminalIssueInteractionChatPublications } from "./chat-interaction-publications.js";
 import { connectionManagementService } from "./connection-management.js";
 import { chatCredentialEntryGenerations } from "./chat-channels/credentials.js";
 import { and, asc, eq, gt, inArray, isNull, notInArray, or } from "drizzle-orm";
-import { approvals, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, toolConnections, companyMemberships, connectionIntentDeliveries, issueApprovals, issueThreadInteractions, issues, type Db } from "@groktopus/db";
+import { chatEndpoints, chatExternalPrincipals, chatIdentityLinks, toolConnections, companyMemberships, connectionIntentDeliveries, issueThreadInteractions, issues, type Db } from "@groktopus/db";
 import { connectionIntentPayloadSchema } from "@groktopus/shared";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { chatCredentialRotationId, connectionIntentService } from "./connection-intents.js";
@@ -113,11 +114,7 @@ export async function connectionContinuationPendingResponse(db: Db, task: Task, 
     // response projection still validate their own exact recorded connection.
     if (!connection) return "interaction";
   }
-  const [approval] = await db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
-    eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId),
-  )).where(and(eq(issueApprovals.companyId, task.companyId), eq(issueApprovals.issueId, task.id),
-    inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
-  return approval ? "approval" : null;
+  return await hasPendingLinkedIssueApproval(db, { companyId: task.companyId, issueId: task.id }) ? "approval" : null;
 }
 
 export function satisfiedConnectionIntentService(db: Db) {

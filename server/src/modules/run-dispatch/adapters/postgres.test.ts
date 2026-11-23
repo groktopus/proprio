@@ -26,6 +26,7 @@ import {
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
+  issueThreadInteractions,
   issueTreeHolds,
   issues,
   nativeRunFinalizations,
@@ -1401,6 +1402,61 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         expect(persisted?.status).toBe("cancelled");
       },
       15_000,
+    );
+
+    it.each(["resolved", "review", "approval", "response", "optional_response"] as const)(
+      "checks the current %s gate before dispatching an automatic continuation",
+      async gate => {
+        const { companyId, agentId } = await seedCompanyAndAgent();
+        const issueId = randomUUID();
+        await seedIssue({ companyId, issueId, status: "in_review", assigneeAgentId: agentId });
+        const body = [
+          "# Continuation Summary", "", "- Status: in_review", "", "## Next Action", "",
+          "- Wait for reviewer feedback or approval before continuing executor work.",
+        ].join("\n");
+        await seedContinuationSummary({ companyId, issueId, agentId, body });
+        const runId = await seedRun({ companyId, agentId, contextSnapshot: {
+          issueId, wakeReason: "issue_continuation_needed", proprioContinuationSummary: { body },
+        } });
+        await db.update(issues).set({
+          status: gate === "review" ? "in_review" : "in_progress",
+          executionRunId: runId,
+        }).where(eq(issues.id, issueId));
+        if (gate === "approval") {
+          const [approval] = await db.insert(approvals).values({
+            companyId, type: "approve_ceo_strategy", status: "pending", payload: {},
+          }).returning();
+          await db.insert(issueApprovals).values({ companyId, issueId, approvalId: approval!.id });
+        }
+        if (gate === "response" || gate === "optional_response") {
+          await db.insert(issueThreadInteractions).values({
+            companyId, issueId, kind: gate === "response" ? "ask_user_questions" : "suggest_routine", status: "pending",
+            title: "Need a human response", addresseeUserId: "fixture-user", payload: {
+              version: 1, questions: [],
+            },
+          });
+        }
+        const adapter = createPostgresRunDispatchAdapter(db);
+        const input = { companyId, runId, now: new Date(), expectedStatus: "queued" as const };
+        const early = await adapter.cancelStaleQueuedRun(input);
+        if (gate !== "resolved" && gate !== "optional_response") {
+          expect(early).toMatchObject({ outcome: "cancelled", errorCode: gate === "review"
+            ? "issue_continuation_waiting_on_review" : "issue_waiting_for_response" });
+          const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+          expect(run).toMatchObject({ status: "cancelled", startedAt: null });
+          return;
+        }
+        expect(early).toMatchObject({ outcome: "not_stale" });
+        await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, runId));
+        const reservation = await reserveRunBudget(db, companyId, runId, null);
+        const dispatch = vi.fn(async () => "adapter invoked");
+        const final = await adapter.dispatchResolvedInteractionIfCurrent({
+          ...input, expectedStatus: "running", reservationId: reservation.id, dispatch,
+        });
+        expect(final.dispatched).toBe(true);
+        if (final.dispatched) await expect(final.resultPromise).resolves.toBe("adapter invoked");
+        expect(dispatch).toHaveBeenCalledOnce();
+      },
     );
 
     it.each(["legacy", "current", "paused", "superseded", "control_pending"] as const)(
