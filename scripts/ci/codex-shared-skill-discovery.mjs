@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessCodexAppServerTransport } from "../../packages/proprio-runner/src/drivers/codex/app-server-transport.ts";
+import { codexExecutableReadOnlyRoots, createIsolatedCodexAppServerArgs } from "../../packages/proprio-runner/src/drivers/codex/codex-security-config.ts";
 import { REPOSITORY_CONTENT_DIR, repositorySkillProjection } from "../../server/src/services/skill-repository-package.ts";
 
-const codex = fileURLToPath(new URL("../../packages/proprio-runner/node_modules/.bin/codex", import.meta.url));
+const codex = fileURLToPath(new URL("../../packages/proprio-runner/node_modules/@openai/codex/bin/codex.js", import.meta.url));
 const root = await mkdtemp(join(tmpdir(), "proprio-shared-skills-"));
 const skillName = "proprio-shared-skill-fixture";
 const rootFile = join(REPOSITORY_CONTENT_DIR, "shared.txt");
@@ -32,20 +33,20 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
   const privateHome = join(root, session);
   await mkdir(privateHome);
   await writeFile(join(privateHome, "config.toml"), `model = ${JSON.stringify(session)}\n`);
-  const selectedSkillRule = assignment ? `,${JSON.stringify(assignment.skill)}="read"` : "";
+  const environment = {
+    PATH: process.env.PATH, HOME: assignment?.home ?? privateHome, CODEX_HOME: privateHome,
+    // Reuse the CI job's empty network namespace so nested Bubblewrap
+    // does not need to configure another loopback device.
+    PROPRIO_RUNNER_NETWORK_ACCESS: process.env.PROPRIO_TEST_ISOLATED_NETWORK === "1" ? "enabled" : undefined,
+  };
+  const readOnlyRoots = codexExecutableReadOnlyRoots(environment, codex);
+  if (assignment) readOnlyRoots.push(assignment.skill);
   let diagnostics = "";
   const transport = new ProcessCodexAppServerTransport({
     command: codex,
-    args: [
-      "-c", 'default_permissions="fixture"',
-      "-c", `permissions.fixture.filesystem={":root"="none",":minimal"="read",":tmpdir"="none",${JSON.stringify(root)}="none"${selectedSkillRule}}`,
-      // The Linux job runs in an empty network namespace and reuses it here
-      // so nested Bubblewrap never needs to configure another loopback device.
-      "-c", `permissions.fixture.network.enabled=${process.env.PROPRIO_TEST_ISOLATED_NETWORK === "1"}`,
-      "app-server",
-    ],
+    args: createIsolatedCodexAppServerArgs(environment, readOnlyRoots, undefined, [root]),
     workingDirectory: workspace,
-    environment: { PATH: process.env.PATH, HOME: assignment?.home ?? privateHome, CODEX_HOME: privateHome, TMPDIR: root },
+    environment,
     onDiagnostic: message => { diagnostics = (diagnostics + message).slice(-4000); },
     processGroup: true,
   });

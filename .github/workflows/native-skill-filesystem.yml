@@ -9,6 +9,7 @@ on:
       - pnpm-lock.yaml
       - packages/proprio-runner/package.json
       - packages/proprio-runner/src/drivers/codex/app-server-transport.ts
+      - packages/proprio-runner/src/drivers/codex/codex-security-config.ts
       - server/src/services/skill-repository-package.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
