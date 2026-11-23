@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 const home = process.env.PROPRIO_HOME;
 assert(home, "Set PROPRIO_HOME to a disposable directory");
@@ -13,8 +14,9 @@ const port = 33107;
 const origin = `http://127.0.0.1:${port}`;
 const server = spawn("strace", [
   "-D", "-f", "-s", "64", "-e", "trace=connect,sendto,sendmsg,sendmmsg", "-o", trace,
-  process.execPath, "server/dist/index.js",
+  process.execPath, "--import", "tsx", "dist/index.js",
 ], {
+  cwd: fileURLToPath(new URL("../../server/", import.meta.url)),
   stdio: "inherit",
   env: { ...process.env, HOST: "127.0.0.1", PORT: String(port) },
 });
