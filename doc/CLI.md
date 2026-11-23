@@ -311,6 +311,11 @@ the service cannot start after installing the replacement, run
 `proprio update --rollback` to reactivate the previous payload. Payload
 rollback leaves database migrations in place.
 
+When GitHub limits an anonymous commit lookup, the installer can resolve an
+exact full commit SHA with a temporary public Git fetch. It disables credential
+helpers and prompts for that fetch. Named branch and tag lookups keep their
+normal GitHub API behavior.
+
 ## Deployment Modes
 
 Mode taxonomy and design intent are documented in `doc/DEPLOYMENT-MODES.md`.
