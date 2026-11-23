@@ -595,6 +595,8 @@ async function removeConnection(
             and(
               eq(toolApplications.id, updatedConnection.applicationId),
               ne(toolApplications.status, "archived"),
+              // A disabled parent can contain both AI and tool connections.
+              ne(toolApplications.status, "disabled"),
             ),
           )
           .returning({ id: toolApplications.id });
