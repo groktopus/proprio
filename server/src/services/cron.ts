@@ -70,106 +70,32 @@ const FIELD_SPECS: FieldSpec[] = [
 function parseField(token: string, spec: FieldSpec): number[] {
   const values = new Set<number>();
 
-  // Split on commas first — each part can be a value, range, or step
-  const parts = token.split(",");
-
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (trimmed === "") {
+  for (const part of token.split(",")) {
+    if (part === "") {
       throw new Error(`Empty element in cron ${spec.name} field`);
     }
 
-    // Check for step syntax: "X/S" where X is "*" or a range or a number
-    const slashIdx = trimmed.indexOf("/");
-    if (slashIdx !== -1) {
-      const base = trimmed.slice(0, slashIdx);
-      const stepStr = trimmed.slice(slashIdx + 1);
-      const step = parseInt(stepStr, 10);
-      if (isNaN(step) || step <= 0) {
-        throw new Error(
-          `Invalid step "${stepStr}" in cron ${spec.name} field`,
-        );
-      }
-
-      let rangeStart = spec.min;
-      let rangeEnd = spec.max;
-
-      if (base === "*") {
-        // */S — every S from field min
-      } else if (base.includes("-")) {
-        // N-M/S — range with step
-        const [a, b] = base.split("-").map((s) => parseInt(s, 10));
-        if (isNaN(a!) || isNaN(b!)) {
-          throw new Error(
-            `Invalid range "${base}" in cron ${spec.name} field`,
-          );
-        }
-        rangeStart = a!;
-        rangeEnd = b!;
-      } else {
-        // N/S — start at N, step S
-        const start = parseInt(base, 10);
-        if (isNaN(start)) {
-          throw new Error(
-            `Invalid start "${base}" in cron ${spec.name} field`,
-          );
-        }
-        rangeStart = start;
-      }
-
-      validateBounds(rangeStart, spec);
-      validateBounds(rangeEnd, spec);
-
-      for (let i = rangeStart; i <= rangeEnd; i += step) {
-        values.add(i);
-      }
-      continue;
+    const match = /^(\*|([0-9]+)(?:-([0-9]+))?)(?:\/([0-9]+))?$/.exec(part);
+    if (!match) {
+      throw new Error(`Invalid element "${part}" in cron ${spec.name} field`);
     }
 
-    // Check for range syntax: "N-M"
-    if (trimmed.includes("-")) {
-      const [aStr, bStr] = trimmed.split("-");
-      const a = parseInt(aStr!, 10);
-      const b = parseInt(bStr!, 10);
-      if (isNaN(a) || isNaN(b)) {
-        throw new Error(
-          `Invalid range "${trimmed}" in cron ${spec.name} field`,
-        );
-      }
-      validateBounds(a, spec);
-      validateBounds(b, spec);
-      if (a > b) {
-        throw new Error(
-          `Invalid range ${a}-${b} in cron ${spec.name} field (start > end)`,
-        );
-      }
-      for (let i = a; i <= b; i++) {
-        values.add(i);
-      }
-      continue;
+    const [, base, startText, endText, stepText] = match;
+    const step = stepText === undefined ? 1 : Number(stepText);
+    if (!Number.isSafeInteger(step) || step === 0) {
+      throw new Error(`Invalid step "${stepText}" in cron ${spec.name} field`);
     }
 
-    // Wildcard
-    if (trimmed === "*") {
-      for (let i = spec.min; i <= spec.max; i++) {
-        values.add(i);
-      }
-      continue;
+    const start = base === "*" ? spec.min : Number(startText);
+    const end = endText !== undefined ? Number(endText) : base === "*" || stepText !== undefined ? spec.max : start;
+    validateBounds(start, spec);
+    validateBounds(end, spec);
+    if (start > end) {
+      throw new Error(`Invalid range ${start}-${end} in cron ${spec.name} field (start > end)`);
     }
-
-    // Single value
-    const val = parseInt(trimmed, 10);
-    if (isNaN(val)) {
-      throw new Error(
-        `Invalid value "${trimmed}" in cron ${spec.name} field`,
-      );
+    for (let value = start; value <= end; value += step) {
+      values.add(value);
     }
-    validateBounds(val, spec);
-    values.add(val);
-  }
-
-  if (values.size === 0) {
-    throw new Error(`Empty result for cron ${spec.name} field`);
   }
 
   return [...values].sort((a, b) => a - b);

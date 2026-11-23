@@ -79,6 +79,43 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     } finally { select.mockRestore(); execute.mockRestore(); transaction.mockRestore(); }
   }
 
+  it.each(["15oops * * * *", "*/10minutes * * * *", "5-10-12 * * * *"])(
+    "rejects malformed cron %s on creation and editing",
+    async (cronExpression) => {
+      const routine = await create();
+      const valid = { kind: "schedule" as const, enabled: true, cronExpression: "0 * * * *", timezone: "UTC" };
+      const { trigger } = await service().createTrigger(routine.id, valid, {});
+      const error = { status: 422, message: expect.stringContaining("cron minute field") };
+      await expect(service().createTrigger(routine.id, { ...valid, cronExpression }, {})).rejects.toMatchObject(error);
+      await expect(service().updateTrigger(trigger.id, { cronExpression }, {})).rejects.toMatchObject(error);
+      expect(await db.select().from(routineTriggers)).toEqual([expect.objectContaining({
+        id: trigger.id, enabled: true, cronExpression: valid.cronExpression, nextRunAt: trigger.nextRunAt,
+      })]);
+    },
+  );
+
+  it("pauses a saved malformed schedule without firing its stale deadline", async () => {
+    const routine = await create();
+    const { trigger } = await service().createTrigger(routine.id, {
+      kind: "schedule", enabled: true, cronExpression: "0 * * * *", timezone: "UTC",
+    }, {});
+    const saved = () => db.select().from(routineTriggers).where(eq(routineTriggers.id, trigger.id)).then(rows => rows[0]);
+    await db.update(routineTriggers).set({ cronExpression: "15oops * * * *", nextRunAt: new Date("2026-07-16T12:15:00Z") })
+      .where(eq(routineTriggers.id, trigger.id));
+
+    expect(await service().tickScheduledTriggers()).toEqual({ triggered: 0 });
+    expect(await db.select().from(routineRuns)).toEqual([]);
+    expect(await saved()).toMatchObject({
+      enabled: false, nextRunAt: null, cronExpression: "15oops * * * *",
+      lastResult: expect.stringContaining("cron minute field"),
+    });
+    await expect(service().updateTrigger(trigger.id, { enabled: true }, {})).rejects.toMatchObject({ status: 422 });
+    const fixed = await service().updateTrigger(trigger.id, { enabled: true, cronExpression: "15 * * * *" }, {});
+    expect(fixed?.trigger).toMatchObject({
+      enabled: true, lastResult: null, nextRunAt: new Date("2026-07-16T13:15:00Z"),
+    });
+  });
+
   it("retains overdue catch-up work after the first capped pass", async () => {
     const routine = await create(db, "enqueue_missed_with_cap");
     const { trigger } = await service().createTrigger(routine.id, { kind: "schedule", enabled: true, cronExpression: "0 * * * *", timezone: "UTC" }, {});

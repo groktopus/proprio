@@ -2993,6 +2993,7 @@ export function routineService(
       if (!existing) return null;
 
       let nextRunAt = existing.nextRunAt;
+      let clearScheduleError = false;
       let cronExpression = existing.cronExpression;
       let timezone = existing.timezone;
 
@@ -3001,16 +3002,19 @@ export function routineService(
         if (!routine) throw notFound("Routine not found");
         if (patch.cronExpression !== undefined) {
           if (patch.cronExpression == null) throw unprocessable("Scheduled triggers require cronExpression");
-          const error = validateCron(patch.cronExpression);
-          if (error) throw unprocessable(error);
           cronExpression = patch.cronExpression;
+          clearScheduleError = existing.lastResult?.startsWith("Invalid schedule: ") ?? false;
         }
         if (patch.timezone !== undefined) {
           if (patch.timezone == null) throw unprocessable("Scheduled triggers require timezone");
           assertTimeZone(patch.timezone);
           timezone = patch.timezone;
         }
-        if (cronExpression && timezone) {
+        const cronError = cronExpression === null ? null : validateCron(cronExpression);
+        if (cronError && (patch.cronExpression !== undefined || patch.enabled === true || patch.timezone !== undefined)) {
+          throw unprocessable(cronError);
+        }
+        if (cronExpression && timezone && !cronError) {
           nextRunAt = nextCronTickInTimeZone(cronExpression, timezone, new Date());
         }
         if ((patch.enabled ?? existing.enabled) === true) {
@@ -3066,6 +3070,7 @@ export function routineService(
             ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
             cronExpression,
             timezone,
+            ...(clearScheduleError ? { lastResult: null } : {}),
             nextRunAt,
             signingMode: patch.signingMode === undefined ? current.signingMode : patch.signingMode,
             replayWindowSec: patch.replayWindowSec === undefined ? existing.replayWindowSec : patch.replayWindowSec,
@@ -3718,7 +3723,23 @@ export function routineService(
       for (const row of due) {
         if (!canContinue()) break;
         const { nextRunAt, cronExpression, timezone } = row.trigger;
-        if (!nextRunAt || !cronExpression || !timezone) continue;
+        if (!nextRunAt || cronExpression === null || !timezone) continue;
+
+        const cronError = validateCron(cronExpression);
+        if (cronError) {
+          const [paused] = await db.update(routineTriggers)
+            .set({ enabled: false, nextRunAt: null, lastResult: `Invalid schedule: ${cronError}`, updatedAt: now })
+            .where(and(
+              eq(routineTriggers.id, row.trigger.id),
+              eq(routineTriggers.companyId, row.routine.companyId),
+              eq(routineTriggers.cronExpression, cronExpression),
+              eq(routineTriggers.enabled, true),
+              eq(routineTriggers.archived, false),
+            ))
+            .returning({ id: routineTriggers.id });
+          if (paused) logger.warn({ triggerId: paused.id, routineId: row.routine.id, cronError }, "paused invalid routine schedule");
+          continue;
+        }
 
         // A project pause or worktree cutoff skips the backlog. A quiet
         // activity gate records one skip for the same window the pass covers.
