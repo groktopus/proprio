@@ -102,9 +102,16 @@ export function approvalRecords(db: Db) {
           decidedAt: now,
           updatedAt: now,
         })
-        .where(eq(approvals.id, id))
+        .where(and(
+          eq(approvals.id, id),
+          eq(approvals.companyId, existing.companyId),
+          eq(approvals.status, "pending"),
+        ))
         .returning()
-        .then((rows) => rows[0]), { approvalId: id });
+        .then(([updated]) => {
+          if (!updated) throw unprocessable("Only pending approvals can request revision");
+          return updated;
+        }), { approvalId: id });
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {

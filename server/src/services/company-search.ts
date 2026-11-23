@@ -16,6 +16,7 @@ import {
 } from "@groktopus/db";
 import {
   COMPANY_SEARCH_MAX_LIMIT,
+  COMPANY_SEARCH_UNASSIGNED,
   COMPANY_SEARCH_MAX_OFFSET,
   COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS,
   COMPANY_ARTIFACTS_MAX_LIMIT,
@@ -292,7 +293,11 @@ function issueFilterConditions(companyId: string, query: CompanySearchQuery, omi
     conditions.push(query.priority.length === 1 ? eq(issues.priority, query.priority[0]!) : inArray(issues.priority, query.priority));
   }
   if (omit !== "assigneeAgentId" && query.assigneeAgentId !== undefined) {
-    conditions.push(query.assigneeAgentId === null ? isNull(issues.assigneeAgentId) : eq(issues.assigneeAgentId, query.assigneeAgentId));
+    if (query.assigneeAgentId === COMPANY_SEARCH_UNASSIGNED) {
+      conditions.push(isNull(issues.assigneeAgentId), isNull(issues.assigneeUserId));
+    } else {
+      conditions.push(query.assigneeAgentId === null ? isNull(issues.assigneeAgentId) : eq(issues.assigneeAgentId, query.assigneeAgentId));
+    }
   }
   if (omit !== "assigneeUserId" && query.assigneeUserId) {
     conditions.push(eq(issues.assigneeUserId, query.assigneeUserId));
@@ -331,9 +336,13 @@ function matchedFacetConditions(companyId: string, query: CompanySearchQuery, om
     conditions.push(sql`m.priority = ANY(${sqlTextArray(query.priority)})`);
   }
   if (omit !== "assigneeAgentId" && query.assigneeAgentId !== undefined) {
-    conditions.push(query.assigneeAgentId === null
-      ? sql`m.assignee_agent_id IS NULL`
-      : sql`m.assignee_agent_id = ${query.assigneeAgentId}`);
+    if (query.assigneeAgentId === COMPANY_SEARCH_UNASSIGNED) {
+      conditions.push(sql`m.assignee_agent_id IS NULL`, sql`m.assignee_user_id IS NULL`);
+    } else {
+      conditions.push(query.assigneeAgentId === null
+        ? sql`m.assignee_agent_id IS NULL`
+        : sql`m.assignee_agent_id = ${query.assigneeAgentId}`);
+    }
   }
   if (omit !== "assigneeUserId" && query.assigneeUserId) {
     conditions.push(sql`m.assignee_user_id = ${query.assigneeUserId}`);
