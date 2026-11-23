@@ -199,17 +199,22 @@ export async function resolveGitHubRef(repo: string, ref: string, runCommand: Co
     const repoPath = path.join(tempRoot, "repo.git");
     const isolatedHome = path.join(tempRoot, "home");
     fs.mkdirSync(isolatedHome, { mode: 0o700 });
+    const networkEnv = Object.fromEntries(
+      ["LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]
+        .flatMap((key) => process.env[key] ? [[key, process.env[key]!] as const] : []),
+    );
     const env = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: isolatedHome,
+      ...networkEnv,
       GIT_TERMINAL_PROMPT: "0",
       GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_GLOBAL: os.devNull,
       GIT_ALLOW_PROTOCOL: "https",
     };
     try {
       await runCommand("git", ["init", "--bare", repoPath], { env, maxBuffer: 4 * 1024 * 1024 });
-      await runCommand("git", ["-C", repoPath, "-c", "credential.helper=", "-c", "core.askPass=", "fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", `https://github.com/${repo}.git`, sha], { env, maxBuffer: 4 * 1024 * 1024 });
+      await runCommand("git", ["-C", repoPath, "-c", "credential.helper=", "-c", "core.askPass=", "fetch", "--depth=1", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", `https://github.com/${repo}.git`, sha], { env, maxBuffer: 4 * 1024 * 1024 });
       const fetched = await runCommand("git", ["-C", repoPath, "rev-parse", "FETCH_HEAD^{commit}"], { env, maxBuffer: 1024 * 1024 });
       if (fetched.stdout.trim().toLowerCase() !== sha) throw new Error(`GitHub returned a different commit while resolving ${repo}@${ref}.`);
       return sha;

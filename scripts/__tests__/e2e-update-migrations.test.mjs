@@ -28,6 +28,16 @@ test("failure cleanup removes the service and managed install", () => {
   assert.match(cleanup, /shim uninstall/);
 });
 
+test("qualification can run the exact tested CLI against the installed base payload", () => {
+  const source = readFileSync(script, "utf8");
+  assert.match(source, /update_cli\(\) \{[\s\S]*?bootstrap "\$@"; else shim "\$@"/);
+  assert.match(source, /CHECK_JSON="\$\(update_cli update --check --json\)"/);
+  assert.match(source, /if update_cli update --yes/);
+  assert.match(source, /if update_cli update --rollback/);
+  const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "linux-source-qualification.yml"), "utf8");
+  assert.match(workflow, /E2E_UPDATE_USE_BOOTSTRAP_CLI=1/);
+});
+
 test("cross-version migration harness requires both refs before side effects", () => {
   for (const testCase of [
     { env: {}, missing: "E2E_UPDATE_BASE_REF" },

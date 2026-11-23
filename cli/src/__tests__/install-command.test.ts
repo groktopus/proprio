@@ -98,13 +98,23 @@ describe("managed install commands", () => {
 
   it("resolves an exact public SHA over isolated Git transport after anonymous API rate limiting", async () => {
     const sha = "c".repeat(40);
+    process.env.HTTPS_PROXY = "http://qualification-proxy.invalid:8080";
+    process.env.NODE_EXTRA_CA_CERTS = "/tmp/qualification-ca.pem";
     const runCommand = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) => {
       if (file === "curl") throw new Error("The requested URL returned error: 403");
-      if (file === "git" && args[0] === "-C" && args.at(-1) === "FETCH_HEAD^{commit}") {
+      if (file === "git" && args.includes("fetch")) {
+        expect(args).toContain("--filter=blob:none");
+        expect(args).toContain("credential.helper=");
+        expect(args).toContain("core.askPass=");
         expect(options?.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_ALLOW_PROTOCOL: "https" });
+        expect(options?.env).toMatchObject({ HTTPS_PROXY: process.env.HTTPS_PROXY, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS });
+        expect(options?.env?.GIT_CONFIG_GLOBAL).toBe(os.devNull);
         expect(options?.env).not.toHaveProperty("GH_TOKEN");
         expect(options?.env).not.toHaveProperty("GITHUB_TOKEN");
         expect(options?.env?.HOME).toContain("proprio-public-ref-");
+        return { stdout: "", stderr: "" };
+      }
+      if (file === "git" && args.at(-1) === "FETCH_HEAD^{commit}") {
         return { stdout: `${sha}\n`, stderr: "" };
       }
       return { stdout: "", stderr: "" };
