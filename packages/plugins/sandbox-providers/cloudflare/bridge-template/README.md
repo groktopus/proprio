@@ -51,12 +51,11 @@ After deploy, configure Proprio with:
 
 ## SDK migration status
 
-This template currently uses the SDK 0.7 API. The shared provider lock retains
-0.7.21. Do not update only the SDK to 1.x: it removes the Sandbox class and
-requires a provider-owned Durable Object and a different container setup.
-[Issue #36](https://github.com/groktopus/proprio/issues/36) tracks the SDK/image
-upgrade and staging checks. Dependabot major SDK updates are deferred until
-that work is ready. Other dependency updates continue.
+This template pins both the Sandbox SDK and container image to 0.12.14.
+Keep those versions paired. SDK 1.x requires a provider-owned Durable Object
+and a different container setup. [Issue #36](https://github.com/groktopus/proprio/issues/36)
+tracks that change and its staging checks. Dependabot major SDK updates remain
+deferred until the 1.x bridge is ready.
 
 [Cloudflare recommends](https://developers.cloudflare.com/sandbox/sdk/migrate/)
 upgrading older applications to SDK and image 0.12.14 before moving to 1.0. Its
