@@ -55,6 +55,32 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+      - name: Execute managed update and rollback on Linux
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || (inputs.test_head && github.sha) }}
+          NEXT_SHA: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          E2E_UPDATE_NEXT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          runner_uid="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$runner_uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$runner_uid.service"
+          systemctl --user import-environment PATH
+          export E2E_UPDATE_BASE_REF="${BASE_SHA:-$(git rev-parse HEAD^)}"
+          export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
+          export E2E_UPDATE_REQUIRE_PROBE=0
+          export E2E_BOOTSTRAP_CLI="$PWD/cli/src/index.ts"
+          export E2E_BOOTSTRAP_NODE_LOADER="$PWD/cli/node_modules/tsx/dist/loader.mjs"
+          export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          bash scripts/e2e-update-migrations.sh
       - name: Build the source checkout
         run: |
           rustc --version
@@ -76,13 +102,6 @@ jobs:
             ip link set lo up
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
-      - name: Install PostgreSQL 18 client tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-client-18
-          /usr/lib/postgresql/18/bin/pg_dump --version
       - name: Check native fresh-target restore
         env:
           PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
@@ -100,24 +119,6 @@ jobs:
             ],
           });
           JS
-      - name: Execute managed update and rollback on Linux
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || (inputs.test_head && github.sha) }}
-          NEXT_SHA: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
-          E2E_UPDATE_NEXT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-        run: |
-          runner_uid="$(id -u)"
-          export XDG_RUNTIME_DIR="/run/user/$runner_uid"
-          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$runner_uid.service"
-          systemctl --user import-environment PATH
-          export E2E_UPDATE_BASE_REF="${BASE_SHA:-$(git rev-parse HEAD^)}"
-          export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
-          export E2E_UPDATE_REQUIRE_PROBE=0
-          export E2E_BOOTSTRAP_CLI="$PWD/cli/dist/index.js"
-          export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
-          bash scripts/e2e-update-migrations.sh
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd

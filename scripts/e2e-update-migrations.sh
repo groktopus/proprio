@@ -22,6 +22,7 @@
 #   E2E_UPDATE_NEXT_REF       ref to update to (required; BASE + one probe migration)
 #   E2E_BOOTSTRAP_CLI         path to an already-built bootstrap CLI entry point
 #                             (dist/index.js); when unset, builds one from BASE
+#   E2E_BOOTSTRAP_NODE_LOADER optional Node loader for a workspace source entry point
 #   E2E_SERVICE_TIMEOUT_SECS  service active/health wait (default 300)
 #   E2E_UPDATE_REQUIRE_PROBE  0 for an exact-commit lifecycle check without a probe migration
 #   E2E_UPDATE_NEXT_REPO      GitHub repository containing NEXT (default: E2E_REPO)
@@ -143,11 +144,19 @@ else
     || { tail -40 "$HOME/e2e-upd-bootstrap-npm.log"; fail_ "1c bootstrap npm install"; exit 1; }
   BOOTSTRAP_CLI="$HOME/e2e-upd-bootstrap-cli/node_modules/proprio/dist/index.js"
 fi
-node "$BOOTSTRAP_CLI" --version >/dev/null || { fail_ "1d bootstrap CLI smoke"; exit 1; }
+bootstrap() {
+  local -a node_args=()
+  if [ -n "${E2E_BOOTSTRAP_NODE_LOADER:-}" ]; then
+    node_args+=(--import "$E2E_BOOTSTRAP_NODE_LOADER")
+  fi
+  node "${node_args[@]}" "$BOOTSTRAP_CLI" "$@"
+}
+
+bootstrap --version >/dev/null || { fail_ "1d bootstrap CLI smoke"; exit 1; }
 pass "1 bootstrap CLI ready"
 
 note "2. install --ref $BASE_REF (the 'old version' the user installed a while ago)"
-if node "$BOOTSTRAP_CLI" install --repo "$E2E_REPO" --ref "$BASE_REF" --yes; then
+if bootstrap install --repo "$E2E_REPO" --ref "$BASE_REF" --yes; then
   pass "2a install base ref exits 0"
 else
   fail_ "2a install base ref exits 0"; exit 1
