@@ -23,6 +23,12 @@ published backup. Incomplete files use a `.partial` suffix and stay out of
 health and retention. A canceled dump leaves the previous recovery point
 available and does not trigger JavaScript fallback or retention pruning.
 
+After publishing an archive, Proprio also removes its matching staging files
+that have been idle for at least 24 hours. It keeps files owned by a live
+process and leaves files from another host for that host to handle. Older
+staging names without an ownership marker use the same 24-hour grace period.
+The published archive retention tiers are independent of this cleanup.
+
 Configure these in:
 
 ```sh

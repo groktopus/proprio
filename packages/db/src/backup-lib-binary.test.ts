@@ -1,4 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -64,5 +67,80 @@ describe("JavaScript backup binary SQL", () => {
       expect(transport.projection).toBe('SELECT "bytes", "payloads"::text AS "payloads", "metadata", "redacted"::text AS "redacted" FROM "public"."binary_fixture"');
       expect(transport.end).toHaveBeenCalledTimes(1);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("reclaims aged orphan output while preserving a concurrent backup", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "backup-orphan-staging-"));
+    const stem = "proprio-20260101-010203-9c7cfaa7-682c-4133-a2ef-0b916a37a793";
+    const legacy = [`${stem}.sql.partial`, `${stem}.sql.gz.partial`];
+    const recent = "proprio-20260101-010204-9c7cfaa7-682c-4133-a2ef-0b916a37a793.sql.partial";
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const options = { connectionString: "postgres://unused/binary_test", backupDir: directory,
+      backupEngine: "javascript" as const, retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } };
+    let markStaged!: (filename: string) => void;
+    let markFailed!: (error: unknown) => void;
+    const ready = new Promise<string>((resolve, reject) => {
+      markStaged = resolve;
+      markFailed = reject;
+    });
+    let releaseVerification!: () => void;
+    const verification = new Promise<void>(resolve => { releaseVerification = resolve; });
+    let running: ReturnType<typeof runDatabaseBackup> | undefined;
+    try {
+      for (const name of [...legacy, recent]) await writeFile(path.join(directory, name), "incomplete backup");
+      for (const name of legacy) await utimes(path.join(directory, name), old, old);
+
+      running = runDatabaseBackup({ ...options, verifyBeforePrune: async (stagingFile) => {
+        await utimes(stagingFile, old, old);
+        markStaged(stagingFile);
+        return verification;
+      } });
+      void running.catch(markFailed);
+      const active = await ready;
+      const second = await runDatabaseBackup(options);
+
+      const names = await readdir(directory);
+      expect(names).toContain(path.basename(active));
+      expect(names).toContain(path.basename(second.backupFile));
+      expect(names).toContain(recent);
+      for (const name of legacy) expect(names).not.toContain(name);
+      releaseVerification();
+      const first = await running;
+      expect(first.backupFile).not.toBe(second.backupFile);
+      expect(await readdir(directory)).toEqual(expect.arrayContaining([
+        path.basename(first.backupFile), path.basename(second.backupFile),
+      ]));
+    } finally {
+      releaseVerification();
+      await running?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves aged staging owned by a different live process and reclaims it after exit", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "backup-live-owner-"));
+    const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const exited = once(owner, "exit");
+    try {
+      await once(owner, "spawn");
+      const machine = createHash("sha256").update(os.hostname()).digest("hex").slice(0, 16);
+      const filename = `proprio-20260101-010203-9c7cfaa7-682c-4133-a2ef-0b916a37a793.owner-${machine}-${owner.pid}.sql.gz.partial`;
+      const file = path.join(directory, filename);
+      await writeFile(file, "incomplete backup");
+      const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      await utimes(file, old, old);
+      const options = { connectionString: "postgres://unused/binary_test", backupDir: directory,
+        backupEngine: "javascript" as const, retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } };
+      await runDatabaseBackup(options);
+      expect(await readdir(directory)).toContain(filename);
+      owner.kill();
+      await exited;
+      await runDatabaseBackup(options);
+      expect(await readdir(directory)).not.toContain(filename);
+    } finally {
+      if (!owner.killed) owner.kill();
+      await exited.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

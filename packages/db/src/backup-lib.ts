@@ -1,11 +1,12 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 
 export type BackupRetentionPolicy = {
   dailyDays: number;
@@ -80,6 +81,10 @@ const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 const PG_DUMP_FALLBACK_WARNING = "The pg_dump backup path failed; the JavaScript fallback may not preserve all PostgreSQL features.";
 
+const BACKUP_STAGING_GRACE_MS = 24 * 60 * 60 * 1000;
+const BACKUP_HOST_ID = createHash("sha256").update(hostname()).digest("hex").slice(0, 16);
+const BACKUP_STAGING_NAME = /^\d{8}-\d{6}-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?:\.owner-([a-f0-9]{16})-([1-9]\d*))?\.sql(?:\.gz)?\.partial$/;
+
 const STATEMENT_BREAKPOINT = "-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
 function sanitizeRestoreErrorMessage(error: unknown): string {
@@ -122,6 +127,38 @@ function monthlyRetentionCutoff(nowMs: number, monthlyMonths: number): number {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, 1);
 }
 
+function backupOwnerIsLive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // Permission failures and invalid process IDs do not prove an owner died.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function pruneAbandonedBackupStaging(backupDir: string, filenamePrefix: string): void {
+  const prefix = `${filenamePrefix}-`;
+  const cutoff = Date.now() - BACKUP_STAGING_GRACE_MS;
+  let names: string[];
+  try { names = readdirSync(backupDir); } catch { return; }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = BACKUP_STAGING_NAME.exec(name.slice(prefix.length));
+    if (!match) continue;
+    const [, ownerHost, ownerPid] = match;
+    if (ownerHost && (ownerHost !== BACKUP_HOST_ID || backupOwnerIsLive(Number(ownerPid)))) continue;
+
+    const file = resolve(backupDir, name);
+    try {
+      const stat = lstatSync(file);
+      if (stat.isFile() && stat.mtimeMs < cutoff) unlinkSync(file);
+    } catch {
+      // Another backup may remove an orphan during the scan.
+    }
+  }
+}
+
 /**
  * Tiered backup pruning:
  * - Daily tier: keep ALL backups from the last `dailyDays` days
@@ -144,8 +181,12 @@ function pruneOldBackups(backupDir: string, retention: BackupRetentionPolicy, fi
     if (!name.startsWith(`${filenamePrefix}-`)) continue;
     if (!name.endsWith(".sql") && !name.endsWith(".sql.gz")) continue;
     const fullPath = resolve(backupDir, name);
-    const stat = statSync(fullPath);
-    entries.push({ name, fullPath, mtimeMs: stat.mtimeMs });
+    try {
+      const stat = statSync(fullPath);
+      entries.push({ name, fullPath, mtimeMs: stat.mtimeMs });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 
   // Sort newest first so the first entry per week/month bucket is the one we keep
@@ -617,8 +658,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   // Keep partial output out of health checks and retention. Concurrent
   // one-off and server-owned jobs also get a separate final archive name.
   const fileStem = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}-${randomUUID()}`);
-  const sqlFile = `${fileStem}.sql.partial`;
-  const stagedArchive = `${fileStem}.sql.gz.partial`;
+  const stagingStem = `${fileStem}.owner-${BACKUP_HOST_ID}-${process.pid}`;
+  const sqlFile = `${stagingStem}.sql.partial`;
+  const stagedArchive = `${stagingStem}.sql.gz.partial`;
   const backupFile = `${fileStem}.sql.gz`;
   const writer = createBufferedTextFileWriter(sqlFile);
 
@@ -639,6 +681,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       throw error;
     }
     const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
+    pruneAbandonedBackupStaging(opts.backupDir, filenamePrefix);
     return { backupFile, sizeBytes, prunedCount, engine, fallbackReason };
   }
 
