@@ -61,6 +61,24 @@ async function readGoal(api: RunnerApi, issueId: string, agentId: string): Promi
   return api.get<Row>(`/api/issues/${issueId}/runner-goal?agentId=${encodeURIComponent(agentId)}`);
 }
 
+export function isSessionGoalControllerReady(value: {
+  goal: Row;
+  activeRun: Row | null | undefined;
+  events: readonly Row[];
+}): boolean {
+  const runId = value.activeRun?.id;
+  if (typeof runId !== "string" || value.activeRun.status !== "running"
+    || value.activeRun.runtimeMode !== "native" || value.goal.activeRunId !== runId
+    || value.goal.capability?.availability !== "available"
+    || !Array.isArray(value.goal.capability.actions) || !value.goal.capability.actions.includes("set")) return false;
+
+  const hasRunEvent = (eventType: string) => value.events.some(event => {
+    const envelope = event.payload?.prpEvent;
+    return envelope?.runId === runId && envelope.sourceKind === "runner" && envelope.eventType === eventType;
+  });
+  return (hasRunEvent("session.started") || hasRunEvent("session.resumed")) && hasRunEvent("turn.started");
+}
+
 async function runArtifactOracle(archivePath: string, nonce: string, deadlineAt: number) {
   const childEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     ["PATH", "SYSTEMROOT", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "HOME"].includes(key)));
@@ -117,12 +135,8 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
         : [];
       return { goal, runs, activeRun, events };
     },
-    accept: value => value.goal.capability?.availability === "available"
-      && Array.isArray(value.goal.capability.actions) && value.goal.capability.actions.includes("set")
-      && value.activeRun?.runtimeMode === "native"
-      && value.events.some((event: Row) => ["session.started", "session.resumed"].includes(String(event.eventType)))
-      && value.events.some((event: Row) => event.eventType === "turn.started"),
-    reject: value => value.runs.some((run: Row) => ["failed", "timed_out", "cancelled"].includes(String(run.status)))
+    accept: isSessionGoalControllerReady,
+    reject: value => value.runs.some((run: Row) => ["failed", "timed_out", "cancelled", "succeeded"].includes(String(run.status)))
       ? "Initial native run ended before its goal controller became available" : undefined,
   });
   const beforeProjection = ready.goal;
