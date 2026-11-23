@@ -70,8 +70,11 @@ capabilities under its Durable Object scheduling policy. See the
 
 The existing provider CI installs both exact SDK versions, typechecks both
 Worker entry points, runs the bridge tests, and builds the 1.0 Worker and
-container with Wrangler's dry-run mode. A dry run cannot exercise Cloudflare's
-container scheduling, native process termination, alarms, or service routing.
+container with Wrangler's dry-run mode. CI also starts the Worker through
+`wrangler dev --local` and exercises the authenticated HTTP API against a
+Docker container on the runner. Local results cover the source and process
+behavior. Live scheduling, alarm timing, and Cloudflare service routing
+still require staging.
 
 Use a staging Worker and container application with unique names. On staging,
 verify an authenticated acquire and resume, separate named and default session

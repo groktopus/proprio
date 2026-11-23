@@ -32,7 +32,8 @@ for (const channel of [worker.stdout, worker.stderr]) {
   channel.on("data", data => { log = (log + data).slice(-32_000); });
 }
 
-function request(route, body, { method = "POST", authorized = true, timeoutMs = 30_000 } = {}) {
+function request(route, body, { method = "POST", authorized = true, timeoutMs = 30_000, signal } = {}) {
+  const deadline = AbortSignal.timeout(timeoutMs);
   return fetch(base + route, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -40,7 +41,7 @@ function request(route, body, { method = "POST", authorized = true, timeoutMs = 
       ...(authorized ? { Authorization: `Bearer ${token}` } : {}),
       "Content-Type": "application/json",
     },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
   });
 }
 
@@ -72,6 +73,16 @@ function eventFrames(text) {
     if (!kind.startsWith("event: ") || !data?.startsWith("data: ")) return [];
     return [{ type: kind.slice("event: ".length), payload: JSON.parse(data.slice("data: ".length)) }];
   });
+}
+
+async function waitForOutput(reader, marker) {
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes(marker)) {
+    const chunk = await reader.read();
+    assert.ok(!chunk.done, "the Worker ended the stream before the native command started");
+    text += decoder.decode(chunk.value, { stream: true });
+  }
 }
 
 let lease;
@@ -112,11 +123,53 @@ try {
   await delay(1000);
   assert.equal((await json("/exec", { ...bound, command: "test", args: ["!", "-e", "/tmp/proprio-late-write"] })).exitCode, 0);
 
+  const disconnect = new AbortController();
+  const streaming = await request("/exec", {
+    ...bound,
+    command: "sh",
+    args: ["-c", 'printf disconnect-ready; (sleep 2; touch /tmp/proprio-after-disconnect) & wait'],
+    streamOutput: true,
+  }, { signal: disconnect.signal });
+  const streamReader = streaming.body.getReader();
+  try {
+    await waitForOutput(streamReader, "disconnect-ready");
+    disconnect.abort();
+  } finally {
+    await streamReader.cancel().catch(() => undefined);
+    streamReader.releaseLock();
+  }
+  await delay(2300);
+  assert.equal((await json("/exec", { ...bound, command: "test", args: ["!", "-e", "/tmp/proprio-after-disconnect"] })).exitCode, 0);
+
   await json("/leases/release", bound);
   const missing = await json("/leases/resume", { ...requestLease, ...bound }, { status: 409 });
   assert.equal(missing.error, "sandbox_state_lost");
+  lease = await json("/leases/acquire", { ...requestLease, runId: "stop" }, { timeoutMs: 90_000 });
+  const stopping = await request("/exec", {
+    providerLeaseId: lease.providerLeaseId,
+    command: "sh", args: ["-c", "printf stop-ready; sleep 30"], streamOutput: true,
+  });
+  const stoppingReader = stopping.body.getReader();
+  try {
+    await waitForOutput(stoppingReader, "stop-ready");
+    await json(`/leases/${encodeURIComponent(lease.providerLeaseId)}`, undefined, { method: "DELETE" });
+    // Destroyed containers may close the underlying stream with an error.
+    // An active process must finish well before its own sleep ends.
+    const drained = (async () => {
+      for (;;) {
+        try { if ((await stoppingReader.read()).done) return true; }
+        catch { return true; }
+      }
+    })();
+    assert.equal(await Promise.race([drained, delay(5000, false, { ref: false })]), true);
+  } finally {
+    await stoppingReader.cancel().catch(() => undefined);
+    stoppingReader.releaseLock();
+  }
+  const stoppedLease = await json("/leases/resume", { ...requestLease, providerLeaseId: lease.providerLeaseId }, { status: 409 });
+  assert.equal(stoppedLease.error, "sandbox_state_lost");
   lease = undefined;
-  console.log("Local Wrangler and Docker verified auth, acquire, resume, native stdin and SSE, session scope, process-group timeout, release, and lost-state detection.");
+  console.log("Local Wrangler and Docker verified auth, acquire, resume, native stdin and SSE, session scope, process-group timeout, disconnect, Stop, release, and lost-state detection.");
 } catch (error) {
   console.error(log);
   throw error;
