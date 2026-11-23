@@ -3,27 +3,28 @@ import { readProcessStartedAt } from "./hot-restart.js";
 import { readLeaseReleaseDeferral } from "./environment-lease-release-deferral.js";
 import { runUsedConversationAdapter } from "./conversation-continuation.js";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { environmentLeases, heartbeatRunEvents, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@groktopus/db";
+import { environmentLeases, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@groktopus/db";
 import { hasNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 
-import { executionStartedEventPredicate } from "./pre-dispatch-execution-evidence.js";
+import { candidateRunScopes, hasStartupExecutionEvidence, RETAINED_RUNNER_PROFILE_KEYS } from "./pre-dispatch-execution-evidence.js";
 import { readRunCancellation } from "./run-cancellation.js";
+import { hasPendingBudgetRunCancellation } from "./heartbeat/budget-cancellation.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
 /** Historical startup cancellations may lack an adapter Stop receipt. This
  * proof is for lifecycle cleanup only. It cannot authorize replay. */
-async function isSettledLegacyStartupCancellation(db: Db, run: Run): Promise<boolean> {
+function isSettledLegacyStartupCancellation(run: Run): boolean {
   const startup = run.resultJson?.startupCancellation as Record<string, unknown> | undefined;
   const cancellation = readRunCancellation(run.resultJson);
   if (run.executionStage !== "settled" || !run.startedAt || !run.finishedAt ||
       startup?.beforeNativeSelection !== false || typeof startup.requestedAt !== "string" ||
       cancellation?.expected !== true ||
       !["operator", "queued_message", "control_plane"].includes(cancellation.source) ||
-      (startup.errorCode !== undefined && startup.errorCode !== run.errorCode) ||
-      runHasPendingStop(run)) return false;
+      startup.errorCode !== "continuation_task_ownership_changed" || startup.errorCode !== run.errorCode ||
+      runHasPendingStop(run) || hasPendingBudgetRunCancellation(startup)) return false;
 
   const requestedAt = Date.parse(startup.requestedAt);
   if (!Number.isFinite(requestedAt) || requestedAt < run.startedAt.getTime() ||
@@ -35,19 +36,8 @@ async function isSettledLegacyStartupCancellation(db: Db, run: Run): Promise<boo
       run.lastOutputAt || run.lastOutputSeq > 0 || run.stdoutExcerpt || run.stderrExcerpt ||
       run.usageJson?.budgetDispatch != null || recovery?.providerWorkStarted === true ||
       run.resultJson?.workspaceRestoreFailure != null || run.resultJson?.workspaceRestoreRecovery != null ||
-      run.runnerProfileJson?.nativeExecutionInput != null || run.runnerProfileJson?.nativeWorkspaceSync != null ||
-      run.runnerProfileJson?.remoteWorkspace != null || run.runnerProfileJson?.sessionCheckpoint != null ||
-      run.runnerProfileJson?.nativeWorkspaceFinalizationOwner != null) return false;
-
-  const [executed] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents).where(and(
-    eq(heartbeatRunEvents.companyId, run.companyId), eq(heartbeatRunEvents.runId, run.id),
-    executionStartedEventPredicate(),
-  )).limit(1);
-  if (executed) return false;
-  const [nativeResult] = await db.select({ id: nativeRunResults.id }).from(nativeRunResults).where(and(
-    eq(nativeRunResults.companyId, run.companyId), eq(nativeRunResults.runId, run.id),
-  )).limit(1);
-  return !nativeResult;
+      RETAINED_RUNNER_PROFILE_KEYS.some(key => run.runnerProfileJson?.[key] != null)) return false;
+  return true;
 }
 
 /** Cancellation changes admission. Process and lease evidence controls cleanup. */
@@ -82,6 +72,7 @@ export async function agentExecutionStopBlocker(db: Db, agentIds: string[]): Pro
     if (!observed || !coordinator.controllerProcessStartedAt ||
         new Date(observed).getTime() === coordinator.controllerProcessStartedAt.getTime()) return "native_controller_alive";
   }
+  const legacyStartupCandidates: Run[] = [];
   for (const run of runs) {
     if (run.runtimeMode === "legacy" &&
         runHasUnverifiedProviderStop(run))
@@ -110,9 +101,22 @@ export async function agentExecutionStopBlocker(db: Db, agentIds: string[]): Pro
     if (run.runtimeMode === "legacy" && !run.processPid && !run.processGroupId &&
         (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
         !(run.executionStage === "settled" && !await runUsedConversationAdapter(db, run)) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id)) &&
-        !(runLeases.length === 0 && !coordinators.some(row => row.runId === run.id) &&
-          await isSettledLegacyStartupCancellation(db, run))) return "legacy_stop_unproven";
+        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) {
+      if (runLeases.length || coordinators.some(row => row.runId === run.id) ||
+          !isSettledLegacyStartupCancellation(run)) return "legacy_stop_unproven";
+      legacyStartupCandidates.push(run);
+    }
+  }
+  if (legacyStartupCandidates.length) {
+    // Check the whole candidate set with two bounded-result reads, regardless
+    // of how many cancelled preparations the agents retained.
+    const [executionStarted, nativeResults] = await Promise.all([
+      hasStartupExecutionEvidence(db, legacyStartupCandidates),
+      db.select({ id: nativeRunResults.id }).from(nativeRunResults).where(
+        sql`(${nativeRunResults.runId}, ${nativeRunResults.companyId}) in (${candidateRunScopes(legacyStartupCandidates)})`,
+      ).limit(1),
+    ]);
+    if (executionStarted || nativeResults.length) return "legacy_stop_unproven";
   }
   // Release an expired owner only after its cancelled execution has stop proof.
   for (const coordinator of abandoned) {

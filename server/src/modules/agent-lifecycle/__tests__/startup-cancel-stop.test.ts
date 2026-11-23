@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { agents, companies, createDb, environmentLeases, heartbeatRunEvents, heartbeatRuns, issues,
   nativeRunFinalizations, type Db } from "@groktopus/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../../__tests__/helpers/embedded-postgres.js";
 import { configureAgentLifecycle, createAgentLifecycle } from "../../../services/agent-lifecycle.js";
 import { createLifecycleDriver } from "../../../services/agent-lifecycle-driver.js";
@@ -62,6 +62,12 @@ describe.skipIf(!support.supported)("historical legacy startup cancellation stop
     ["provider cancellation", { resultJson: { ...resultJson, cancellation: { ...cancellation, source: "provider" } } }],
     ["provider output", { lastOutputSeq: 1 }],
     ["unrecognized startup data", { resultJson: { ...resultJson, startupCancellation: "cancelled" } }],
+    ["generic startup marker", { resultJson: { ...resultJson, startupCancellation: {
+      requestedAt: finishedAt.toISOString(), beforeNativeSelection: false,
+    } } }],
+    ["undelivered budget Stop", { resultJson: { ...resultJson, startupCancellation: {
+      ...startupCancellation, budgetEnforcement: { scopeType: "agent" },
+    } } }],
     ["outstanding Stop", { resultJson: { ...resultJson, executionCancellation: { state: "requested" } } }],
     ["admitted dispatch without handoff", { usageJson: { budgetDispatch: { admittedAt: startedAt.toISOString() } } }],
     ["handed off dispatch", { usageJson: { budgetDispatch: { handedOffAt: startedAt.toISOString() } } }],
@@ -94,6 +100,26 @@ describe.skipIf(!support.supported)("historical legacy startup cancellation stop
     const { agent, run } = await fixture();
     await db.insert(environmentLeases).values({ companyId: run.companyId, heartbeatRunId: run.id, ...lease });
     expect(await agentExecutionStopBlocker(db, [agent.id])).not.toBeNull();
+  });
+
+  it("checks retained startup history in a fixed number of evidence queries", async () => {
+    const { agent, run } = await fixture();
+    await db.insert(heartbeatRuns).values(Array.from({ length: 120 }, () => ({
+      companyId: run.companyId, agentId: agent.id, invocationSource: "on_demand" as const, status: run.status, errorCode: run.errorCode,
+      runtimeMode: run.runtimeMode, executionStage: run.executionStage, startedAt, finishedAt,
+      runnerProfileJson: run.runnerProfileJson, resultJson,
+    })));
+    const select = vi.spyOn(db, "select");
+    try {
+      expect(await agentExecutionStopBlocker(db, [agent.id])).toBeNull();
+      expect(select.mock.calls.length).toBeLessThanOrEqual(6);
+    } finally {
+      select.mockRestore();
+    }
+    await db.insert(heartbeatRunEvents).values({
+      companyId: run.companyId, agentId: agent.id, runId: run.id, seq: 1, eventType: "adapter.invoke",
+    });
+    expect(await agentExecutionStopBlocker(db, [agent.id])).toBe("legacy_stop_unproven");
   });
 
   it("still blocks on a native finalization record", async () => {
