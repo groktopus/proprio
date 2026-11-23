@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { writeManagedShim, flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
+import { writeManagedShim, flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, withInstallStoreLock, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
 import type { CommandRunner } from "../commands/install.js";
 import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManagedInstall, updateCommand } from "../commands/update.js";
 
@@ -146,6 +146,108 @@ describe("update command", () => {
     }
     expect(readInstallManifest(paths)?.sha).toBe(replacementHealthy ? newSha : oldSha);
     expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(replacementHealthy ? newPayload : oldPayload));
+  });
+
+  it.each(["older passes", "older fails", "both fail", "staging fails"] as const)("settles overlapping managed Git updates when %s", async mode => {
+    const olderHealthy = mode === "older passes";
+    const paths = resolveInstallStorePaths();
+    initializeInstallStore(paths);
+    const originalSha = "1".repeat(40);
+    const olderSha = "2".repeat(40);
+    const newerSha = "3".repeat(40);
+    const seedPayload = (sha: string) => {
+      const payload = payloadPathFor(paths, "git", sha.slice(0, 12));
+      createPayload(payload, "0.3.1");
+      fs.writeFileSync(path.join(payload, "node_modules/proprio/package.json"), JSON.stringify({ version: "0.3.1" }));
+      return payload;
+    };
+    const originalPayload = seedPayload(originalSha);
+    const olderPayload = seedPayload(olderSha);
+    flipCurrentAtomic(originalPayload, paths);
+    writeInstallManifestAtomic({
+      schemaVersion: 1, source: "git", version: "0.3.1", channel: "pinned",
+      repo: "groktopus/proprio", ref: "main", sha: originalSha,
+      payloadPath: originalPayload, installedAt: "2026-07-22T00:00:00.000Z", previous: [],
+    }, paths);
+    writeManagedShim(paths);
+
+    const validationStarted = Promise.withResolvers<void>();
+    const releaseValidation = Promise.withResolvers<void>();
+    const validationError = new Error("older commit failed validation");
+    const olderRestart = vi.fn(async (_version: string, target?: { expectedCommit?: string }) => {
+      if (target?.expectedCommit === olderSha) {
+        validationStarted.resolve();
+        await releaseValidation.promise;
+        if (!olderHealthy) throw validationError;
+      }
+      return true;
+    });
+    const runCommand = (sha: string) => vi.fn(async (file: string) => file === "curl"
+      ? { stdout: JSON.stringify({ sha }), stderr: "" }
+      : { stdout: "0.3.1\n", stderr: "" });
+    const executable = (payload: string) => path.join(payload, "node_modules/proprio/dist/index.js");
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const olderUpdate = updateCommand({ yes: true, backup: false, json: true }, {
+      paths, executablePath: executable(originalPayload), runCommand: runCommand(olderSha),
+      restartActiveService: olderRestart,
+    }).then(() => undefined, (error: unknown) => error);
+
+    const newerRestart = vi.fn(async (_version: string, target?: { expectedCommit?: string }) => {
+      if (mode === "both fail" && target?.expectedCommit === newerSha) throw new Error("newer commit failed validation");
+      return true;
+    });
+    try {
+      await Promise.race([validationStarted.promise, olderUpdate.then(error => { throw error; })]);
+      expect(readInstallManifest(paths)?.sha).toBe(olderSha);
+      if (mode === "staging fails") {
+        const buildError = new Error("staging failed before activation");
+        const staging = withInstallStoreLock(async () => {
+          releaseValidation.resolve();
+          // Keep the lock after the older validation rejects. A failed build
+          // leaves the older activation in place for its rollback to settle.
+          await new Promise(resolve => setTimeout(resolve, 50));
+          throw buildError;
+        }, paths);
+        await expect(staging).rejects.toBe(buildError);
+      } else {
+        seedPayload(newerSha);
+        const newerUpdate = updateCommand({ yes: true, backup: false, json: true }, {
+          paths, executablePath: executable(olderPayload), runCommand: runCommand(newerSha),
+          restartActiveService: newerRestart,
+        });
+        if (mode === "both fail") await expect(newerUpdate).rejects.toThrow("rolled back to 0.3.1");
+        else {
+          await newerUpdate;
+          expect(readInstallManifest(paths)?.sha).toBe(newerSha);
+        }
+      }
+    } finally {
+      releaseValidation.resolve();
+      await olderUpdate;
+    }
+
+    const shouldRestoreOriginal = mode === "both fail" || mode === "staging fails";
+    const activeSha = shouldRestoreOriginal ? originalSha : newerSha;
+    expect(readInstallManifest(paths)?.sha).toBe(activeSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(payloadPathFor(paths, "git", activeSha.slice(0, 12))));
+    if (mode === "staging fails") {
+      expect(olderRestart).toHaveBeenLastCalledWith("0.3.1", { expectedCommit: originalSha, startIfInactive: true });
+      expect(await olderUpdate).toMatchObject({ message: expect.stringContaining("rolled back"), cause: validationError });
+      expect(stdout).not.toHaveBeenCalled();
+      return;
+    }
+    expect(olderRestart).toHaveBeenCalledExactlyOnceWith("0.3.1", { expectedCommit: olderSha });
+    expect(await olderUpdate).toMatchObject({
+      message: expect.stringContaining("superseded"),
+      ...(olderHealthy ? {} : { cause: validationError }),
+    });
+    if (mode === "both fail") {
+      expect(newerRestart).toHaveBeenLastCalledWith("0.3.1", { expectedCommit: originalSha, startIfInactive: true });
+      expect(stdout).not.toHaveBeenCalled();
+    } else {
+      expect(stdout).toHaveBeenCalledOnce();
+      expect(JSON.parse(String(stdout.mock.calls[0]?.[0]))).toMatchObject({ targetSha: newerSha, restarted: true });
+    }
   });
 
   it("reports SHA git installs as pinned without resolving again", async () => {

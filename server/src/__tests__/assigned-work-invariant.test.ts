@@ -7,6 +7,7 @@ import {
   issueRecoveryActions, issueRelations, issues, issueThreadInteractions, nativeRunFinalizations,
 } from "@groktopus/db";
 import { recoveryService } from "../services/recovery/service.js";
+import { canAdmitSessionGoalRecovery } from "../services/heartbeat/session-goal-recovery.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { assignedWorkSweep, ASSIGNED_WORK_CONTINUED_ACTION, ASSIGNED_WORK_REPAIRS_PER_MINUTE } from "../services/recovery/assigned-work-sweep.js";
 import { CONTINUATION_CAP } from "../services/recovery/assigned-work-invariant.js";
@@ -723,11 +724,63 @@ describePostgres("assigned-work invariant sweep", () => {
     expect(queue.calls).toHaveLength(0);
   }, 60_000);
 
-  it("treats a stopped or blocked session goal as the person's move and only a running goal as pending", async () => {
+  it.each(["live run", "queued successor"] as const)("does not enqueue goal recovery beside a %s", async path => {
+    const f = await seedCompany();
+    const issueId = await f.issue();
+    const [session] = await db.insert(agentTaskSessions).values({
+      companyId: f.companyId, agentId: f.agentId, adapterType: "codex_local", taskKey: issueId,
+      goalStatus: "active", goalDesiredState: "active", goalRevision: 7,
+    }).returning();
+    const readAdmission = () => db.transaction(async tx => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+      return canAdmitSessionGoalRecovery(tx as unknown as typeof db, {
+        companyId: f.companyId, issueId, agentId: f.agentId, adapterType: "codex_local",
+        sessionId: session!.id, revision: 7,
+      });
+    });
+    expect(await readAdmission()).toBe(true);
+    if (path === "live run") await f.run(issueId, { status: "running", finishedAt: null });
+    else await wakeQueue().enqueueWakeup(f.agentId, { payload: { issueId } });
+    expect(await readAdmission()).toBe(false);
+  }, 60_000);
+
+  it("retries an orphaned session goal and leaves an independent goal recoverable", async () => {
+    const f = await seedCompany();
+    const [first, second] = await Promise.all([f.issue(), f.issue()]);
+    for (const issueId of [first, second]) {
+      await f.run(issueId, { status: "succeeded", errorCode: null });
+      await db.insert(agentTaskSessions).values({
+        companyId: f.companyId, agentId: f.agentId, adapterType: "codex_local",
+        taskKey: issueId, goalStatus: "active", goalDesiredState: "active", goalRevision: 7,
+      });
+    }
+
+    const queue = wakeQueue();
+    queue.enqueueWakeup.mockRejectedValueOnce(new Error("fixture fault after predecessor settlement"));
+    let now = new Date();
+    const sweep = assignedWorkSweep(db, { enqueueWakeup: queue.enqueueWakeup, now: () => now });
+    const check = (issueId: string) => sweep.checkIssue({ companyId: f.companyId, issueId });
+    const failed = await check(first);
+    expect(failed).toMatchObject({ outcome: "enqueue_refused", retryAt: expect.any(Date) });
+    expect(await check(second)).toMatchObject({ outcome: "repaired" });
+    expect(queue.calls.map(call => call.issueId)).toEqual([second]);
+    expect(queue.enqueueWakeup).toHaveBeenLastCalledWith(f.agentId, expect.objectContaining({
+      reason: "goal_control",
+      contextSnapshot: expect.objectContaining({ taskKey: second, resumeSessionGoalHeartbeat: true, skipIssueComment: true }),
+    }));
+
+    now = new Date(failed!.retryAt!.getTime() + 1_000);
+    const restarted = assignedWorkSweep(db, { enqueueWakeup: queue.enqueueWakeup, now: () => now });
+    expect(await restarted.checkIssue({ companyId: f.companyId, issueId: first })).toMatchObject({ outcome: "repaired" });
+    expect(await restarted.checkIssue({ companyId: f.companyId, issueId: first }))
+      .toMatchObject({ outcome: "ok", verdict: { clause: "pending_intent", intent: "queued_wake" } });
+    expect(queue.calls.map(call => call.issueId)).toEqual([second, first]);
+  }, 60_000);
+
+  it("treats a stopped or blocked session goal as the person's move", async () => {
     const f = await seedCompany();
     const sweep = assignedWorkSweep(db, { enqueueWakeup: wakeQueue().enqueueWakeup });
     const cases = [
-      { goalStatus: "active", goalDesiredState: "active", expected: { clause: "pending_intent", intent: "session_goal" } },
       { goalStatus: "blocked", goalDesiredState: "paused", expected: { clause: "waiting", reason: "user_stop" } },
       { goalStatus: "active", goalDesiredState: "paused", expected: { clause: "waiting", reason: "user_stop" } },
     ];

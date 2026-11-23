@@ -469,9 +469,15 @@ describe("managed install commands", () => {
       previous: [],
     }, paths);
 
+    const uninstall = vi.fn(async () => undefined);
+    const detectServiceManager = vi.fn(async () => ({
+      supported: true as const,
+      manager: { status: async () => ({ installed: true, active: true }), uninstall } as never,
+    }));
     await withInstallStoreLock(
       async () => {
-        await expect(uninstallCommand()).rejects.toThrow("already running");
+        await expect(uninstallCommand({ detectServiceManager })).rejects.toThrow("already running");
+        expect(uninstall).not.toHaveBeenCalled();
       },
       paths,
     );
