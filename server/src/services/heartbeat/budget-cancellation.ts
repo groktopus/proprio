@@ -12,6 +12,12 @@ export function pendingBudgetRunCancellationPredicate() {
   );
 }
 
+export function hasPendingBudgetRunCancellation(startup: Record<string, unknown> | undefined): boolean {
+  const intent = startup?.budgetEnforcement;
+  return Boolean(intent && typeof intent === "object" && !Array.isArray(intent) &&
+    (intent as Record<string, unknown>).deliveredAt == null);
+}
+
 export function budgetCancellationScopePredicate(scope: Pick<BudgetEnforcementScope, "companyId" | "scopeType" | "scopeId">) {
   return and(eq(heartbeatRuns.companyId, scope.companyId),
     sql`${heartbeatRuns.resultJson}->'startupCancellation'->'budgetEnforcement'->>'companyId' = ${scope.companyId}`,

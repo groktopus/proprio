@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { heartbeatRunEvents, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
-import { executionStartedEventPredicate } from "./pre-dispatch-execution-evidence.js";
+import { executionStartedEventPredicate, RETAINED_RUNNER_PROFILE_KEYS } from "./pre-dispatch-execution-evidence.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -39,8 +39,7 @@ export function legacyShutdownBeforeDispatchCondition() {
     sql`coalesce(${heartbeatRuns.resultJson}#>'{executionRecovery,providerWorkStarted}', 'false'::jsonb) = 'false'::jsonb`,
     sql`${heartbeatRuns.resultJson}->'workspaceRestoreFailure' is null`,
     sql`${heartbeatRuns.resultJson}->'workspaceRestoreRecovery' is null`,
-    sql`not (coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ?| array[
-      'nativeExecutionInput', 'nativeWorkspaceSync', 'remoteWorkspace', 'nativeWorkspaceFinalizationOwner', 'sessionCheckpoint'])`,
+    sql`not (coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ?| array[${sql.join(RETAINED_RUNNER_PROFILE_KEYS.map(key => sql`${key}::text`), sql`, `)}])`,
     sql`coalesce(${heartbeatRuns.runnerProfileJson}#>>'{adapterDispatch,adapterType}', '') <> 'proprio_runner'`,
     sql`not exists (select 1 from ${nativeRunFinalizations}
       where ${nativeRunFinalizations.companyId} = ${heartbeatRuns.companyId} and ${nativeRunFinalizations.runId} = ${heartbeatRuns.id})`,
