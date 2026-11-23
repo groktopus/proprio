@@ -76,22 +76,12 @@ export function goalRoutes(db: Db) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Goal not found");
     if (!existing) return;
-    const goal = await svc.remove(id);
+    const { actorType, actorId, agentId } = getActorInfo(req);
+    const goal = await svc.remove(existing.companyId, id, { actorType, actorId, agentId });
     if (!goal) {
       res.status(404).json({ error: "Goal not found" });
       return;
     }
-
-    const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: goal.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      action: "goal.deleted",
-      entityType: "goal",
-      entityId: goal.id,
-    });
 
     res.json(goal);
   });
