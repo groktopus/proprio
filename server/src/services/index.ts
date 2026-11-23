@@ -73,7 +73,7 @@ export {
   type ExternalObjectResolveResult,
   type ExternalObjectResolverSnapshot,
 } from "./external-objects.js";
-export { goalService } from "./goals.js";
+export { goalService, getGoalIdInCompany } from "./goals.js";
 export { responsibilityService } from "./responsibilities.js";
 export { activityService, type ActivityFilters } from "./activity.js";
 export { workTimelineService, normalizeTimelineWindow } from "./work-timeline.js";

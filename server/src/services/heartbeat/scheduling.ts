@@ -4,6 +4,7 @@ import { notifyIssueReviewState } from "../issue-review-state-notifications.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import {
   issues,
+  goals,
   issueComments,
   heartbeatRuns,
   nativeRunFinalizations,
@@ -149,6 +150,11 @@ export function createHeartbeatScheduling(
     companyId: issues.companyId,
     projectId: issues.projectId,
     goalId: issues.goalId,
+    goalOrigin: sql<"explicit" | "inherited" | "unknown">`CASE
+      WHEN ${issues.goalOriginGoalId} IS NOT DISTINCT FROM ${issues.goalId}
+        THEN ${issues.goalOrigin}
+      ELSE 'unknown'
+    END`,
     identifier: issues.identifier,
     title: issues.title,
     status: issues.status,
@@ -165,12 +171,14 @@ export function createHeartbeatScheduling(
     monitorNotes: issues.monitorNotes,
     monitorScheduledBy: issues.monitorScheduledBy,
   };
+  const { goalOrigin: _discoveryGoalOrigin, ...issueMonitorDiscoveryColumns } = issueMonitorDispatchColumns;
 
   interface IssueMonitorDispatchRow {
     id: string;
     companyId: string;
     projectId: string | null;
     goalId: string | null;
+    goalOrigin: "explicit" | "inherited" | "unknown";
     identifier: string | null;
     title: string;
     status: string;
@@ -341,6 +349,7 @@ export function createHeartbeatScheduling(
           parentDepthPolicy: "allow_nested",
           projectId: input.claimed.projectId,
           goalId: input.claimed.goalId,
+          goalOrigin: input.claimed.goalOrigin,
           assigneeAgentId: input.claimed.assigneeAgentId,
           originKind: RECOVERY_ORIGIN_KINDS.strandedIssueRecovery,
           originId: input.claimed.id,
@@ -485,6 +494,21 @@ export function createHeartbeatScheduling(
     runId: string | null;
     activitySource: "manual" | "scheduled";
   }) {
+    if (input.claimed.goalId) {
+      const [companyGoal] = await db.select({ id: goals.id }).from(goals).where(and(
+        eq(goals.id, input.claimed.goalId),
+        eq(goals.companyId, input.claimed.companyId),
+      ));
+      if (!companyGoal) {
+        // An invalid legacy binding must not make recovery fail after this
+        // function consumes the monitor. Keep the claim and let normal project
+        // fallback resolution choose a company-valid goal for recovery work.
+        input = {
+          ...input,
+          claimed: { ...input.claimed, goalId: null, goalOrigin: "unknown" },
+        };
+      }
+    }
     const recover = () => performIssueMonitorRecovery(input);
     if (input.recoveryPolicy === "wake_owner") {
       try {
@@ -1030,7 +1054,7 @@ export function createHeartbeatScheduling(
   async function tickDueIssueMonitors(now: Date, canContinue: () => boolean) {
     const staleClaimThreshold = new Date(now.getTime() - 5 * 60 * 1000);
     const dueMonitors = await db
-      .select(issueMonitorDispatchColumns)
+      .select(issueMonitorDiscoveryColumns)
       .from(issues)
       .innerJoin(companies, eq(companies.id, issues.companyId))
       .where(

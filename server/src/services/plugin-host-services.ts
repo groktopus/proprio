@@ -2814,6 +2814,7 @@ export function buildHostServices(
               companyId,
               projectId: issue.projectId ?? null,
               goalId: issue.goalId ?? null,
+              goalOrigin: issue.goalOrigin,
               status: issue.status,
             },
             params.interactionId,

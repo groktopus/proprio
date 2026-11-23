@@ -219,6 +219,7 @@ import {
   executionWorkspaceService,
   enrichWorkProductMetadataWithDiff,
   goalService,
+  getGoalIdInCompany,
   heartbeatService,
   issueApprovalService,
   issueRecoveryActionService,
@@ -3167,6 +3168,14 @@ export const ISSUE_LIST_HAS_MORE_HEADER = "X-Proprio-Has-More";
 export const ISSUE_LIST_LIMIT_HEADER = "X-Proprio-Limit";
 export const ISSUE_LIST_NEXT_OFFSET_HEADER = "X-Proprio-Next-Offset";
 export const ISSUE_LIST_NEXT_AFTER_ID_HEADER = "X-Proprio-Next-After-Id";
+
+/** Keep the provenance snapshot column private at every HTTP issue boundary. */
+function issueApiResponse<T extends object>(issue: T): Omit<T, "goalOriginGoalId"> {
+  const { goalOriginGoalId: _goalOriginGoalId, ...response } = issue as T & {
+    goalOriginGoalId?: unknown;
+  };
+  return response;
+}
 
 type IssueListPreparedResponse =
   | { kind: "inbox"; body: unknown; serverTimingPhases?: InboxMinePhaseDurations }
@@ -13174,6 +13183,9 @@ export function issueRoutes(
               goalId:
                 rawCreateBody.goalId ??
                 watchdogProductBugFollowUp.sourceIssue.goalId,
+              goalOrigin: rawCreateBody.goalId
+                ? "explicit"
+                : watchdogProductBugFollowUp.sourceIssue.goalOrigin,
               billingCode:
                 rawCreateBody.billingCode ??
                 watchdogProductBugFollowUp.sourceIssue.billingCode,
@@ -13521,7 +13533,7 @@ export function issueRoutes(
 
     const visibleReferenceSummary = await redactIssueReferenceEdges(req, companyId, referenceSummary);
       res.status(201).json({
-        ...issue,
+        ...issueApiResponse(issue),
       relatedWork: visibleReferenceSummary,
       referencedIssueIdentifiers: visibleReferenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
       });
@@ -13801,7 +13813,7 @@ export function issueRoutes(
       });
       await queueTaskWatchdogEvaluation(issue, actor.runId);
 
-      res.status(201).json(issue);
+      res.status(201).json(issueApiResponse(issue));
     },
   );
 
@@ -14724,6 +14736,15 @@ export function issueRoutes(
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
         ...updateFields
       } = req.body;
+      // Reject a foreign explicit goal before this route can stop a live run
+      // or apply other execution-control side effects. The service validates
+      // again under its owning write transaction.
+      if (typeof updateFields.goalId === "string") {
+        if (!await getGoalIdInCompany(db, existing.companyId, updateFields.goalId)) {
+          res.status(404).json({ error: "Goal not found" });
+          return;
+        }
+      }
       if (commentBody && req.actor.type === "agent") {
         await assertAgentInteraction(db, { companyId: existing.companyId, actorAgentId: req.actor.agentId,
           operation: "comment", issueId: existing.id, texts: [commentBody] });
@@ -17032,7 +17053,7 @@ export function issueRoutes(
         });
         return;
       }
-      res.json({ ...issueResponse, changes, comment, ...(parentAdjusted ? { parentAdjusted } : {}) });
+      res.json({ ...issueApiResponse(issueResponse), changes, comment, ...(parentAdjusted ? { parentAdjusted } : {}) });
     },
   );
 
@@ -17096,7 +17117,7 @@ export function issueRoutes(
     });
 
     await queueTaskWatchdogEvaluation(existing, actor.runId);
-    res.json(issue);
+    res.json(issueApiResponse(issue));
   });
 
   router.post(

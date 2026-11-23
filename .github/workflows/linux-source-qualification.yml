@@ -100,6 +100,7 @@ jobs:
           fi
           export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
           export E2E_UPDATE_REQUIRE_PROBE=0
+          export E2E_UPDATE_USE_BOOTSTRAP_CLI=1
           export E2E_UPDATE_RESULT_FILE="$RUNNER_TEMP/durable-work-lifecycle.json"
           export E2E_BOOTSTRAP_CLI="$PWD/cli/src/index.ts"
           export E2E_BOOTSTRAP_NODE_LOADER="$PWD/cli/node_modules/tsx/dist/loader.mjs"
