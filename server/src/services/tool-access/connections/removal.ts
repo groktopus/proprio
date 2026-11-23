@@ -595,9 +595,8 @@ async function removeConnection(
             and(
               eq(toolApplications.id, updatedConnection.applicationId),
               ne(toolApplications.status, "archived"),
-              // Removing the last AI account must not turn an operator pause into
-              // a recoverable automatic archive.
-              updatedConnection.connectionPurpose === "ai" ? ne(toolApplications.status, "disabled") : undefined,
+              // A disabled parent can contain both AI and tool connections.
+              ne(toolApplications.status, "disabled"),
             ),
           )
           .returning({ id: toolApplications.id });

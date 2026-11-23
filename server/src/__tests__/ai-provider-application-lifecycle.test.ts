@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { companies, companyMemberships, connectionGrants, createDb, toolApplications } from "@groktopus/db";
+import { activityLog, companies, companyMemberships, connectionGrants, createDb, toolApplications } from "@groktopus/db";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { aiConnectionService } from "../services/ai-connections.js";
@@ -113,6 +113,40 @@ describe.skipIf(!support.supported)("AI provider application lifecycle", () => {
     await tools.updateApplication(application.id, { status: "archived" });
     await expect(tools.getApplication(application.id)).resolves.toMatchObject({ status: "archived", archivedAt: null });
     await expect(saveAccount("replacement")).rejects.toThrow("archived");
+  });
+
+  it("revives an auto-archived provider matched by name after a description edit", async () => {
+    const { companyId, application, tools, saveAccount, removeFirst } = await fixture();
+    await db.update(toolApplications).set({ applicationKey: "legacy-provider-key" })
+      .where(eq(toolApplications.id, application.id));
+    await removeFirst();
+    await tools.updateApplication(application.id, { description: "Updated description" });
+    const replacement = await saveAccount("replacement");
+    await expect(tools.getApplication(application.id)).resolves.toMatchObject({
+      status: "active", description: "Updated description", archivedAt: null,
+    });
+    expect((await tools.listConnections(companyId)).find(connection => connection.id === replacement.connectionId))
+      .toMatchObject({ applicationId: application.id, status: "active" });
+  });
+
+  it("preserves a recorded operator disable on a legacy automatic archive", async () => {
+    const { companyId, application, saveAccount, removeFirst } = await fixture();
+    await db.insert(activityLog).values({
+      companyId, actorId: "fixture-board", actorType: "user",
+      action: "tool_application.updated", entityType: "tool_application", entityId: application.id,
+      details: { status: "disabled" },
+    });
+    await removeFirst();
+    await expect(saveAccount("replacement")).rejects.toThrow("disabled or archived by an operator");
+  });
+
+  it("allows the owner to explicitly reauthorize an identity that was already revoked", async () => {
+    const { first, saveAccount } = await fixture();
+    await db.update(connectionGrants).set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(connectionGrants.id, first.grantId));
+    await expect(saveAccount("first again", first.connectionId)).resolves.toMatchObject(first);
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, first.grantId));
+    expect(grant).toMatchObject({ status: "active", revokedAt: null });
   });
 
   it("does not hide the surviving connection when add overlaps last removal", async () => {

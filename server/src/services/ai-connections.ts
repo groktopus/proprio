@@ -5,9 +5,10 @@ import { withAccountHomeSecretMutationLock } from "@groktopus/adapter-codex-loca
 import { syncConnectionCredentialBindings } from "./connection-credential-bindings.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import {
   type Db,
+  activityLog,
   authUsers,
   adapterAuthSessions,
   aiProviderDefaults,
@@ -718,7 +719,7 @@ export function aiConnectionService(db: Db) {
           .for("update");
         if (
           !current ||
-          current.status === "revoked" ||
+          current.status !== reconnect.grant.status ||
           current.updatedAt.getTime() !== reconnect.grant.updatedAt.getTime() ||
           current.updatedAt.getTime() > attemptStartedAt.getTime()
         )
@@ -822,10 +823,24 @@ export function aiConnectionService(db: Db) {
         throw unprocessable("This provider application is disabled");
       }
       if (app.status === "archived") {
-        // Last-connection removal sets both timestamps together. Do not revive
-        // a same-name application or an archive subsequently edited by an operator.
-        if (app.applicationKey !== key || app.archivedAt?.getTime() !== app.updatedAt.getTime()) {
+        // The application may have been reused by name on an older version.
+        // Require a retained AI connection for that provider in either layout.
+        const [previous] = await tx.select({ id: toolConnections.id }).from(toolConnections)
+          .where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.applicationId, app.id),
+            eq(toolConnections.connectionPurpose, "ai"),
+            sql`${toolConnections.config} #>> '{ai,provider}' = ${input.provider}`)).limit(1);
+        if (!app.archivedAt || !previous) {
           throw unprocessable("This provider application is archived");
+        }
+        // Older last-removal code also archived disabled applications. Honor
+        // recorded operator state and treat old ambiguous archive edits as deliberate.
+        const [lastChange] = await tx.select({ details: activityLog.details }).from(activityLog)
+          .where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityType, "tool_application"),
+            eq(activityLog.entityId, app.id), eq(activityLog.action, "tool_application.updated"),
+            sql`coalesce(${activityLog.details}->>'statusChanged', 'true') = 'true'`))
+          .orderBy(desc(activityLog.createdAt)).limit(1);
+        if (lastChange?.details?.status === "disabled" || lastChange?.details?.status === "archived") {
+          throw unprocessable("This provider application was disabled or archived by an operator");
         }
         await tx
           .update(toolApplications)
