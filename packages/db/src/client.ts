@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import {
+  checkMigrationStagingEvidence, pendingMigrationTags,
+  type MigrationStagingEvidence, type MigrationStagingManifest,
+} from "./migration-staging-evidence.js";
 import postgres from "postgres";
 import { installDatabaseWorkSignals } from "./work-signals.js";
 import { installDatabaseResponseCapture } from "./response-capture.js";
@@ -1585,10 +1589,36 @@ async function readMigrationState(sql: ReturnType<typeof postgres>): Promise<Mig
   };
 }
 
-export async function applyPendingMigrations(url: string): Promise<void> {
-  if ((await inspectMigrations(url)).status === "upToDate") return;
+type MigrationRolloutEvidence = {
+  manifest: MigrationStagingManifest;
+  evidence?: MigrationStagingEvidence;
+};
+
+async function verifyMigrationRollout(
+  rollout: MigrationRolloutEvidence | undefined,
+  pending: readonly string[],
+): Promise<void> {
+  if (!rollout) return;
+  const tags = pendingMigrationTags(pending);
+  const { errors } = checkMigrationStagingEvidence(rollout.manifest, rollout.evidence, tags);
+  if (!errors.length) {
+    const entries = new Map(rollout.manifest.migrationCompatibility.migrations.map(entry => [entry.tag, entry]));
+    for (const [index, file] of pending.entries()) {
+      const digest = createHash("sha256").update(await readMigrationFileContent(file)).digest("hex");
+      if (entries.get(tags[index]!)?.sqlSha256 !== digest) errors.push(`${file}: pending SQL does not match the rollout manifest.`);
+    }
+  }
+  if (errors.length) throw new Error(`Migration rollout blocked:\n${errors.join("\n")}`);
+}
+
+export async function applyPendingMigrations(url: string, rollout?: MigrationRolloutEvidence): Promise<void> {
+  if ((await inspectMigrations(url)).status === "upToDate") {
+    await verifyMigrationRollout(rollout, []);
+    return;
+  }
   await withMigrationLock(url, async sql => {
     let state = await readMigrationState(sql);
+    await verifyMigrationRollout(rollout, state.status === "upToDate" ? [] : state.pendingMigrations);
     if (state.status === "upToDate") return;
     if (state.reason === "no-migration-journal-non-empty-db") {
       throw new Error(

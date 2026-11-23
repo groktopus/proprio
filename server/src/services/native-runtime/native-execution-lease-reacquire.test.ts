@@ -5,7 +5,7 @@ import {
   agents, closeLivenessDb, companies, createDb, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults,
 } from "@groktopus/db";
 import {
-  lockNativeExecutionLeaseForReacquire, nativeExecutionLeaseHeldCondition, renewNativeExecutionLeasesNow,
+  nativeClaimReleaseAuthority, nativeFailureSettlementAuthority, renewNativeExecutionLeasesNow,
   renewNativeSessionExecutionLease, startNativeSessionExecutionLeaseRenewal,
 } from "./native-execution-lease.js";
 import { OPERATOR_ATTESTED_CONTROLLER_HOST } from "./native-controller-host-recovery.js";
@@ -180,14 +180,13 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
     expect(await row(run.runId)).toEqual(before);
   });
 
-  /** The executor's release and failure settlement use the same lock and held condition. */
-  async function releaseAsOwner(run: SleptRun) {
+  /** Exercise the same named operations used by the executor against PostgreSQL. */
+  async function releaseAsOwner(run: SleptRun, remote = false) {
     return owner.transaction(async tx => {
-      await lockNativeExecutionLeaseForReacquire(tx, run);
+      const authority = await nativeClaimReleaseAuthority(tx, { ...run, attempt: 1, controller,
+        controllerGeneration: GENERATION, remote });
       return tx.update(nativeRunFinalizations).set({ leaseOwner: null, leaseExpiresAt: null })
-        .where(and(eq(nativeRunFinalizations.runId, run.runId), eq(nativeRunFinalizations.leaseOwner, run.leaseOwner),
-          eq(nativeRunFinalizations.attempt, 1), eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-          nativeExecutionLeaseHeldCondition({ remote: false, controllerGeneration: GENERATION, relinquishAccepted: true })))
+        .where(authority)
         .returning({ runId: nativeRunFinalizations.runId });
     });
   }
@@ -235,19 +234,17 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
     expect(await releaseAsOwner(run)).toHaveLength(1);
   });
 
-  async function settleFailureAsOwner(run: SleptRun) {
+  async function settleFailureAsOwner(run: SleptRun, remote = false) {
     return owner.transaction(async tx => {
-      await lockNativeExecutionLeaseForReacquire(tx, { ...run, preResultOnly: true });
+      const authority = await nativeFailureSettlementAuthority(tx, { ...run, attempt: 1, controller,
+        controllerGeneration: GENERATION, remote });
       return tx.update(nativeRunFinalizations).set({
         phase: "retryable_failure", leaseOwner: null, leaseExpiresAt: null, recoveryState: "resuming_session",
         failureCode: "native_session_lease_lost", nextAttemptAt: new Date(),
         recoveryHistory: sql`coalesce(${nativeRunFinalizations.recoveryHistory}, '[]'::jsonb)
           || jsonb_build_array(${JSON.stringify({ disposition: "retryable_failure", reason: "native_session_lease_lost",
             controllerBootId: controller.bootId, controllerGeneration: GENERATION })}::jsonb)`,
-      }).where(and(eq(nativeRunFinalizations.runId, run.runId), eq(nativeRunFinalizations.leaseOwner, run.leaseOwner),
-        eq(nativeRunFinalizations.attempt, 1), eq(nativeRunFinalizations.controllerGeneration, GENERATION),
-        eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-        nativeExecutionLeaseHeldCondition({ remote: false, controllerGeneration: GENERATION })))
+      }).where(authority)
         .returning({ runId: nativeRunFinalizations.runId });
     });
   }
@@ -260,6 +257,13 @@ describeEmbeddedPostgres("native execution lease taken back after a host sleep",
       failureCode: "native_session_lease_lost" });
     expect((saved.recoveryHistory as Array<{ disposition?: string }>).at(-1)?.disposition).toBe("retryable_failure");
     await expect(renewNativeSessionExecutionLease(run.renewal)).rejects.toThrow("native_session_lease_lost");
+  });
+
+  it("does not let a lapsed remote owner settle or release its claim", async () => {
+    const run = await seedSleptRun("remote-lapsed");
+    expect(await settleFailureAsOwner(run, true)).toHaveLength(0);
+    expect(await releaseAsOwner(run, true)).toHaveLength(0);
+    expect((await row(run.runId)).leaseOwner).toBe(run.leaseOwner);
   });
 
   const restartClaimChanged: Array<[string, () => Promise<SleptRun>]> = [

@@ -221,6 +221,19 @@ jobs:
             'rolls back goal deletion when its activity record cannot be inserted',
           ] });
           JS
+      - name: Check migration staging handoff and overlap
+        run: |
+          test_file=packages/db/src/migration-staging-evidence.test.ts
+          report="$RUNNER_TEMP/migration-staging-results.json"
+          pnpm exec vitest run --project @groktopus/db --reporter=default --reporter=json --outputFile="$report" "$test_file"
+          node --input-type=module - "$report" "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), { [process.argv[3]]: [
+            'blocks a gated migration before DDL without evidence or matching packaged SQL',
+            'preserves reads and writes from both releases during an expand migration',
+          ] });
+          JS
       - name: Check Agent Chat supersession and Stop
         run: |
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
@@ -376,6 +389,28 @@ jobs:
             ],
             'server/src/__tests__/plugin-scheduled-work.test.ts': [
               'clears a saved malformed plugin deadline and still allows manual execution',
+            ],
+          });
+          JS
+      - name: Check automatic continuation against current review state
+        run: |
+          report="$RUNNER_TEMP/current-review-results.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts server/src/__tests__/issue-continuation-summary.test.ts \
+            server/src/__tests__/heartbeat-clean-continuation-dispatch.test.ts \
+            -t 'checks the current .* gate|drops the generated review wait|preserves an explicit approval wait|approval opens after queue admission'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts': ['resolved', 'review', 'approval', 'response', 'optional_response']
+              .map(gate => `checks the current ${gate} gate before dispatching an automatic continuation`),
+            'server/src/__tests__/issue-continuation-summary.test.ts': [
+              'drops the generated review wait when execution returns to in progress',
+              'preserves an explicit approval wait after a task status change',
+            ],
+            'server/src/__tests__/heartbeat-clean-continuation-dispatch.test.ts': [
+              'cancels an automatic continuation when an approval opens after queue admission',
             ],
           });
           JS

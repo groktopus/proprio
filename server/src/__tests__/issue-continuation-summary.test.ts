@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ISSUE_CONTINUATION_SUMMARY_MAX_BODY_CHARS,
   buildContinuationSummaryMarkdown,
-  continuationSummaryParksExecutor,
+  inProgressContinuationSummaryParksExecutor,
   extractContinuationSummaryNextAction,
 } from "../services/issue-continuation-summary.js";
 
@@ -111,7 +111,7 @@ describe("issue continuation summaries", () => {
     expect(extractContinuationSummaryNextAction(body)).toBe(
       "Wait for reviewer feedback or approval before continuing executor work.",
     );
-    expect(continuationSummaryParksExecutor(body)).toBe(true);
+    expect(inProgressContinuationSummaryParksExecutor(body)).toBe(true);
   });
 
   it("keeps provider diagnostic instructions out of continuation prompts", () => {
@@ -133,6 +133,23 @@ describe("issue continuation summaries", () => {
     expect(body).not.toContain(providerText);
   });
 
+  it("drops the generated review wait when execution returns to in progress", () => {
+    const issue = { id: "issue-1", identifier: null, title: "Complete delivery", description: null, status: "in_review", priority: "medium" };
+    const run = { id: "run-1", status: "succeeded", error: null };
+    const agent = { id: "agent-1", name: "Executor", adapterType: null };
+    const previousSummaryBody = buildContinuationSummaryMarkdown({ issue, run, agent });
+    expect(inProgressContinuationSummaryParksExecutor(previousSummaryBody)).toBe(false);
+    const reopened = buildContinuationSummaryMarkdown({
+      issue: { ...issue, status: "in_progress" }, run, agent, previousSummaryBody,
+    });
+    expect(inProgressContinuationSummaryParksExecutor(reopened)).toBe(false);
+  });
+
+  it("preserves an explicit approval wait after a task status change", () => {
+    const body = "# Continuation Summary\n- Status: todo\n\n## Next Action\n- Wait for operator approval before continuing.";
+    expect(inProgressContinuationSummaryParksExecutor(body)).toBe(true);
+  });
+
   it("does not park executor work when the next action is still runnable", () => {
     const body = [
       "# Continuation Summary",
@@ -142,6 +159,6 @@ describe("issue continuation summaries", () => {
       "- Re-check run `25145432006`, then move the issue to `in_review` if the final step is green.",
     ].join("\n");
 
-    expect(continuationSummaryParksExecutor(body)).toBe(false);
+    expect(inProgressContinuationSummaryParksExecutor(body)).toBe(false);
   });
 });

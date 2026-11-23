@@ -14,6 +14,7 @@ const fixtures = vi.hoisted(() => ({
   fail: new Map<string, number>(),
   reads: new Map<string, number>(),
   beforeFailure: new Map<string, () => Promise<void>>(),
+  sourceText: new Map<string, string>(),
   statements: vi.fn(),
   end: vi.fn(),
 }));
@@ -29,7 +30,7 @@ vi.mock("node:fs", async (importOriginal) => {
         fixtures.reads.set(file, count);
         if (count === after) {
           return Readable.from((async function* () {
-            yield gzipSync("SELECT 1;\n");
+            yield gzipSync(fixtures.sourceText.get(file) ?? "SELECT 1;\n");
             await fixtures.beforeFailure.get(file)?.();
             throw Object.assign(new Error("fixture source read failed"), { code: "EIO" });
           })());
@@ -64,6 +65,7 @@ afterEach(() => {
   fixtures.fail.clear();
   fixtures.reads.clear();
   fixtures.beforeFailure.clear();
+  fixtures.sourceText.clear();
   fixtures.statements.mockClear();
   fixtures.end.mockClear();
   vi.unstubAllEnvs();
@@ -121,6 +123,20 @@ it.skipIf(process.platform === "win32").each([1, 2, 3])("propagates gzip source 
   await expect(runDatabaseRestore({ backupFile, connectionString })).rejects.toThrow("fixture source read failed");
   expect(fixtures.reads.get(backupFile)).toBe(read);
   expect(fixtures.end).toHaveBeenCalledTimes(read === 3 ? 1 : 0);
+});
+
+it.skipIf(process.platform === "win32")("closes a gzip probe after finding a statement breakpoint", async () => {
+  const directory = fixture("cat >/dev/null\nexit 4\n");
+  const backupFile = path.join(directory, "backup.sql.gz");
+  const text = "SELECT 1;\n-- proprio statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900\n";
+  writeFileSync(backupFile, gzipSync(text));
+  fixtures.fail.set(backupFile, 2);
+  fixtures.sourceText.set(backupFile, text);
+  fixtures.beforeFailure.set(backupFile, () => delay(30));
+  await runDatabaseRestore({ backupFile, connectionString });
+  expect(fixtures.reads.get(backupFile)).toBe(3);
+  expect(fixtures.statements).toHaveBeenCalledWith("SELECT 1;");
+  expect(fixtures.end).toHaveBeenCalledOnce();
 });
 
 it.skipIf(process.platform === "win32")("stops a running psql wrapper after a gzip read error", async () => {

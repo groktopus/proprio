@@ -338,6 +338,56 @@ array lists every packed migration in journal order with `idx`, `tag`,
 `compatibility`, `classified` (the classifier's verdict before an override),
 `override`, `overrideJustification`, and `reasons`.
 
+For a managed rollout, use the exact manifest for the packed migrator and
+invoke the gated migration command. Supply an absolute path to the deployment
+owner's evidence when the target has staging-required migrations.
+
+```sh
+pnpm db:migrate --rollout-manifest "$PWD/manifest.json" \
+  --staging-evidence "$PWD/staging-evidence.json"
+```
+
+In this mode Core reads the pending list on the reserved PostgreSQL session
+under the migration lock. It checks each pending SQL file against the manifest
+before repairing history or applying DDL. Missing staging evidence, unknown
+classifications, or mismatched SQL block the attempt. The deployment owner
+configures the rollout to use this command and reviews the referenced evidence
+before invoking it.
+
+To preview the check, pass the target's migration status JSON to the checker.
+The checker reads `pendingMigrations` and maps the SQL filenames to manifest tags.
+Use the same target connection for the preview and the gated migration.
+
+```sh
+pnpm --filter @groktopus/db exec tsx src/migration-status.ts --json > migration-status.json
+pnpm --filter @groktopus/db exec tsx scripts/check-migration-staging-evidence.ts \
+  "$PWD/manifest.json" "$PWD/migration-status.json" "$PWD/staging-evidence.json"
+```
+
+The version 1 evidence identifies the exact manifest `sourceSha`, the
+responsible deployment `owner`, and an entry for each pending staging-required
+migration. Each entry repeats the `tag` and `sqlSha256`, links the rollout plan
+with `rollout.evidenceRef`, and names the phase, release SHA, and evidence for
+each stage. The phases are either `expand`, `backfill`, and `contract` or a
+single `staging` phase. The `previousRelease` record links evidence that the
+previous release is `serving` or `drained`. Serving overlap also needs an
+`overlap.evidenceRef` for read and write proof.
+
+`rehearsalAttempts` records outcomes from the exact SQL tested on a staging or
+disposable database. At least one rehearsal must acquire the lock, record a
+start, and apply the SQL. A lock acquisition timeout records
+`migrationStarted: false`. Record actual target migration outcomes separately
+for retry and promotion decisions. Evidence for known staging-required
+migrations may be retained when a rollout resumes after partial success.
+
+Core validates the handoff structure, migration identity, and evidence
+references. The deployment owner reviews the referenced rehearsal itself and
+selects the release sequence. Stability smoke exercises both the locked CLI
+gate on a disposable PostgreSQL database and overlapping old and new query
+shapes after an additive expand. If a target attempt times out before
+acquisition, confirm that history is unchanged before retrying. If DDL starts,
+pause promotion and inspect migration history and schema before recovery.
+
 ## Migration authoring checklist
 
 Older embedded databases can use `SQL_ASCII`. Test encoding-sensitive SQL on

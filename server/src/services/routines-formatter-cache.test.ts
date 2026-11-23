@@ -1,23 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { nextCronTickInTimeZone } from "./routines.js";
-import * as cron from "./cron.js";
 
 describe("nextCronTickInTimeZone formatter caching", () => {
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  it("parses a sparse schedule once instead of once per searched minute", () => {
-    const parse = cron.parseCron;
-    let parses = 0;
-    vi.spyOn(cron, "parseCron").mockImplementation(expression => {
-      parses++;
-      if (parses > 1) throw new Error("Repeated cron parsing blocks unrelated scheduled work");
-      return parse(expression);
-    });
-    const next = nextCronTickInTimeZone("0 12 1 1 *", "UTC", new Date("2020-01-01T12:00:00Z"));
-    expect(next?.toISOString()).toBe("2021-01-01T12:00:00.000Z");
-    expect(parses).toBe(1);
   });
 
   it("skips impossible UTC dates before localized formatting", () => {
@@ -28,8 +14,8 @@ describe("nextCronTickInTimeZone formatter caching", () => {
       if (formats > 48) throw new Error("Sparse UTC schedules must skip impossible dates");
       return format.call(this, date);
     });
-    const next = nextCronTickInTimeZone("0 12 1 1 *", "UTC", new Date("2020-01-01T12:00:00Z"));
-    expect(next?.toISOString()).toBe("2021-01-01T12:00:00.000Z");
+    const next = nextCronTickInTimeZone("* * 1 * *", "UTC", new Date("2026-11-01T23:59:00Z"));
+    expect(next?.toISOString()).toBe("2026-12-01T00:00:00.000Z");
     expect(formats).toBeLessThanOrEqual(48);
   });
 

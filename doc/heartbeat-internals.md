@@ -179,6 +179,17 @@ deadlines keep their original timer so a canceled drain does not delay them. Ext
 rely on the periodic recovery scan. Sparse cron searches reuse one parsed
 expression and skip impossible UTC dates before localized formatting.
 
+Routine schedule previews and persisted deadlines share the timezone-aware
+five-field cron implementation in `packages/shared/src/routine-cron.ts`. When
+both day-of-month and day-of-week are restricted, either matching day fires; if
+one field is wildcard, the restricted field controls the day match. Existing
+saved `next_run_at` values remain the current durable obligation after an
+upgrade. Once that occurrence is consumed, subsequent deadlines use the shared
+rules. Previews use the selected schedule timezone. Metadata edits preserve an
+existing deadline, while creating, changing, or resuming a schedule computes a
+new one. The scheduler initializes eligible legacy schedules whose deadline is
+missing and whose day fields now produce a future occurrence.
+
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
 Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)
 for state lifetime, admission, recovery ownership, cleanup ordering, and verification.
