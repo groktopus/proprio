@@ -1,5 +1,5 @@
-import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
-import { DEFAULT_SESSION_ID } from "./sandboxes.js";
+import type { Sandbox as CloudflareSandbox } from "sandbox-0x";
+import { DEFAULT_SESSION_ID } from "./runtime.js";
 
 export type SessionStrategy = "named" | "default";
 

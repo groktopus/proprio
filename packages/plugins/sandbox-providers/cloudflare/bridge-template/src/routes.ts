@@ -1,19 +1,14 @@
-import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
+import type { BridgeLease, ResolveBridgeLease } from "./runtime.js";
 import { isAuthorizedRequest } from "./auth.js";
-import { executeInSandbox } from "./exec.js";
 import { shellQuote } from "./helpers.js";
 import {
-  buildLeaseSandboxId,
-  buildSentinelPath,
   DEFAULT_REMOTE_CWD,
   DEFAULT_SESSION_ID,
   DEFAULT_TIMEOUT_MS,
-  resolveSandbox,
-  applySandboxKeepAlive,
   toErrorResponse,
   toJsonResponse,
-  type BridgeEnv,
-} from "./sandboxes.js";
+} from "./runtime.js";
+import { buildLeaseSandboxId, buildSentinelPath } from "./helpers.js";
 import type { SessionStrategy } from "./sessions.js";
 
 interface ProbeRequestBody {
@@ -91,7 +86,7 @@ function toSseResponse(stream: ReadableStream<Uint8Array>): Response {
 }
 
 async function execLeaseUtility(
-  sandbox: CloudflareSandbox,
+  sandbox: BridgeLease,
   options: {
     remoteCwd: string;
     sessionStrategy: SessionStrategy;
@@ -102,8 +97,7 @@ async function execLeaseUtility(
   args: string[],
   cwd = "/",
 ) {
-  return await executeInSandbox({
-    sandbox,
+  return await sandbox.execute({
     command,
     args,
     cwd,
@@ -125,7 +119,7 @@ function requireZeroExit(action: string, result: { exitCode: number | null; time
 }
 
 async function ensureWorkspace(
-  sandbox: CloudflareSandbox,
+  sandbox: BridgeLease,
   options: {
     remoteCwd: string;
     sessionStrategy: SessionStrategy;
@@ -138,7 +132,7 @@ async function ensureWorkspace(
 }
 
 async function writeSentinel(
-  sandbox: CloudflareSandbox,
+  sandbox: BridgeLease,
   input: {
     providerLeaseId: string;
     remoteCwd: string;
@@ -178,7 +172,7 @@ async function writeSentinel(
 }
 
 async function verifySentinel(
-  sandbox: CloudflareSandbox,
+  sandbox: BridgeLease,
   input: {
     remoteCwd: string;
     sessionStrategy: SessionStrategy;
@@ -186,6 +180,7 @@ async function verifySentinel(
     timeoutMs: number;
   },
 ): Promise<boolean> {
+  if (sandbox.hasSentinel) return sandbox.hasSentinel(buildSentinelPath(input.remoteCwd), input.timeoutMs);
   const result = await execLeaseUtility(
     sandbox,
     input,
@@ -196,8 +191,8 @@ async function verifySentinel(
   return !result.timedOut && (result.exitCode ?? 0) === 0;
 }
 
-export async function handleBridgeRequest(request: Request, env: BridgeEnv): Promise<Response> {
-  if (!(await isAuthorizedRequest(request, env.BRIDGE_AUTH_TOKEN))) {
+export async function handleBridgeRequest(request: Request, authToken: string | undefined, resolveLease: ResolveBridgeLease): Promise<Response> {
+  if (!(await isAuthorizedRequest(request, authToken))) {
     return toErrorResponse(401, "unauthorized", "Missing or invalid bridge bearer token.");
   }
 
@@ -233,12 +228,11 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
       normalizeId,
     });
 
-    const sandbox = await resolveSandbox(env, sandboxId, { keepAlive, sleepAfter, normalizeId });
-    await applySandboxKeepAlive(sandbox, keepAlive);
+    const sandbox = await resolveLease(sandboxId, { keepAlive, sleepAfter, normalizeId });
+    await sandbox.setKeepAlive(keepAlive);
     try {
       await ensureWorkspace(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs });
-      const result = await executeInSandbox({
-        sandbox,
+      const result = await sandbox.execute({
         command: "pwd",
         cwd: remoteCwd,
         timeoutMs,
@@ -280,14 +274,14 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
       reuseLease,
       normalizeId,
     });
-    const sandbox = await resolveSandbox(env, providerLeaseId, { keepAlive, sleepAfter, normalizeId });
+    const sandbox = await resolveLease(providerLeaseId, { keepAlive, sleepAfter, normalizeId });
     // Guard against orphaning a keepAlive sandbox if workspace setup throws
     // after creation: Proprio never sees the lease ID in that case, so it
     // can't clean up. Destroy here unless this is a reuseLease handshake
     // (where the sandbox may have been created by a prior acquire and we
     // shouldn't destroy it on a transient setup failure during reattachment).
     try {
-      await applySandboxKeepAlive(sandbox, keepAlive);
+      await sandbox.setKeepAlive(keepAlive);
       await ensureWorkspace(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs });
       await writeSentinel(sandbox, {
         providerLeaseId,
@@ -335,13 +329,11 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     const sessionStrategy = readSessionStrategy(body.sessionStrategy);
     const sessionId = readString(body.sessionId, DEFAULT_SESSION_ID);
     const timeoutMs = readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS);
-    const sandbox = await resolveSandbox(env, body.providerLeaseId, { keepAlive, sleepAfter, normalizeId });
+    const sandbox = await resolveLease(body.providerLeaseId, { keepAlive, sleepAfter, normalizeId });
     // Resume always reattaches to a providerLeaseId the operator already
-    // owns, so we deliberately do NOT destroy on failure here — the operator
-    // has the ID and can issue an explicit release/destroy. Calling
-    // `getSandbox` is idempotent on the Sandbox SDK side (no new sandbox is
-    // created), so a failed resume doesn't leak a *new* sandbox.
-    await applySandboxKeepAlive(sandbox, keepAlive);
+    // owns. The operator can still use that ID to release the original lease.
+    // The active runtime owns sentinel checks and container lifetime.
+    await sandbox.setKeepAlive(keepAlive);
 
     if (!(await verifySentinel(sandbox, { remoteCwd, sessionStrategy, sessionId, timeoutMs }))) {
       return toErrorResponse(409, "sandbox_state_lost", "Cloudflare sandbox state is no longer available.");
@@ -384,7 +376,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     if (readBoolean(body.reuseLease, false)) {
       return toJsonResponse({ ok: true });
     }
-    const sandbox = await resolveSandbox(env, body.providerLeaseId, {
+    const sandbox = await resolveLease(body.providerLeaseId, {
       keepAlive: readBoolean(body.keepAlive, false),
       sleepAfter: "10m",
       normalizeId: true,
@@ -398,7 +390,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     if (providerLeaseId.length === 0) {
       return toErrorResponse(400, "invalid_request", "providerLeaseId path parameter is required.");
     }
-    const sandbox = await resolveSandbox(env, providerLeaseId, {
+    const sandbox = await resolveLease(providerLeaseId, {
       keepAlive: false,
       sleepAfter: "10m",
       normalizeId: true,
@@ -414,56 +406,65 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
     }
     const sessionStrategy = readSessionStrategy(body.sessionStrategy);
     const sessionId = readString(body.sessionId, DEFAULT_SESSION_ID);
-    const sandbox = await resolveSandbox(env, body.providerLeaseId, {
+    const sandbox = await resolveLease(body.providerLeaseId, {
       keepAlive: false,
       sleepAfter: "10m",
       normalizeId: true,
     });
     if (body.streamOutput === true) {
       const encoder = new TextEncoder();
+      const cancellation = new AbortController();
+      const signal = AbortSignal.any([request.signal, cancellation.signal]);
       const stream = new ReadableStream<Uint8Array>({
-        async start(controller) {
+        start(controller) {
+          const send = (data: string) => {
+            if (!signal.aborted) controller.enqueue(encoder.encode(data));
+          };
           // Heartbeat keeps the SSE response alive during silent stretches
           // (e.g. npm install downloading silently). SSE comment lines (`:`)
           // are ignored by the client parser but keep the underlying HTTP
           // connection from idling out at the Cloudflare edge.
           const heartbeat = setInterval(() => {
             try {
-              controller.enqueue(encoder.encode(": keepalive\n\n"));
+              send(": keepalive\n\n");
             } catch {
               // Controller may already be closed; ignore.
             }
           }, 15_000);
-          try {
-            const result = await executeInSandbox({
-              sandbox,
-              command: body.command!,
-              args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
-              cwd: typeof body.cwd === "string" ? body.cwd : undefined,
-              env: body.env,
-              stdin: body.stdin ?? null,
-              timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
-              sessionStrategy,
-              sessionId,
-              onOutput: async (streamName, data) => {
-                controller.enqueue(encoder.encode(encodeSseEvent(streamName, { data })));
-              },
-            });
-            controller.enqueue(encoder.encode(encodeSseEvent("complete", result)));
-          } catch (error) {
-            controller.enqueue(encoder.encode(encodeSseEvent("error", {
-              error: error instanceof Error ? error.message : String(error),
-            })));
-          } finally {
-            clearInterval(heartbeat);
-            controller.close();
-          }
+          // Return from start immediately so workerd can invoke cancel while
+          // the command is still running.
+          void (async () => {
+            try {
+              const result = await sandbox.execute({
+                command: body.command!,
+                args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
+                cwd: typeof body.cwd === "string" ? body.cwd : undefined,
+                env: body.env,
+                stdin: body.stdin ?? null,
+                timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
+                sessionStrategy,
+                sessionId,
+                signal,
+                onOutput: async (streamName, data) => {
+                  send(encodeSseEvent(streamName, { data }));
+                },
+              });
+              send(encodeSseEvent("complete", result));
+            } catch (error) {
+              send(encodeSseEvent("error", {
+                error: error instanceof Error ? error.message : String(error),
+              }));
+            } finally {
+              clearInterval(heartbeat);
+              if (!cancellation.signal.aborted) controller.close();
+            }
+          })();
         },
+        cancel: () => cancellation.abort(),
       });
       return toSseResponse(stream);
     }
-    const result = await executeInSandbox({
-      sandbox,
+    const result = await sandbox.execute({
       command: body.command,
       args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
       cwd: typeof body.cwd === "string" ? body.cwd : undefined,
@@ -472,6 +473,7 @@ export async function handleBridgeRequest(request: Request, env: BridgeEnv): Pro
       timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
       sessionStrategy,
       sessionId,
+      signal: request.signal,
     });
     return toJsonResponse(result);
   }

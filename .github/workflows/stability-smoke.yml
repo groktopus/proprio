@@ -47,9 +47,11 @@ jobs:
         run: pnpm docs:api:check
       - name: Check service onboarding
         run: pnpm exec vitest run cli/src/__tests__/onboard-service.test.ts
+      - name: Check database backup CLI output
+        run: pnpm exec vitest run cli/src/__tests__/db-backup.test.ts
       - name: Check cost summaries and database backups
         run: |
-          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/stability-results.json" server/src/__tests__/costs-service.test.ts packages/db/src/backup-lib.test.ts
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/stability-results.json" server/src/__tests__/costs-service.test.ts packages/db/src/backup-lib.test.ts packages/db/src/backup-lib-restore.test.ts
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
@@ -163,6 +165,8 @@ jobs:
           JS
       - name: Check late live settlement metadata
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
+      - name: Check company portability
+        run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs

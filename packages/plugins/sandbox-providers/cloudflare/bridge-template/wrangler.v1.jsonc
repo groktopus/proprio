@@ -1,0 +1,24 @@
+{
+  "name": "proprio-cloudflare-sandbox-bridge-v1",
+  "main": "src/index-v1.ts",
+  "compatibility_date": "2026-11-19",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "containers": [
+    {
+      "class_name": "ProprioSandboxV1",
+      "name": "proprio-cloudflare-sandbox-bridge-v1-container",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "bridge": { "dockerfile": "./Dockerfile.v1" }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ProprioSandboxV1", "name": "ProprioSandboxV1" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ProprioSandboxV1"] }
+  ]
+}
