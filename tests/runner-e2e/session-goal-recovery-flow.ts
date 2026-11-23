@@ -95,9 +95,40 @@ async function runArtifactOracle(archivePath: string, nonce: string, deadlineAt:
 export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): Promise<StoryCheck[]> {
   const objective = structuredGoalObjective(input.nonce);
   const checkpointPath = path.join(input.workspacePath, "goal-checkpoint.json");
-  const beforeProjection = await readGoal(input.api, input.issue.id, input.agentId);
+  // Task creation starts the first native run immediately. Do not issue the
+  // fixture's initial goal create while that run is still bootstrapping: before
+  // its session is bound, the control action can be interpreted as a wake and
+  // start a second executor against the same isolated Codex home. Wait for the
+  // public projection to bind the active run, then steer that live session.
+  const ready = await pollUntil({
+    label: "live session-goal controller bound before goal creation",
+    deadlineAt: input.deadlineAt,
+    intervalMs: 500,
+    load: async () => {
+      const [goal, runs] = await Promise.all([
+        readGoal(input.api, input.issue.id, input.agentId),
+        input.api.get<Row[]>(`/api/issues/${input.issue.id}/runs`),
+      ]);
+      const activeRun = runs.find((run: Row) => run.id === goal.activeRunId && run.status === "running");
+      const events = activeRun
+        ? await collectRunEvents<Row>((afterSeq, limit) => input.api.get(
+            `/api/heartbeat-runs/${activeRun.id}/events?afterSeq=${afterSeq}&limit=${limit}`,
+          )).catch(() => [])
+        : [];
+      return { goal, runs, activeRun, events };
+    },
+    accept: value => value.goal.capability?.availability === "available"
+      && Array.isArray(value.goal.capability.actions) && value.goal.capability.actions.includes("set")
+      && value.activeRun?.runtimeMode === "native"
+      && value.events.some((event: Row) => ["session.started", "session.resumed"].includes(String(event.eventType)))
+      && value.events.some((event: Row) => event.eventType === "turn.started"),
+    reject: value => value.runs.some((run: Row) => ["failed", "timed_out", "cancelled"].includes(String(run.status)))
+      ? "Initial native run ended before its goal controller became available" : undefined,
+  });
+  const beforeProjection = ready.goal;
   if (beforeProjection.capability?.availability !== "available"
-    || !Array.isArray(beforeProjection.capability.actions) || !beforeProjection.capability.actions.includes("set")) {
+    || !Array.isArray(beforeProjection.capability.actions) || !beforeProjection.capability.actions.includes("set")
+    || !ready.activeRun?.id) {
     throw new Error("session_goal_profile_not_available");
   }
   const requestId = randomUUID();

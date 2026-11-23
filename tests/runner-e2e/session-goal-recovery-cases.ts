@@ -33,7 +33,7 @@ export const sessionGoalRecoveryTask: RunnerTaskFixture = {
   turnTimeoutMs: 4 * 60_000,
   expectedTerminalState: { issue: "done", run: "succeeded" },
   buildTitle: nonce => `Structured goal recovery ${nonce}`,
-  buildPrompt: nonce => `Complete this work through a structured session goal. ${structuredGoalObjective(nonce)} Keep the first execution active through the checkpoint and wait so the qualification fixture can restart the controller. Do not claim success before the verified archive exists.`,
+  buildPrompt: nonce => `Wait for the controller to install the structured session goal for this task before creating or changing any files. Once that goal is active, complete it exactly as specified: ${structuredGoalObjective(nonce)} Keep the first execution active through the checkpoint and wait so the qualification fixture can restart the controller. Do not claim success before the verified archive exists.`,
   buildVisibleMarker: nonce => `GOAL_OUTPUT:${nonce}`,
   buildMatchers: () => [],
 };
