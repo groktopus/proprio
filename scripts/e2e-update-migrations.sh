@@ -396,8 +396,21 @@ NODE
     ACTIVE_RUN_ID="$(jq -er '.id // .executionRunId // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
     [ -n "$ACTIVE_RUN_ID" ] \
       || { fail_ "4f issue-linked wake did not return a durable run id"; exit 1; }
-    ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
-    pass "4f assignment admitted no run; one issue-linked wake created durable run $ACTIVE_RUN_ID"
+    active_deadline=$(( $(date +%s) + 90 ))
+    ACTIVE_RUN_BEFORE=""
+    while [ "$(date +%s)" -lt "$active_deadline" ]; do
+      ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.id,status:$run.status,errorCode:($run.errorCode // null)}')"
+        fail_ "4f issue-linked wake reached terminal state $SAFE_RUN_FAILURE"
+        exit 1
+      fi
+      if [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then break; fi
+      sleep 1
+    done
+    [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; } \
+      || { fail_ "4f issue-linked wake did not reach its expected run state with the effect marker"; exit 1; }
+    pass "4f assignment admitted no run; one issue-linked wake created active durable run $ACTIVE_RUN_ID"
   fi
   [ -n "$ACTIVE_RUN_ID" ] || { fail_ "4f recovered task assignment starts a durable run"; exit 1; }
   ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // .execution.executionWorkspaceId' <<<"$ACTIVE_RUN_BEFORE")" \
