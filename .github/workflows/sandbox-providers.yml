@@ -10,6 +10,7 @@ on:
       - 'packages/plugins/sdk/**'
       - 'packages/shared/**'
       - 'scripts/ci/qualify-sandbox-provider-dependencies*'
+      - 'scripts/ci/verify-cloudflare-bridge-v1.mjs'
       - 'scripts/typecheck-test-programs.mjs'
       - 'scripts/test-sandbox-providers.mjs'
       - 'scripts/link-plugin-dev-sdk.mjs'
@@ -58,3 +59,13 @@ jobs:
         run: |
           node --test scripts/ci/qualify-sandbox-provider-dependencies.test.mjs
           node scripts/ci/qualify-sandbox-provider-dependencies.mjs --scope "$PROVIDER_SCOPE"
+      - name: Build the 1.0 Cloudflare Worker and image without deployment
+        if: matrix.scope == 'shared'
+        working-directory: packages/plugins/sandbox-providers/cloudflare/bridge-template
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: pnpm exec wrangler deploy --dry-run --config wrangler.v1.jsonc --outdir "$RUNNER_TEMP/cloudflare-bridge-v1"
+      - name: Exercise the local 1.0 Worker and container without a Cloudflare account
+        if: matrix.scope == 'shared'
+        working-directory: packages/plugins/sandbox-providers/cloudflare/bridge-template
+        run: node "$GITHUB_WORKSPACE/scripts/ci/verify-cloudflare-bridge-v1.mjs"

@@ -5,6 +5,6 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     environment: "node",
     // Keep the Workers SDK in Vite so unit-test mocks intercept its imports.
-    server: { deps: { inline: ["@cloudflare/sandbox"] } },
+    server: { deps: { inline: ["@cloudflare/sandbox", "sandbox-0x"] } },
   },
 });

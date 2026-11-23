@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@cloudflare/sandbox", () => ({
+vi.mock("sandbox-0x", () => ({
   getSandbox: vi.fn(),
 }));
 
 import { handleBridgeRequest } from "./routes.js";
+import { legacyRuntime } from "./legacy-runtime.js";
 import { resolveSandbox } from "./sandboxes.js";
 
 vi.mock("./sandboxes.js", async () => {
@@ -50,7 +51,8 @@ describe("bridge routes", () => {
         sessionStrategy: "named",
         sessionId: "proprio",
       }),
-      { BRIDGE_AUTH_TOKEN: "secret-token", Sandbox: {} as never },
+      "secret-token",
+      legacyRuntime({ Sandbox: {} as never }),
     );
 
     expect(response.status).toBe(200);
@@ -94,7 +96,8 @@ describe("bridge routes", () => {
         sessionStrategy: "named",
         sessionId: "proprio",
       }),
-      { BRIDGE_AUTH_TOKEN: "secret-token", Sandbox: {} as never },
+      "secret-token",
+      legacyRuntime({ Sandbox: {} as never }),
     );
 
     expect(response.status).toBe(200);
@@ -131,7 +134,8 @@ describe("bridge routes", () => {
         sessionId: "proprio",
         streamOutput: true,
       }),
-      { BRIDGE_AUTH_TOKEN: "secret-token", Sandbox: {} as never },
+      "secret-token",
+      legacyRuntime({ Sandbox: {} as never }),
     );
 
     expect(response.status).toBe(200);

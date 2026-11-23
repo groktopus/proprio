@@ -47,17 +47,69 @@ After deploy, configure Proprio with:
 
 - `reuseLease: true` should only be used together with `keepAlive: true`
 - `.workers.dev` is fine for bridge HTTP traffic, but preview/wildcard host flows are intentionally out of scope here
-- keep the Docker image aligned with the installed `@cloudflare/sandbox` version
+- keep each Docker image or shim aligned with the SDK its Worker uses
 
-## SDK migration status
+## SDK 1.0 staging candidate
 
-This template pins both the Sandbox SDK and container image to 0.12.14.
-Keep those versions paired. SDK 1.x requires a provider-owned Durable Object
-and a different container setup. [Issue #36](https://github.com/groktopus/proprio/issues/36)
-tracks that change and its staging checks. Dependabot major SDK updates remain
-deferred until the 1.x bridge is ready.
+The default Worker uses the legacy `sandbox-0x` alias and image 0.12.14. The
+separate `wrangler.v1.jsonc` configuration uses the bridge-owned
+`ProprioSandboxV1` class and the shim from SDK 1.0.3. It is a separate Worker
+with its own container application and SQLite storage.
 
-[Cloudflare recommends](https://developers.cloudflare.com/sandbox/sdk/migrate/)
-upgrading older applications to SDK and image 0.12.14 before moving to 1.0. Its
-0.x bug and security support ends on 2026-12-31. The deployed-class switch to
-the new scheduling policy is one-way, so rehearse it on a staging Worker.
+The Worker authorizes each bridge request before it resolves a lease. The
+Durable Object owns container startup, idle timeout, keep-alive alarms,
+session environment, and command cancellation. Resume checks the workspace
+sentinel through the 1.0 SDK. A stopped container returns a lost-state
+response without creating a replacement. Non-keep-alive idle timeouts on the
+1.0 path must be positive and at most six hours. The lease container is the
+execution boundary. Cloudflare gives processes root-equivalent Linux
+capabilities under its Durable Object scheduling policy. See the
+[Container API](https://developers.cloudflare.com/containers/api/durable-object-container/).
+
+### Verify before routing leases
+
+The existing provider CI installs both exact SDK versions, typechecks both
+Worker entry points, runs the bridge tests, and builds the 1.0 Worker and
+container with Wrangler's dry-run mode. CI also starts the Worker through
+`wrangler dev --local` and exercises the authenticated HTTP API against a
+Docker container on the runner. Local results cover the source and process
+behavior, including explicit Stop and command deadlines. Live scheduling,
+alarm timing, and Cloudflare service routing still require staging.
+
+The local Wrangler proxy did not notify the Worker when the test client
+closed its TCP socket. The probe observed a late write from the child
+process. Use the authenticated Stop route for cancellation. To repeat the
+passive-disconnect probe on a machine with Docker, run
+`node ../../../../../scripts/ci/verify-cloudflare-bridge-v1.mjs --probe-passive-disconnect`
+from this directory. The probe exits with a failure if the child writes
+after disconnect. [Ubuntu diagnostic](https://github.com/groktopus/proprio/actions/runs/45114890542/job/137495363862)
+
+Use a staging Worker and container application with unique names. On staging,
+verify an authenticated acquire and resume, separate named and default session
+settings, stdin and both streamed output channels, a real command timeout,
+a client disconnect, Stop, and release. Confirm a child process from a
+timed-out command cannot continue changing the workspace. Check both idle
+expiry and keep-alive across a Durable Object restart. Confirm that resume
+returns lost state after destruction. Obtain operator approval before changing
+any deployment or lease routing.
+
+### Cutover and recovery
+
+Create a new Proprio execution environment with the 1.0 Worker URL and its
+own bearer token. Send fresh leases to that environment. Keep existing
+environments and leases on their original Worker until they are drained.
+A lease ID is scoped to its Worker even if the ID text also exists elsewhere.
+
+For a workspace that must move, quiesce its old lease and capture and validate
+its workspace backup while the old container still holds the files. Restore
+the files into a fresh lease on the other Worker. Let the new Worker write
+and verify its own lease sentinel. Keep the original workspace backup until
+the restored lease is verified.
+
+For rollback, send new leases to the legacy environment. Keep the 1.0 Worker
+available for leases that it already owns. Drain those leases and recover any
+required workspaces before removing its container application.
+
+[Issue #36](https://github.com/groktopus/proprio/issues/36) tracks the
+remaining staging evidence. See the [Cloudflare migration guide](https://developers.cloudflare.com/sandbox/sdk/migrate/)
+for the platform's in-place scheduling limits and recovery options.
