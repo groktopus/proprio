@@ -416,7 +416,7 @@ export async function handleBridgeRequest(request: Request, authToken: string | 
       const cancellation = new AbortController();
       const signal = AbortSignal.any([request.signal, cancellation.signal]);
       const stream = new ReadableStream<Uint8Array>({
-        async start(controller) {
+        start(controller) {
           const send = (data: string) => {
             if (!signal.aborted) controller.enqueue(encoder.encode(data));
           };
@@ -431,30 +431,34 @@ export async function handleBridgeRequest(request: Request, authToken: string | 
               // Controller may already be closed; ignore.
             }
           }, 15_000);
-          try {
-            const result = await sandbox.execute({
-              command: body.command!,
-              args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
-              cwd: typeof body.cwd === "string" ? body.cwd : undefined,
-              env: body.env,
-              stdin: body.stdin ?? null,
-              timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
-              sessionStrategy,
-              sessionId,
-              signal,
-              onOutput: async (streamName, data) => {
-                send(encodeSseEvent(streamName, { data }));
-              },
-            });
-            send(encodeSseEvent("complete", result));
-          } catch (error) {
-            send(encodeSseEvent("error", {
-              error: error instanceof Error ? error.message : String(error),
-            }));
-          } finally {
-            clearInterval(heartbeat);
-            if (!cancellation.signal.aborted) controller.close();
-          }
+          // Return from start immediately so workerd can invoke cancel while
+          // the command is still running.
+          void (async () => {
+            try {
+              const result = await sandbox.execute({
+                command: body.command!,
+                args: Array.isArray(body.args) ? body.args.filter((value): value is string => typeof value === "string") : [],
+                cwd: typeof body.cwd === "string" ? body.cwd : undefined,
+                env: body.env,
+                stdin: body.stdin ?? null,
+                timeoutMs: readInteger(body.timeoutMs, DEFAULT_TIMEOUT_MS),
+                sessionStrategy,
+                sessionId,
+                signal,
+                onOutput: async (streamName, data) => {
+                  send(encodeSseEvent(streamName, { data }));
+                },
+              });
+              send(encodeSseEvent("complete", result));
+            } catch (error) {
+              send(encodeSseEvent("error", {
+                error: error instanceof Error ? error.message : String(error),
+              }));
+            } finally {
+              clearInterval(heartbeat);
+              if (!cancellation.signal.aborted) controller.close();
+            }
+          })();
         },
         cancel: () => cancellation.abort(),
       });
