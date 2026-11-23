@@ -233,6 +233,7 @@ function makePreview(): CatalogTeamImportPreviewResult {
       warnings: [],
       errors: [],
     },
+    agentRuntimes: [],
     skillPreparations: [],
     warnings: [],
     errors: [],
@@ -365,6 +366,33 @@ describe("TeamCatalog install preview path", () => {
       expect(mockTeamCatalogApi.install).toHaveBeenCalledTimes(1);
       expect(override).toBeUndefined();
     }
+    await act(async () => root.unmount());
+  });
+
+  it("shows the planned catalog runtime and submits the automatic selection", async () => {
+    const preview = makePreview();
+    preview.portabilityPreview.manifest.agents = [{
+      slug: "ceo", name: "CEO", path: "agents/ceo/AGENTS.md", skills: [], role: "ceo", title: null, icon: null,
+      capabilities: null, reportsToSlug: null, reportsToExistingAgentId: null, reportsToExistingAgentSlug: null,
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {}, permissionGrants: [],
+      budgetMonthlyCents: 0, metadata: null,
+    }];
+    preview.agentRuntimes = [{
+      slug: "ceo", requestedAdapterType: "codex_local", adapterType: "proprio_runner",
+      provider: "codex", defaulted: true, error: null,
+    }];
+    mockTeamCatalogApi.preview.mockResolvedValue(preview);
+    const root = await renderPage();
+    await act(async () => findButton("Install team")!.click());
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Proprio Runner (codex) · Catalog default");
+    const submit = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .filter(button => button.textContent?.includes("Install team")).at(-1)!;
+    expect(submit.disabled).toBe(false);
+    await act(async () => submit.click());
+    await flushReact();
+    expect(mockTeamCatalogApi.install.mock.calls[0]?.[2]?.adapterOverrides).toBeUndefined();
     await act(async () => root.unmount());
   });
 

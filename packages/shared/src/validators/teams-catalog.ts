@@ -142,10 +142,10 @@ export const catalogTeamPreviewSchema = z.object({
   nameOverrides: z.record(z.string().min(1), z.string().min(1)).optional(),
   selectedFiles: z.array(z.string().min(1)).optional(),
   sourcePolicy: catalogTeamSourcePolicySchema.optional(),
+  adapterOverrides: z.record(z.string().min(1), portabilityAdapterOverrideSchema).optional(),
 }).strict();
 
 export const catalogTeamInstallSchema = catalogTeamPreviewSchema.extend({
-  adapterOverrides: z.record(z.string().min(1), portabilityAdapterOverrideSchema).optional(),
   secretValues: z.record(z.string().min(1), z.string()).optional(),
 }).strict();
 

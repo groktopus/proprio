@@ -36,6 +36,7 @@ interface TeamPreviewOptions extends BaseClientOptions {
   agent?: string[];
   collisionStrategy?: "rename" | "skip" | "replace";
   nameOverride?: string[];
+  adapterOverride?: string[];
   selectedFile?: string[];
   allowExternalSources?: boolean;
   allowUnpinnedOptionalSources?: boolean;
@@ -46,7 +47,6 @@ interface TeamInstallOptions extends TeamPreviewOptions {
   requestApprovalOnForbidden?: boolean;
   approvalIssueId?: string;
   secretValue?: string[];
-  adapterOverride?: string[];
 }
 
 interface TeamInstallApprovalFallbackResult {
@@ -174,6 +174,7 @@ export function registerTeamCommands(program: Command): void {
       .option("--agent <slug>", "Only preview selected agent slug; may be repeated", collectOptionValue, [] as string[])
       .option("--collision-strategy <strategy>", "Import collision strategy (rename, skip, replace)")
       .option("--name-override <slug=name>", "Override an imported entity name; may be repeated", collectOptionValue, [] as string[])
+      .option("--adapter-override <slug=type>", "Adapter type override for an imported agent slug; may be repeated", collectOptionValue, [] as string[])
       .option("--selected-file <path>", "Restrict import preview to selected portable file; may be repeated", collectOptionValue, [] as string[])
       .option("--allow-external-sources", "Allow GitHub, URL, or skills.sh skill sources declared by the catalog team", false)
       .option("--allow-unpinned-optional-sources", "Allow optional-team external skill sources that are not pinned to a commit", false)
@@ -356,6 +357,7 @@ function buildTeamOptions(opts: TeamPreviewOptions): CatalogTeamImportOptions {
     agents: opts.agent && opts.agent.length > 0 ? opts.agent : undefined,
     collisionStrategy: opts.collisionStrategy,
     nameOverrides: parseNameOverrides(opts.nameOverride),
+    adapterOverrides: parseAdapterOverrides(opts.adapterOverride),
     selectedFiles: opts.selectedFile && opts.selectedFile.length > 0 ? opts.selectedFile : undefined,
     sourcePolicy: buildSourcePolicy(opts),
   });
@@ -364,7 +366,6 @@ function buildTeamOptions(opts: TeamPreviewOptions): CatalogTeamImportOptions {
 function buildTeamInstallOptions(opts: TeamInstallOptions): CatalogTeamInstallOptions {
   return removeUndefined({
     ...buildTeamOptions(opts),
-    adapterOverrides: parseAdapterOverrides(opts.adapterOverride),
     secretValues: parseSecretValues(opts.secretValue),
   });
 }
@@ -660,6 +661,15 @@ function printCatalogTeamPreview(result: CatalogTeamImportPreviewResult | null):
   console.log(
     `Catalog team preview: ${result.team.name} (${result.team.key}) agents=${preview.plan.agentPlans.length} projects=${preview.plan.projectPlans.length} issues=${preview.plan.issuePlans.length} warnings=${result.warnings.length} errors=${result.errors.length}`,
   );
+  for (const runtime of result.agentRuntimes ?? []) {
+    console.log(formatInlineRecord({
+      agent: runtime.slug,
+      requestedAdapter: runtime.requestedAdapterType,
+      adapter: runtime.adapterType ?? "unavailable",
+      provider: runtime.provider,
+      defaulted: runtime.defaulted,
+    }));
+  }
   for (const warning of result.warnings) console.log(`warning=${warning}`);
   for (const error of result.errors) console.log(`error=${error}`);
 }

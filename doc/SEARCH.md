@@ -101,6 +101,14 @@ new extension in this change.
 PostgreSQL documents the existing index support in
 [pg_trgm](https://www.postgresql.org/docs/17/pgtrgm.html).
 
+## Assignee filters
+
+Task search accepts `assigneeAgentId=unassigned` to require that both the agent
+and user assignee fields are empty. The board's **Unassigned** choice sends this
+value. The existing `assigneeAgentId=null` API filter still means no agent, so
+it can return tasks assigned to a user. Use an agent ID or `assigneeUserId` to
+search for a specific assignee.
+
 ## Reproduce the evaluation
 
 ```sh
