@@ -325,6 +325,47 @@ array lists every packed migration in journal order with `idx`, `tag`,
 `compatibility`, `classified` (the classifier's verdict before an override),
 `override`, `overrideJustification`, and `reasons`.
 
+Before applying any pending `requires_staging` migration, the deployment owner
+supplies a version 1 staging-evidence document and checks it against that exact
+manifest and the target database's pending migration list:
+
+```sh
+pnpm --filter @groktopus/db exec tsx scripts/check-migration-staging-evidence.ts \
+  manifest.json pending-migration-tags.json staging-evidence.json
+```
+
+`pending-migration-tags.json` is a JSON array of migration tags returned by
+`inspectMigrations` for the target database. Do not construct it from the
+manifest. Previously applied staging-required or unknown migrations do not
+block the next rollout. Every pending migration must appear in the manifest.
+
+The evidence document identifies the manifest `sourceSha`, the responsible
+deployment `owner`, and one entry for every staging-required migration. Each
+entry repeats the migration `tag` and `sqlSha256`, identifies either an
+expand/backfill/contract sequence or an explicitly staged deployment, and
+links each stage (`expand`, `backfill`, `contract`, or `staging`) to its release
+SHA and evidence reference. It records whether the previous release remains
+`serving` or was `drained`. A serving release requires evidence from an
+overlapping read/write rehearsal; a drained release requires evidence of the
+drain. It also records migration attempts separately: a `timed_out` advisory
+lock attempt must say `migrationStarted: false`, and at least one successful
+attempt must record lock acquisition, migration start, and `migrationOutcome: "applied"`.
+This preserves the safe-retry distinction from a failure after DDL has begun.
+
+The checker rejects missing entries, stale SQL hashes, unknown classifications,
+and incomplete overlap, drain, or attempt records. It checks reference presence
+and structure. It does not fetch or validate the evidence behind a reference.
+The deployment gate must review the linked rehearsal itself. It must not treat a
+metadata field as proof of compatible overlap. Deployment owners retain
+responsibility for reviewing evidence and selecting their release sequence. The
+stability smoke gate runs the checker contract tests and a disposable
+PostgreSQL overlap fixture that exercises reads and writes from old and new
+release query shapes after an additive expand. A real deployment must retain
+its own sanitized rehearsal results. A lock-acquisition timeout before start
+leaves the active release in place and can be retried only after confirming
+there was no migration-history change. If migration started, stop promotion
+and inspect durable migration history and actual schema before recovery.
+
 ## Migration authoring checklist
 
 Older embedded databases can use `SQL_ASCII`. Test encoding-sensitive SQL on

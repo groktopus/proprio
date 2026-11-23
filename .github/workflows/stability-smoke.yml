@@ -146,6 +146,8 @@ jobs:
             'rolls back goal deletion when its activity record cannot be inserted',
           ] });
           JS
+      - name: Check migration staging handoff and overlap
+        run: pnpm exec vitest run --project @groktopus/db packages/db/src/migration-staging-evidence.test.ts
       - name: Check Agent Chat supersession and Stop
         run: |
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
