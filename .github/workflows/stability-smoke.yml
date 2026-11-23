@@ -221,6 +221,21 @@ jobs:
         run: pnpm exec vitest run --maxWorkers 1 server/src/services/heartbeat/run-completion.test.ts -t 'reconciliation wins'
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
+      - name: Check atomic company import
+        run: |
+          test_file=server/src/__tests__/company-portability-import-batching.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/import-atomicity-results.json" "$test_file" -t 'rolls back a failed new-company'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'import-atomicity-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/company-portability-import-batching.test.ts': [
+              'rolls back a failed new-company import and retries without duplicating tasks',
+            ],
+          });
+          JS
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs

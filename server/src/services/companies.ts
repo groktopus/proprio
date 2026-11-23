@@ -31,7 +31,6 @@ import { notifyCloudOfPrimaryCompanyLifecycleChange } from "./cloud-lifecycle-sy
 import {
   MAX_ISSUE_PREFIX_ATTEMPTS,
   deriveIssuePrefixBase,
-  isIssuePrefixConflict,
   issuePrefixSuffixForAttempt,
   pickAvailableIssuePrefix,
   rekeyCompanyIssueIdentifiers,
@@ -262,15 +261,12 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
     let suffix = 1;
     while (suffix <= MAX_ISSUE_PREFIX_ATTEMPTS) {
       const candidate = `${base}${issuePrefixSuffixForAttempt(suffix)}`;
-      try {
-        const rows = await db
-          .insert(companies)
-          .values({ ...data, issuePrefix: candidate })
-          .returning();
-        return rows[0];
-      } catch (error) {
-        if (!isIssuePrefixConflict(error)) throw error;
-      }
+      const [created] = await db
+        .insert(companies)
+        .values({ ...data, issuePrefix: candidate })
+        .onConflictDoNothing({ target: companies.issuePrefix })
+        .returning();
+      if (created) return created;
       suffix += 1;
     }
     throw new Error("Unable to allocate unique issue prefix");

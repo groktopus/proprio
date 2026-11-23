@@ -135,6 +135,9 @@ vi.mock("../services/agents.js", () => ({
 }));
 
 vi.mock("../services/agent-lifecycle.js", () => ({
+  requestAgentHireInTransaction: (_db: unknown, _publications: unknown, ...args: unknown[]) => agentSvc.create(...args),
+  initializeImportedAgentConfigurationInTransaction: (_db: unknown, _publications: unknown, ...args: unknown[]) => agentSvc.update(...args),
+  scheduleAgentLifecycle: vi.fn(),
   createAgentLifecycle: () => ({
     requestHire: (...args: unknown[]) => agentSvc.create(...args),
     pauseAgent: vi.fn(),
@@ -205,7 +208,20 @@ vi.mock("../routes/org-chart-svg.js", () => ({
   renderOrgChartPng: vi.fn(async () => Buffer.from("png")),
 }));
 
-const { companyPortabilityService, dedupeImportedCompanyName, parseGitHubSourceUrl, renderYamlBlock, renderFrontmatter } = await import("../services/company-portability.js");
+const { companyPortabilityService: createPortabilityService, dedupeImportedCompanyName, parseGitHubSourceUrl, renderYamlBlock, renderFrontmatter } = await import("../services/company-portability.js");
+
+function transactionalFixtureDb(db: Parameters<typeof createPortabilityService>[0]) {
+  // These fixtures mock resource services. The PostgreSQL sibling suite proves
+  // transaction isolation while these tests keep their existing service mocks.
+  if (!db.transaction) {
+    Object.assign(db, { transaction: (work: (tx: typeof db) => Promise<unknown>) => work(db) });
+  }
+  return db;
+}
+
+function companyPortabilityService(db: Parameters<typeof createPortabilityService>[0], storage?: Parameters<typeof createPortabilityService>[1]) {
+  return createPortabilityService(transactionalFixtureDb(db), storage);
+}
 
 function responseAssetDb(reservations: Array<{ id: string }> = []) {
   return { select: () => ({ from: (table: unknown) => ({ where: () => {
@@ -4926,7 +4942,7 @@ describe("company portability", () => {
       const { companyPortabilityService: cappedPortabilityService } =
         await import("../services/company-portability.js");
       const storage = fakeAttachmentStorage();
-      const portability = cappedPortabilityService({} as any, storage as any);
+      const portability = cappedPortabilityService(transactionalFixtureDb({} as any), storage as any);
       mockAttachmentExportSources([
         {
           id: "attachment-3",

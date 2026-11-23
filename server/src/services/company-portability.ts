@@ -1,3 +1,4 @@
+import { logger } from "../middleware/logger.js";
 import { publishActivity, type ActivityPublication } from "./activity-log.js";
 import { currentPluginInteractionOrigin } from "./plugin-interaction-context.js";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
@@ -82,7 +83,7 @@ import { findServerAdapter } from "../adapters/index.js";
 import { formatAttachmentSize, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { forbidden, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
-import type { StorageService } from "../storage/types.js";
+import type { PutFileResult, StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
 import { agentService } from "./agents.js";
 import { agentInstructionsBundleMode, agentInstructionsService } from "./agent-instructions.js";
@@ -767,8 +768,10 @@ type ImportMode = "board_full" | "agent_safe";
 type ImportBehaviorOptions = {
   actorAgentId?: string | null;
   actorAgentCompanyId?: string | null;
-  interactionTransaction?: boolean;
-  interactionPublications?: ActivityPublication[];
+  importTransaction?: {
+    publications: ActivityPublication[];
+    storageWrites?: Array<{ companyId: string; objectKey: string }>;
+  };
   mode?: ImportMode;
   sourceCompanyId?: string | null;
   pauseAutomations?: boolean;
@@ -5287,20 +5290,76 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     const origin = currentPluginInteractionOrigin();
     const actorAgentId = origin?.agentId ?? options?.actorAgentId;
     const actorAgentCompanyId = origin?.companyId ?? options?.actorAgentCompanyId ?? options?.sourceCompanyId;
-    if (actorAgentId && !options?.interactionTransaction) {
+    const createsCompany = input.target.mode === "new_company";
+    if ((actorAgentId || createsCompany) && !options?.importTransaction) {
       const publications: ActivityPublication[] = [];
-      const result = await db.transaction(async tx => {
-        const companyIds = [actorAgentCompanyId, input.target.mode === "existing_company" ? input.target.companyId : null]
-          .filter((id): id is string => Boolean(id));
-        await tx.select({ id: companiesTable.id }).from(companiesTable).where(inArray(companiesTable.id, companyIds)).orderBy(companiesTable.id).for("no key update");
-        return companyPortabilityService(tx as unknown as Db, storage).importBundle(input, actorUserId, {
-          ...options, actorAgentId, actorAgentCompanyId, interactionTransaction: true, interactionPublications: publications,
+      const storageWrites: Array<{ companyId: string; objectKey: string }> = [];
+      let readyToCommit = false;
+      let result: CompanyPortabilityImportResult;
+      try {
+        result = await db.transaction(async tx => {
+          if (actorAgentId) {
+            const companyIds = [actorAgentCompanyId, input.target.mode === "existing_company" ? input.target.companyId : null]
+              .filter((id): id is string => Boolean(id));
+            await tx.select({ id: companiesTable.id }).from(companiesTable).where(inArray(companiesTable.id, companyIds))
+              .orderBy(companiesTable.id).for("no key update");
+          }
+          const imported = await companyPortabilityService(tx as unknown as Db, storage).importBundle(input, actorUserId, {
+            ...options, actorAgentId, actorAgentCompanyId,
+            importTransaction: { publications, storageWrites: createsCompany ? storageWrites : undefined },
+          });
+          readyToCommit = true;
+          return imported;
         });
-      });
+      } catch (error) {
+        // If the callback failed, PostgreSQL never attempted commit. Keep
+        // objects if the outcome of an attempted commit is uncertain.
+        if (!readyToCommit && storage) {
+          for (const { companyId, objectKey } of storageWrites) {
+            try {
+              await storage.deleteObject(companyId, objectKey);
+            } catch (err) {
+              logger.warn({ err, companyId, objectKey }, "failed to remove storage after import rollback");
+            }
+          }
+        }
+        throw error;
+      }
       for (const publication of publications) publishActivity(publication);
       for (const agent of result.agents) if (agent.action === "created" && agent.id) scheduleAgentLifecycle(db, agent.id);
       return result;
     }
+
+    async function putImportFile(service: StorageService, input: Parameters<StorageService["putFile"]>[0]) {
+      const object = await service.putFile(input);
+      options?.importTransaction?.storageWrites?.push({ companyId: input.companyId, objectKey: object.objectKey });
+      return object;
+    }
+
+    async function recordImportedAsset(companyId: string, stored: PutFileResult, companyLogo = false) {
+      const persist = async (executor: Db) => {
+        const asset = await assetService(executor).create(companyId, {
+          provider: stored.provider,
+          objectKey: stored.objectKey,
+          contentType: stored.contentType,
+          byteSize: stored.byteSize,
+          sha256: stored.sha256,
+          originalFilename: stored.originalFilename,
+          createdByAgentId: null,
+          createdByUserId: actorUserId ?? null,
+        });
+        const company = companyLogo
+          ? await companyService(executor).update(companyId, { logoAssetId: asset.id })
+          : null;
+        return { asset, company };
+      };
+      // A rejected optional asset should not abort the transaction for the
+      // rest of the import. A nested transaction is a savepoint in PostgreSQL.
+      return options?.importTransaction
+        ? db.transaction(tx => persist(tx as unknown as Db))
+        : persist(db);
+    }
+
     // The importing board user brings a CEO's recorded hiring denial with the
     // package; create and configuration writes never take one from input.
     // Like the permissions toggle, the denial also removes an explicit
@@ -5335,8 +5394,9 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       throw unprocessable("Safe import routes only allow create or skip actions.");
     }
 
-    const updateImportedAgent = (...args: Parameters<typeof agents.update>) => options?.interactionTransaction
-      ? initializeImportedAgentConfigurationInTransaction(db, options.interactionPublications ?? [], args[0], args[1])
+    const importTransaction = options?.importTransaction;
+    const updateImportedAgent = (...args: Parameters<typeof agents.update>) => importTransaction
+      ? initializeImportedAgentConfigurationInTransaction(db, importTransaction.publications, args[0], args[1])
       : agents.update(...args);
     const sourceManifest = plan.source.manifest;
     if (actorAgentId && actorAgentCompanyId) {
@@ -5547,26 +5607,14 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             } else {
               try {
                 const body = portableFileToBuffer(logoFile, logoPath);
-                const stored = await storage.putFile({
+                const stored = await putImportFile(storage, {
                   companyId: targetCompany.id,
                   namespace: "assets/companies",
                   originalFilename: path.posix.basename(logoPath),
                   contentType,
                   body,
                 });
-                const createdAsset = await assetRecords.create(targetCompany.id, {
-                  provider: stored.provider,
-                  objectKey: stored.objectKey,
-                  contentType: stored.contentType,
-                  byteSize: stored.byteSize,
-                  sha256: stored.sha256,
-                  originalFilename: stored.originalFilename,
-                  createdByAgentId: null,
-                  createdByUserId: actorUserId ?? null,
-                });
-                const updated = await companies.update(targetCompany.id, {
-                  logoAssetId: createdAsset.id,
-                });
+                const { company: updated } = await recordImportedAsset(targetCompany.id, stored, true);
                 targetCompany = updated ?? targetCompany;
               } catch (err) {
                 warnings.push(`Failed to import company logo ${logoPath}: ${err instanceof Error ? err.message : String(err)}`);
@@ -5599,24 +5647,15 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             // entry hashes to its path, which this entry's sha256 derives.
             const body = portableFileToBuffer(blobFile, blobPath);
             try {
-              const stored = await storage.putFile({
+              const stored = await putImportFile(storage, {
                 companyId: targetCompany.id,
                 namespace: "assets/general",
                 originalFilename: embeddedAsset.originalFilename,
                 contentType: embeddedAsset.contentType,
                 body,
               });
-              const createdAsset = await assetRecords.create(targetCompany.id, {
-                provider: stored.provider,
-                objectKey: stored.objectKey,
-                contentType: stored.contentType,
-                byteSize: stored.byteSize,
-                sha256: stored.sha256,
-                originalFilename: stored.originalFilename,
-                createdByAgentId: null,
-                createdByUserId: actorUserId ?? null,
-              });
-              embeddedAssetIdMap.set(embeddedAsset.assetId, createdAsset.id);
+              const { asset } = await recordImportedAsset(targetCompany.id, stored);
+              embeddedAssetIdMap.set(embeddedAsset.assetId, asset.id);
             } catch (error) {
               warnings.push(`Embedded image asset ${embeddedAssetLabel} could not be imported: ${error instanceof Error ? error.message : String(error)}; its references were left unchanged.`);
             }
@@ -5828,8 +5867,8 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             continue;
           }
 
-          const requestHire = options?.interactionTransaction
-            ? (...args: Parameters<ReturnType<typeof createAgentLifecycle>["requestHire"]>) => requestAgentHireInTransaction(db, options.interactionPublications ?? [], ...args)
+          const requestHire = importTransaction
+            ? (...args: Parameters<ReturnType<typeof createAgentLifecycle>["requestHire"]>) => requestAgentHireInTransaction(db, importTransaction.publications, ...args)
             : (...args: Parameters<ReturnType<typeof createAgentLifecycle>["requestHire"]>) => agentsLifecycle().requestHire(...args);
           let created = await requestHire(targetCompany.id, {
             ...patch,
@@ -6382,7 +6421,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               }
             }
             try {
-              const stored = await storage.putFile({
+              const stored = await putImportFile(storage, {
                 companyId: targetCompany.id,
                 namespace: `issues/${issueId}`,
                 originalFilename: attachmentEntry.originalFilename,

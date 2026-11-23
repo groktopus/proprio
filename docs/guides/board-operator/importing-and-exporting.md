@@ -122,6 +122,10 @@ proprio company import org/repo/companies/acme
 - **`new`** — Creates a fresh company from the package. Good for duplicating a company template.
 - **`existing`** — Merges the package into an existing company. Use `--company-id` to specify the target.
 
+An import that fails before committing a new company rolls back the company
+and its records. After you correct the reported error, retry the import with
+the same target name.
+
 If `--target` is not specified, Proprio infers it: if a `--company-id` is provided (or one exists in context), it defaults to `existing`; otherwise `new`.
 
 ### Collision Strategies
