@@ -1,0 +1,31 @@
+{
+  "$schema": "https://unpkg.com/oxlint@1.94.0/configuration_schema.json",
+  "rules": {
+    "no-debugger": "deny",
+    "no-dupe-keys": "deny",
+    "no-unreachable": "deny",
+    "no-async-promise-executor": "deny",
+    "no-cond-assign": "deny"
+  },
+  "plugins": ["typescript", "react", "import"],
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "ui/storybook-static/**",
+    "ui/src/generated/**"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/__tests__/**"
+      ],
+      "rules": {
+        "no-unused-vars": "off"
+      }
+    }
+  ]
+}

@@ -396,6 +396,16 @@ repair, and every `proprio worktree` option.
 
 ## Test Commands
 
+Run the source linter from the repository root with:
+
+```sh
+pnpm lint
+```
+
+This checks `server/src`, `ui/src`, and `cli/src` with the shared Oxlint configuration.
+Oxlint errors fail the command; the existing warning backlog does not. A first run
+may need registry access to download the pinned Oxlint version with `pnpm dlx`.
+
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.
 Its generated page inventory lists current source references. The documented journeys have separate
