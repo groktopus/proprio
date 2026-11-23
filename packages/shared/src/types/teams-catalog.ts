@@ -148,10 +148,10 @@ export interface CatalogTeamImportOptions {
   nameOverrides?: Record<string, string>;
   selectedFiles?: string[];
   sourcePolicy?: CatalogTeamSourcePolicy;
+  adapterOverrides?: Record<string, CompanyPortabilityAdapterOverride>;
 }
 
 export interface CatalogTeamInstallOptions extends CatalogTeamImportOptions {
-  adapterOverrides?: Record<string, CompanyPortabilityAdapterOverride>;
   secretValues?: Record<string, string>;
 }
 
@@ -173,9 +173,19 @@ export interface CatalogTeamSkillPreparation {
   reason: string | null;
 }
 
+export interface CatalogTeamAgentRuntimePlan {
+  slug: string;
+  requestedAdapterType: string;
+  adapterType: string | null;
+  provider: string | null;
+  defaulted: boolean;
+  error: string | null;
+}
+
 export interface CatalogTeamImportPreviewResult {
   team: CatalogTeam;
   portabilityPreview: CompanyPortabilityPreviewResult;
+  agentRuntimes: CatalogTeamAgentRuntimePlan[];
   skillPreparations: CatalogTeamSkillPreparation[];
   warnings: string[];
   errors: string[];

@@ -1000,13 +1000,17 @@ export function useInstallTeamCatalogEntry({
 
   const steps = useMemo(() => computeSteps(team, simplified), [team, simplified]);
 
-  // Preview body — the preview schema is strict and does NOT accept adapterOverrides.
   const buildPreviewOptions = useCallback(
     (form: TeamInstallFormState): CatalogTeamImportOptions => ({
       targetManagerAgentId: simplified || form.fullCompany ? null : form.targetManagerAgentId,
       collisionStrategy: form.collisionStrategy,
       nameOverrides:
         Object.keys(form.nameOverrides).length > 0 ? form.nameOverrides : undefined,
+      adapterOverrides: Object.keys(form.adapterOverrides).length > 0
+        ? Object.fromEntries(Object.entries(form.adapterOverrides)
+          .filter(([, adapterType]) => !!adapterType)
+          .map(([slug, adapterType]) => [slug, { adapterType }]))
+        : undefined,
       sourcePolicy: {
         allowExternalSources: form.allowExternalSources,
         allowUnpinnedOptionalSources: form.allowUnpinnedOptionalSources,
@@ -1016,19 +1020,11 @@ export function useInstallTeamCatalogEntry({
     [simplified],
   );
 
-  // Install body extends the preview body with adapterOverrides.
   const buildInstallOptions = useCallback(
-    (form: TeamInstallFormState): CatalogTeamInstallOptions => {
-      const overrides: Record<string, CompanyPortabilityAdapterOverride> = {};
-      for (const [slug, adapterType] of Object.entries(form.adapterOverrides)) {
-        if (adapterType) overrides[slug] = { adapterType };
-      }
-      return {
-        ...buildPreviewOptions(form),
-        adapterOverrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-        secretValues: Object.keys(form.secretValues).length > 0 ? form.secretValues : undefined,
-      };
-    },
+    (form: TeamInstallFormState): CatalogTeamInstallOptions => ({
+      ...buildPreviewOptions(form),
+      secretValues: Object.keys(form.secretValues).length > 0 ? form.secretValues : undefined,
+    }),
     [buildPreviewOptions],
   );
 
@@ -1169,10 +1165,10 @@ export function TeamInstallerDialog({
 
   const currentStep = steps[stepIndex];
 
-  // Preview body — the preview schema is strict and does NOT accept adapterOverrides.
-  const buildPreviewOptions = () => ({
+  const buildPreviewOptions = (selection = adapterOverrides, strategy = collisionStrategy) => ({
     targetManagerAgentId: fullCompany ? null : targetManagerAgentId,
-    collisionStrategy,
+    collisionStrategy: strategy,
+    adapterOverrides: buildAdapterOverrides(selection),
     nameOverrides: Object.keys(nameOverrides).length > 0 ? nameOverrides : undefined,
     sourcePolicy: {
       allowExternalSources,
@@ -1181,10 +1177,9 @@ export function TeamInstallerDialog({
     },
   });
 
-  // Install body extends the preview body with adapterOverrides.
-  const buildInstallOptions = () => {
+  const buildAdapterOverrides = (selection: Record<string, string>) => {
     const overrides: Record<string, CompanyPortabilityAdapterOverride> = {};
-    for (const [slug, adapterType] of Object.entries(adapterOverrides)) {
+    for (const [slug, adapterType] of Object.entries(selection)) {
       if (adapterType) {
         const source = previewResult?.portabilityPreview.manifest.agents.find(agent => agent.slug === slug);
         const adapterConfig = source ? teamInstallSelectionConfig(source, adapterType, cloud, harnessPolicy) : {};
@@ -1205,7 +1200,7 @@ export function TeamInstallerDialog({
       }
     }
     for (const agent of previewResult?.portabilityPreview.manifest.agents ?? []) {
-      if (overrides[agent.slug]) continue;
+      if (overrides[agent.slug] || previewResult?.agentRuntimes?.some(runtime => runtime.slug === agent.slug)) continue;
       const adapterType = resolveTeamInstallAdapterType(
         agent.adapterType,
         selectableAdapterTypes,
@@ -1220,18 +1215,22 @@ export function TeamInstallerDialog({
         };
       }
     }
+    return Object.keys(overrides).length > 0 ? overrides : undefined;
+  };
+
+  const buildInstallOptions = () => {
     const enteredSecretValues = Object.fromEntries(
       Object.entries(secretValues).filter(([, value]) => value.trim().length > 0),
     );
     return {
       ...buildPreviewOptions(),
-      adapterOverrides: Object.keys(overrides).length > 0 ? overrides : undefined,
       secretValues: Object.keys(enteredSecretValues).length > 0 ? enteredSecretValues : undefined,
     };
   };
 
   const previewMutation = useMutation({
-    mutationFn: () => teamCatalogApi.preview(companyId, team.id, buildPreviewOptions()),
+    mutationFn: (change?: { selection?: Record<string, string>; strategy?: typeof collisionStrategy }) =>
+      teamCatalogApi.preview(companyId, team.id, buildPreviewOptions(change?.selection, change?.strategy)),
     onSuccess: (result) => {
       setPreviewResult(result);
       setPreviewError(null);
@@ -1289,15 +1288,23 @@ export function TeamInstallerDialog({
   const missingRequiredSecretCount = missingRequiredSecretInputs.length;
   const missingEnabledAdapter = Boolean(
     previewResult?.portabilityPreview.manifest.agents.some(
-      (agent) =>
-        !resolveTeamInstallAdapterType(
+      (agent) => {
+        const runtime = previewResult.agentRuntimes?.find((entry) => entry.slug === agent.slug);
+        if (runtime && !adapterOverrides[agent.slug]) {
+          return cloud && !!runtime.adapterType && !harnessPolicy.isCloudHarnessAllowed(runtime.adapterType, {
+            ...(runtime.adapterType === agent.adapterType ? agent.adapterConfig : {}),
+            ...(runtime.provider ? { provider: runtime.provider } : {}),
+          });
+        }
+        return !resolveTeamInstallAdapterType(
           adapterOverrides[agent.slug] ?? agent.adapterType,
           selectableAdapterTypes,
           { cloud, adapterConfig: teamInstallSelectionConfig(agent, adapterOverrides[agent.slug], cloud, harnessPolicy), harnessPolicy, nativeRunnerAvailable },
-        ),
+        );
+      },
     ),
   );
-  const installBlocked = hasErrors || missingRequiredSecretCount > 0 || missingEnabledAdapter;
+  const installBlocked = !!previewError || hasErrors || missingRequiredSecretCount > 0 || missingEnabledAdapter;
   const needsScriptsConfirm = team.trustLevel === "scripts_executables";
 
   function goNext() {
@@ -1385,7 +1392,10 @@ export function TeamInstallerDialog({
                 error={previewError}
                 result={previewResult}
                 collisionStrategy={collisionStrategy}
-                onCollisionStrategyChange={(s) => { setCollisionStrategy(s); previewRequested.current = false; previewMutation.mutate(); }}
+                onCollisionStrategyChange={(strategy) => {
+                  setCollisionStrategy(strategy);
+                  previewMutation.mutate({ strategy });
+                }}
                 nameOverrides={nameOverrides}
                 onRename={(slug, name) => setNameOverrides((cur) => ({ ...cur, [slug]: name }))}
                 adapterOverrides={adapterOverrides}
@@ -1393,7 +1403,13 @@ export function TeamInstallerDialog({
                 cloud={cloud}
                 harnessPolicy={harnessPolicy}
                 nativeRunnerAvailable={nativeRunnerAvailable}
-                onAdapterChange={(slug, adapterType) => setAdapterOverrides((cur) => ({ ...cur, [slug]: adapterType }))}
+                onAdapterChange={(slug, adapterType) => {
+                  const selection = { ...adapterOverrides };
+                  if (adapterType === "automatic") delete selection[slug];
+                  else selection[slug] = adapterType;
+                  setAdapterOverrides(selection);
+                  previewMutation.mutate({ selection });
+                }}
                 secretValues={secretValues}
                 visibleSecretKeys={visibleSecretKeys}
                 onSecretChange={(key, value) => setSecretValues((cur) => ({ ...cur, [key]: value }))}
@@ -1446,7 +1462,7 @@ export function TeamInstallerDialog({
           )}
           {currentStep === "preview" && !hasErrors && missingRequiredSecretCount === 0 && missingEnabledAdapter && (
             <span className="text-xs text-rose-600 dark:text-rose-300">
-              Enable a legacy adapter to install this team
+              Select an available adapter to install this team
             </span>
           )}
           {currentStep === "preview" ? (
@@ -1963,13 +1979,14 @@ export function StepPreview({
         </PreviewSection>
       )}
 
-      {/* Adapter selection — install schema accepts adapterOverrides (design §4.4) */}
+      {/* Adapter selection */}
       {manifestAgents.length > 0 && (
         <PreviewSection title={`Adapter selection · ${manifestAgents.length}`}>
           {manifestAgents.map((agent) => {
+            const runtime = result.agentRuntimes?.find((entry) => entry.slug === agent.slug);
             const savedRunnerSelectable = agent.adapterType === "proprio_runner" && nativeRunnerAvailable
               && (!cloud || harnessPolicy.isCloudHarnessAllowed(agent.adapterType, agent.adapterConfig));
-            const selected = resolveTeamInstallAdapterType(
+            const selected = runtime && !adapterOverrides[agent.slug] ? "automatic" : resolveTeamInstallAdapterType(
               adapterOverrides[agent.slug] ?? agent.adapterType,
               selectableAdapterTypes,
               { cloud, adapterConfig: teamInstallSelectionConfig(agent, adapterOverrides[agent.slug], cloud, harnessPolicy), harnessPolicy, nativeRunnerAvailable },
@@ -1979,12 +1996,20 @@ export function StepPreview({
                 <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
                 <span className="min-w-0 truncate">{agent.name}</span>
                 <span className="font-mono text-(length:--text-micro) text-muted-foreground">{agent.slug}</span>
+                {runtime?.adapterType && (
+                  <span className="text-xs text-muted-foreground">
+                    {getAdapterLabel(runtime.adapterType)}
+                    {runtime.provider && ` (${runtime.provider})`}
+                    {runtime.defaulted && " · Catalog default"}
+                  </span>
+                )}
                 {selected ? (
-                  <Select value={selected} onValueChange={(v) => onAdapterChange(agent.slug, v)}>
+                  <Select value={selected} disabled={loading} onValueChange={(v) => onAdapterChange(agent.slug, v)}>
                     <SelectTrigger className="ml-auto h-8 w-48">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      {runtime && <SelectItem value="automatic">Automatic</SelectItem>}
                       {selectableAdapterTypes.map((type) => (
                         <SelectItem key={type} value={type}>{getAdapterLabel(type)}</SelectItem>
                       ))}
@@ -2002,8 +2027,7 @@ export function StepPreview({
             );
           })}
           <li className="px-3 py-1.5 text-(length:--text-micro) text-muted-foreground">
-            Each imported agent defaults to its package adapter; override here before install.
-            Deeper per-adapter model config is editable on the agent after install.
+            Override the planned adapter here. Model configuration is editable after install.
           </li>
         </PreviewSection>
       )}

@@ -20,6 +20,7 @@ import {
   type Db,
 } from "@groktopus/db";
 import type {
+  CompanyPortabilityAdapterOverride,
   CompanyPortabilityAgentManifestEntry,
   CompanyPortabilityBlobManifestEntry,
   CompanyPortabilityEmbeddedAssetManifestEntry,
@@ -3674,23 +3675,97 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     }
   }
 
+  async function resolveImportedAgentRuntime(
+    companyId: string,
+    manifestAgent: CompanyPortabilityAgentManifestEntry,
+    adapterOverride: CompanyPortabilityAdapterOverride | undefined,
+    mode: ImportMode,
+    existingImportAgent?: Awaited<ReturnType<typeof agents.getById>>,
+  ) {
+    const baseAdapterConfig = adapterOverride?.adapterConfig
+      ? { ...adapterOverride.adapterConfig }
+      : { ...manifestAgent.adapterConfig } as Record<string, unknown>;
+
+    let selectedAdapterType = adapterOverride?.adapterType ?? manifestAgent.adapterType;
+    const selectedHarness = agentHarnessType(selectedAdapterType, baseAdapterConfig);
+    let runner = adapterOverride?.runner;
+    if (runner === undefined && adapterOverride?.adapterType !== "proprio_runner") {
+      if (selectedHarness === agentHarnessType(manifestAgent.adapterType, manifestAgent.adapterConfig)) {
+        runner = manifestAgent.runner;
+      }
+      if (runner === undefined && existingImportAgent
+        && selectedHarness === agentHarnessType(existingImportAgent.adapterType, existingImportAgent.adapterConfig)) {
+        runner = agentRunner(existingImportAgent.adapterType);
+      }
+    }
+    const retainedNative = runner === "proprio" && Boolean(proprioRunnerProfileForHarness(selectedHarness))
+      ? [manifestAgent, existingImportAgent].find((agent) => agent?.adapterType === "proprio_runner"
+        && agentHarnessType(agent.adapterType, agent.adapterConfig) === selectedHarness)
+      : undefined;
+    if (retainedNative) {
+      selectedAdapterType = "proprio_runner";
+      for (const field of ["provider", "acpxAgent", "acpxMode"]) {
+        if (retainedNative.adapterConfig[field] !== undefined) baseAdapterConfig[field] = retainedNative.adapterConfig[field];
+      }
+    }
+    const resolved = await resolveNewAgentRunnerForCompany(db, companyId, {
+      adapterType: selectedAdapterType,
+      adapterConfig: baseAdapterConfig,
+      runner,
+      defaultEnvironmentId: existingImportAgent?.defaultEnvironmentId,
+    });
+    const adapterType = assertKnownImportAdapterType(resolved.adapterType);
+    if (mode === "agent_safe" && IMPORT_FORBIDDEN_ADAPTER_TYPES.has(adapterType)) {
+      throw forbidden(`Adapter type "${adapterType}" is not allowed in safe imports`);
+    }
+    return { adapterType, adapterConfig: resolved.adapterConfig };
+  }
+
+  function assertExplicitImportRunnerFeatures(
+    config: Record<string, unknown>,
+    experimental: Awaited<ReturnType<ReturnType<typeof instanceSettingsService>["getExperimental"]>>,
+  ) {
+    if (config.provider === "muse") {
+      if (experimental.enableMuse !== true || experimental.enableNativeRunner !== true) {
+        throw unprocessable("Muse and Proprio Runner must be enabled before importing a Muse agent.", {
+          code: "proprio_runner_muse_disabled",
+        });
+      }
+    } else if (config.provider === "openai_dot") {
+      if (experimental.enableOpenAiDot !== true) throw unprocessable(
+        "OpenAI Dot is experimental and disabled on this instance.",
+        { code: "proprio_runner_dot_disabled" },
+      );
+    } else if (config.provider !== "codex" && config.provider !== "opencode" && config.provider !== undefined && !["claude_local", "pi_local", "grok_local"].includes(agentHarnessType("proprio_runner", config)) && experimental.enableNativeRunner !== true) {
+      throw unprocessable(
+        "Proprio Runner is experimental and disabled on this instance.",
+        { code: "proprio_runner_rollout_disabled" },
+      );
+    }
+  }
+
+  async function previewImportedAgentRuntime(
+    companyId: string,
+    manifestAgent: CompanyPortabilityAgentManifestEntry,
+    adapterOverride: CompanyPortabilityAdapterOverride | undefined,
+  ) {
+    if ((adapterOverride?.adapterType ?? manifestAgent.adapterType) === "proprio_runner") {
+      assertExplicitImportRunnerFeatures(
+        adapterOverride?.adapterConfig ?? manifestAgent.adapterConfig,
+        await instanceSettingsService(db).getExperimental(),
+      );
+    }
+    const runtime = await resolveImportedAgentRuntime(companyId, manifestAgent, adapterOverride, "agent_safe");
+    await assertImportAdapterConfigConstraints(companyId, runtime.adapterType, runtime.adapterConfig);
+    return runtime;
+  }
+
   async function prepareImportedAgentAdapter(
     companyId: string,
-    adapterType: string | null | undefined,
-    adapterConfig: Record<string, unknown>,
+    runtime: Awaited<ReturnType<typeof resolveImportedAgentRuntime>>,
     desiredSkills: string[],
-    mode: ImportMode,
-    runner?: AgentRunnerChoice,
-    defaultEnvironmentId?: string | null,
   ) {
-    const resolved = await resolveNewAgentRunnerForCompany(db, companyId, {
-      adapterType, adapterConfig, runner, defaultEnvironmentId,
-    });
-    adapterConfig = resolved.adapterConfig;
-    const effectiveAdapterType = assertKnownImportAdapterType(resolved.adapterType);
-    if (mode === "agent_safe" && IMPORT_FORBIDDEN_ADAPTER_TYPES.has(effectiveAdapterType)) {
-      throw forbidden(`Adapter type "${effectiveAdapterType}" is not allowed in safe imports`);
-    }
+    const { adapterType: effectiveAdapterType, adapterConfig } = runtime;
     const nextAdapterConfig = writeProprioSkillSyncPreference(
       applyImportAdapterRunDefaults(effectiveAdapterType, adapterConfig),
       desiredSkills,
@@ -5381,19 +5456,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         const experimental = await instanceSettingsService(db).getExperimental();
         for (const agent of runnerSelections) {
           const config = input.adapterOverrides?.[agent.slug]?.adapterConfig ?? agent.adapterConfig;
-          if (config.provider === "muse") {
-            if (experimental.enableMuse !== true || experimental.enableNativeRunner !== true) throw unprocessable("Muse and Proprio Runner must be enabled before importing a Muse agent.", {code:"proprio_runner_muse_disabled"});
-          } else if (config.provider === "openai_dot") {
-            if (experimental.enableOpenAiDot !== true) throw unprocessable(
-              "OpenAI Dot is experimental and disabled on this instance.",
-              { code: "proprio_runner_dot_disabled" },
-            );
-          } else if (config.provider !== "codex" && config.provider !== "opencode" && config.provider !== undefined && !["claude_local", "pi_local", "grok_local"].includes(agentHarnessType("proprio_runner", config)) && experimental.enableNativeRunner !== true) {
-            throw unprocessable(
-              "Proprio Runner is experimental and disabled on this instance.",
-              { code: "proprio_runner_rollout_disabled" },
-            );
-          }
+          assertExplicitImportRunnerFeatures(config, experimental);
         }
       }
     }
@@ -5713,44 +5776,13 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
 
           // Apply adapter overrides from request if present
           const adapterOverride = input.adapterOverrides?.[planAgent.slug];
-          const baseAdapterConfig = adapterOverride?.adapterConfig
-            ? { ...adapterOverride.adapterConfig }
-            : { ...manifestAgent.adapterConfig } as Record<string, unknown>;
-
           const desiredSkills = (manifestAgent.skills ?? []).map((skillRef) => desiredSkillRefMap.get(skillRef) ?? skillRef);
           const existingImportAgent = planAgent.action === "update" && planAgent.existingAgentId
             ? await agents.getById(planAgent.existingAgentId) : null;
-          let selectedAdapterType = adapterOverride?.adapterType ?? manifestAgent.adapterType;
-          const selectedHarness = agentHarnessType(selectedAdapterType, baseAdapterConfig);
-          let runner = adapterOverride?.runner;
-          if (runner === undefined && adapterOverride?.adapterType !== "proprio_runner") {
-            if (selectedHarness === agentHarnessType(manifestAgent.adapterType, manifestAgent.adapterConfig)) {
-              runner = manifestAgent.runner;
-            }
-            if (runner === undefined && existingImportAgent
-              && selectedHarness === agentHarnessType(existingImportAgent.adapterType, existingImportAgent.adapterConfig)) {
-              runner = agentRunner(existingImportAgent.adapterType);
-            }
-          }
-          const retainedNative = runner === "proprio" && Boolean(proprioRunnerProfileForHarness(selectedHarness))
-            ? [manifestAgent, existingImportAgent].find((agent) => agent?.adapterType === "proprio_runner"
-              && agentHarnessType(agent.adapterType, agent.adapterConfig) === selectedHarness)
-            : undefined;
-          if (retainedNative) {
-            selectedAdapterType = "proprio_runner";
-            for (const field of ["provider", "acpxAgent", "acpxMode"]) {
-              if (retainedNative.adapterConfig[field] !== undefined) baseAdapterConfig[field] = retainedNative.adapterConfig[field];
-            }
-          }
-          const normalizedAdapter = await prepareImportedAgentAdapter(
-            targetCompany.id,
-            selectedAdapterType,
-            baseAdapterConfig,
-            desiredSkills,
-            mode,
-            runner,
-            existingImportAgent?.defaultEnvironmentId,
+          const runtime = await resolveImportedAgentRuntime(
+            targetCompany.id, manifestAgent, adapterOverride, mode, existingImportAgent,
           );
+          const normalizedAdapter = await prepareImportedAgentAdapter(targetCompany.id, runtime, desiredSkills);
           const patch = {
             name: planAgent.plannedName,
             role: manifestAgent.role,
@@ -6615,6 +6647,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     exportBundle,
     previewExport,
     previewImport,
+    previewImportedAgentRuntime,
     importBundle,
   };
 }

@@ -985,6 +985,7 @@ export type {
   CatalogTeamInstallOptions,
   CatalogTeamSkillPreparationAction,
   CatalogTeamSkillPreparation,
+  CatalogTeamAgentRuntimePlan,
   CatalogTeamImportPreviewResult,
   CatalogTeamInstallResult,
   InstalledCatalogTeam,
