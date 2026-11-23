@@ -3,6 +3,11 @@ import { shellQuote } from "./helpers.js";
 import { isTimeoutError } from "./sandboxes.js";
 import { cleanupTimedOutExecution, resolveExecutionTarget, type SessionStrategy } from "./sessions.js";
 
+// Leave the SDK a fallback deadline if the bridge cannot perform cleanup.
+const STREAM_TIMEOUT_GRACE_MS = 5_000;
+
+class StreamExecutionTimeout extends Error {}
+
 export interface BridgeExecuteParams {
   sandbox: CloudflareSandbox;
   command: string;
@@ -98,6 +103,8 @@ export async function executeInSandbox(params: BridgeExecuteParams) {
     await params.sandbox.writeFile(stdinFile, stdinPayload, { encoding: "utf8" });
   }
 
+  let streamTimer: ReturnType<typeof setTimeout> | undefined;
+  let streamDeadlineReached = false;
   try {
     const target = await resolveExecutionTarget(params.sandbox, {
       sessionStrategy: params.sessionStrategy,
@@ -114,19 +121,34 @@ export async function executeInSandbox(params: BridgeExecuteParams) {
       stdinFile,
     });
     const fullCommand = `sh -lc ${shellQuote(script)}`;
-    const result = await target.exec(fullCommand, {
+    const onOutput = params.onOutput;
+    const { timeoutMs } = params;
+    // SDK 0.12.14 resolves streamed timeouts with a normal exit code 124.
+    // Own the streaming deadline so command output cannot trigger cleanup.
+    const streamDeadline = onOutput && timeoutMs !== undefined && timeoutMs > 0
+      ? new Promise<never>((_resolve, reject) => {
+          streamTimer = setTimeout(() => {
+            streamDeadlineReached = true;
+            reject(new StreamExecutionTimeout(`Command timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        })
+      : undefined;
+    const execution = target.exec(fullCommand, {
       cwd: "/",
-      timeout: params.timeoutMs,
-      ...(typeof params.onOutput === "function"
+      timeout: streamDeadline && timeoutMs !== undefined ? timeoutMs + STREAM_TIMEOUT_GRACE_MS : timeoutMs,
+      ...(onOutput
         ? {
             stream: true,
-            onOutput: params.onOutput,
+            onOutput: (stream, data) => {
+              if (!streamDeadlineReached) return onOutput(stream, data);
+            },
           }
         : {}),
     });
+    const result = await (streamDeadline ? Promise.race([execution, streamDeadline]) : execution);
     return coerceExecuteResult(result);
   } catch (error) {
-    if (isTimeoutError(error)) {
+    if (error instanceof StreamExecutionTimeout || isTimeoutError(error)) {
       await cleanupTimedOutExecution(params.sandbox, {
         sessionStrategy: params.sessionStrategy,
         sessionId: params.sessionId,
@@ -141,6 +163,7 @@ export async function executeInSandbox(params: BridgeExecuteParams) {
     }
     throw error;
   } finally {
+    clearTimeout(streamTimer);
     if (stdinFile) {
       await params.sandbox.deleteFile?.(stdinFile).catch(() => undefined);
     }
