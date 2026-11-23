@@ -36,7 +36,10 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
   const child = spawn(codex, [
     "-c", 'default_permissions="fixture"',
     "-c", `permissions.fixture.filesystem={":root"="none",":minimal"="read",":tmpdir"="none",${JSON.stringify(root)}="none"${selectedSkillRule}}`,
-    "-c", "permissions.fixture.network.enabled=false", "app-server",
+    // The Linux job already puts the whole fixture in an empty network
+    // namespace. Reuse it to avoid asking nested bubblewrap to configure lo.
+    "-c", `permissions.fixture.network.enabled=${process.env.PROPRIO_TEST_ISOLATED_NETWORK === "1"}`,
+    "app-server",
   ], {
     cwd: workspace,
     env: { PATH: process.env.PATH, HOME: assignment?.home ?? privateHome, CODEX_HOME: privateHome, TMPDIR: root },
