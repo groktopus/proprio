@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import {
-  DEPLOYMENT_MODES,
+  resolveDeploymentMode as resolveSharedDeploymentMode,
   findProprioConfigKeyWarnings,
   proprioConfigSchema,
   type ProprioConfig,
@@ -73,8 +73,5 @@ export function readConfigFile(options?: { includeProvenance: true }): ProprioCo
 
 /** Resolve the same deployment mode without loading config.ts's dotenv/startup side effects. */
 export function resolveDeploymentMode(fileConfig = readConfigFile()): DeploymentMode {
-  const fromEnv = process.env.PROPRIO_DEPLOYMENT_MODE;
-  return fromEnv && DEPLOYMENT_MODES.includes(fromEnv as DeploymentMode)
-    ? fromEnv as DeploymentMode
-    : fileConfig?.server.deploymentMode ?? "local_trusted";
+  return resolveSharedDeploymentMode(process.env.PROPRIO_DEPLOYMENT_MODE, fileConfig?.server.deploymentMode);
 }

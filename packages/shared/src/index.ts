@@ -833,6 +833,7 @@ export {
   inferBindModeFromHost,
   isAllInterfacesHost,
   isLoopbackHost,
+  resolveDeploymentMode,
   resolveRuntimeBind,
   validateConfiguredBindMode,
 } from "./network-bind.js";

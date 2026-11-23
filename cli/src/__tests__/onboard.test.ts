@@ -217,18 +217,14 @@ describe("onboard", () => {
     expect(fs.existsSync(`${configPath}.backup`)).toBe(false);
   });
 
-  it("keeps --yes onboarding on local trusted loopback defaults", async () => {
+  it("rejects a LAN bind environment override without authenticated mode", async () => {
     const configPath = createFreshConfigPath();
     process.env.HOST = "0.0.0.0";
     process.env.PROPRIO_BIND = "lan";
 
-    await onboard({ config: configPath, yes: true, invokedByRun: true });
-
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as ProprioConfig;
-    expect(raw.server.deploymentMode).toBe("local_trusted");
-    expect(raw.server.exposure).toBe("private");
-    expect(raw.server.bind).toBe("loopback");
-    expect(raw.server.host).toBe("127.0.0.1");
+    await expect(onboard({ config: configPath, yes: true, invokedByRun: true }))
+      .rejects.toThrow("local_trusted requires server.bind=loopback");
+    expect(fs.existsSync(configPath)).toBe(false);
   });
 
   it("creates instance-root config and data paths for a fresh PROPRIO_HOME", async () => {
@@ -285,14 +281,14 @@ describe("onboard", () => {
     expect(raw.server.host).toBe("127.0.0.1");
   });
 
-  it("ignores deployment env overrides during --yes quickstart", async () => {
+  it("honors explicit authenticated mode during --yes quickstart", async () => {
     const configPath = createFreshConfigPath();
     process.env.PROPRIO_DEPLOYMENT_MODE = "authenticated";
 
     await onboard({ config: configPath, yes: true, invokedByRun: true });
 
     const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as ProprioConfig;
-    expect(raw.server.deploymentMode).toBe("local_trusted");
+    expect(raw.server.deploymentMode).toBe("authenticated");
     expect(raw.server.exposure).toBe("private");
     expect(raw.server.bind).toBe("loopback");
     expect(raw.server.host).toBe("127.0.0.1");
