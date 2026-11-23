@@ -68,7 +68,9 @@ async function ready() {
 }
 
 function eventFrames(text) {
-  return text.split("\n\n").flatMap(frame => {
+  const complete = text.split("\n\n");
+  complete.pop();
+  return complete.flatMap(frame => {
     const [kind, data] = frame.split("\n");
     if (!kind.startsWith("event: ") || !data?.startsWith("data: ")) return [];
     return [{ type: kind.slice("event: ".length), payload: JSON.parse(data.slice("data: ".length)) }];
@@ -78,7 +80,7 @@ function eventFrames(text) {
 async function waitForOutput(reader, marker) {
   const decoder = new TextDecoder();
   let text = "";
-  while (!text.includes(marker)) {
+  while (!eventFrames(text).filter(event => event.type === "stdout").map(event => event.payload.data).join("").includes(marker)) {
     const chunk = await reader.read();
     assert.ok(!chunk.done, "the Worker ended the stream before the native command started");
     text += decoder.decode(chunk.value, { stream: true });
