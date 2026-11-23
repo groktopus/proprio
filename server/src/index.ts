@@ -157,6 +157,7 @@ import {
 } from "./services/managed-config.js";
 import { getOperatorSettingDefaults } from "./services/setting-defaults.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
+import { resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
 import { cloudActorHeaderSourceFromHeaders, resolveCloudTenantActor } from "./middleware/auth.js";
 import {
@@ -1090,6 +1091,9 @@ async function startServerWithDatabaseTeardown(
   });
   const liveEventsWebSocketServer = setupLiveEventsWebSocketServer(server, db as any, {
     deploymentMode: config.deploymentMode,
+    trustProxy: app.get("trust proxy fn"),
+    publicOrigin: config.authPublicBaseUrl,
+    localHostnames: resolvePrivateHostnameAllowSet({ allowedHostnames: config.allowedHostnames, bindHost: config.host }),
     subscribeInvalidation: deploymentHints?.subscribeCompany,
     resolveSessionFromHeaders,
     // Cloud-proxied browsers carry trusted x-proprio-cloud-* headers instead

@@ -60,6 +60,22 @@ describe("boardMutationGuard", () => {
     expect([200, 204]).toContain(res.status);
   });
 
+  it("requires a trusted origin for local browser mutations", async () => {
+    const app = createApp("board", "local_implicit");
+    for (const origin of ["https://other.example.test", "null"]) {
+      const denied = await request(app).post("/mutate")
+        .set("Host", "board.example.test")
+        .set("Origin", origin)
+        .set("Referer", "https://board.example.test/tasks");
+      expect(denied.status).toBe(403);
+    }
+    const originlessBrowser = await request(app).post("/mutate").set("Sec-Fetch-Site", "cross-site");
+    expect(originlessBrowser.status).toBe(403);
+    const sameOrigin = await request(app).post("/mutate")
+      .set("Host", "board.example.test").set("Origin", "https://board.example.test");
+    expect(sameOrigin.status).toBe(204);
+  });
+
   it("allows board bearer-key mutations without origin", async () => {
     const app = createApp("board", "board_key");
     const res = await request(app).post("/mutate").send({ ok: true });

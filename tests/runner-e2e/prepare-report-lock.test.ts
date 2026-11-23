@@ -27,7 +27,26 @@ it.skipIf(pendingDependabotLock).each(['valid', 'unknown-lock', 'changed-patch',
         expect(createHash('sha256').update(await readFile(lock)).digest('hex')).toBe(policy.outputSha256);
         await writeFile(lock, committed);
       }
-      if (committedHash === policy.outputSha256) {
+      if (policy.inputSha256 === policy.outputSha256) {
+        // Use a fixture-only correction when the committed lock already resolves.
+        const marker = '# Reporting correction fixture';
+        const firstLine = committed.toString('utf8').split('\n')[0];
+        const patch = [
+          'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml',
+          '--- a/pnpm-lock.yaml',
+          '+++ b/pnpm-lock.yaml',
+          '@@ -1,2 +1 @@',
+          `-${marker}`,
+          ` ${firstLine}`,
+          '',
+        ].join('\n');
+        const input = Buffer.concat([Buffer.from(`${marker}\n`), committed]);
+        policy.inputSha256 = createHash('sha256').update(input).digest('hex');
+        policy.patchSha256 = createHash('sha256').update(patch).digest('hex');
+        await writeFile(lock, input);
+        await writeFile(path.join(relative, 'report-lock.patch'), patch);
+        await writeFile(path.join(relative, 'report-lock.json'), JSON.stringify(policy));
+      } else if (committedHash === policy.outputSha256) {
         execFileSync('git', ['apply', '--reverse', path.join(relative, 'report-lock.patch')], { cwd: root });
       }
       const input = await readFile(lock);
