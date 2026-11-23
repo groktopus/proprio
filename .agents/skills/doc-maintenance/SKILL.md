@@ -126,7 +126,7 @@ git commit -m "docs: update documentation for accuracy
 
 - [list each fix briefly]
 
-Co-Authored-By: Proprio <noreply@paperclip.ing>"
+Co-Authored-By: Proprio <noreply@groktop.us>"
 
 git push -u origin "$BRANCH"
 
