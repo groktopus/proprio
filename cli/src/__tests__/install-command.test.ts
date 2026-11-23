@@ -125,19 +125,26 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls[0]?.[0]).toBe(process.execPath);
   });
 
-  const createGitCheckoutRunCommand = (sha: string) =>
+  const createGitCheckoutRunCommand = (sha: string, { bundleServerAssets = false } = {}) =>
     vi.fn(async (file: string, args: string[], _options?: Parameters<CommandRunner>[2]) => {
       if (file === "curl" && !args.includes("--output")) return { stdout: JSON.stringify({ sha }), stderr: "" };
       if (file === "curl") { fs.writeFileSync(args[args.indexOf("--output") + 1], "archive"); return { stdout: "", stderr: "" }; }
       if (file === "tar") {
         const checkout = args[args.indexOf("-C") + 1];
         const packages = [
-          { dir: "packages/shared", name: "@groktopus/shared", packageJson: { name: "@groktopus/shared", version: "0.3.1" } },
+          { dir: "packages/shared", name: "@groktopus/shared", packageJson: { name: "@groktopus/shared", version: bundleServerAssets ? "1.0.0" : "0.3.1" } },
           { dir: "packages/db", name: "@groktopus/db", packageJson: { name: "@groktopus/db", version: "0.3.1", dependencies: { "@groktopus/shared": "workspace:*" }, bundleDependencies: ["embedded-postgres"] } },
-          { dir: "server", name: "@groktopus/server", packageJson: { name: "@groktopus/server", version: "0.3.1", dependencies: { "@groktopus/db": "workspace:*" } } },
+          { dir: "server", name: "@groktopus/server", packageJson: {
+            name: "@groktopus/server", version: "0.3.1", dependencies: { "@groktopus/db": "workspace:*", ...(bundleServerAssets ? { "@groktopus/shared": "workspace:^" } : {}) },
+            ...(bundleServerAssets ? { files: ["dist", "ui-dist", "skills"], bundleDependencies: ["a-server-dependency"] } : {}),
+          } },
         ];
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
+        if (bundleServerAssets) {
+          fs.mkdirSync(path.join(checkout, "skills", "proprio"), { recursive: true });
+          fs.writeFileSync(path.join(checkout, "skills", "proprio", "SKILL.md"), "# Proprio skill");
+        }
         fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
         for (const workspacePackage of packages) {
@@ -147,24 +154,68 @@ describe("managed install commands", () => {
         return { stdout: "", stderr: "" };
       }
       if (path.basename(file) === "corepack") {
+        if (args.includes("prepare:ui-dist")) {
+          const checkout = _options?.cwd;
+          if (typeof checkout !== "string") throw new Error("A Git checkout directory is required");
+          const uiDist = path.join(checkout, "server", "ui-dist");
+          fs.mkdirSync(uiDist, { recursive: true });
+          fs.writeFileSync(path.join(uiDist, "index.html"), "<!doctype html>");
+        }
         if (args.includes("pack")) {
           const destination = args[args.indexOf("--pack-destination") + 1];
           const packageDir = args[args.indexOf("--dir") + 1];
           const packageName = packageDir === "server" ? "proprio-server" : "proprio-shared";
-          fs.writeFileSync(path.join(destination, `${packageName}-0.3.1.tgz`), "package");
+          const version = bundleServerAssets && packageDir === "packages/shared" ? "1.0.0" : "0.3.1";
+          fs.writeFileSync(path.join(destination, `${packageName}-${version}.tgz`), "package");
         }
         return { stdout: "", stderr: "" };
       }
       if (file === "bash") return { stdout: "", stderr: "" };
       if (file === "npm" && args[0] === "pack") {
-        const packageName = args[1]?.includes("workspace-package-") ? "proprio-db" : "proprio";
+        const stagedPackage = args[1]?.includes("workspace-package-") ? args[1] : null;
+        if (bundleServerAssets && stagedPackage && !args.includes("--ignore-scripts")) {
+          throw new Error("A staged bundle must not rerun workspace prepack hooks");
+        }
+        const manifest = stagedPackage
+          ? JSON.parse(fs.readFileSync(path.join(stagedPackage, "package.json"), "utf8"))
+          : { name: "proprio" };
+        if (bundleServerAssets && manifest.name === "@groktopus/server") {
+          expect(manifest.dependencies).toEqual({
+            "@groktopus/db": "0.3.1",
+            "@groktopus/shared": "^1.0.0",
+            "a-server-dependency": "2.0.0",
+          });
+        }
+        const packageName = manifest.name.replace("@groktopus/", "proprio-");
         fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
         return { stdout: "", stderr: "" };
       }
-      if (file === "npm" && args[0] === "install") { const prefix = args[args.indexOf("--prefix") + 1]; const packageRoot = path.join(prefix, "node_modules", "proprio"); fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true }); fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" })); fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n"); return { stdout: "", stderr: "" }; }
+      if (file === "sh" && args[4] === "install") {
+        if (bundleServerAssets) expect([file, ...args.slice(0, 5)]).toEqual(
+          ["sh", "-c", 'umask g-w,o-w && exec "$@"', "proprio-npm-install", "npm", "install"],
+        );
+        const prefix = args[args.indexOf("--prefix") + 1];
+        const packageRoot = path.join(prefix, "node_modules", "proprio");
+        fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
+        fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" }));
+        fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n");
+        return { stdout: "", stderr: "" };
+      }
       if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
+        const isServer = path.basename(args[1]) === "server";
+        if (isServer && !fs.existsSync(path.join(args[1], "ui-dist", "index.html"))) {
+          throw new Error("Server UI missing at packaging");
+        }
+        if (isServer && !fs.existsSync(path.join(args[1], "skills", "proprio", "SKILL.md"))) {
+          throw new Error("Server skills missing at packaging");
+        }
         fs.mkdirSync(args[2], { recursive: true });
-        fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify({ name: "@groktopus/db", version: "0.3.1" }));
+        fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify({
+          name: isServer ? "@groktopus/server" : "@groktopus/db", version: "0.3.1",
+          dependencies: isServer
+            ? { "@groktopus/db": "0.3.1", "@groktopus/shared": "^0.3.1", "a-server-dependency": "2.0.0" }
+            : { "@groktopus/shared": "0.3.1" },
+        }));
         return { stdout: "", stderr: "" };
       }
       if (file === process.execPath) return { stdout: "0.3.1\n", stderr: "" };
@@ -271,8 +322,57 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls.filter(([command, args]) => command === corepack && args.includes("pack"))).toHaveLength(2);
     expect(runCommand.mock.calls.filter(([command, args]) => command === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
-    const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
+    const installCall = runCommand.mock.calls.find(([command, args]) => command === "sh" && args[4] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+  });
+
+  it("prepares the UI and skills before staging the bundled server during a Git install", async () => {
+    stageFakeCorepack();
+    const runCommand = createGitCheckoutRunCommand("d".repeat(40), { bundleServerAssets: true });
+
+    await expect(installCommand({ ref: "main", yes: true }, { runCommand })).resolves.toBeUndefined();
+
+    const ui = runCommand.mock.calls.findIndex(([, args]) => args.includes("prepare:ui-dist"));
+    const serverBundle = runCommand.mock.calls.findIndex(([, args]) =>
+      args[0]?.endsWith("prepare-bundled-package.mjs") && path.basename(args[1]) === "server");
+    expect(ui).toBeGreaterThan(-1);
+    expect(serverBundle).toBeGreaterThan(ui);
+    expect(readInstallManifest(resolveInstallStorePaths())?.sha).toBe("d".repeat(40));
+  });
+
+  it("upgrades an existing managed Git payload with the fixed source installer", async () => {
+    stageFakeCorepack();
+    const baseSha = "b".repeat(40);
+    const nextSha = "d".repeat(40);
+    await installCommand({ ref: "main", yes: true }, { runCommand: createGitCheckoutRunCommand(baseSha) });
+    const paths = resolveInstallStorePaths();
+    const instance = path.join(paths.proprioHome, "instances", "default");
+    fs.mkdirSync(instance, { recursive: true });
+    fs.writeFileSync(path.join(instance, "retained.txt"), "saved work");
+
+    await installCommand({ ref: "main", yes: true }, {
+      runCommand: createGitCheckoutRunCommand(nextSha, { bundleServerAssets: true }),
+    });
+
+    const manifest = readInstallManifest(paths);
+    expect(manifest?.sha).toBe(nextSha);
+    expect(manifest?.previous[0]?.sha).toBe(baseSha);
+    expect(fs.readFileSync(path.join(instance, "retained.txt"), "utf8")).toBe("saved work");
+  });
+
+  it("does not activate a Git installation when UI preparation fails", async () => {
+    stageFakeCorepack();
+    const fixture = createGitCheckoutRunCommand("d".repeat(40), { bundleServerAssets: true });
+    const runCommand: CommandRunner = (file, args, options) => args.includes("prepare:ui-dist")
+      ? Promise.reject(new Error("UI preparation failed"))
+      : fixture(file, args, options);
+
+    await expect(installCommand({ ref: "main", yes: true }, { runCommand })).rejects.toThrow("UI preparation failed");
+
+    const paths = resolveInstallStorePaths();
+    expect(fs.existsSync(paths.manifestPath)).toBe(false);
+    expect(fs.existsSync(paths.currentPath)).toBe(false);
+    expect(fs.existsSync(paths.shimPath)).toBe(false);
   });
 
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {
