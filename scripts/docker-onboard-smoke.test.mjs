@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "./test-external-release-contract.mjs";
 
 // Pins the diagnostics wiring of the Docker leg of the release smoke.
 //
@@ -16,11 +17,10 @@ import test from "node:test";
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const scriptPath = join(repoRoot, "scripts", "docker-onboard-smoke.sh");
 const script = readFileSync(scriptPath, "utf8");
-const workflow = readFileSync(
-  join(repoRoot, ".github", "workflows", "release-smoke.yml"),
-  "utf8",
-);
-const dockerJob = workflow.split(/^  smoke:$/m)[1] ?? "";
+function dockerSmokeJob() {
+  const workflow = readExternalReleaseFile(".github/workflows/release-smoke.yml");
+  return workflow.split(/^  smoke:$/m)[1] ?? "";
+}
 
 test("smoke script is executable and parses", () => {
   accessSync(scriptPath, constants.X_OK);
@@ -78,7 +78,8 @@ test("the log dump starts empty on every run", () => {
   );
 });
 
-test("workflow fixes the container name before the harness runs", () => {
+testExternalReleaseContract("workflow fixes the container name before the harness runs", () => {
+  const dockerJob = dockerSmokeJob();
   assert.match(dockerJob, /^    env:$/m);
   assert.match(dockerJob, /SMOKE_CONTAINER_NAME: release-smoke-onboard/);
   // Reading the name back out of the harness is the defect: a step that only
@@ -87,7 +88,8 @@ test("workflow fixes the container name before the harness runs", () => {
   assert.match(dockerJob, /SMOKE_LOG_FILE="\$\{\{ runner\.temp \}\}\/docker-onboard-smoke\.log"/);
 });
 
-test("workflow captures and uploads the logs unconditionally", () => {
+testExternalReleaseContract("workflow captures and uploads the logs unconditionally", () => {
+  const dockerJob = dockerSmokeJob();
   const capture = dockerJob.split("- name: Capture Docker logs")[1] ?? "";
   assert.ok(capture, "the Capture Docker logs step must exist");
   assert.match(capture.split("- name:")[0], /if: always\(\)/);

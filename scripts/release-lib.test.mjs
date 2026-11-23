@@ -4,16 +4,11 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { readExternalReleaseFile, testExternalReleaseContract } from "./test-external-release-contract.mjs";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const releaseWorkflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-
-function workflowVerifyBudget() {
-  return {
-    verifyAttempts: Number(releaseWorkflow.match(/^  NPM_PUBLISH_VERIFY_ATTEMPTS: "(\d+)"$/m)?.[1]),
-    verifyDelaySeconds: Number(releaseWorkflow.match(/^  NPM_PUBLISH_VERIFY_DELAY_SECONDS: "(\d+)"$/m)?.[1]),
-  };
-}
+const observedVisibilityDelaySeconds = 15 * 60 + 20;
+const longVisibilityFixture = { verifyAttempts: 96, verifyDelaySeconds: 10 };
 
 function writeExecutable(path, body) {
   writeFileSync(path, body, { mode: 0o755 });
@@ -258,7 +253,7 @@ test("publish_package_to_npm retries bundled directory tlog failures without pro
   const result = runPublishHelper({ pnpmMode: "tlog-then-success", publishTool: "npm" });
 
   assert.equal(result.status, 0);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
   assert.match(
     result.calls,
     /^npm publish --tag canary --access public --provenance=false --ignore-scripts --loglevel verbose$/m,
@@ -269,7 +264,7 @@ test("publish_package_to_npm retries duplicate tlog failures without provenance"
   const result = runPublishHelper({ pnpmMode: "tlog-then-success" });
 
   assert.equal(result.status, 0);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
   assert.match(
     result.calls,
     /^pnpm publish --no-git-checks --tag canary --access public --provenance=false$/m,
@@ -280,7 +275,7 @@ test("publish_package_to_npm treats a duplicate tlog failure as complete when np
   const result = runPublishHelper({ pnpmMode: "tlog-always-fails", npmVersionExists: true });
 
   assert.equal(result.status, 0);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
   assert.doesNotMatch(result.calls, /--provenance=false/);
 });
 
@@ -304,7 +299,7 @@ test("publish_package_to_npm does not retry stable publishes without provenance"
   const result = runPublishHelper({ pnpmMode: "tlog-then-success", distTag: "latest" });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
   assert.doesNotMatch(result.calls, /--provenance=false/);
 });
 
@@ -317,15 +312,15 @@ test("wait_for_npm_package_versions confirms registry visibility after a publish
 
   assert.equal(result.status, 0);
   assert.match(result.calls, /^pnpm publish --no-git-checks --tag canary --access public$/m);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
 });
 
 test("wait_for_npm_package_versions blocks the release and names the straggler", () => {
   const result = runPublishHelper({ pnpmMode: "success", waitForRegistry: true });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.calls, /^npm view @proprio\/example@1\.2\.3 version$/m);
-  assert.match(result.output, /did not become registry-visible: @proprio\/example@1\.2\.3/);
+  assert.match(result.calls, /^npm view @groktopus\/example@1\.2\.3 version$/m);
+  assert.match(result.output, /did not become registry-visible: @groktopus\/example@1\.2\.3/);
 });
 
 test("wait_for_npm_package_versions polls every package concurrently", () => {
@@ -341,14 +336,14 @@ test("wait_for_npm_package_versions polls every package concurrently", () => {
   });
 
   assert.equal(result.status, 0, result.output);
-  assert.match(result.output, /@proprio\/alpha@1\.2\.3 is registry-visible/);
-  assert.match(result.output, /@proprio\/beta@1\.2\.3 is registry-visible/);
+  assert.match(result.output, /@groktopus\/alpha@1\.2\.3 is registry-visible/);
+  assert.match(result.output, /@groktopus\/beta@1\.2\.3 is registry-visible/);
 });
 
-test("the workflow budget tolerates the observed 15-minute 20-second registry delay", () => {
-  const budget = workflowVerifyBudget();
+test("a configured polling budget tolerates the observed 15-minute 20-second registry delay", () => {
+  const budget = longVisibilityFixture;
   assert.ok(budget.verifyDelaySeconds > 0);
-  const delayedCheck = Math.ceil((15 * 60 + 20) / budget.verifyDelaySeconds) + 1;
+  const delayedCheck = Math.ceil(observedVisibilityDelaySeconds / budget.verifyDelaySeconds) + 1;
   const result = runPublishHelper({
     pnpmMode: "success",
     waitForRegistry: true,
@@ -365,12 +360,12 @@ test("the workflow budget tolerates the observed 15-minute 20-second registry de
   );
 });
 
-test("the workflow budget does not delay an immediately visible publish", () => {
+test("a configured polling budget does not delay an immediately visible publish", () => {
   const result = runPublishHelper({
     pnpmMode: "success",
     npmVersionExists: true,
     waitForRegistry: true,
-    ...workflowVerifyBudget(),
+    ...longVisibilityFixture,
   });
 
   assert.equal(result.status, 0, result.output);
@@ -378,8 +373,8 @@ test("the workflow budget does not delay an immediately visible publish", () => 
   assert.doesNotMatch(result.calls, /^sleep /m);
 });
 
-test("the workflow budget fails closed after the last registry check", () => {
-  const budget = workflowVerifyBudget();
+test("a configured polling budget fails closed after the last registry check", () => {
+  const budget = longVisibilityFixture;
   assert.ok(budget.verifyAttempts > 0);
   const result = runPublishHelper({
     pnpmMode: "success",
@@ -395,9 +390,13 @@ test("the workflow budget fails closed after the last registry check", () => {
   assert.equal(result.calls.match(/^sleep /gm)?.length, budget.verifyAttempts - 1);
 });
 
-test("every publish job budgets for build time, four delayed packages and the install deadline", () => {
-  const { verifyAttempts, verifyDelaySeconds } = workflowVerifyBudget();
+testExternalReleaseContract("every publish job budgets for build time, four delayed packages and the install deadline", () => {
+  const releaseWorkflow = readExternalReleaseFile(".github/workflows/release.yml");
+  const verifyAttempts = Number(releaseWorkflow.match(/^  NPM_PUBLISH_VERIFY_ATTEMPTS: "(\d+)"$/m)?.[1]);
+  const verifyDelaySeconds = Number(releaseWorkflow.match(/^  NPM_PUBLISH_VERIFY_DELAY_SECONDS: "(\d+)"$/m)?.[1]);
+  assert.ok(verifyAttempts > 0 && verifyDelaySeconds > 0);
   const pollingSeconds = (verifyAttempts - 1) * verifyDelaySeconds;
+  assert.ok(pollingSeconds >= observedVisibilityDelaySeconds, "the workflow must tolerate the observed registry delay");
   const releaseScript = readFileSync(new URL("./release.sh", import.meta.url), "utf8");
   const installDeadlineSeconds = Number(releaseScript.match(/NPM_INSTALL_VERIFY_TIMEOUT_SECONDS:-(\d+)/)?.[1]);
   assert.ok(installDeadlineSeconds > 0);
