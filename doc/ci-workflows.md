@@ -16,6 +16,7 @@ workspace from the frozen pnpm lockfile, and runs:
 - the CLI service-onboarding test;
 - server cost-summary and database-backup tests, with named PostgreSQL assertions;
 - Agent Chat supersession and Stop regressions across server and UI;
+- the standalone release-registry test suite;
 - native heartbeat replay cadence and settlement callback consumers;
 - late live-settlement metadata regressions;
 - the server typecheck, Hermes adapter build, and server TypeScript build compilation.

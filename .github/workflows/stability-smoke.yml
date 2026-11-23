@@ -111,6 +111,8 @@ jobs:
           };
           assertRequiredVitestTests(result, required);
           JS
+      - name: Check release registry from source
+        run: pnpm test:release-registry
       - name: Check native replay heartbeat cadence
         run: |
           test_file=server/src/__tests__/native-run-projection-work.test.ts
