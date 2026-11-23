@@ -34,7 +34,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { createRoutineSchema, envConfigSchema, type Routine } from "@groktopus/shared";
+import { createRoutineSchema, envConfigSchema, nextRoutineCronFire, type Routine } from "@groktopus/shared";
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
@@ -1590,6 +1590,44 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
     const [listed] = await svc.list(companyId);
     expect(listed?.triggers[0]?.cronExpression).toBe(cronExpression);
+  });
+
+  it("persists the shared cron preview deadline and advances once across a repeated scheduler pass", async () => {
+    const { routine, svc } = await seedFixture();
+    const reference = new Date("2026-11-16T10:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(reference);
+    try {
+      const { trigger } = await svc.createTrigger(routine.id, {
+        kind: "schedule",
+        enabled: true,
+        cronExpression: "0 9 1 * 1",
+        timezone: "UTC",
+      }, {});
+      const expectedPreview = nextRoutineCronFire("0 9 1 * 1", "UTC", reference);
+      const persisted = await svc.getTrigger(trigger.id);
+      expect(persisted?.nextRunAt).toEqual(expectedPreview);
+      expect(persisted?.nextRunAt?.toISOString()).toBe("2026-11-23T09:00:00.000Z");
+
+      // Model a pre-upgrade saved deadline computed with the old AND matcher.
+      // Keep that already-persisted obligation, then use the shared matcher
+      // when this occurrence is consumed and the next deadline is calculated.
+      const legacyDeadline = new Date("2027-02-01T09:00:00.000Z");
+      await db.update(routineTriggers).set({ nextRunAt: legacyDeadline }).where(eq(routineTriggers.id, trigger.id));
+      expect((await svc.getTrigger(trigger.id))?.nextRunAt).toEqual(legacyDeadline);
+
+      const dueAt = legacyDeadline;
+      expect(await svc.tickScheduledTriggers(dueAt)).toEqual({ triggered: 1 });
+      const afterFirstPass = await svc.getTrigger(trigger.id);
+      expect(afterFirstPass?.nextRunAt?.toISOString()).toBe("2027-02-08T09:00:00.000Z");
+
+      // A fresh scheduler pass at the same reference instant sees the persisted
+      // future deadline, so restart recovery cannot replay the claimed fire.
+      expect(await svc.tickScheduledTriggers(dueAt)).toEqual({ triggered: 0 });
+      expect(await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("blocks agents from restoring routine revisions assigned to another agent", async () => {
