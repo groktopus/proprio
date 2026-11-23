@@ -100,6 +100,8 @@ const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blo
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
+type ScheduledOccurrence = { dueAt: Date; nextAt: Date | null };
+class ScheduleOccurrenceAlreadyClaimed extends Error {}
 const MAX_ROUTINE_REVISIONS = 100;
 const ACTIVITY_GATE_IGNORED_ACTIONS = [
   "issue.read_marked",
@@ -1502,15 +1504,34 @@ export function routineService(
     };
   }
 
-  // Records an automatic firing that was claimed but intentionally not dispatched. The
-  // scheduler advances its tick before calling this helper, so suppressed work is never
-  // replayed after a setting or project state changes.
+  async function advanceScheduledOccurrence(
+    executor: Db,
+    trigger: typeof routineTriggers.$inferSelect,
+    occurrence: ScheduledOccurrence,
+  ) {
+    // The cursor and run record commit together. A stale scheduler must leave
+    // both alone, and a failed insert must leave the occurrence due.
+    const [updated] = await executor.update(routineTriggers)
+      .set({ nextRunAt: occurrence.nextAt, updatedAt: new Date() })
+      .where(and(
+        eq(routineTriggers.id, trigger.id),
+        eq(routineTriggers.routineId, trigger.routineId),
+        eq(routineTriggers.companyId, trigger.companyId),
+        eq(routineTriggers.enabled, true),
+        eq(routineTriggers.archived, false),
+        eq(routineTriggers.setupPending, false),
+        eq(routineTriggers.nextRunAt, occurrence.dueAt),
+      ))
+      .returning({ id: routineTriggers.id });
+    if (!updated) throw new ScheduleOccurrenceAlreadyClaimed();
+  }
+
   async function recordSuppressedAutomaticRun(input: {
     routine: typeof routines.$inferSelect;
     trigger: typeof routineTriggers.$inferSelect;
     source: "schedule" | "webhook";
     reason: string;
-    nextRunAt?: Date | null;
+    scheduledOccurrence?: ScheduledOccurrence;
     details?: Record<string, unknown> | null;
     idempotencyKey?: string | null;
     rejectIdempotencyReplay?: boolean;
@@ -1532,6 +1553,10 @@ export function routineService(
         if (!currentTrigger || currentTrigger.archived || !currentTrigger.enabled || currentTrigger.setupPending || currentRoutine?.status !== "active") {
           throw conflict("Routine trigger is not active");
         }
+      }
+
+      if (input.scheduledOccurrence) {
+        await advanceScheduledOccurrence(txDb, input.trigger, input.scheduledOccurrence);
       }
 
       if (input.idempotencyKey) {
@@ -1587,7 +1612,6 @@ export function routineService(
           : input.reason === "no_external_activity"
             ? "skipped_no_activity"
             : "skipped_worktree_execution_cutoff",
-        nextRunAt: input.nextRunAt,
       }, txDb);
       return createdRun;
     });
@@ -1820,7 +1844,7 @@ export function routineService(
     executionWorkspacePreference?: string | null;
     executionWorkspaceSettings?: Record<string, unknown> | null;
     descriptionAppendix?: string | null;
-    nextRunAtOverride?: Date | null;
+    scheduledOccurrence?: ScheduledOccurrence;
     actor?: Actor;
   }) {
     const projectId = input.projectId ?? input.routine.projectId ?? null;
@@ -1925,6 +1949,10 @@ export function routineService(
         }
       }
 
+      if (input.trigger && input.scheduledOccurrence) {
+        await advanceScheduledOccurrence(txDb, input.trigger, input.scheduledOccurrence);
+      }
+
       if (input.idempotencyKey) {
         const existing = await txDb
           .select()
@@ -1962,7 +1990,7 @@ export function routineService(
 
 
 
-      if (input.trigger?.kind === "schedule" && input.nextRunAtOverride === undefined) {
+      if (input.trigger?.kind === "schedule" && !input.scheduledOccurrence) {
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.routineSchedules);
       }
       const triggeredAt = new Date();
@@ -2006,11 +2034,10 @@ export function routineService(
         })
         .returning();
 
-      const nextRunAt = input.nextRunAtOverride !== undefined
-        ? input.nextRunAtOverride
-        : input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
-          ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
-          : undefined;
+      const nextRunAt = !input.scheduledOccurrence && input.trigger?.kind === "schedule"
+        && input.trigger.cronExpression && input.trigger.timezone
+        ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
+        : undefined;
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
@@ -3689,94 +3716,74 @@ export function routineService(
 
       let triggered = 0;
       for (const row of due) {
-
-
         if (!canContinue()) break;
-        if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
+        const { nextRunAt, cronExpression, timezone } = row.trigger;
+        if (!nextRunAt || !cronExpression || !timezone) continue;
 
-        // Suppress scheduled firings while the routine's project is paused. The tick is still
-        // claimed and advanced to the next single cron tick (no backfill), so resume continues
-        // at the next cron boundary instead of replaying missed firings. Routines with no
-        // project are never suppressed here.
+        // A project pause or worktree cutoff skips the backlog. A quiet
+        // activity gate records one skip for the same window the pass covers.
         const projectPaused = !!(row.routine.projectId && row.projectPausedAt);
         const automaticEligibility = await getAutomaticRoutineDispatchEligibility(row.routine, worktreeActivation);
         const worktreeSuppressed = !automaticEligibility.eligible;
-
-        let runCount = 1;
-        let claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
-
-        if (!projectPaused && !worktreeSuppressed && row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
-          if (isSubHourlyCronExpression(row.trigger.cronExpression, row.trigger.timezone, now)) {
-            claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
-          } else {
-            let cursor: Date | null = row.trigger.nextRunAt;
-            runCount = 0;
-            while (cursor && cursor <= now && runCount < MAX_CATCH_UP_RUNS) {
-              runCount += 1;
-              claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, cursor);
-              cursor = claimedNextRunAt;
-            }
+        const occurrences: ScheduledOccurrence[] = [];
+        if (!projectPaused && !worktreeSuppressed && row.routine.catchUpPolicy === "enqueue_missed_with_cap"
+          && !isSubHourlyCronExpression(cronExpression, timezone, now)) {
+          let dueAt: Date | null = nextRunAt;
+          while (dueAt && dueAt <= now && occurrences.length < MAX_CATCH_UP_RUNS) {
+            const nextAt: Date | null = nextCronTickInTimeZone(cronExpression, timezone, dueAt);
+            occurrences.push({ dueAt, nextAt });
+            dueAt = nextAt;
           }
+        } else {
+          occurrences.push({ dueAt: nextRunAt, nextAt: nextCronTickInTimeZone(cronExpression, timezone, now) });
         }
+        const lastOccurrence = occurrences.at(-1);
+        if (!lastOccurrence) continue;
 
-        const claimed = await db
-          .update(routineTriggers)
-          .set({
-            nextRunAt: claimedNextRunAt,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(routineTriggers.id, row.trigger.id),
-              eq(routineTriggers.enabled, true),
-              eq(routineTriggers.archived, false),
-              eq(routineTriggers.nextRunAt, row.trigger.nextRunAt),
-            ),
-          )
-          .returning({ id: routineTriggers.id })
-          .then((rows) => rows[0] ?? null);
-        if (!claimed) continue;
+        try {
+          if (projectPaused || worktreeSuppressed) {
+            await recordSuppressedAutomaticRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              reason: worktreeSuppressed ? "worktree_execution_cutoff" : "paused",
+              scheduledOccurrence: { dueAt: nextRunAt, nextAt: lastOccurrence.nextAt },
+            });
+            continue;
+          }
 
-        if (projectPaused || worktreeSuppressed) {
-          await recordSuppressedAutomaticRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            reason: worktreeSuppressed ? "worktree_execution_cutoff" : "paused",
-            nextRunAt: claimedNextRunAt,
-          });
-          continue;
-        }
-
-        const activityGate = row.routine.activityGatePolicy === "require_external_activity"
-          ? await evaluateActivityGate(row.routine, now)
-          : null;
-        if (activityGate && !activityGate.fire) {
-          await recordSuppressedAutomaticRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            reason: "no_external_activity",
-            nextRunAt: claimedNextRunAt,
-            details: {
-              activityGate: {
-                verdict: "quiet",
-                windowStart: activityGate.windowStart?.toISOString() ?? null,
-                matchedActivityId: null,
+          const activityGate = row.routine.activityGatePolicy === "require_external_activity"
+            ? await evaluateActivityGate(row.routine, now)
+            : null;
+          if (activityGate && !activityGate.fire) {
+            await recordSuppressedAutomaticRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              reason: "no_external_activity",
+              scheduledOccurrence: { dueAt: nextRunAt, nextAt: lastOccurrence.nextAt },
+              details: {
+                activityGate: {
+                  verdict: "quiet",
+                  windowStart: activityGate.windowStart?.toISOString() ?? null,
+                  matchedActivityId: null,
+                },
               },
-            },
-          });
-          continue;
-        }
+            });
+            continue;
+          }
 
-        for (let i = 0; i < runCount; i += 1) {
-          await dispatchRoutineRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-            nextRunAtOverride: claimedNextRunAt,
-          });
-          triggered += 1;
+          for (const scheduledOccurrence of occurrences) {
+            await dispatchRoutineRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+              scheduledOccurrence,
+            });
+            triggered += 1;
+          }
+        } catch (error) {
+          if (!(error instanceof ScheduleOccurrenceAlreadyClaimed)) throw error;
         }
       }
 

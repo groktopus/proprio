@@ -93,6 +93,59 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     await quiet();
   });
 
+  it.each([0, 1])("retries unrecorded catch-up work after the scheduler restarts with %i recorded runs", async recorded => {
+    const routine = await create(db, "enqueue_missed_with_cap");
+    const { trigger } = await service().createTrigger(routine.id, {
+      kind: "schedule", enabled: true, cronExpression: "0 * * * *", timezone: "UTC",
+    }, {});
+    const now = new Date("2026-07-16T12:30:00Z");
+    await db.update(routineTriggers).set({ nextRunAt: new Date("2026-07-16T10:00:00Z") })
+      .where(eq(routineTriggers.id, trigger.id));
+
+    const readRuns = () => db.select().from(routineRuns).where(eq(routineRuns.triggerId, trigger.id));
+    const nextRunAt = () => db.select({ at: routineTriggers.nextRunAt }).from(routineTriggers)
+      .where(eq(routineTriggers.id, trigger.id)).then(([row]) => row?.at);
+    await db.execute(sql`
+      create function test_reject_second_schedule_run() returns trigger language plpgsql as $$
+      begin
+        if new.source = 'schedule'
+          and new.trigger_id::text = TG_ARGV[0]
+          and (select count(*) from routine_runs where trigger_id = new.trigger_id) >= TG_ARGV[1]::integer then
+          raise exception 'fixture routine run insert failure';
+        end if;
+        return new;
+      end;
+      $$
+    `);
+    try {
+      await db.execute(sql`
+        create trigger test_reject_second_schedule_run before insert on routine_runs
+        for each row execute function test_reject_second_schedule_run(
+          ${sql.raw("'" + trigger.id + "'")}, ${sql.raw("'" + recorded + "'")}
+        )
+      `);
+      try {
+        await expect(service().tickScheduledTriggers(now)).rejects.toThrow();
+        expect(await readRuns()).toHaveLength(recorded);
+        const hours = 10 + recorded;
+        expect(await nextRunAt()).toEqual(new Date(`2026-07-16T${hours}:00:00Z`));
+      } finally {
+        await db.execute(sql`drop trigger test_reject_second_schedule_run on routine_runs`);
+      }
+    } finally {
+      await db.execute(sql`drop function test_reject_second_schedule_run()`);
+    }
+
+    const [first, second] = await Promise.all([
+      service().tickScheduledTriggers(now),
+      service().tickScheduledTriggers(now),
+    ]);
+    expect(first.triggered + second.triggered).toBe(3 - recorded);
+    expect(await readRuns()).toHaveLength(3);
+    expect(await nextRunAt()).toEqual(new Date("2026-07-16T13:00:00Z"));
+    await expect(service().tickScheduledTriggers(now)).resolves.toEqual({ triggered: 0 });
+  });
+
   it("disarms on company pause and rearms from the committed reactivation", async () => {
     const routine = await create();
     const { trigger } = await service().createTrigger(routine.id, { kind: "schedule", enabled: true, cronExpression: "0 0 * * *", timezone: "UTC" }, {});

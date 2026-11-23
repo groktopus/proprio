@@ -141,6 +141,20 @@ jobs:
           ];
           assertRequiredVitestTests(result, { [path]: required });
           JS
+      - name: Check recovery of unrecorded routine occurrences
+        run: |
+          test_file=server/src/__tests__/routine-schedule-work.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/routine-retry-results.json" "$test_file"
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'routine-retry-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'retries unrecorded catch-up work after the scheduler restarts with 0 recorded runs',
+            'retries unrecorded catch-up work after the scheduler restarts with 1 recorded runs',
+          ] });
+          JS
       - name: Check native settlement callback consumers
         run: |
           node --test scripts/ci/assert-required-vitest-tests.test.mjs
