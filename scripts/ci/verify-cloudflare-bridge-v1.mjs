@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,8 +34,7 @@ for (const channel of [worker.stdout, worker.stderr]) {
   channel.on("data", data => { log = (log + data).slice(-32_000); });
 }
 
-function request(route, body, { method = "POST", authorized = true, timeoutMs = 30_000, signal } = {}) {
-  const deadline = AbortSignal.timeout(timeoutMs);
+function request(route, body, { method = "POST", authorized = true, timeoutMs = 30_000 } = {}) {
   return fetch(base + route, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -41,7 +42,7 @@ function request(route, body, { method = "POST", authorized = true, timeoutMs = 
       ...(authorized ? { Authorization: `Bearer ${token}` } : {}),
       "Content-Type": "application/json",
     },
-    signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -125,24 +126,6 @@ try {
   await delay(1000);
   assert.equal((await json("/exec", { ...bound, command: "test", args: ["!", "-e", "/tmp/proprio-late-write"] })).exitCode, 0);
 
-  const disconnect = new AbortController();
-  const streaming = await request("/exec", {
-    ...bound,
-    command: "sh",
-    args: ["-c", 'printf disconnect-ready; (sleep 2; touch /tmp/proprio-after-disconnect) & wait'],
-    streamOutput: true,
-  }, { signal: disconnect.signal });
-  const streamReader = streaming.body.getReader();
-  try {
-    await waitForOutput(streamReader, "disconnect-ready");
-    disconnect.abort();
-  } finally {
-    await streamReader.cancel().catch(() => undefined);
-    streamReader.releaseLock();
-  }
-  await delay(2300);
-  assert.equal((await json("/exec", { ...bound, command: "test", args: ["!", "-e", "/tmp/proprio-after-disconnect"] })).exitCode, 0);
-
   await json("/leases/release", bound);
   const missing = await json("/leases/resume", { ...requestLease, ...bound }, { status: 409 });
   assert.equal(missing.error, "sandbox_state_lost");
@@ -170,8 +153,49 @@ try {
   }
   const stoppedLease = await json("/leases/resume", { ...requestLease, providerLeaseId: lease.providerLeaseId }, { status: 409 });
   assert.equal(stoppedLease.error, "sandbox_state_lost");
+  console.log("Local Worker verified auth, acquire, resume, stdin, SSE, session scope, process-group timeout, Stop, release, and lost-state detection.");
+
+  lease = await json("/leases/acquire", { ...requestLease, runId: "disconnect" }, { timeoutMs: 90_000 });
+  const requestBody = JSON.stringify({
+    providerLeaseId: lease.providerLeaseId,
+    command: "sh",
+    args: ["-c", "printf disconnect-ready; (sleep 2; touch /tmp/proprio-after-disconnect) & wait"],
+    streamOutput: true,
+  });
+  const incoming = await new Promise((resolve, reject) => {
+    const outgoing = httpRequest(base + "/exec", {
+      method: "POST",
+      agent: false,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(requestBody),
+      },
+    }, resolve);
+    outgoing.once("error", reject);
+    outgoing.setTimeout(10_000, () => outgoing.destroy(new Error("Timed out before disconnect fixture output")));
+    outgoing.end(requestBody);
+  });
+  assert.equal(incoming.statusCode, 200);
+  const socket = incoming.socket;
+  const disconnected = once(socket, "close");
+  const reader = Readable.toWeb(incoming).getReader();
+  try {
+    await waitForOutput(reader, "disconnect-ready");
+    socket.destroy();
+    await disconnected;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  await delay(2300);
+  const noLateWrite = await json("/exec", {
+    providerLeaseId: lease.providerLeaseId, command: "test", args: ["!", "-e", "/tmp/proprio-after-disconnect"],
+  });
+  assert.equal(noLateWrite.exitCode, 0, "a child process wrote after the loopback TCP socket was closed");
+  await json("/leases/release", { providerLeaseId: lease.providerLeaseId });
   lease = undefined;
-  console.log("Local Wrangler and Docker verified auth, acquire, resume, native stdin and SSE, session scope, process-group timeout, disconnect, Stop, release, and lost-state detection.");
+  console.log("Local Worker stopped a command after the client closed its TCP socket.");
 } catch (error) {
   console.error(log);
   throw error;
