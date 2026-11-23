@@ -77,8 +77,14 @@ describe("JavaScript backup binary SQL", () => {
     const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
     const options = { connectionString: "postgres://unused/binary_test", backupDir: directory,
       backupEngine: "javascript" as const, retention: { dailyDays: 1, weeklyWeeks: 1, monthlyMonths: 1 } };
-    const ready = Promise.withResolvers<string>();
-    const verification = Promise.withResolvers<void>();
+    let markStaged!: (filename: string) => void;
+    let markFailed!: (error: unknown) => void;
+    const ready = new Promise<string>((resolve, reject) => {
+      markStaged = resolve;
+      markFailed = reject;
+    });
+    let releaseVerification!: () => void;
+    const verification = new Promise<void>(resolve => { releaseVerification = resolve; });
     let running: ReturnType<typeof runDatabaseBackup> | undefined;
     try {
       for (const name of [...legacy, recent]) await writeFile(path.join(directory, name), "incomplete backup");
@@ -86,11 +92,11 @@ describe("JavaScript backup binary SQL", () => {
 
       running = runDatabaseBackup({ ...options, verifyBeforePrune: async (stagingFile) => {
         await utimes(stagingFile, old, old);
-        ready.resolve(stagingFile);
-        return verification.promise;
+        markStaged(stagingFile);
+        return verification;
       } });
-      void running.catch(ready.reject);
-      const active = await ready.promise;
+      void running.catch(markFailed);
+      const active = await ready;
       const second = await runDatabaseBackup(options);
 
       const names = await readdir(directory);
@@ -98,14 +104,14 @@ describe("JavaScript backup binary SQL", () => {
       expect(names).toContain(path.basename(second.backupFile));
       expect(names).toContain(recent);
       for (const name of legacy) expect(names).not.toContain(name);
-      verification.resolve();
+      releaseVerification();
       const first = await running;
       expect(first.backupFile).not.toBe(second.backupFile);
       expect(await readdir(directory)).toEqual(expect.arrayContaining([
         path.basename(first.backupFile), path.basename(second.backupFile),
       ]));
     } finally {
-      verification.resolve();
+      releaseVerification();
       await running?.catch(() => undefined);
       await rm(directory, { recursive: true, force: true });
     }
