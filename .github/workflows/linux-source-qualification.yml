@@ -75,5 +75,7 @@ jobs:
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
           pnpm exec vitest run --maxWorkers 1 \
+            server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
+            server/src/services/native-runtime/native-codex-runner.integration.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
