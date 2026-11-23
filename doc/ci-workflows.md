@@ -18,10 +18,11 @@ workspace from the frozen pnpm lockfile, and runs:
 - Agent Chat supersession and Stop regressions across server and UI;
 - the standalone release-registry test suite;
 - native heartbeat replay cadence and settlement callback consumers;
-- late live-settlement metadata regressions;
-- recovery of interrupted plugin jobs and preservation of active owners;
 - strict cron parsing and routine and plugin schedule recovery;
+- late live-settlement metadata regressions;
+- Team Catalog runtime preview parity and the install wizard tests;
 - the server typecheck, Hermes adapter build, and server TypeScript build compilation.
+- recovery of interrupted plugin jobs and preservation of active owners.
 
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
