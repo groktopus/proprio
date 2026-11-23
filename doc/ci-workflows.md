@@ -12,6 +12,7 @@ when the pull request comes from a branch in this repository. It checks out the
 exact pull-request head without persisting checkout credentials, installs the
 workspace from the frozen pnpm lockfile, and runs:
 
+- `pnpm lint` for server, UI, and CLI source;
 - the `AGENTS.md` local-link check and its Node test suite;
 - the CLI service-onboarding test;
 - managed service restart and same-version Git update validation;

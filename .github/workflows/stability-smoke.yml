@@ -41,6 +41,8 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Lint server, UI, and CLI source
+        run: pnpm lint
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
