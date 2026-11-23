@@ -23,6 +23,7 @@ workspace from the frozen pnpm lockfile, and runs:
 - late live-settlement metadata regressions;
 - Team Catalog runtime preview parity and the install wizard tests;
 - the server typecheck, Hermes adapter build, and server TypeScript build compilation.
+- recovery of interrupted plugin jobs and preservation of active owners.
 
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.

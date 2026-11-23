@@ -172,6 +172,24 @@ jobs:
           JS
       - name: Check release registry from source
         run: pnpm test:release-registry
+      - name: Check interrupted plugin job recovery
+        run: |
+          test_file=server/src/__tests__/plugin-scheduled-work.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/plugin-recovery-results.json" "$test_file" -t 'reconciles an interrupted|another scheduler|reports shutdown persistence failure'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'plugin-recovery-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/plugin-scheduled-work.test.ts': [
+              'reconciles an interrupted queued plugin run after startup',
+              'reconciles an interrupted running plugin run after startup',
+              "keeps another scheduler's live plugin run intact",
+              'reports shutdown persistence failure and retains the result for another stop attempt',
+            ],
+          });
+          JS
       - name: Check native replay heartbeat cadence
         run: |
           test_file=server/src/__tests__/native-run-projection-work.test.ts

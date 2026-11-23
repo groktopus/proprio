@@ -35,6 +35,11 @@ The proof combines existing routine and issue-monitor obligations with:
   remain blockers. Inspection reads credential ownership/version metadata and
   never resolves plaintext token material.
 
+The plugin scheduler holds a PostgreSQL job lock until the execution result is
+durable. It can mark an older unlocked run as interrupted. A queued run can
+leave its scheduled deadline due. A running execution can have an unknown
+outcome, so recovery advances its overdue deadline before dispatching again.
+
 Pending watchdog first-run grace (15 seconds) and automatic merge-confirmation
 checks (five minutes) remain awake. They provide no useful safe sleep window
 under the unchanged Cloud minimum of five minutes. Their cadence is preserved;
