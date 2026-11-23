@@ -996,40 +996,30 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     // Collect foreign keys now. Emit them after routines and standalone indexes
     // because PostgreSQL permits a non-constraint unique index to be the target
     // of a foreign key.
+    // A catalog-only path makes PostgreSQL qualify referenced relation names.
+    await sql`SET LOCAL search_path = pg_catalog`;
     const allForeignKeys = await sql<{
       constraint_name: string;
       source_schema: string;
       source_table: string;
-      source_columns: string[];
       target_schema: string;
       target_table: string;
-      target_columns: string[];
-      update_rule: string;
-      delete_rule: string;
-      validated: boolean;
+      definition: string;
     }[]>`
       SELECT
         c.conname AS constraint_name,
         srcn.nspname AS source_schema,
         src.relname AS source_table,
-        array_agg(sa.attname ORDER BY key_columns.ordinal_position) AS source_columns,
         tgtn.nspname AS target_schema,
         tgt.relname AS target_table,
-        array_agg(ta.attname ORDER BY key_columns.ordinal_position) AS target_columns,
-        CASE c.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule,
-        CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule,
-        c.convalidated AS validated
+        pg_get_constraintdef(c.oid) AS definition
       FROM pg_constraint c
       JOIN pg_class src ON src.oid = c.conrelid
       JOIN pg_namespace srcn ON srcn.oid = src.relnamespace
       JOIN pg_class tgt ON tgt.oid = c.confrelid
       JOIN pg_namespace tgtn ON tgtn.oid = tgt.relnamespace
-      JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS key_columns(source_attnum, target_attnum, ordinal_position) ON true
-      JOIN pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = key_columns.source_attnum
-      JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = key_columns.target_attnum
       WHERE c.contype = 'f'
         AND ${sql.unsafe(nonSystemSchemaPredicate("srcn.nspname"))}
-      GROUP BY c.conname, srcn.nspname, src.relname, tgtn.nspname, tgt.relname, c.confupdtype, c.confdeltype, c.convalidated
       ORDER BY srcn.nspname, src.relname, c.conname
     `;
     const fks = allForeignKeys.filter(
@@ -1040,7 +1030,6 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     // JavaScript backups are used when a worktree seed filters or transforms
     // table data. Preserve user-defined routines before indexes because an
     // expression index may depend on a user-defined function.
-    await sql`SET LOCAL search_path = pg_catalog`;
     const routines = await sql<{ definition: string; identity: string; kind: string; has_search_path: boolean }[]>`
       SELECT pg_get_functiondef(p.oid) AS definition,
         quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS identity,
@@ -1097,10 +1086,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     if (fks.length > 0) {
       emit("-- Foreign keys");
       for (const fk of fks) {
-        const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
-        const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
         emitStatement(
-          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule}${fk.validated ? "" : " NOT VALID"};`,
+          `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT ${quoteIdentifier(fk.constraint_name)} ${fk.definition};`,
         );
       }
       emit("");

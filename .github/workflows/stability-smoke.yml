@@ -114,19 +114,20 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
           const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'stability-results.json'), 'utf8'));
-          const assertions = result.testResults.flatMap(file => file.assertionResults);
-          const required = [
-            'aggregates run wall-clock duration across the recursive issue tree',
-            'reclaims aged orphan output while preserving a concurrent backup',
-            'preserves aged staging owned by a different live process and reclaims it after exit',
-            'preserves identity generation, sequence options and progress in JavaScript backups',
-            'preserves foreign-key validation state in a JavaScript fallback restore',
-          ];
-          for (const title of required) {
-            if (!assertions.some(test => test.title === title && test.status === 'passed')) {
-              throw new Error(`Required PostgreSQL test did not pass: ${title}`);
-            }
-          }
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/costs-service.test.ts': [
+              'aggregates run wall-clock duration across the recursive issue tree',
+            ],
+            'packages/db/src/backup-lib-binary.test.ts': [
+              'reclaims aged orphan output while preserving a concurrent backup',
+              'preserves aged staging owned by a different live process and reclaims it after exit',
+            ],
+            'packages/db/src/backup-lib.test.ts': [
+              'preserves identity generation, sequence options and progress in JavaScript backups',
+              'preserves foreign-key validation state in a JavaScript fallback restore',
+            ],
+          });
           JS
       - name: Check linked goal deletion
         run: |
