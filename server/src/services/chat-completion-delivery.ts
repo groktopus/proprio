@@ -356,13 +356,28 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
       .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]), lte(deliveries.nextAttemptAt, new Date())))
       .returning().then(rows => rows[0]);
     if (!claimed) return;
+    const sameClaim = and(eq(deliveries.id, id), eq(deliveries.companyId, claimed.companyId),
+      inArray(deliveries.status, [...pending]), eq(deliveries.statusVersion, claimed.statusVersion),
+      eq(deliveries.attempts, claimed.attempts), eq(deliveries.nextAttemptAt, claimed.nextAttemptAt),
+      claimed.targetRunId ? eq(deliveries.targetRunId, claimed.targetRunId) : isNull(deliveries.targetRunId));
     try {
       const row = await loadAudience(db, id);
       if (!row || !current(row)) {
         await db.update(deliveries).set({ status: "superseded" }).where(eq(deliveries.id, id)); return;
       }
       const [agent] = await db.select().from(agents).where(and(eq(agents.id, row.handoff.agentId), eq(agents.companyId, claimed.companyId)));
-      if (!agent || ["paused", "terminated"].includes(agent.status)) return;
+      if (!agent || agent.status === "paused") return;
+      if (agent.status === "terminated") {
+        await db.transaction(async tx => {
+          // Use the task-first lock order shared with reply publication and reopening.
+          const [task] = await tx.select({ status: issues.status }).from(issues)
+            .where(and(eq(issues.id, claimed.taskId), eq(issues.companyId, claimed.companyId))).for("update");
+          if (task?.status !== "done") return;
+          await tx.update(deliveries).set({ status: "exhausted", error: "Conversation agent was terminated" })
+            .where(sameClaim);
+        });
+        return;
+      }
       const key = `chat-completion:${id}:${claimed.attempts}`;
       const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, claimed.companyId), eq(agentWakeupRequests.idempotencyKey, key)));
       const runId = claimed.targetRunId ?? wakes.find(w => w.runId)?.runId;
@@ -398,11 +413,6 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
           const [task] = await tx.select({ status: issues.status }).from(issues)
             .where(and(eq(issues.id, claimed.taskId), eq(issues.companyId, claimed.companyId))).for("update");
           if (task?.status !== "done") return false;
-          const sameClaim = and(eq(deliveries.id, id), eq(deliveries.companyId, claimed.companyId),
-            inArray(deliveries.status, [...pending]), eq(deliveries.statusVersion, claimed.statusVersion),
-            eq(deliveries.attempts, claimed.attempts),
-            eq(deliveries.nextAttemptAt, claimed.nextAttemptAt),
-            claimed.targetRunId ? eq(deliveries.targetRunId, claimed.targetRunId) : isNull(deliveries.targetRunId));
           const [latest] = await tx.select({ id: deliveries.id }).from(deliveries).where(sameClaim).for("update");
           if (!latest) return false;
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.chatCompletion);

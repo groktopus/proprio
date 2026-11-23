@@ -120,18 +120,23 @@ jobs:
       - name: Check Agent Chat supersession and Stop
         run: |
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/chat-supersession-results.json" \
+            server/src/__tests__/chat-completion-delivery.test.ts \
             server/src/__tests__/heartbeat-chat-completion-supersession.test.ts \
             server/src/services/heartbeat/run-completion.test.ts \
             ui/src/components/TaskChatThread.test.tsx \
             ui/src/components/task-chat/status-relevance.test.ts \
             ui/src/context/LiveUpdatesProvider.test.ts \
-            -t 'Agent Chat supersession through heartbeat|quietly skips a superseded chat completion|durable operator Stop claimed|keeps a real setup failure visible|omits a superseded|ignores a newer .* superseded completion|scheduler-only chat supersession toast'
+            -t 'Agent Chat supersession through heartbeat|quietly skips a superseded chat completion|durable operator Stop claimed|keeps a real setup failure visible|omits a superseded|ignores a newer .* superseded completion|scheduler-only chat supersession toast|settles terminal recipient deliveries|keeps paused agents paused'
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
           import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
           const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'chat-supersession-results.json'), 'utf8'));
           const required = {
+            'server/src/__tests__/chat-completion-delivery.test.ts': [
+              'settles terminal recipient deliveries without touching completed work or other recipients',
+              'keeps paused agents paused and retries after they resume',
+            ],
             'server/src/__tests__/heartbeat-chat-completion-supersession.test.ts': [
               'promotes a real user message parked behind the obsolete completion',
               'preserves the settled agent projection for provider_quota',

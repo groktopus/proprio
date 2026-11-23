@@ -14,6 +14,7 @@ import { buildLowTrustSourceTrust } from "../services/source-trust.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { chatCompletionAlreadyReported, chatCompletionDeliveryService, isCompletedOnboardingHandoffWake, prepareChatCompletionTurn, recordChatCompletion, recordChatHandoff, recordCompletedHandoffRead } from "../services/chat-completion-delivery.js";
+import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { heartbeatService, shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
 import { createHeartbeatQueue } from "../services/heartbeat/queue.js";
 import { createHeartbeatQueueTestDependencies } from "./helpers/heartbeat-queue.js";
@@ -490,6 +491,39 @@ import { ALREADY_REPORTED_WAKE_REASON, createPostgresWakeQueueAdapter } from "..
     expect(a.wakeup).toHaveBeenCalledOnce();
     expect((await b.rows())[0].targetRunId).toBeNull();
   });
+  it("settles terminal recipient deliveries without touching completed work or other recipients", async () => {
+    const recipient = await seed();
+    const { reply } = await reportedByEarlierTurn(recipient);
+    const [delivered] = await recipient.rows();
+    await recipient.service.deliver(delivered.id);
+    const completedTask = await recipient.create();
+    await recipient.finish(completedTask.id);
+    const pending = (await recipient.rows()).find(row => row.taskId === completedTask.id)!;
+
+    expect((await createAgentLifecycle(db).terminateAgent(recipient.agentId))?.status).toBe("terminated");
+    await recipient.due();
+    await recipient.service.sweepPending({ companyId: recipient.companyId, taskId: completedTask.id });
+    expect(await recipient.service.hasPending()).toBe(false);
+
+    const other = await seed();
+    await other.finish();
+    const [otherDelivery] = await other.rows();
+    await recipient.service.sweepPending({ companyId: recipient.companyId, taskId: completedTask.id });
+    expect(await other.rows()).toEqual([otherDelivery]);
+    expect(await recipient.service.hasPending()).toBe(true);
+    expect(recipient.wakeup).not.toHaveBeenCalled();
+
+    const deliveryRows = await recipient.rows();
+    expect(deliveryRows.find(row => row.id === pending.id)).toMatchObject({
+      status: "exhausted", attempts: 0, targetRunId: null, error: "Conversation agent was terminated",
+    });
+    expect(deliveryRows.find(row => row.id === delivered.id)).toMatchObject({
+      status: "delivered", responseCommentId: reply.id, error: null,
+    });
+    const [storedTask] = await db.select().from(issues).where(eq(issues.id, completedTask.id));
+    expect(storedTask.status).toBe("done");
+  });
+
   it("keeps paused agents paused and retries after they resume", async () => {
     const f = await seed(); await f.finish(); const [delivery] = await f.rows();
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
