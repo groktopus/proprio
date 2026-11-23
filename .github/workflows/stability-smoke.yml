@@ -249,6 +249,24 @@ jobs:
           JS
       - name: Check company portability
         run: pnpm exec vitest run server/src/__tests__/company-portability.test.ts
+      - name: Check Team Catalog runtime previews
+        run: |
+          test_file=server/src/__tests__/teams-catalog-install-no-overrides.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/catalog-runtime-results.json" "$test_file" -t 'previews the native Codex|surfaces an unavailable default|honors an explicit caller'
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'catalog-runtime-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/teams-catalog-install-no-overrides.test.ts': [
+              'previews the native Codex default and installs the same runtime',
+              'surfaces an unavailable default in preview before installation writes agents',
+              'honors an explicit caller adapter override for a single slug while defaulting the rest to native Claude',
+            ],
+          });
+          JS
+          pnpm exec vitest run ui/src/pages/TeamCatalog.test.tsx
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs
