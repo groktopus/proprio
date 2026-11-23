@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { restartManagedService } from "../commands/service.js";
+import { restartManagedService, withHotRestartLock } from "../commands/service.js";
 import * as managers from "../services/service-manager.js";
 
 let home: string;
@@ -93,6 +93,31 @@ describe("managed service restart", () => {
       report: { previousServerPid: 42, newServerPid: 43, drainRequired: true },
     });
     expect(manager.restart).toHaveBeenCalledOnce();
+  });
+
+  it("checks service activity after an existing restart releases the lock", async () => {
+    const manager = supervisor(43, undefined, 42);
+    signedHealth("2".repeat(40));
+    const release = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const previous = withHotRestartLock("fixture", async () => {
+      held.resolve();
+      await release.promise;
+    });
+    await held.promise;
+    const update = restartManagedService({
+      expectedVersion: "0.3.1", expectedCommit: "2".repeat(40), skipIfInactive: true,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(300);
+      expect(manager.status).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await previous;
+    }
+    await vi.waitFor(() => expect(manager.restart).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(11_000);
+    await expect(update).resolves.toMatchObject({ status: { active: true } });
   });
 
   it("starts the rollback payload when the failed replacement is inactive", async () => {
