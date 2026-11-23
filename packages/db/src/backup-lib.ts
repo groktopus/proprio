@@ -329,6 +329,25 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, label: string):
   }
 }
 
+async function terminateBackupChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    await new Promise<void>(done => {
+      const taskkill = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+      execFile(taskkill, ["/pid", String(child.pid), "/t", "/f"], { timeout: 2_000, windowsHide: true }, error => {
+        if (error) child.kill("SIGKILL");
+        done();
+      });
+    });
+    return;
+  }
+  // Include children of an operator-supplied wrapper that share its pipes.
+  try { process.kill(-child.pid, "SIGKILL"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL");
+  }
+}
+
 async function runPgDumpBackup(opts: {
   connectionString: string;
   backupFile: string;
@@ -364,25 +383,7 @@ async function runPgDumpBackup(opts: {
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   let termination: Promise<void> | undefined;
   const stopChild = () => {
-    termination ??= (async () => {
-      if (!child.pid) return;
-      if (process.platform === "win32") {
-        await new Promise<void>(done => {
-          const taskkill = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-          execFile(taskkill, ["/pid", String(child.pid), "/t", "/f"], { timeout: 2_000, windowsHide: true }, error => {
-            if (error) child.kill("SIGKILL");
-            done();
-          });
-        });
-        return;
-      }
-      // Kill the dump's dedicated process group, including children of an
-      // operator-supplied wrapper that share its stdout and stderr.
-      try { process.kill(-child.pid, "SIGKILL"); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL");
-      }
-    })();
+    termination ??= terminateBackupChild(child);
   };
   const streamCancellation = new AbortController();
   const signal = opts.signal
@@ -408,6 +409,13 @@ async function runPgDumpBackup(opts: {
   }
 }
 
+function openRestoreInput(backupFile: string) {
+  const raw = createReadStream(backupFile);
+  return backupFile.endsWith(".gz") ? raw.compose(createGunzip()) : raw;
+}
+
+class RestoreInputError extends Error {}
+
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
   const psqlBin = process.env.PROPRIO_PSQL_PATH || "psql";
   const child = spawn(
@@ -420,6 +428,7 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
     ],
     {
       stdio: ["pipe", "ignore", "pipe"],
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         PGCONNECT_TIMEOUT: String(connectTimeout),
@@ -431,23 +440,25 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
     throw new Error("psql did not expose stdin");
   }
 
-  const input = opts.backupFile.endsWith(".gz")
-    ? createReadStream(opts.backupFile).pipe(createGunzip())
-    : createReadStream(opts.backupFile);
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const processExit = waitForChildExit(child, psqlBin);
+  const input = pipeline(openRestoreInput(opts.backupFile), child.stdin).catch(async (error: NodeJS.ErrnoException) => {
+    // psql can close stdin on a SQL error. Keep its stderr and exit status.
+    if (error.code === "EPIPE" || error.code === "ERR_STREAM_PREMATURE_CLOSE" || error.code === "ERR_STREAM_DESTROYED") {
+      throw error;
+    }
+    await terminateBackupChild(child);
+    throw new RestoreInputError("Failed to read the restore input", { cause: error });
+  });
+  const [processResult, streamResult] = await Promise.allSettled([processExit, input, closed]);
 
-  const [processResult, streamResult] = await Promise.allSettled([
-    waitForChildExit(child, psqlBin),
-    pipeline(input, child.stdin),
-  ]);
-  // psql can close its input on a statement error. Keep its SQL diagnostic
-  // instead of racing it against the resulting EPIPE from the stream.
+  if (streamResult.status === "rejected" && streamResult.reason instanceof RestoreInputError) throw streamResult.reason;
   if (processResult.status === "rejected") throw processResult.reason;
   if (streamResult.status === "rejected") throw streamResult.reason;
 }
 
 async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
-  const raw = createReadStream(backupFile);
-  const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
+  const stream = openRestoreInput(backupFile);
   let text = "";
 
   try {
@@ -459,13 +470,11 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
     return text.includes(STATEMENT_BREAKPOINT);
   } finally {
     stream.destroy();
-    raw.destroy();
   }
 }
 
 async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
-  const raw = createReadStream(backupFile);
-  const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
+  const stream = openRestoreInput(backupFile);
   stream.setEncoding("utf8");
   const isBreakpoint = (line: string) => line === STATEMENT_BREAKPOINT || line === `${STATEMENT_BREAKPOINT}\r`;
   let lineFragments: string[] = [];
@@ -503,7 +512,6 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     if (trailingStatement.length > 0) yield trailingStatement;
   } finally {
     stream.destroy();
-    raw.destroy();
   }
 }
 
@@ -1291,6 +1299,7 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
     await restoreWithPsql(opts, connectTimeout);
     return;
   } catch (error) {
+    if (error instanceof RestoreInputError) throw error.cause;
     psqlRestoreError = error;
     if (!(await hasStatementBreakpoints(opts.backupFile))) {
       throw new Error(
