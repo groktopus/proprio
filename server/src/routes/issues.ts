@@ -3742,6 +3742,12 @@ export function issueRoutes(
     wakeup: (agentId, options) => heartbeat.wakeup(agentId, options),
   });
   const runnerGoals = runnerGoalService(db, {
+    enqueueGoalReadback: async ({ requestId }) => {
+      const result = await heartbeat.recoverPendingSessionGoalActions(requestId);
+      if (result.enqueued === 0 && result.alreadyQueued === 0 && result.invalid === 0) {
+        throw new Error("session_goal_reconciliation_wake_not_scheduled");
+      }
+    },
     enqueueOfflineControl: async ({ issueId, agentId, requestId, control }) => {
       const run = await heartbeat.wakeup(agentId, {
         source: "on_demand",

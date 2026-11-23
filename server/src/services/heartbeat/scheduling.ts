@@ -1212,7 +1212,7 @@ export function createHeartbeatScheduling(
     return { scanned: sessions.length, enqueued };
   }
 
-  async function recoverPendingSessionGoalActions() {
+  async function recoverPendingSessionGoalActions(requestId?: string) {
     if ((await getSchedulingSuppression()).suppressed) {
       return { scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0 };
     }
@@ -1226,8 +1226,11 @@ export function createHeartbeatScheduling(
         companyId: agentTaskSessions.companyId,
         sessionId: agentTaskSessions.id,
         goalRevision: agentTaskSessions.goalRevision,
+        goalAuthorityRevision: agentTaskSessions.goalAuthorityRevision,
         goalSourceId: agentTaskSessions.goalSourceId,
         goalSourceCursor: agentTaskSessions.goalSourceCursor,
+        goalObservationSourceId: agentTaskSessions.goalObservationSourceId,
+        goalObservationCursor: agentTaskSessions.goalObservationCursor,
         agentId: agentTaskSessions.agentId,
         adapterType: agentTaskSessions.adapterType,
         issueId: agentTaskSessions.taskKey,
@@ -1246,12 +1249,15 @@ export function createHeartbeatScheduling(
         ),
       )
       .where(
-        inArray(agentSessionGoalActions.status, [
-          "pending",
-          "delivering",
-          "delivered",
-          "reconciling",
-        ]),
+        and(
+          inArray(agentSessionGoalActions.status, [
+            "pending",
+            "delivering",
+            "delivered",
+            "reconciling",
+          ]),
+          requestId ? eq(agentSessionGoalActions.requestId, requestId) : undefined,
+        ),
       )
       .orderBy(asc(agentSessionGoalActions.createdAt));
 
@@ -1279,13 +1285,22 @@ export function createHeartbeatScheduling(
 
       const reconciliation = parseObject(parseObject(action.result).reconciliation);
       if (action.status === "reconciling") {
-        const sourceId = typeof reconciliation.sourceId === "string" ? reconciliation.sourceId : null;
-        const sourceCursor = typeof reconciliation.sourceCursor === "number" ? reconciliation.sourceCursor : null;
-        const revision = typeof reconciliation.failureRevision === "number" ? reconciliation.failureRevision : null;
+        const authorityFence = typeof reconciliation.failureAuthorityRevision === "number";
+        const sourceId = typeof reconciliation.observationSourceId === "string"
+          ? reconciliation.observationSourceId : authorityFence ? null
+            : typeof reconciliation.sourceId === "string" ? reconciliation.sourceId : null;
+        const sourceCursor = typeof reconciliation.observationCursor === "number"
+          ? reconciliation.observationCursor : authorityFence ? null
+            : typeof reconciliation.sourceCursor === "number" ? reconciliation.sourceCursor : null;
+        const revision = authorityFence
+          ? reconciliation.failureAuthorityRevision as number
+          : typeof reconciliation.failureRevision === "number" ? reconciliation.failureRevision : null;
         const attempts = typeof reconciliation.attempts === "number" ? reconciliation.attempts : 1;
         if (
-          revision === null || action.goalRevision !== revision ||
-          action.goalSourceId !== sourceId || action.goalSourceCursor !== sourceCursor
+          revision === null ||
+          (authorityFence
+            ? action.goalAuthorityRevision !== revision || action.goalObservationSourceId !== sourceId || action.goalObservationCursor !== sourceCursor
+            : action.goalRevision !== revision || action.goalSourceId !== sourceId || action.goalSourceCursor !== sourceCursor)
         ) {
           invalid += 1;
           await failRunnerGoalAction(

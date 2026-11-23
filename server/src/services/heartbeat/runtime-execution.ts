@@ -985,6 +985,18 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       if (!guardedDispatch.dispatched) return { dispatched: false };
       adapterResult = await guardedDispatch.resultPromise;
     }
+    if (issueRef && runGoalReconciliationRequestId) {
+      // A readback heartbeat only resolves the control if it produced an
+      // authoritative provider goal observation. If it completed without one,
+      // leave a durable terminal failure instead of blocking future controls.
+      await failRunnerGoalAction(
+        db,
+        { companyId: run.companyId, issueId: issueRef.id, agentId: agent.id, adapterType: agent.adapterType },
+        runGoalReconciliationRequestId,
+        "session_goal_readback_unresolved",
+        "ambiguous_delivery",
+      ).catch(() => undefined);
+    }
     adapterResult = identityRedactor.redact(adapterResult);
     if (run.runtimeMode === "legacy" && hasWorkspaceRestoreFailure(adapterResult.resultJson)
         && executionTarget?.kind === "remote" && executionTarget.transport === "sandbox") {
@@ -1183,6 +1195,22 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         adapterErr instanceof Error
           ? identityRedactor.redact(adapterErr.message)
           : "session_goal_control_failed",
+      ).catch(() => undefined);
+    }
+    if (issueRef && runGoalReconciliationRequestId) {
+      await failRunnerGoalAction(
+        db,
+        {
+          companyId: run.companyId,
+          issueId: issueRef.id,
+          agentId: agent.id,
+          adapterType: agent.adapterType,
+        },
+        runGoalReconciliationRequestId,
+        adapterErr instanceof Error
+          ? identityRedactor.redact(adapterErr.message)
+          : "session_goal_readback_failed",
+        "ambiguous_delivery",
       ).catch(() => undefined);
     }
     const nativeResumeScheduled =

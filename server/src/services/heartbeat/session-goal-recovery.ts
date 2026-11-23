@@ -20,11 +20,16 @@ export async function lockCurrentGoalControlReconciliation(
   tx: Db,
   input: GoalControlReconciliationScope,
 ): Promise<string | null> {
-  const [session] = await tx.select({ id: agentTaskSessions.id }).from(agentTaskSessions).where(and(
+  const [session] = await tx.select({
+    id: agentTaskSessions.id,
+    goalRevision: agentTaskSessions.goalRevision,
+    goalAuthorityRevision: agentTaskSessions.goalAuthorityRevision,
+    goalSourceId: agentTaskSessions.goalSourceId,
+    goalSourceCursor: agentTaskSessions.goalSourceCursor,
+    goalObservationSourceId: agentTaskSessions.goalObservationSourceId,
+    goalObservationCursor: agentTaskSessions.goalObservationCursor,
+  }).from(agentTaskSessions).where(and(
     eq(agentTaskSessions.id, input.sessionId),
-    eq(agentTaskSessions.goalRevision, input.revision),
-    input.sourceId === null ? sql`${agentTaskSessions.goalSourceId} is null` : eq(agentTaskSessions.goalSourceId, input.sourceId),
-    input.sourceCursor === null ? sql`${agentTaskSessions.goalSourceCursor} is null` : eq(agentTaskSessions.goalSourceCursor, input.sourceCursor),
     eq(agentTaskSessions.companyId, input.companyId),
     eq(agentTaskSessions.taskKey, input.issueId),
     eq(agentTaskSessions.agentId, input.agentId),
@@ -40,12 +45,23 @@ export async function lockCurrentGoalControlReconciliation(
   const reconciliation = action?.result && typeof action.result.reconciliation === "object" && action.result.reconciliation !== null
     ? action.result.reconciliation as Record<string, unknown>
     : null;
-  if (
-    !reconciliation || reconciliation.state !== "required" ||
-    reconciliation.failureRevision !== input.revision ||
-    (reconciliation.sourceId ?? null) !== input.sourceId ||
-    (reconciliation.sourceCursor ?? null) !== input.sourceCursor
-  ) return null;
+  if (!reconciliation || reconciliation.state !== "required") return null;
+  const authorityFence = typeof reconciliation.failureAuthorityRevision === "number";
+  const current = authorityFence
+    ? session.goalAuthorityRevision === input.revision
+      && session.goalObservationSourceId === input.sourceId
+      && session.goalObservationCursor === input.sourceCursor
+    : session.goalRevision === input.revision
+      && session.goalSourceId === input.sourceId
+      && session.goalSourceCursor === input.sourceCursor;
+  const recorded = authorityFence
+    ? reconciliation.failureAuthorityRevision === input.revision
+      && (reconciliation.observationSourceId ?? null) === input.sourceId
+      && (reconciliation.observationCursor ?? null) === input.sourceCursor
+    : reconciliation.failureRevision === input.revision
+      && (reconciliation.sourceId ?? null) === input.sourceId
+      && (reconciliation.sourceCursor ?? null) === input.sourceCursor;
+  if (!current || !recorded) return null;
   return session.id;
 }
 

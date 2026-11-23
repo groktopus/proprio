@@ -127,7 +127,8 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
   async function session(f: Awaited<ReturnType<typeof fixture>>, patch: Partial<typeof agentTaskSessions.$inferInsert> = {}) {
     return db.insert(agentTaskSessions).values({
       companyId: f.company.id, agentId: f.agent.id, adapterType: f.agent.adapterType, taskKey: f.issue.id,
-      goalDesiredState: "active", goalStatus: "active", goalRevision: 7, ...patch,
+      goalDesiredState: "active", goalStatus: "active", goalRevision: 7, goalAuthorityRevision: 7,
+      goalObservationSourceId: null, goalObservationCursor: null, ...patch,
     }).returning().then(rows => rows[0]!);
   }
   function enableTimer(deps: ReturnType<typeof callbacks>) {
@@ -550,15 +551,18 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
       payloadJson: { requestId, action: "clear" },
       resultJson: {
         goalActionControl: { previousDesiredState: "active", acceptedRevision: 6, sourceId: null, sourceCursor: null },
-        reconciliation: { state: "required", attempts: 1, acceptedRevision: 6, failureRevision: 7, sourceId: null, sourceCursor: null },
+        reconciliation: { state: "required", attempts: 1, acceptedRevision: 6, failureRevision: 7,
+          acceptedAuthorityRevision: 6, failureAuthorityRevision: 6, observationSourceId: null, observationCursor: null,
+          sourceId: null, sourceCursor: null },
       },
     }).returning();
-    expect(await f.scheduler.recoverPendingSessionGoalActions()).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
+    await db.update(agentTaskSessions).set({ goalAuthorityRevision: 6 }).where(eq(agentTaskSessions.id, active.id));
+    expect(await f.scheduler.recoverPendingSessionGoalActions(requestId)).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
     expect(f.deps.enqueueWakeup).toHaveBeenCalledWith(f.agent.id, expect.objectContaining({
       idempotencyKey: `goal_control_reconciliation:${action!.id}:1`,
       contextSnapshot: expect.objectContaining({
         goalControlReconciliationRequestId: requestId,
-        goalControlReconciliation: { sessionId: active.id, revision: 7, sourceId: null, sourceCursor: null },
+        goalControlReconciliation: { sessionId: active.id, revision: 6, sourceId: null, sourceCursor: null },
       }),
     }));
     const context = f.deps.enqueueWakeup.mock.calls[0]![1]!.contextSnapshot as Record<string, unknown>;

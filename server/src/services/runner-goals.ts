@@ -45,6 +45,13 @@ export class RunnerGoalActionError extends Error {
 
 export type RunnerGoalActionFailureOutcome = "confirmed_rejection" | "ambiguous_delivery";
 
+type GoalReadbackWake = {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  requestId: string;
+};
+
 export function runnerGoalActionFailureOutcome(error: unknown): RunnerGoalActionFailureOutcome {
   if (error instanceof RunnerGoalActionError && error.code === "goal_control_wake_skipped") {
     return "confirmed_rejection";
@@ -268,6 +275,7 @@ export function runnerGoalService(
   options: {
     queueLiveCommand?: typeof queueLiveRunnerPrpCommand;
     dispatchLiveControl?: typeof dispatchLiveRunnerGoalControl;
+    enqueueGoalReadback?: (input: GoalReadbackWake) => Promise<void>;
     enqueueOfflineControl?: (input: {
       companyId: string;
       issueId: string;
@@ -479,6 +487,7 @@ export function runnerGoalService(
       }
 
       const nextRevision = session.goalRevision + 1;
+      const nextAuthorityRevision = session.goalAuthorityRevision + 1;
       const desiredState = request.action === "pause"
         ? "paused"
         : request.action === "clear"
@@ -487,6 +496,7 @@ export function runnerGoalService(
       await tx.update(agentTaskSessions).set({
         goalDesiredState: desiredState,
         goalRevision: nextRevision,
+        goalAuthorityRevision: nextAuthorityRevision,
         updatedAt: new Date(),
       }).where(eq(agentTaskSessions.id, session.id));
       const pendingProjection: RunnerGoalProjection = {
@@ -506,8 +516,11 @@ export function runnerGoalService(
           goalActionControl: {
             previousDesiredState: session.goalDesiredState,
             acceptedRevision: nextRevision,
+            acceptedAuthorityRevision: nextAuthorityRevision,
             sourceId: session.goalSourceId,
             sourceCursor: session.goalSourceCursor,
+            observationSourceId: session.goalObservationSourceId,
+            observationCursor: session.goalObservationCursor,
           },
         },
       }).returning();
@@ -589,29 +602,59 @@ export function runnerGoalService(
         inArray(agentSessionGoalActions.status, ["pending", "delivering"]),
       ));
       if (live) {
-        void Promise.all(liveCompletions).catch((error) =>
-          failRunnerGoalAction(
+        const failureBinding = {
+          companyId,
+          issueId,
+          agentId: request.agentId,
+          adapterType: binding.agent!.adapterType,
+        };
+        const recordFailure = async (error: unknown) => {
+          const outcome = runnerGoalActionFailureOutcome(error);
+          await failRunnerGoalAction(
             db,
-            {
-              companyId,
-              issueId,
-              agentId: request.agentId,
-              adapterType: binding.agent!.adapterType,
-            },
+            failureBinding,
             request.requestId,
             error instanceof Error ? error.message : "live_goal_control_failed",
-            runnerGoalActionFailureOutcome(error),
-          )
-        ).catch(() => undefined);
+            outcome,
+          );
+          if (outcome === "ambiguous_delivery" && options.enqueueGoalReadback) {
+            try {
+              await options.enqueueGoalReadback({ companyId, issueId, agentId: request.agentId, requestId: request.requestId });
+            } catch (readbackError) {
+              await failRunnerGoalAction(
+                db,
+                failureBinding,
+                request.requestId,
+                readbackError instanceof Error ? readbackError.message : "goal_control_reconciliation_wake_failed",
+                "ambiguous_delivery",
+              );
+            }
+          }
+        };
+        void Promise.all(liveCompletions).catch(recordFailure).catch(() => undefined);
       }
     } catch (error) {
+      const outcome = runnerGoalActionFailureOutcome(error);
       await failRunnerGoalAction(
         db,
         { companyId, issueId, agentId: request.agentId, adapterType: binding.agent.adapterType },
         request.requestId,
         error instanceof Error ? error.message : "goal_control_dispatch_failed",
-        runnerGoalActionFailureOutcome(error),
+        outcome,
       );
+      if (outcome === "ambiguous_delivery" && options.enqueueGoalReadback) {
+        try {
+          await options.enqueueGoalReadback({ companyId, issueId, agentId: request.agentId, requestId: request.requestId });
+        } catch (readbackError) {
+          await failRunnerGoalAction(
+            db,
+            { companyId, issueId, agentId: request.agentId, adapterType: binding.agent.adapterType },
+            request.requestId,
+            readbackError instanceof Error ? readbackError.message : "goal_control_reconciliation_wake_failed",
+            "ambiguous_delivery",
+          );
+        }
+      }
       throw error;
     }
     const current = await projection(companyId, issueId, request.agentId);
@@ -773,6 +816,7 @@ export async function applyRunnerGoalPrpEvent(
 
     const capability = asRecord(payload.sessionGoals);
     const providerError = typeof payload.error === "string" && payload.error.length > 0;
+    const authoritativeGoalObservation = !providerError && event.eventType.startsWith("session.goal.");
     const turnLifecycleEvent = event.eventType.startsWith("turn.");
     const workingNow = event.eventType === "turn.started"
       ? true
@@ -859,6 +903,11 @@ export async function applyRunnerGoalPrpEvent(
     const update: Partial<typeof agentTaskSessions.$inferInsert> = {
       goalSourceCursor: event.sourceSeq,
       ...(sourceId ? { goalSourceId: sourceId } : {}),
+      ...(authoritativeGoalObservation ? {
+        goalObservationSourceId: sourceId ?? null,
+        goalObservationCursor: event.sourceSeq,
+        goalAuthorityRevision: session.goalAuthorityRevision + 1,
+      } : {}),
       goalObservedAt: observedAt,
       updatedAt: observedAt,
     };
@@ -945,16 +994,29 @@ export async function failRunnerGoalAction(
       ? (typeof previousReconciliation?.attempts === "number" ? previousReconciliation.attempts : 1) + 1
       : 1;
     const reconciliationFailed = outcome === "ambiguous_delivery" && reconciliationAttempts >= 2;
-    const noNewerProjection = typeof control?.acceptedRevision === "number" && (
-      session.goalRevision === control.acceptedRevision ||
-      (action.status === "reconciling" && session.goalRevision === previousReconciliation?.failureRevision)
+    const acceptedAuthorityRevision = typeof control?.acceptedAuthorityRevision === "number"
+      ? control.acceptedAuthorityRevision
+      : control?.acceptedRevision;
+    const authorityRevision = typeof control?.acceptedAuthorityRevision === "number"
+      ? session.goalAuthorityRevision
+      : session.goalRevision;
+    const failureAuthorityRevision = typeof previousReconciliation?.failureAuthorityRevision === "number"
+      ? previousReconciliation.failureAuthorityRevision
+      : previousReconciliation?.failureRevision;
+    const noNewerAuthority = typeof acceptedAuthorityRevision === "number" && (
+      authorityRevision === acceptedAuthorityRevision ||
+      (action.status === "reconciling" && authorityRevision === failureAuthorityRevision)
     );
+    const usesObservationFence = Object.hasOwn(control ?? {}, "observationSourceId")
+      && Object.hasOwn(control ?? {}, "observationCursor");
+    const observationSourceId = usesObservationFence ? control?.observationSourceId : control?.sourceId;
+    const observationCursor = usesObservationFence ? control?.observationCursor : control?.sourceCursor;
     const mayRestoreDesiredState = outcome === "confirmed_rejection"
       && typeof control?.acceptedRevision === "number"
       && Object.hasOwn(control, "previousDesiredState")
-      && noNewerProjection
-      && (control.sourceId ?? null) === session.goalSourceId
-      && (control.sourceCursor ?? null) === session.goalSourceCursor;
+      && noNewerAuthority
+      && (observationSourceId ?? null) === (usesObservationFence ? session.goalObservationSourceId : session.goalSourceId)
+      && (observationCursor ?? null) === (usesObservationFence ? session.goalObservationCursor : session.goalSourceCursor);
     const failed = await tx.update(agentSessionGoalActions).set({
       status: outcome === "confirmed_rejection" || reconciliationFailed ? "failed" : "reconciling",
       error: errorCode.slice(0, 240),
@@ -967,7 +1029,11 @@ export async function failRunnerGoalAction(
               reason: errorCode.slice(0, 240),
               attempts: reconciliationAttempts,
               acceptedRevision: control?.acceptedRevision ?? null,
+              acceptedAuthorityRevision: acceptedAuthorityRevision ?? null,
               failureRevision: session.goalRevision + 1,
+              failureAuthorityRevision: authorityRevision,
+              observationSourceId: observationSourceId ?? null,
+              observationCursor: observationCursor ?? null,
               sourceId: control?.sourceId ?? null,
               sourceCursor: control?.sourceCursor ?? null,
             },
@@ -1032,6 +1098,7 @@ export async function blockRunnerGoalRecovery(
       goalStatus: "blocked",
       goalDesiredState: "paused",
       goalRevision: session.goalRevision + 1,
+      goalAuthorityRevision: session.goalAuthorityRevision + 1,
       goalObservedAt: now,
       updatedAt: now,
     }).where(eq(agentTaskSessions.id, session.id));
