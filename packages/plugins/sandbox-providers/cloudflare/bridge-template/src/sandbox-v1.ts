@@ -126,9 +126,7 @@ export class ProprioSandboxV1 extends DurableObject {
     }
     if (route === "/cancel") {
       const { commandId } = await request.json<{ commandId: string }>();
-      const active = this.cancellations.get(commandId);
-      console.warn("[bridge diagnostic] Durable Object received explicit cancellation", Boolean(active));
-      active?.abort();
+      this.cancellations.get(commandId)?.abort();
       return new Response(null, { status: 204 });
     }
     if (route !== "/execute") return new Response(null, { status: 404 });
@@ -139,10 +137,7 @@ export class ProprioSandboxV1 extends DurableObject {
     const encoder = new TextEncoder();
     const cancellation = new AbortController();
     this.cancellations.set(commandId, cancellation);
-    const disconnect = () => {
-      console.warn("[bridge diagnostic] Durable Object stream or request disconnected");
-      cancellation.abort();
-    };
+    const disconnect = () => cancellation.abort();
     request.signal.addEventListener("abort", disconnect, { once: true });
     if (request.signal.aborted) disconnect();
     const stream = new ReadableStream<Uint8Array>({

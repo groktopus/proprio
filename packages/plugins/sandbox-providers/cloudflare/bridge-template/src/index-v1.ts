@@ -62,7 +62,6 @@ function runtime(env: Env, ctx: ExecutionContext): ResolveBridgeLease {
         signal?.throwIfAborted();
         const commandId = crypto.randomUUID();
         const cancel = () => {
-          console.warn("[bridge diagnostic] Worker sent Durable Object cancellation");
           ctx.waitUntil(request("/cancel", { commandId }).then(response => {
             if (!response.ok) throw new Error("Cloudflare Durable Object command cancellation failed");
           }).catch(error => console.error("Cloudflare command cancellation failed", error)));
