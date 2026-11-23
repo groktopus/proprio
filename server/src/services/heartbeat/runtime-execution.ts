@@ -548,6 +548,9 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   const runGoalControlRequestId = readNonEmptyString(
     context.goalControlRequestId,
   );
+  const runGoalReconciliationRequestId = readNonEmptyString(
+    context.goalControlReconciliationRequestId,
+  );
   // The runner posts its accepted result before it returns. Keep the recovery
   // workers off this run until this heartbeat has finished it.
   const releaseLiveNativeFinalization = nativeRuntimeResolution.kind === "native"
@@ -681,6 +684,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               useRunnerd: agent.adapterType === "proprio_runner",
               adapterType: agent.adapterType,
               sessionGoalControl,
+              reconcileSessionGoalRequestId: runGoalReconciliationRequestId,
               sessionCompaction: readContextCompactionRequest(context),
               resumeSessionGoalHeartbeat:
                 context.resumeSessionGoalHeartbeat === true ||

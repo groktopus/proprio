@@ -1221,7 +1221,13 @@ export function createHeartbeatScheduling(
         id: agentSessionGoalActions.id,
         requestId: agentSessionGoalActions.requestId,
         payload: agentSessionGoalActions.payloadJson,
+        result: agentSessionGoalActions.resultJson,
+        status: agentSessionGoalActions.status,
         companyId: agentTaskSessions.companyId,
+        sessionId: agentTaskSessions.id,
+        goalRevision: agentTaskSessions.goalRevision,
+        goalSourceId: agentTaskSessions.goalSourceId,
+        goalSourceCursor: agentTaskSessions.goalSourceCursor,
         agentId: agentTaskSessions.agentId,
         adapterType: agentTaskSessions.adapterType,
         issueId: agentTaskSessions.taskKey,
@@ -1244,6 +1250,7 @@ export function createHeartbeatScheduling(
           "pending",
           "delivering",
           "delivered",
+          "reconciling",
         ]),
       )
       .orderBy(asc(agentSessionGoalActions.createdAt));
@@ -1265,7 +1272,88 @@ export function createHeartbeatScheduling(
           },
           action.requestId,
           "session_goal_control_payload_invalid",
+          "confirmed_rejection",
         ).catch(() => undefined);
+        continue;
+      }
+
+      const reconciliation = parseObject(parseObject(action.result).reconciliation);
+      if (action.status === "reconciling") {
+        const sourceId = typeof reconciliation.sourceId === "string" ? reconciliation.sourceId : null;
+        const sourceCursor = typeof reconciliation.sourceCursor === "number" ? reconciliation.sourceCursor : null;
+        const revision = typeof reconciliation.failureRevision === "number" ? reconciliation.failureRevision : null;
+        const attempts = typeof reconciliation.attempts === "number" ? reconciliation.attempts : 1;
+        if (
+          revision === null || action.goalRevision !== revision ||
+          action.goalSourceId !== sourceId || action.goalSourceCursor !== sourceCursor
+        ) {
+          invalid += 1;
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            "session_goal_reconciliation_superseded",
+            "confirmed_rejection",
+          ).catch(() => undefined);
+          continue;
+        }
+        const inFlight = await db
+          .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.companyId, action.companyId),
+            eq(heartbeatRuns.agentId, action.agentId),
+            inArray(heartbeatRuns.status, ["queued", "scheduled_retry", "running"]),
+          ))
+          .then((runs) => runs.some((run) => {
+            const context = parseObject(run.contextSnapshot);
+            return readNonEmptyString(context.goalControlReconciliationRequestId) === action.requestId;
+          }));
+        if (inFlight) {
+          alreadyQueued += 1;
+          continue;
+        }
+        let run: Awaited<ReturnType<typeof enqueueWakeup>>;
+        try {
+          run = await enqueueWakeup(action.agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "goal_control",
+            payload: { issueId: action.issueId, requestId: action.requestId, intent: "goal_control_reconciliation" },
+            idempotencyKey: `goal_control_reconciliation:${action.id}:${attempts}`,
+            requestedByActorType: "system",
+            contextSnapshot: {
+              issueId: action.issueId,
+              taskKey: action.issueId,
+              resumeIntent: true,
+              goalControlReconciliationRequestId: action.requestId,
+              goalControlReconciliation: {
+                sessionId: action.sessionId,
+                revision,
+                sourceId,
+                sourceCursor,
+              },
+              skipIssueComment: true,
+            },
+          });
+        } catch (error) {
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            error instanceof Error ? error.message : "session_goal_reconciliation_wake_failed",
+          ).catch(() => undefined);
+          continue;
+        }
+        if (run) enqueued += 1;
+        else {
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            "session_goal_reconciliation_wake_skipped",
+          ).catch(() => undefined);
+        }
         continue;
       }
 

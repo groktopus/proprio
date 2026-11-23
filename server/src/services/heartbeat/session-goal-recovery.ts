@@ -10,6 +10,45 @@ type GoalRecoveryScope = {
   sessionId?: string; revision?: number;
 };
 
+export type GoalControlReconciliationScope = {
+  companyId: string; issueId: string; agentId: string; adapterType: string;
+  sessionId: string; requestId: string; revision: number;
+  sourceId: string | null; sourceCursor: number | null;
+};
+
+export async function lockCurrentGoalControlReconciliation(
+  tx: Db,
+  input: GoalControlReconciliationScope,
+): Promise<string | null> {
+  const [session] = await tx.select({ id: agentTaskSessions.id }).from(agentTaskSessions).where(and(
+    eq(agentTaskSessions.id, input.sessionId),
+    eq(agentTaskSessions.goalRevision, input.revision),
+    input.sourceId === null ? sql`${agentTaskSessions.goalSourceId} is null` : eq(agentTaskSessions.goalSourceId, input.sourceId),
+    input.sourceCursor === null ? sql`${agentTaskSessions.goalSourceCursor} is null` : eq(agentTaskSessions.goalSourceCursor, input.sourceCursor),
+    eq(agentTaskSessions.companyId, input.companyId),
+    eq(agentTaskSessions.taskKey, input.issueId),
+    eq(agentTaskSessions.agentId, input.agentId),
+    eq(agentTaskSessions.adapterType, input.adapterType),
+  )).for("update").limit(1);
+  if (!session) return null;
+  const [action] = await tx.select({ result: agentSessionGoalActions.resultJson }).from(agentSessionGoalActions).where(and(
+    eq(agentSessionGoalActions.companyId, input.companyId),
+    eq(agentSessionGoalActions.sessionId, session.id),
+    eq(agentSessionGoalActions.requestId, input.requestId),
+    eq(agentSessionGoalActions.status, "reconciling"),
+  )).limit(1);
+  const reconciliation = action?.result && typeof action.result.reconciliation === "object" && action.result.reconciliation !== null
+    ? action.result.reconciliation as Record<string, unknown>
+    : null;
+  if (
+    !reconciliation || reconciliation.state !== "required" ||
+    reconciliation.failureRevision !== input.revision ||
+    (reconciliation.sourceId ?? null) !== input.sourceId ||
+    (reconciliation.sourceCursor ?? null) !== input.sourceCursor
+  ) return null;
+  return session.id;
+}
+
 export async function lockCurrentSessionGoalRecovery(tx: Db, input: GoalRecoveryScope): Promise<string | null> {
   // The caller already owns the issue lock. The session lock serializes
   // observations and controls with admission and the final dispatch gate.

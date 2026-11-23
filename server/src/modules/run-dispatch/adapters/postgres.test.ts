@@ -1504,6 +1504,54 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       },
     );
 
+  it.each(["current_cursor", "changed_cursor"] as const)(
+    "binds goal-control readback dispatch to the provider cursor (%s)", async mode => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      const [session] = await db.insert(agentTaskSessions).values({
+        companyId, agentId, taskKey: issueId, adapterType: "codex_local",
+        goalStatus: "active", goalDesiredState: "paused", goalRevision: 5,
+        goalSourceId: "runner:run-1", goalSourceCursor: 8,
+      }).returning();
+      const requestId = `reconcile-${mode}`;
+      await db.insert(agentSessionGoalActions).values({
+        companyId, sessionId: session!.id, requestId, action: "pause", status: "reconciling",
+        payloadJson: { requestId, action: "pause" },
+        resultJson: { reconciliation: { state: "required", failureRevision: 5, sourceId: "runner:run-1", sourceCursor: 8 } },
+      });
+      const contextSnapshot = {
+        issueId, taskKey: issueId, resumeIntent: true,
+        goalControlReconciliationRequestId: requestId,
+        goalControlReconciliation: {
+          sessionId: session!.id, revision: 5, sourceId: "runner:run-1", sourceCursor: 8,
+        },
+      };
+      const runId = await seedRun({ companyId, agentId, contextSnapshot });
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      const adapter = createPostgresRunDispatchAdapter(db);
+      const check = { companyId, runId, expectedStatus: "queued" as const, now: new Date() };
+      expect(await adapter.cancelStaleQueuedRun(check)).toMatchObject({ outcome: "not_stale" });
+      if (mode === "changed_cursor") {
+        await db.update(agentTaskSessions).set({ goalSourceCursor: 9 }).where(eq(agentTaskSessions.id, session!.id));
+      }
+      await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, runId));
+      const reservation = await reserveRunBudget(db, companyId, runId, null);
+      const dispatch = vi.fn(async () => "read back");
+      const outcome = await adapter.dispatchResolvedInteractionIfCurrent({
+        ...check, expectedStatus: "running", reservationId: reservation.id, dispatch,
+      });
+      if (mode === "current_cursor") {
+        expect(outcome.dispatched).toBe(true);
+        expect(dispatch).toHaveBeenCalledOnce();
+      } else {
+        expect(outcome).toMatchObject({ dispatched: false,
+          cancellation: { outcome: "cancelled", errorCode: "session_goal_reconciliation_superseded" } });
+        expect(dispatch).not.toHaveBeenCalled();
+      }
+    },
+  );
+
     it("maps a review-parking continuation summary into a stale queued-run decision", async () => {
       const { companyId, agentId } = await seedCompanyAndAgent();
       const issueId = randomUUID();

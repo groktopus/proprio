@@ -102,6 +102,26 @@ describe("session goal dialogs", () => {
     await vi.waitFor(() => expect(document.querySelector('[data-testid="runner-goal-widget"]')?.textContent).toContain("Starting"));
   });
 
+  it("shows when an ambiguous goal action is being reconciled", async () => {
+    await act(async () => {
+      client.setQueryData(queryKeys.issues.runnerGoal("issue-goal", "agent-goal"), {
+        ...projection, pendingAction: "pausing", pendingActionStatus: "reconciling",
+      });
+    });
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="runner-goal-widget"]')?.textContent)
+      .toContain("Checking provider state"));
+  });
+
+  it("shows a terminal provider control failure after reconciliation", async () => {
+    await act(async () => {
+      client.setQueryData(queryKeys.issues.runnerGoal("issue-goal", "agent-goal"), {
+        ...projection, actionFailure: true,
+      });
+    });
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent)
+      .toContain("The provider did not confirm the last goal change"));
+  });
+
   it("shows action errors without leaving behind an empty informational card", async () => {
     await act(async () => {
       client.setQueryData(queryKeys.issues.runnerGoal("issue-goal", "agent-goal"), { ...projection, goal: null });

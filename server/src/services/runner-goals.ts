@@ -23,7 +23,7 @@ import { dispatchLiveRunnerGoalControl } from "./runner-goal-control-broker.js";
 import { publishLiveEvent } from "./live-events.js";
 
 const ACTIVE_RUN_STATUSES = ["queued", "scheduled_retry", "running"] as const;
-const OPEN_ACTION_STATUSES = ["pending", "delivering", "delivered"] as const;
+const OPEN_ACTION_STATUSES = ["pending", "delivering", "delivered", "reconciling"] as const;
 
 type AgentBinding = Pick<typeof agents.$inferSelect, "id" | "companyId" | "adapterType" | "adapterConfig">;
 type TaskSession = typeof agentTaskSessions.$inferSelect;
@@ -43,10 +43,38 @@ export class RunnerGoalActionError extends Error {
   }
 }
 
+export type RunnerGoalActionFailureOutcome = "confirmed_rejection" | "ambiguous_delivery";
+
+export function runnerGoalActionFailureOutcome(error: unknown): RunnerGoalActionFailureOutcome {
+  if (error instanceof RunnerGoalActionError && error.code === "goal_control_wake_skipped") {
+    return "confirmed_rejection";
+  }
+  if (error instanceof Error && error.message.startsWith("runner_prp_command_rejected:")) {
+    return "confirmed_rejection";
+  }
+  return "ambiguous_delivery";
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function reconciledActionSucceeded(
+  action: string,
+  request: Record<string, unknown>,
+  goal: RunnerGoalSnapshot | null,
+): boolean {
+  if (action === "clear") return goal === null;
+  if (!goal) return false;
+  if (action === "pause") return goal.status === "paused";
+  if (action === "resume") return goal.status === "active";
+  if (["create", "edit", "replace"].includes(action)) {
+    return goal.objective === request.objective &&
+      (request.tokenBudget === undefined || goal.tokenBudget === request.tokenBudget);
+  }
+  return false;
 }
 
 function capabilityForAgent(agent: AgentBinding): RunnerGoalCapability {
@@ -299,6 +327,8 @@ export function runnerGoalService(
         workingNow: false,
         activeRunId: null,
         pendingAction: null,
+        pendingActionStatus: null,
+        actionFailure: false,
         revision: 0,
         observedAt: null,
       };
@@ -317,17 +347,20 @@ export function runnerGoalService(
         inArray(heartbeatRuns.status, [...ACTIVE_RUN_STATUSES]),
       )).orderBy(desc(heartbeatRuns.createdAt)).limit(1).then((rows) => rows[0] ?? null),
     ]);
-    const pending = session
-      ? await db.select({ action: agentSessionGoalActions.action })
+    const latestAction = session
+      ? await db.select({ action: agentSessionGoalActions.action, status: agentSessionGoalActions.status })
           .from(agentSessionGoalActions)
           .where(and(
             eq(agentSessionGoalActions.sessionId, session.id),
-            inArray(agentSessionGoalActions.status, [...OPEN_ACTION_STATUSES]),
+            inArray(agentSessionGoalActions.status, [...OPEN_ACTION_STATUSES, "completed", "failed"]),
           ))
           .orderBy(desc(agentSessionGoalActions.createdAt))
           .limit(1)
           .then((rows) => rows[0] ?? null)
       : null;
+    const pending = latestAction && OPEN_ACTION_STATUSES.includes(
+      latestAction.status as (typeof OPEN_ACTION_STATUSES)[number],
+    ) ? latestAction : null;
     const goal = storedGoal(session);
     const projectedPendingAction = pendingAction(pending?.action ?? null) ?? (
       goal?.status === "active" && !goal.workingNow && activeRun
@@ -344,6 +377,10 @@ export function runnerGoalService(
       workingNow: goal?.workingNow ?? false,
       activeRunId: activeRun?.id ?? null,
       pendingAction: projectedPendingAction,
+      pendingActionStatus: pending
+        ? pending.status === "reconciling" ? "reconciling" : "pending"
+        : null,
+      actionFailure: latestAction?.status === "failed",
       revision: session?.goalRevision ?? 0,
       observedAt: session?.goalObservedAt?.toISOString() ?? null,
     };
@@ -455,6 +492,7 @@ export function runnerGoalService(
       const pendingProjection: RunnerGoalProjection = {
         ...currentProjection,
         pendingAction: pendingAction(request.action),
+        pendingActionStatus: "pending",
         revision: nextRevision,
       };
       const [action] = await tx.insert(agentSessionGoalActions).values({
@@ -463,7 +501,15 @@ export function runnerGoalService(
         requestId: request.requestId,
         action: request.action,
         payloadJson: request,
-        resultJson: { projection: pendingProjection },
+        resultJson: {
+          projection: pendingProjection,
+          goalActionControl: {
+            previousDesiredState: session.goalDesiredState,
+            acceptedRevision: nextRevision,
+            sourceId: session.goalSourceId,
+            sourceCursor: session.goalSourceCursor,
+          },
+        },
       }).returning();
       return {
         repeated: false,
@@ -482,10 +528,11 @@ export function runnerGoalService(
         : accepted.status === "completed"
           ? "completed"
           : "failed";
+      const currentProjection = await projection(companyId, issueId, request.agentId);
       return {
         requestId: request.requestId,
         status: repeatedStatus,
-        projection: originalProjection ?? (await projection(companyId, issueId, request.agentId))!,
+        projection: currentProjection ?? originalProjection ?? initialProjection,
       };
     }
 
@@ -553,19 +600,18 @@ export function runnerGoalService(
             },
             request.requestId,
             error instanceof Error ? error.message : "live_goal_control_failed",
+            runnerGoalActionFailureOutcome(error),
           )
         ).catch(() => undefined);
       }
     } catch (error) {
-      await db.update(agentSessionGoalActions).set({
-        status: "failed",
-        error: error instanceof Error ? error.name : "goal_control_dispatch_failed",
-        completedAt: new Date(),
-        updatedAt: new Date(),
-      }).where(and(
-        eq(agentSessionGoalActions.sessionId, accepted.session.id),
-        eq(agentSessionGoalActions.requestId, request.requestId),
-      ));
+      await failRunnerGoalAction(
+        db,
+        { companyId, issueId, agentId: request.agentId, adapterType: binding.agent.adapterType },
+        request.requestId,
+        error instanceof Error ? error.message : "goal_control_dispatch_failed",
+        runnerGoalActionFailureOutcome(error),
+      );
       throw error;
     }
     const current = await projection(companyId, issueId, request.agentId);
@@ -763,27 +809,33 @@ export async function applyRunnerGoalPrpEvent(
       }
     }
     let completedPendingActionId: string | null = null;
-    if (
-      !providerError &&
-      (event.eventType === "session.goal.updated" || event.eventType === "session.goal.cleared")
-    ) {
+    let failedReconciliationActionId: string | null = null;
+    if (event.eventType.startsWith("session.goal.")) {
       const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
       const [pending] = requestId
         ? await tx.select({
             id: agentSessionGoalActions.id,
             action: agentSessionGoalActions.action,
+            status: agentSessionGoalActions.status,
+            payloadJson: agentSessionGoalActions.payloadJson,
           }).from(agentSessionGoalActions).where(and(
             eq(agentSessionGoalActions.sessionId, session.id),
             inArray(agentSessionGoalActions.status, [...OPEN_ACTION_STATUSES]),
             eq(agentSessionGoalActions.requestId, requestId),
           )).limit(1)
         : [];
+      const isReadback = event.eventType.startsWith("session.goal.") && pending?.status === "reconciling";
       const matches = pending && (
-        event.eventType === "session.goal.updated"
-          ? pending.action !== "clear"
-          : pending.action === "clear"
+        isReadback
+          ? reconciledActionSucceeded(pending.action, asRecord(pending.payloadJson) ?? {}, goal)
+          : !providerError && event.eventType === "session.goal.updated"
+            ? pending.action !== "clear"
+            : !providerError && event.eventType === "session.goal.cleared" && pending.action === "clear"
       );
-      if (pending && matches) completedPendingActionId = pending.id;
+      if (pending && (matches || isReadback)) {
+        if (matches) completedPendingActionId = pending.id;
+        else failedReconciliationActionId = pending.id;
+      }
     }
     const writesGoal =
       (!providerError && event.eventType.startsWith("session.goal.")) ||
@@ -801,7 +853,8 @@ export async function applyRunnerGoalPrpEvent(
       (capability !== null && !isDeepStrictEqual(asRecord(session.goalCapabilityJson), capability)) ||
       (Boolean(writesGoal) && !isDeepStrictEqual(storedGoal(session), goal)) ||
       nextDesiredState !== session.goalDesiredState ||
-      completedPendingActionId !== null;
+      completedPendingActionId !== null ||
+      failedReconciliationActionId !== null;
     const observedAt = new Date();
     const update: Partial<typeof agentTaskSessions.$inferInsert> = {
       goalSourceCursor: event.sourceSeq,
@@ -834,6 +887,14 @@ export async function applyRunnerGoalPrpEvent(
         updatedAt: observedAt,
       }).where(eq(agentSessionGoalActions.id, completedPendingActionId));
     }
+    if (failedReconciliationActionId) {
+      await tx.update(agentSessionGoalActions).set({
+        status: "failed",
+        error: providerError ? "provider_goal_readback_failed" : "provider_goal_control_not_applied",
+        completedAt: observedAt,
+        updatedAt: observedAt,
+      }).where(eq(agentSessionGoalActions.id, failedReconciliationActionId));
+    }
     return true;
   });
   if (!changed) return null;
@@ -856,6 +917,7 @@ export async function failRunnerGoalAction(
   binding: { companyId: string; issueId: string; agentId: string; adapterType: string },
   requestId: string,
   errorCode: string,
+  outcome: RunnerGoalActionFailureOutcome = "ambiguous_delivery",
 ): Promise<RunnerGoalProjection | null> {
   const changed = await db.transaction(async (tx) => {
     const [session] = await tx.select().from(agentTaskSessions).where(and(
@@ -866,10 +928,51 @@ export async function failRunnerGoalAction(
     )).limit(1).for("update");
     if (!session) return false;
     const now = new Date();
+    const [action] = await tx.select({
+      id: agentSessionGoalActions.id,
+      resultJson: agentSessionGoalActions.resultJson,
+      status: agentSessionGoalActions.status,
+    }).from(agentSessionGoalActions).where(and(
+      eq(agentSessionGoalActions.sessionId, session.id),
+      eq(agentSessionGoalActions.requestId, requestId),
+      inArray(agentSessionGoalActions.status, [...OPEN_ACTION_STATUSES]),
+    )).limit(1);
+    if (!action) return false;
+    const result = asRecord(action.resultJson) ?? {};
+    const control = asRecord(result.goalActionControl);
+    const previousReconciliation = asRecord(result.reconciliation);
+    const reconciliationAttempts = action.status === "reconciling"
+      ? (typeof previousReconciliation?.attempts === "number" ? previousReconciliation.attempts : 1) + 1
+      : 1;
+    const reconciliationFailed = outcome === "ambiguous_delivery" && reconciliationAttempts >= 2;
+    const noNewerProjection = typeof control?.acceptedRevision === "number" && (
+      session.goalRevision === control.acceptedRevision ||
+      (action.status === "reconciling" && session.goalRevision === previousReconciliation?.failureRevision)
+    );
+    const mayRestoreDesiredState = outcome === "confirmed_rejection"
+      && typeof control?.acceptedRevision === "number"
+      && Object.hasOwn(control, "previousDesiredState")
+      && noNewerProjection
+      && (control.sourceId ?? null) === session.goalSourceId
+      && (control.sourceCursor ?? null) === session.goalSourceCursor;
     const failed = await tx.update(agentSessionGoalActions).set({
-      status: "failed",
+      status: outcome === "confirmed_rejection" || reconciliationFailed ? "failed" : "reconciling",
       error: errorCode.slice(0, 240),
-      completedAt: now,
+      ...(outcome === "confirmed_rejection" || reconciliationFailed ? { completedAt: now } : {}),
+      ...(outcome === "ambiguous_delivery"
+        ? { resultJson: {
+            ...result,
+            reconciliation: {
+              state: reconciliationFailed ? "failed" : "required",
+              reason: errorCode.slice(0, 240),
+              attempts: reconciliationAttempts,
+              acceptedRevision: control?.acceptedRevision ?? null,
+              failureRevision: session.goalRevision + 1,
+              sourceId: control?.sourceId ?? null,
+              sourceCursor: control?.sourceCursor ?? null,
+            },
+          } }
+        : {}),
       updatedAt: now,
     }).where(and(
       eq(agentSessionGoalActions.sessionId, session.id),
@@ -880,6 +983,7 @@ export async function failRunnerGoalAction(
     // Pending-action transitions are part of the same revisioned projection as
     // provider snapshots. Clients must not discard a failed start as a replay.
     await tx.update(agentTaskSessions).set({
+      ...(mayRestoreDesiredState ? { goalDesiredState: control!.previousDesiredState as string | null } : {}),
       goalRevision: session.goalRevision + 1,
       goalObservedAt: now,
       updatedAt: now,

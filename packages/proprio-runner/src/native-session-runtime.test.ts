@@ -1931,15 +1931,16 @@ describe("executeNativeSession recovery", () => {
   });
 
   it.each([
-    { keepSessionOpen: false, recoveryOnly: false },
-    { keepSessionOpen: true, recoveryOnly: false },
-    { keepSessionOpen: false, recoveryOnly: true },
-    { keepSessionOpen: true, recoveryOnly: true },
-  ].flatMap((options) => [false, true].map((cleared) => ({ ...options, cleared }))))("reconciles goal recovery without replaying completed controls (warm=$keepSessionOpen, recovery=$recoveryOnly, cleared=$cleared)", async ({ keepSessionOpen, recoveryOnly, cleared }) => {
+    { keepSessionOpen: false, recoveryOnly: false, reconcileOnly: false },
+    { keepSessionOpen: true, recoveryOnly: false, reconcileOnly: false },
+    { keepSessionOpen: false, recoveryOnly: true, reconcileOnly: false },
+    { keepSessionOpen: true, recoveryOnly: true, reconcileOnly: false },
+    { keepSessionOpen: false, recoveryOnly: false, reconcileOnly: true },
+  ].flatMap((options) => [false, true].map((cleared) => ({ ...options, cleared }))))("reconciles goal recovery without replaying controls (warm=$keepSessionOpen, recovery=$recoveryOnly, readback=$reconcileOnly, cleared=$cleared)", async ({ keepSessionOpen, recoveryOnly, reconcileOnly, cleared }) => {
     const pausedGoal = {
       threadId: "provider-recovery",
       objective: "Verify recovered goal control",
-      status: recoveryOnly ? "complete" as const : "paused" as const,
+      status: recoveryOnly ? "complete" as const : reconcileOnly ? "active" as const : "paused" as const,
       tokenBudget: null,
       tokensUsed: 250,
       timeUsedSeconds: 2,
@@ -1948,7 +1949,7 @@ describe("executeNativeSession recovery", () => {
     };
     const startTurn = vi.fn(async () => ({ turnId: "turn-recovery" }));
     const goal = vi.fn(async () => cleared ? null : pausedGoal);
-    const requestId = recoveryOnly ? `recovery_${input.binding.runId}` : cleared ? "goal-clear" : "goal-pause";
+    const requestId = recoveryOnly ? `recovery_${input.binding.runId}` : reconcileOnly ? "goal-reconcile" : cleared ? "goal-clear" : "goal-pause";
     const close = vi.fn(async () => {});
     let snapshotCount = 0;
     const session: NativeSession = {
@@ -1963,7 +1964,7 @@ describe("executeNativeSession recovery", () => {
         };
       },
       async *events() {
-        yield runnerEvent(1, cleared ? "session.goal.cleared" : "session.goal.updated", {
+        yield runnerEvent(1, recoveryOnly || reconcileOnly ? "session.goal.snapshot" : cleared ? "session.goal.cleared" : "session.goal.updated", {
           requestId,
           goal: cleared ? null : {
             objective: pausedGoal.objective,
@@ -1972,7 +1973,7 @@ describe("executeNativeSession recovery", () => {
             tokensUsed: pausedGoal.tokensUsed,
             elapsedSeconds: pausedGoal.timeUsedSeconds,
           },
-          workingNow: !recoveryOnly,
+          workingNow: !recoveryOnly && !reconcileOnly,
         });
         yield runnerEvent(2, "turn.completed");
         yield runnerEvent(3, "session.goal.snapshot", {
@@ -1999,7 +2000,7 @@ describe("executeNativeSession recovery", () => {
           identity,
           providerSessionId: "provider-recovery",
           cursor: null,
-          activeTurnId: !recoveryOnly && snapshotCount === 1 ? "turn-recovery" : null,
+          activeTurnId: !recoveryOnly && !reconcileOnly && snapshotCount === 1 ? "turn-recovery" : null,
           pendingRuntimeRequests: [],
           goal: cleared ? null : pausedGoal,
           lineage: [],
@@ -2066,7 +2067,8 @@ describe("executeNativeSession recovery", () => {
       keepSessionOpen,
       requireSessionCloseBeforeReturn: true,
       resumeSessionGoalHeartbeat: recoveryOnly,
-      sessionGoalControl: recoveryOnly ? null : {
+      reconcileSessionGoalRequestId: reconcileOnly ? requestId : null,
+      sessionGoalControl: recoveryOnly || reconcileOnly ? null : {
         requestId,
         action: cleared ? "clear" : "pause",
       },
@@ -2074,11 +2076,11 @@ describe("executeNativeSession recovery", () => {
 
     expect(startTurn).not.toHaveBeenCalled();
     expect(goal).toHaveBeenNthCalledWith(1, {
-      action: recoveryOnly ? "get" : cleared ? "clear" : "pause",
+      action: recoveryOnly || reconcileOnly ? "get" : cleared ? "clear" : "pause",
       requestId,
     });
-    expect(goal).toHaveBeenCalledTimes(cleared && !recoveryOnly ? 2 : 1);
-    if (cleared && !recoveryOnly) {
+    expect(goal).toHaveBeenCalledTimes(cleared && !recoveryOnly && !reconcileOnly ? 2 : 1);
+    if (cleared && !recoveryOnly && !reconcileOnly) {
       expect(goal).toHaveBeenNthCalledWith(2, { action: "get" });
     }
     expect(close).toHaveBeenCalledTimes(1);

@@ -537,6 +537,57 @@ describe.skipIf(!postgres.supported)("heartbeat scheduling database boundary", (
     }));
   });
 
+  it("recovers ambiguous goal controls with readback only and never replays Clear or Pause", async () => {
+    const f = await fixture();
+    const active = await session(f);
+    const requestId = randomUUID();
+    const [action] = await db.insert(agentSessionGoalActions).values({
+      companyId: f.company.id,
+      sessionId: active.id,
+      requestId,
+      action: "clear",
+      status: "reconciling",
+      payloadJson: { requestId, action: "clear" },
+      resultJson: {
+        goalActionControl: { previousDesiredState: "active", acceptedRevision: 6, sourceId: null, sourceCursor: null },
+        reconciliation: { state: "required", attempts: 1, acceptedRevision: 6, failureRevision: 7, sourceId: null, sourceCursor: null },
+      },
+    }).returning();
+    expect(await f.scheduler.recoverPendingSessionGoalActions()).toEqual({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 });
+    expect(f.deps.enqueueWakeup).toHaveBeenCalledWith(f.agent.id, expect.objectContaining({
+      idempotencyKey: `goal_control_reconciliation:${action!.id}:1`,
+      contextSnapshot: expect.objectContaining({
+        goalControlReconciliationRequestId: requestId,
+        goalControlReconciliation: { sessionId: active.id, revision: 7, sourceId: null, sourceCursor: null },
+      }),
+    }));
+    const context = f.deps.enqueueWakeup.mock.calls[0]![1]!.contextSnapshot as Record<string, unknown>;
+    expect(context).not.toHaveProperty("runnerGoalControl");
+    expect(context).not.toHaveProperty("goalControlRequestId");
+  });
+
+  it("surfaces a terminal goal failure when reconciliation admission is skipped", async () => {
+    const f = await fixture();
+    const active = await session(f);
+    const requestId = randomUUID();
+    const [action] = await db.insert(agentSessionGoalActions).values({
+      companyId: f.company.id,
+      sessionId: active.id,
+      requestId,
+      action: "pause",
+      status: "reconciling",
+      payloadJson: { requestId, action: "pause" },
+      resultJson: {
+        goalActionControl: { previousDesiredState: "active", acceptedRevision: 6, sourceId: null, sourceCursor: null },
+        reconciliation: { state: "required", attempts: 1, acceptedRevision: 6, failureRevision: 7, sourceId: null, sourceCursor: null },
+      },
+    }).returning();
+    f.deps.enqueueWakeup.mockResolvedValueOnce(null);
+    expect(await f.scheduler.recoverPendingSessionGoalActions()).toEqual({ scanned: 1, enqueued: 0, alreadyQueued: 0, invalid: 0 });
+    const [failed] = await db.select().from(agentSessionGoalActions).where(eq(agentSessionGoalActions.id, action!.id));
+    expect(failed).toMatchObject({ status: "failed", error: "session_goal_reconciliation_wake_skipped" });
+  });
+
   it("persists invalid goal actions as failures without wake admission", async () => {
     const f = await fixture();
     const active = await session(f);
