@@ -7,6 +7,7 @@ import {
   link,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readdir,
   rename,
@@ -105,15 +106,26 @@ function portableRuntimeNameKey(runtimeName: string): string {
 const REPOSITORY_CONTENT_DIR = ".proprio-repository";
 const LINUX_EXT_FILESYSTEM_MAGIC = 0xef53;
 
-async function repositoryTreeDigest(root: string): Promise<string | null> {
+/** The local controller holds the lifecycle lock for each company-scoped tree
+ * until the consumer has acquired its own filesystem references. */
+export type NativeCodexRepositoryCache = <T>(
+  digest: string,
+  consume: (cacheEntry: string) => Promise<T>,
+) => Promise<T>;
+
+async function repositoryTreeDigest(root: string, sealed = false): Promise<string | null> {
   const rootStat = await lstat(root).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
-  if (!rootStat?.isDirectory()) return null;
+  if (!rootStat?.isDirectory() || (sealed && rootStat.mode & 0o222)) return null;
 
   const digest = createHash("sha256");
   async function visit(directory: string) {
+    if (sealed) {
+      const state = await lstat(directory);
+      if (!state.isDirectory() || state.mode & 0o222) throw new Error("shared runtime repository directory is writable");
+    }
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     for (const entry of entries) {
@@ -127,10 +139,13 @@ async function repositoryTreeDigest(root: string): Promise<string | null> {
       try {
         const before = await handle.stat();
         if (!before.isFile()) throw new Error("runtime repository asset must be a regular file");
+        if (sealed && (before.mode & 0o7222) !== 0) throw new Error("shared runtime repository file is writable");
         const bytes = createHash("sha256");
         for await (const chunk of handle.createReadStream({ autoClose: false })) bytes.update(chunk);
         const after = await handle.stat();
-        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+        // Adding or removing an alias changes ctime without changing a sealed file.
+        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
+          || before.mode !== after.mode || (!sealed && before.ctimeMs !== after.ctimeMs)) {
           throw new Error("runtime repository asset changed while staging skills");
         }
         digest.update(JSON.stringify(["file", relative(root, file), before.mode & 0o555, bytes.digest("hex")]));
@@ -143,14 +158,58 @@ async function repositoryTreeDigest(root: string): Promise<string | null> {
   return digest.digest("hex");
 }
 
-async function linkPrivateRepository(source: string, destination: string): Promise<void> {
+async function linkRepositoryFiles(source: string, destination: string): Promise<void> {
   await mkdir(destination);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const copied = join(source, entry.name);
     const alias = join(destination, entry.name);
-    if (entry.isDirectory()) await linkPrivateRepository(copied, alias);
+    if (entry.isDirectory()) await linkRepositoryFiles(copied, alias);
     else await link(copied, alias);
   }
+}
+
+async function linkSharedRepository(
+  useRepository: NativeCodexRepositoryCache,
+  digest: string,
+  source: string,
+  destination: string,
+): Promise<boolean> {
+  return useRepository(digest, async repository => {
+    const [cacheParent, stageParent] = await Promise.all([
+      lstat(dirname(repository)), lstat(dirname(destination)),
+    ]);
+    if (!cacheParent.isDirectory() || !stageParent.isDirectory() || cacheParent.dev !== stageParent.dev) return false;
+
+    const existing = await lstat(repository).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!existing) {
+      const staging = await mkdtemp(join(dirname(repository), `.repository-staging-${digest}-`));
+      try {
+        await cp(source, staging, { recursive: true, force: false });
+        await protectStagedTree(staging);
+        if (await repositoryTreeDigest(staging, true) !== digest) {
+          throw new Error("runtime repository asset changed while publishing skills");
+        }
+        await rename(staging, repository);
+      } catch (error) {
+        await removeMaterializedTree(staging, path => rm(path, { recursive: true, force: true })).catch(() => undefined);
+        throw error;
+      }
+    } else if (!existing.isDirectory() || await repositoryTreeDigest(repository, true) !== digest) {
+      throw new Error("shared runtime repository does not match its pinned content");
+    }
+    try {
+      await linkRepositoryFiles(repository, destination);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EXDEV" && code !== "EMLINK") throw error;
+      await removeMaterializedTree(destination, path => rm(path, { recursive: true, force: true }));
+      return false;
+    }
+  });
 }
 
 async function protectStagedTree(root: string): Promise<void> {
@@ -180,7 +239,10 @@ async function protectStagedTree(root: string): Promise<void> {
         if (!openedChild.isFile()) {
           throw new Error("staged runtime context asset must be a regular file");
         }
-        await childHandle.chmod(openedChild.mode & 0o555);
+        // A shared file is already sealed. Avoid changing its ctime while
+        // another session or checkpoint reader verifies the same inode.
+        const sealedMode = openedChild.mode & 0o555;
+        if ((openedChild.mode & 0o7777) !== sealedMode) await childHandle.chmod(sealedMode);
       } finally {
         await childHandle.close();
       }
@@ -266,6 +328,7 @@ export async function materializeNativeRuntimeSkills(
   dependencies: {
     cloneFiles?: boolean;
     colocateRepositoryFiles?: boolean;
+    useSharedRepository?: NativeCodexRepositoryCache;
     /** Internal test seam for failed staging cleanup coverage. */
     removeTree?: (path: string) => Promise<void>;
     /** Internal test seam for publication failure coverage. */
@@ -319,8 +382,12 @@ export async function materializeNativeRuntimeSkills(
   await chmod(parent, 0o700);
   await mkdir(stagingHome, { mode: 0o700 });
   try {
-    const colocate = dependencies.colocateRepositoryFiles && process.platform === "linux"
-      && (context?.skills.length ?? 0) > 1 && (await statfs(stagingHome)).type === LINUX_EXT_FILESYSTEM_MAGIC;
+    const onLinuxExt = process.platform === "linux"
+      && Boolean(dependencies.colocateRepositoryFiles || dependencies.useSharedRepository)
+      && (await statfs(stagingHome)).type === LINUX_EXT_FILESYSTEM_MAGIC;
+    const sharedRepository = onLinuxExt ? dependencies.useSharedRepository : undefined;
+    const colocate = onLinuxExt && (sharedRepository
+      || (dependencies.colocateRepositoryFiles && (context?.skills.length ?? 0) > 1));
     const repositories = new Map<string, string>();
     for (const skill of context?.skills ?? []) {
       const target = safeMaterializationTarget(stagingHome, skill.runtimeName);
@@ -335,15 +402,22 @@ export async function materializeNativeRuntimeSkills(
         errorOnExist: true,
         dereference: false,
         verbatimSymlinks: true,
-        ...(existing ? { filter: (source: string) => source !== sourceRepository } : {}),
+        ...((existing || (digest && sharedRepository)) ? { filter: (source: string) => source !== sourceRepository } : {}),
       });
-      // Link only a private staged copy. Source snapshots and other durable
-      // homes must retain their own inode metadata and lifetimes.
-      if (existing) await linkPrivateRepository(existing, stagedRepository);
+      let linkedFromSharedCache = false;
+      if (existing) {
+        await linkRepositoryFiles(existing, stagedRepository);
+      } else if (digest && sharedRepository) {
+        linkedFromSharedCache = await linkSharedRepository(sharedRepository, digest, sourceRepository, stagedRepository);
+        if (!linkedFromSharedCache) {
+          // Preserve the regular-file path when the archive is on another device.
+          await cp(sourceRepository, stagedRepository, { recursive: true, force: false, errorOnExist: true });
+        }
+      }
       await assertSafeTree(target);
       await protectStagedTree(target);
       if (digest && !existing) {
-        if (await repositoryTreeDigest(stagedRepository) !== digest) {
+        if (!linkedFromSharedCache && await repositoryTreeDigest(stagedRepository) !== digest) {
           throw new Error("runtime repository asset changed while copying skills");
         }
         repositories.set(digest, stagedRepository);
@@ -412,6 +486,7 @@ export async function prepareIsolatedCodexHome(input: {
   context: NativeRuntimeContextSnapshot | null;
   codexHome: string;
   colocateRepositoryFiles?: boolean;
+  useSharedRepository?: NativeCodexRepositoryCache;
   sourceCodexHome?: string | null;
   apiKey?: string | null;
 }): Promise<void> {
@@ -420,6 +495,7 @@ export async function prepareIsolatedCodexHome(input: {
     // copy across filesystems or on local/remote storage without clone support.
     await materializeNativeRuntimeSkills(input.context, join(input.codexHome, "skills"), {
       cloneFiles: true, colocateRepositoryFiles: input.colocateRepositoryFiles,
+      useSharedRepository: input.useSharedRepository,
     });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

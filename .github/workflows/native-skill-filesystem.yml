@@ -14,6 +14,10 @@ on:
       - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
       - packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts
+      - packages/proprio-runner/src/live/runner-provider-launch.ts
+      - packages/proprio-runner/src/live/runnerd-codex-transport.ts
+      - server/src/services/native-runtime/local-codex-repository-cache.ts
+      - server/src/services/native-runtime/local-codex-repository-cache.test.ts
       - packages/proprio-runner/runner/crates/runner-core/src/bin/fake-codex-app-server.rs
 
 permissions:
@@ -46,6 +50,8 @@ jobs:
           sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
           test "$(readlink -f "$(command -v bwrap)")" = /usr/bin/bwrap
           timeout 10s /usr/bin/bwrap --unshare-user --ro-bind / / --cap-drop ALL /bin/true
+      - name: Verify controller repository cache scope, cleanup, and archive
+        run: pnpm --filter @groktopus/server exec vitest run src/services/native-runtime/local-codex-repository-cache.test.ts
       - name: Build the native runner and synthetic Codex provider
         run: |
           pnpm --filter @groktopus/proprio-runner build:typescript
@@ -73,15 +79,18 @@ jobs:
             sudo chown "$(id -u):$(id -g)" "$scratch/mount"
             TMPDIR="$scratch/mount" PROPRIO_TEST_CODEX_SKILL_FILESYSTEM="$filesystem" \
               pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
-              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging'
+              src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging|shares an ext4 repository'
             if [ "$filesystem" = ext4 ]; then
               # Codex deliberately denies /tmp within its command sandbox.
               # Give the real provider a second view of the same ext4 fixture
               # outside /tmp. Keep the short path for runner control sockets.
               sudo mount --bind "$scratch/mount" "$discovery_mount"
-              sudo unshare --net -- runuser -u "$(id -un)" -- \
-                env TMPDIR="$discovery_mount" PATH="$PATH" PROPRIO_TEST_ISOLATED_NETWORK=1 "$(command -v node)" \
-                --import ./cli/node_modules/tsx/dist/loader.mjs scripts/ci/codex-shared-skill-discovery.mjs
+              for shared_inodes in 0 1; do
+                sudo unshare --net -- runuser -u "$(id -un)" -- \
+                  env TMPDIR="$discovery_mount" PATH="$PATH" PROPRIO_TEST_ISOLATED_NETWORK=1 \
+                  PROPRIO_TEST_CODEX_SHARED_INODES="$shared_inodes" "$(command -v node)" \
+                  --import ./cli/node_modules/tsx/dist/loader.mjs scripts/ci/codex-shared-skill-discovery.mjs
+              done
               sudo umount "$discovery_mount"
               TMPDIR="$scratch/mount" PROPRIO_TEST_NATIVE_SKILL_EXT4=1 \
                 pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \

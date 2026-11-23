@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { parseNativeRuntimeContext, retargetNativeSystemInstructions } from "../contracts/runtime-context.js";
 import { resolve } from "node:path";
 import { codexExecutableReadOnlyRoots } from "../drivers/codex/codex-security-config.js";
@@ -225,7 +226,7 @@ export function preparedRunnerLaunchWorkingDirectory(
 export interface RunnerProviderLaunchEnvironment {
   options: Pick<CapabilityRunnerdCodexTransportOptions,
     "acpxRuntimeDirectory" | "homeMode" | "environment" | "codexArgs" |
-    "runnerFilesystemRoot" | "disableCodexProjectInstructions" | "externallySandboxed">;
+    "runnerFilesystemRoot" | "sharedCodexRepositories" | "disableCodexProjectInstructions" | "externallySandboxed">;
   root: string;
   cwd: string;
   codexHome: string;
@@ -391,6 +392,7 @@ export function createRunnerProviderLaunch(
                           codexHome,
                           workingDirectory: input.cwd,
                           runtimeStateRoot: input.options.runnerFilesystemRoot ?? input.root,
+                          sharedCodexRepositoriesRoot: input.options.sharedCodexRepositories?.rootPath,
                           codexCommand: effectiveCodexCommand,
                           instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
                           disableProjectInstructions: settings.disableCodexProjectInstructions ?? input.options.disableCodexProjectInstructions,
@@ -487,6 +489,7 @@ export function createRunnerdCodexAppServerArgs(input: {
   codexCommand?: string;
   workingDirectory?: string;
   runtimeStateRoot?: string;
+  sharedCodexRepositoriesRoot?: string;
   readOnlyRoots?: string[];
   instructionWorkingCopyRoot?: string;
   disableProjectInstructions?: boolean;
@@ -506,7 +509,11 @@ export function createRunnerdCodexAppServerArgs(input: {
       },
       [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
       input.instructionWorkingCopyRoot,
-      usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : [],
+      [
+        ...(usesPreconfiguredHome(input.environment) && input.runtimeStateRoot ? [input.runtimeStateRoot] : []),
+        ...(input.sharedCodexRepositoriesRoot && existsSync(input.sharedCodexRepositoriesRoot)
+          ? [input.sharedCodexRepositoriesRoot] : []),
+      ],
     ),
   ];
   if (!input.args && usesPreconfiguredHome(input.environment) && input.workingDirectory) {

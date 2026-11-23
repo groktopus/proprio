@@ -30,6 +30,24 @@ the local libc remains unknown and automatic GNU/Linux runner selection stays
 disabled. Qualified Linux targets still require GNU libc 2.39 or newer. Existing
 saved execution choices remain unchanged.
 
+## Local Codex repository skills
+
+Managed Codex sessions on Linux ext4 share a cache within the company. The
+runner seals the repository files and links them into each assigned skill
+directory. Each skill keeps its own entry point and sees the same pinned tree,
+including repository-root files and unassigned siblings. A different tree gets
+its own cache entry. Remote runners keep their portable staging behavior.
+
+The controller locks each cache entry while publishing or linking it. A retained
+session keeps its own references, so deleting a different session leaves its
+files readable during recovery. At most once an hour per active company, reuse
+can trigger a cleanup pass. That pass removes expired trees and interrupted
+publications only when no session still holds a link.
+
+To roll back, stop the controller and restore the previous Proprio build.
+Retained homes and archives still contain regular files at their existing paths.
+New sessions on the previous build use its staging behavior.
+
 ## OpenCode native runtime
 
 Proprio Runner resolves the pinned OpenCode platform package installed with

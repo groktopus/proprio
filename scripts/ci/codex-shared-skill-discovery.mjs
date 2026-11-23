@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,9 +11,11 @@ const codex = fileURLToPath(new URL("../../packages/proprio-runner/node_modules/
 const root = await mkdtemp(join(tmpdir(), "proprio-shared-skills-"));
 const skillName = "proprio-shared-skill-fixture";
 const rootFile = join(REPOSITORY_CONTENT_DIR, "shared.txt");
+const useHardlinks = process.env.PROPRIO_TEST_CODEX_SHARED_INODES === "1";
+const repositories = join(root, "repositories");
 
 async function createRepository(revision) {
-  const repository = join(root, "repositories", revision);
+  const repository = join(repositories, revision);
   const entry = "skills/assigned/SKILL.md";
   const files = repositorySkillProjection([
     { path: entry, kind: "skill", content: `---\nname: ${skillName}\ndescription: Pinned repository discovery fixture.\n---\nRead ../../shared.txt and ../unassigned-sibling/data.txt.\n` },
@@ -38,12 +40,14 @@ async function createAssignment(name, { repository, files }) {
   await mkdir(skills, { recursive: true });
   await mkdir(skill, { recursive: true });
   for (const file of files) {
-    if (file.path.startsWith(REPOSITORY_CONTENT_DIR + sep)) continue;
+    const repositoryFile = file.path.startsWith(REPOSITORY_CONTENT_DIR + sep);
+    if (repositoryFile && !useHardlinks) continue;
     const path = join(skill, file.path);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, file.content, { mode: 0o444 });
+    if (repositoryFile) await link(join(repository, file.path.slice(REPOSITORY_CONTENT_DIR.length + 1)), path);
+    else await writeFile(path, file.content, { mode: 0o444 });
   }
-  await symlink(repository, join(skill, REPOSITORY_CONTENT_DIR), "dir");
+  if (!useHardlinks) await symlink(repository, join(skill, REPOSITORY_CONTENT_DIR), "dir");
   await symlink(skill, join(skills, skillName), "dir");
   return { home, skill, files, repository };
 }
@@ -61,11 +65,14 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
     PROPRIO_RUNNER_NETWORK_ACCESS: process.env.PROPRIO_TEST_ISOLATED_NETWORK === "1" ? "enabled" : undefined,
   };
   const readOnlyRoots = codexExecutableReadOnlyRoots(environment, codex);
-  if (assignment) readOnlyRoots.push(assignment.skill, assignment.repository);
+  if (assignment) {
+    readOnlyRoots.push(assignment.skill);
+    if (!useHardlinks) readOnlyRoots.push(assignment.repository);
+  }
   let diagnostics = "";
   const transport = new ProcessCodexAppServerTransport({
     command: codex,
-    args: createIsolatedCodexAppServerArgs(environment, readOnlyRoots),
+    args: createIsolatedCodexAppServerArgs(environment, readOnlyRoots, undefined, useHardlinks ? [repositories] : []),
     workingDirectory: workspace,
     environment,
     onDiagnostic: message => { diagnostics = (diagnostics + message).slice(-4000); },
@@ -93,8 +100,12 @@ async function verifyDiscovery(workspace, session, assignment, outsideAssignment
       assert.notEqual(changeMode.exitCode, 0, "The Codex sandbox must refuse permission changes on a shared file");
       assert.equal((await stat(selected)).mode & 0o777, 0o444);
     }
-    const outsideRead = await command("/bin/cat", join(outsideAssignment.repository, "shared.txt"));
+    const outsideRead = await command("/bin/cat", join(outsideAssignment.skill, rootFile));
     assert.notEqual(outsideRead.exitCode, 0, "The Codex sandbox must refuse files outside the assigned revision");
+    if (useHardlinks && assignment) {
+      const directRead = await command("/bin/cat", join(assignment.repository, "shared.txt"));
+      assert.notEqual(directRead.exitCode, 0, "The Codex sandbox must refuse access to the shared cache");
+    }
     const privateRead = await command("/bin/cat", join(privateHome, "config.toml"));
     assert.notEqual(privateRead.exitCode, 0, "The Codex sandbox must refuse access to the private configuration");
     console.log(`${session}: verified private config, ${matches.length} matching skills, and sandbox permissions`);
@@ -113,7 +124,11 @@ try {
   const first = await createAssignment("first", repository);
   const second = await createAssignment("second", repository);
   const alternate = await createAssignment("alternate", await createRepository("alternate-revision"));
-  assert.equal(await realpath(join(first.skill, rootFile)), await realpath(join(second.skill, rootFile)));
+  const firstFile = await stat(join(first.skill, rootFile));
+  const secondFile = await stat(join(second.skill, rootFile));
+  assert.equal(firstFile.dev, secondFile.dev);
+  assert.equal(firstFile.ino, secondFile.ino);
+  console.log(`Shared repository proof: ${useHardlinks ? "hardlinks" : "directory links"}`);
   await verifyDiscovery(workspace, "session-one", first, alternate);
   await rm(first.home, { recursive: true });
   await rm(first.skill, { recursive: true });
