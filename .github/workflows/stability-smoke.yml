@@ -47,6 +47,21 @@ jobs:
         run: node --test --test-name-pattern='implicit verification|the remote default' scripts/__tests__/local-verify.test.mjs
       - name: Verify generated API documentation
         run: pnpm docs:api:check
+      - name: Check transactional document revision conflicts
+        run: |
+          test_file=server/src/__tests__/documents-service.test.ts
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/document-results.json" "$test_file"
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'document-results.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'reports the winning revision when two saves share the same base',
+            'preserves the duplicate-key conflict for overlapping document creation',
+            'locks and unlocks issue documents',
+          ] });
+          JS
       - name: Check service onboarding
         run: pnpm exec vitest run cli/src/__tests__/onboard-service.test.ts
       - name: Check database backup CLI output
