@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterEach, expect, it, vi } from "vitest";
 import { runDatabaseRestore } from "./backup-lib.js";
@@ -73,7 +74,7 @@ it.skipIf(process.platform === "win32")("rejects missing gzip input in a subproc
   const directory = fixture('printf "%s" "$$" > "$RESTORE_FIXTURE_PID"\nexec cat >/dev/null\n');
   const pidPath = path.join(directory, "pid");
   const backupFile = path.join(directory, "missing.sql.gz");
-  const loader = createRequire(import.meta.url).resolve("tsx");
+  const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   const result = spawnSync(process.execPath, ["--import", loader, "--input-type=module", "-e", `
     import { runDatabaseRestore } from ${JSON.stringify(source)};
     try {
