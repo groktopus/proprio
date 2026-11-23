@@ -171,4 +171,55 @@ describePostgres("issue company-link migrations", () => {
       await database.cleanup();
     }
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("removes an interrupted invalid 0503 index before retrying the migration", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("proprio-issue-company-links-index-retry-");
+    const sql = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+
+    try {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      await sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Index retry', 'IR')`;
+      await sql`INSERT INTO agents (id, company_id, name) VALUES (${agentId}, ${companyId}, 'Retry agent')`;
+      await sql`INSERT INTO heartbeat_runs (company_id, agent_id, status) VALUES
+        (${companyId}, ${agentId}, 'succeeded'), (${companyId}, ${agentId}, 'succeeded')`;
+
+      for (const name of ["issues_checkout_run_company_fk", "issues_execution_run_company_fk"]) {
+        await sql.unsafe(`ALTER TABLE issues DROP CONSTRAINT ${name}`);
+      }
+      await sql.unsafe("DROP INDEX CONCURRENTLY public.heartbeat_runs_company_id_uq");
+      await expect(sql.unsafe(
+        "CREATE UNIQUE INDEX CONCURRENTLY heartbeat_runs_company_id_uq ON heartbeat_runs ((1))",
+      )).rejects.toThrow();
+
+      const [interruptedIndex] = await sql<{ indisvalid: boolean }[]>`
+        SELECT i.indisvalid FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = 'heartbeat_runs_company_id_uq'
+      `;
+      expect(interruptedIndex?.indisvalid).toBe(false);
+
+      const indexMigrationHash = await migrationHash("0503_redundant_radioactive_man.sql");
+      await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash = ${indexMigrationHash}`;
+
+      await applyPendingMigrations(database.connectionString);
+      const [rebuiltIndex] = await sql<{ indisvalid: boolean; definition: string }[]>`
+        SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS definition
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = 'heartbeat_runs_company_id_uq'
+      `;
+      expect(rebuiltIndex).toMatchObject({ indisvalid: true });
+      expect(rebuiltIndex?.definition).toContain("(company_id, id)");
+      const [history] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations WHERE hash = ${indexMigrationHash}
+      `;
+      expect(history?.count).toBe(1);
+    } finally {
+      await sql.end();
+      await database.cleanup();
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 });
