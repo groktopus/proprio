@@ -104,7 +104,23 @@ jobs:
       - name: Check managed restart and same-version updates
         run: |
           pnpm exec vitest run cli/src/__tests__/managed-service-restart.test.ts cli/src/__tests__/service-health-check.test.ts server/src/__tests__/managed-restart-health.test.ts
-          pnpm exec vitest run cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update'
+          report="$RUNNER_TEMP/managed-update-results.json"
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$report" \
+            cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update|settles overlapping managed Git updates'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'cli/src/__tests__/update-command.test.ts': [
+              'validates a same-version Git update before retaining its new payload (true)',
+              'validates a same-version Git update before retaining its new payload (false)',
+              'settles overlapping managed Git updates when older passes',
+              'settles overlapping managed Git updates when older fails',
+              'settles overlapping managed Git updates when both fail',
+              'settles overlapping managed Git updates when staging fails',
+            ],
+          });
+          JS
       - name: Check database backup CLI output
         run: pnpm exec vitest run cli/src/__tests__/db-backup.test.ts
       - name: Check cost summaries and database backups
