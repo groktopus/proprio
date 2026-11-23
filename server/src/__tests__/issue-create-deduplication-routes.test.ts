@@ -325,14 +325,29 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
       .post(`/api/companies/${companyId}/issues`)
       .send({ title: "Inherited A", projectId: projectA!.id, allowDuplicate: true })
       .expect(201);
+    expect(explicit.body).not.toHaveProperty("goalOriginGoalId");
+    expect(inherited.body).not.toHaveProperty("goalOriginGoalId");
 
     await request(app).patch(`/api/issues/${explicit.body.id}`)
       .send({ goalId: foreignGoal!.id }).expect(404);
 
-    await request(app).patch(`/api/issues/${explicit.body.id}`)
+    const explicitPatch = await request(app).patch(`/api/issues/${explicit.body.id}`)
       .send({ projectId: projectB!.id }).expect(200);
-    await request(app).patch(`/api/issues/${inherited.body.id}`)
+    expect(explicitPatch.body).not.toHaveProperty("goalOriginGoalId");
+    const inheritedPatch = await request(app).patch(`/api/issues/${inherited.body.id}`)
       .send({ projectId: projectB!.id }).expect(200);
+    expect(inheritedPatch.body).not.toHaveProperty("goalOriginGoalId");
+    const child = await request(app).post(`/api/issues/${inherited.body.id}/children`)
+      .send({ title: "Inherited destination child", projectId: projectA!.id, allowDuplicate: true })
+      .expect(201);
+    expect(child.body).toMatchObject({ goalId: goalA!.id, goalOrigin: "inherited" });
+    expect(child.body).not.toHaveProperty("goalOriginGoalId");
+    const list = await request(app).get(`/api/companies/${companyId}/issues?view=index`).expect(200);
+    expect(list.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: explicit.body.id }),
+      expect.objectContaining({ id: inherited.body.id }),
+    ]));
+    expect(JSON.stringify(list.body)).not.toContain("goalOriginGoalId");
 
     const [explicitRow] = await db.select().from(issues).where(eq(issues.id, explicit.body.id));
     const [inheritedRow] = await db.select().from(issues).where(eq(issues.id, inherited.body.id));

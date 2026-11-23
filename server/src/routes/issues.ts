@@ -3169,6 +3169,14 @@ export const ISSUE_LIST_LIMIT_HEADER = "X-Proprio-Limit";
 export const ISSUE_LIST_NEXT_OFFSET_HEADER = "X-Proprio-Next-Offset";
 export const ISSUE_LIST_NEXT_AFTER_ID_HEADER = "X-Proprio-Next-After-Id";
 
+/** Keep the provenance snapshot column private at every HTTP issue boundary. */
+function issueApiResponse<T extends object>(issue: T): Omit<T, "goalOriginGoalId"> {
+  const { goalOriginGoalId: _goalOriginGoalId, ...response } = issue as T & {
+    goalOriginGoalId?: unknown;
+  };
+  return response;
+}
+
 type IssueListPreparedResponse =
   | { kind: "inbox"; body: unknown; serverTimingPhases?: InboxMinePhaseDurations }
   | {
@@ -13525,7 +13533,7 @@ export function issueRoutes(
 
     const visibleReferenceSummary = await redactIssueReferenceEdges(req, companyId, referenceSummary);
       res.status(201).json({
-        ...issue,
+        ...issueApiResponse(issue),
       relatedWork: visibleReferenceSummary,
       referencedIssueIdentifiers: visibleReferenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
       });
@@ -13805,7 +13813,7 @@ export function issueRoutes(
       });
       await queueTaskWatchdogEvaluation(issue, actor.runId);
 
-      res.status(201).json(issue);
+      res.status(201).json(issueApiResponse(issue));
     },
   );
 
@@ -17045,7 +17053,7 @@ export function issueRoutes(
         });
         return;
       }
-      res.json({ ...issueResponse, changes, comment, ...(parentAdjusted ? { parentAdjusted } : {}) });
+      res.json({ ...issueApiResponse(issueResponse), changes, comment, ...(parentAdjusted ? { parentAdjusted } : {}) });
     },
   );
 
@@ -17109,7 +17117,7 @@ export function issueRoutes(
     });
 
     await queueTaskWatchdogEvaluation(existing, actor.runId);
-    res.json(issue);
+    res.json(issueApiResponse(issue));
   });
 
   router.post(
