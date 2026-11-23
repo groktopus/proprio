@@ -841,6 +841,8 @@ export interface WakeupOptions {
     /** Internal diagnostic only; the callback cannot grant admission. */
     onExecutionDeferred?: (blockerCause: string) => void;
   };
+  /** Server-owned fence for resuming an already confirmed goal. */
+  sessionGoalRecovery?: { sessionId: string; revision: number };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
 }

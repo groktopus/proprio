@@ -1,3 +1,4 @@
+import { canAdmitSessionGoalRecovery } from "./session-goal-recovery.js";
 import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
 import { QUEUED_MESSAGES_DELIVERED_REASON } from "../../modules/wake-queue/index.js";
 import { connectionIntentService } from "../connection-intents.js";
@@ -3812,6 +3813,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               finishedAt: new Date(),
             });
             return { kind: "skipped" as const };
+          }
+
+          if (opts.sessionGoalRecovery && (
+            issue.assigneeAgentId !== agentId || issue.assigneeUserId || issue.status !== "in_progress"
+            || !await canAdmitSessionGoalRecovery(tx as unknown as Db, {
+              ...opts.sessionGoalRecovery, companyId: agent.companyId, issueId, agentId, adapterType: agent.adapterType,
+            })
+          )) return { kind: "skipped" as const };
+
+          if (opts.sessionGoalRecovery) {
+            enrichedContextSnapshot.sessionGoalRecovery = opts.sessionGoalRecovery;
           }
 
           // Completion can settle the conversation while admission is outside

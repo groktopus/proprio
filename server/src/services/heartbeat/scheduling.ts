@@ -1169,6 +1169,7 @@ export function createHeartbeatScheduling(
         triggerDetail: "system",
         reason: "goal_control",
         payload: { issueId: session.issueId, intent: "goal_recovery" },
+        sessionGoalRecovery: { sessionId: session.id, revision: session.revision },
         idempotencyKey: `goal_recovery:${session.id}:${session.revision}`,
         requestedByActorType: "system",
         contextSnapshot: {
@@ -1177,6 +1178,10 @@ export function createHeartbeatScheduling(
           resumeSessionGoalHeartbeat: true,
           skipIssueComment: true,
         },
+      }).catch(err => {
+        logger.warn({ err, companyId: session.companyId, issueId: session.issueId, sessionId: session.id },
+          "active session-goal wake was not admitted and remains eligible for reconciliation");
+        return null;
       });
       if (run) enqueued += 1;
     }

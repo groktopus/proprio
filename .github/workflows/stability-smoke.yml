@@ -247,6 +247,27 @@ jobs:
           ];
           assertRequiredVitestTests(result, { [path]: required });
           JS
+      - name: Check orphaned session-goal recovery
+        run: |
+          report="$RUNNER_TEMP/session-goal-recovery.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/__tests__/assigned-work-invariant.test.ts \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts \
+            -t 'retries an orphaned session goal|does not enqueue goal recovery beside|goal recovery at queued admission and provider dispatch'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/__tests__/assigned-work-invariant.test.ts': [
+              'retries an orphaned session goal and leaves an independent goal recoverable',
+              'does not enqueue goal recovery beside a live run',
+              'does not enqueue goal recovery beside a queued successor',
+            ],
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts':
+              ['legacy', 'current', 'paused', 'superseded', 'control_pending'].map(
+                state => `rechecks ${state} goal recovery at queued admission and provider dispatch`),
+          });
+          JS
       - name: Check recovery of unrecorded routine occurrences
         run: |
           test_file=server/src/__tests__/routine-schedule-work.test.ts
