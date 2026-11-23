@@ -3,8 +3,8 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { createDb, instanceUserRoles, invites } from "@groktopus/db";
-import { inferBindModeFromHost } from "@groktopus/shared";
-import { loadProprioEnvFile } from "../config/env.js";
+import { inferBindModeFromHost, parseDeploymentExposure, resolveDeploymentMode } from "@groktopus/shared";
+import { loadDeploymentEnv } from "../config/env.js";
 import { readConfig, resolveConfigPath } from "../config/store.js";
 
 function hashToken(token: string) {
@@ -59,14 +59,25 @@ export async function bootstrapCeoInvite(opts: {
   dbUrl?: string;
 }) {
   const configPath = resolveConfigPath(opts.config);
-  loadProprioEnvFile(configPath);
+  loadDeploymentEnv(configPath);
+  parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE);
   const config = readConfig(configPath);
   if (!config) {
     p.log.error(`No config found at ${configPath}. Run ${pc.cyan("proprio onboard")} first.`);
     return;
   }
 
-  if (config.server.deploymentMode !== "authenticated") {
+  const savedMode = config.server.deploymentMode;
+  const effectiveMode = resolveDeploymentMode(process.env.PROPRIO_DEPLOYMENT_MODE, savedMode);
+  if (savedMode !== effectiveMode) {
+    p.log.error(
+      `Deployment mode differs: ${configPath} selects ${savedMode} but PROPRIO_DEPLOYMENT_MODE selects ${effectiveMode}. Match the saved setting to the running service and retry.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (effectiveMode !== "authenticated") {
     p.log.info("Deployment mode is local_trusted. Bootstrap CEO invite is only required for authenticated mode.");
     return;
   }

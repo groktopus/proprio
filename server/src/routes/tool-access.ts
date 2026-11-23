@@ -1892,7 +1892,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         action: "tool_application.updated",
         entityType: "tool_application",
         entityId: application.id,
-        details: { status: application.status, name: application.name },
+        details: { status: application.status, name: application.name, statusChanged: req.body.status !== undefined },
       });
       res.json(application);
     } catch (error) {
