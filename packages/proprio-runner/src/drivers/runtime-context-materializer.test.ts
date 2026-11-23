@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -28,6 +30,7 @@ import {
   materializeNativeRuntimeSkills,
   prepareIsolatedCodexRecoveryHome,
   prepareIsolatedCodexHome,
+  releaseMaterializedNativeRuntimeSkills,
 } from "./runtime-context-materializer.js";
 
 const roots: string[] = [];
@@ -146,6 +149,87 @@ describe("runtime context materialization", () => {
     expect(config).not.toContain("Bearer ");
     expect(config).not.toContain("unassigned");
   });
+
+  it("preserves pinned repository dependencies and independent files across Codex session cleanup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "proprio-codex-skill-copy-"));
+    roots.push(root);
+    const relativeSource = join("repo", "skills", "unassigned-sibling", "support.txt");
+    const pinned = await Promise.all(["first", "second", "other-version"].map(async name => {
+      const bundle = join(root, name);
+      await mkdir(dirname(join(bundle, relativeSource)), { recursive: true });
+      await writeFile(join(bundle, "SKILL.md"), `# ${name}\n`);
+      await writeFile(join(bundle, relativeSource), name === "other-version" ? "other revision" : "shared revision");
+      return bundle;
+    }));
+    const assignment = context(pinned[0]!, root, "first");
+    assignment.skills.push({ ...context(pinned[1]!, root, "second").skills[0]!, versionId: "second-version-1" });
+    assignment.aggregateDigest = canonicalNativeRuntimeContextDigest(assignment);
+    const nextVersion = context(pinned[2]!, root, "first");
+    nextVersion.skills[0]!.versionId = "version-2";
+    nextVersion.aggregateDigest = canonicalNativeRuntimeContextDigest(nextVersion);
+    const firstHome = join(root, "codex-1");
+    const secondHome = join(root, "codex-2");
+    const thirdHome = join(root, "codex-3");
+    await Promise.all([
+      prepareIsolatedCodexHome({ context: assignment, codexHome: firstHome }),
+      prepareIsolatedCodexHome({ context: assignment, codexHome: secondHome }),
+      prepareIsolatedCodexHome({ context: nextVersion, codexHome: thirdHome }),
+    ]);
+    const firstCopy = join(firstHome, "skills", "first", relativeSource);
+    const secondCopy = join(secondHome, "skills", "first", relativeSource);
+    const siblingCopy = join(secondHome, "skills", "second", relativeSource);
+    const thirdCopy = join(thirdHome, "skills", "first", relativeSource);
+    const paths = [firstCopy, secondCopy, siblingCopy, thirdCopy, join(pinned[0]!, relativeSource)];
+    const identities = await Promise.all(paths.map(file => stat(file)));
+    expect(new Set(identities.map(file => file.ino)).size).toBe(paths.length);
+    await expect(readFile(thirdCopy, "utf8")).resolves.toBe("other revision");
+
+    await prepareIsolatedCodexRecoveryHome({ codexHome: secondHome });
+    await releaseMaterializedNativeRuntimeSkills(join(firstHome, "skills"));
+    await expect(stat(firstCopy)).rejects.toMatchObject({ code: "ENOENT" });
+    for (const path of [secondCopy, siblingCopy]) {
+      await expect(readFile(path, "utf8")).resolves.toBe("shared revision");
+      expect((await stat(path)).mode & 0o222).toBe(0);
+    }
+  });
+
+  const skillFilesystem = process.env.PROPRIO_TEST_CODEX_SKILL_FILESYSTEM;
+  it.skipIf(process.platform !== "linux" || !["ext4", "btrfs"].includes(skillFilesystem ?? ""))(
+    "measures pinned repository skill staging on a Linux filesystem", async () => {
+      const root = await mkdtemp(join(tmpdir(), "proprio-codex-skill-filesystem-"));
+      roots.push(root);
+      expect(execFileSync("findmnt", ["--noheadings", "--output", "FSTYPE", "--target", root], { encoding: "utf8" }).trim())
+        .toBe(skillFilesystem);
+      const repositoryPath = join("repo", "skills", "unassigned-sibling", "data.bin");
+      const data = randomBytes(8 * 1024 * 1024);
+      const bundles = await Promise.all(["first", "second"].map(async name => {
+        const bundle = join(root, name);
+        await mkdir(dirname(join(bundle, repositoryPath)), { recursive: true });
+        await writeFile(join(bundle, "SKILL.md"), `# ${name}\n`);
+        await writeFile(join(bundle, repositoryPath), data);
+        return context(bundle, root, name).skills[0]!;
+      }));
+      const assignment = context(bundles[0]!.bundle.rootPath, root);
+      assignment.skills = bundles;
+      assignment.aggregateDigest = canonicalNativeRuntimeContextDigest(assignment);
+      const homes = [join(root, "run-1"), join(root, "run-2")];
+      await Promise.all(homes.map(codexHome => prepareIsolatedCodexHome({ context: assignment, codexHome })));
+      const copies = homes.flatMap(home => bundles.map(bundle => join(home, "skills", bundle.runtimeName, repositoryPath)));
+      const stats = await Promise.all(copies.map(path => stat(path)));
+      expect(new Set(stats.map(file => file.ino)).size).toBe(copies.length);
+      const allocated = stats.reduce((sum, file) => sum + file.blocks * 512, 0);
+      if (skillFilesystem === "ext4") {
+        expect(allocated).toBeGreaterThanOrEqual(copies.length * data.byteLength);
+      } else {
+        for (const path of copies) {
+          expect((await readFile(path)).equals(data)).toBe(true);
+          const extents = execFileSync("filefrag", ["-sv", path], { encoding: "utf8" });
+          expect(extents).toMatch(/\bshared\b/);
+        }
+      }
+      console.log(`${skillFilesystem}: ${copies.length} staged files, ${allocated} bytes in reported allocation blocks`);
+    }, 30_000,
+  );
 
   it("preserves a managed provider while excluding ambient auth, hooks, and tool configuration", async () => {
     const root = await mkdtemp(join(tmpdir(), "proprio-routing-home-"));
