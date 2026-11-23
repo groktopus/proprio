@@ -583,6 +583,22 @@ export function documentService(db: Db) {
             }
             throw conflict("Document key already exists on this issue", { key });
           }
+          if (input.baseRevisionId && isUniqueViolation(error, "document_revisions_document_revision_uq")) {
+            // The failed transaction has rolled back. Read the committed revision
+            // outside that transaction so the caller can reconcile the losing edit.
+            const [current] = await db.select({ id: documents.latestRevisionId })
+              .from(issueDocuments)
+              .innerJoin(documents, and(
+                eq(issueDocuments.documentId, documents.id),
+                eq(issueDocuments.companyId, documents.companyId),
+              ))
+              .where(and(
+                eq(issueDocuments.companyId, issue.companyId),
+                eq(issueDocuments.issueId, issue.id),
+                eq(issueDocuments.key, key),
+              ));
+            throw conflict("Document was updated by someone else", { currentRevisionId: current?.id ?? null });
+          }
           throw error;
         }
       }
