@@ -121,10 +121,11 @@ pnpm verify
 
 This selects affected Vitest files with the same conservative dependency policy
 as CI. It includes committed, staged, unstaged, and untracked changes against the
-merge base with local `origin/master` (or `master`), and it reuses passing checks
-whose inputs are unchanged. Use `--base <ref>` for another base, `--explain` to
-inspect the selection, and `--no-cache` for fresh execution. See "Incremental
-local verification" in `doc/DEVELOPING.md` for how reuse and invalidation work.
+merge base with the locally recorded default branch, and it reuses passing
+checks whose inputs are unchanged. Use `--base <ref>` for another base,
+`--explain` to inspect the selection, and `--no-cache` for fresh execution.
+See "Incremental local verification" in `doc/DEVELOPING.md` for how reuse and
+invalidation work.
 
 Follow these rules:
 
