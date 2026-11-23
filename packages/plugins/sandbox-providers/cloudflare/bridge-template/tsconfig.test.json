@@ -1,4 +1,10 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": []
+  "exclude": [],
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types",
+      "node"
+    ]
+  }
 }

@@ -1,34 +1,11 @@
-import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
-import { getSandbox } from "@cloudflare/sandbox";
+import type { BridgeLeaseConfig } from "./runtime.js";
+import type { Sandbox as CloudflareSandbox } from "sandbox-0x";
+import { getSandbox } from "sandbox-0x";
 import { buildLeaseSandboxId, buildSentinelPath, isTimeoutError } from "./helpers.js";
 
 export interface BridgeEnv {
   Sandbox: DurableObjectNamespace<CloudflareSandbox>;
   BRIDGE_AUTH_TOKEN?: string;
-}
-
-export interface BridgeLeaseConfig {
-  keepAlive: boolean;
-  sleepAfter: string;
-  normalizeId: boolean;
-}
-
-export const DEFAULT_REMOTE_CWD = "/workspace/proprio";
-export const DEFAULT_SESSION_ID = "proprio";
-export const DEFAULT_TIMEOUT_MS = 300_000;
-export const LEASE_SENTINEL_FILE = ".proprio-lease.json";
-
-export function toJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-}
-
-export function toErrorResponse(status: number, error: string, message: string, details?: unknown): Response {
-  return toJsonResponse({ error, message, details }, status);
 }
 
 export async function resolveSandbox(

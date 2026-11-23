@@ -1,6 +1,7 @@
-import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
+import type { Sandbox as CloudflareSandbox } from "sandbox-0x";
 import { shellQuote } from "./helpers.js";
-import { isTimeoutError } from "./sandboxes.js";
+import { isTimeoutError } from "./helpers.js";
+import type { BridgeCommand } from "./runtime.js";
 import { cleanupTimedOutExecution, resolveExecutionTarget, type SessionStrategy } from "./sessions.js";
 
 // Leave the SDK a fallback deadline if the bridge cannot perform cleanup.
@@ -9,17 +10,8 @@ const MAX_STREAM_DEADLINE_MS = 2_147_483_647 - STREAM_TIMEOUT_GRACE_MS;
 
 class StreamExecutionTimeout extends Error {}
 
-export interface BridgeExecuteParams {
+export interface BridgeExecuteParams extends BridgeCommand {
   sandbox: CloudflareSandbox;
-  command: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  stdin?: string | null;
-  timeoutMs?: number;
-  sessionStrategy: SessionStrategy;
-  sessionId?: string;
-  onOutput?: (stream: "stdout" | "stderr", data: string) => void | Promise<void>;
 }
 
 function isValidShellEnvKey(value: string): boolean {

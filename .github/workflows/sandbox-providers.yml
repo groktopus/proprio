@@ -58,3 +58,9 @@ jobs:
         run: |
           node --test scripts/ci/qualify-sandbox-provider-dependencies.test.mjs
           node scripts/ci/qualify-sandbox-provider-dependencies.mjs --scope "$PROVIDER_SCOPE"
+      - name: Build the 1.0 Cloudflare Worker and image without deployment
+        if: matrix.scope == 'shared'
+        working-directory: packages/plugins/sandbox-providers/cloudflare/bridge-template
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: pnpm exec wrangler deploy --dry-run --config wrangler.v1.jsonc --outdir "$RUNNER_TEMP/cloudflare-bridge-v1"
