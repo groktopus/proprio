@@ -28,9 +28,9 @@ const serverTests = {
 };
 
 const runnerTests = {
-  'packages/proprio-runner/src/protocol/auth-credentials.test.ts': [
-    'rejects secret material, missing fields, invalid revisions, and downgraded priority',
-  ],
+  'packages/proprio-runner/src/protocol/auth-credentials.test.ts': [1, 2, 3].map(
+    (version) => `PRP v${version} credential updates rejects secret material, missing fields, invalid revisions, and downgraded priority`,
+  ),
   'packages/proprio-runner/src/semantic-tools/proprio-semantic-tools.test.ts': [
     'denies cross-company contexts and malformed protocol identities',
   ],
