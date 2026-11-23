@@ -35,11 +35,13 @@ operational detail for reusable or centrally managed workflows; the workflows
 present in `.github/workflows/` are the source of truth for what this checkout
 runs directly.
 
-Contributor checks include `pnpm check:agents` for local links referenced by
-`AGENTS.md` and `pnpm check:no-git-push` for adapter/runtime remote-push
-boundaries. After installing pre-commit and the workspace dependencies, run `pre-commit
-install` to enable commit hooks. Use `pre-commit run --all-files` to run them on
-the current checkout. These focused checks do not replace `pnpm verify`.
+Contributor checks include `pnpm lint` for server, UI, and CLI source,
+`pnpm check:agents` for local links referenced by `AGENTS.md`, and
+`pnpm check:no-git-push` for adapter/runtime remote-push boundaries. After
+installing pre-commit and the workspace dependencies, run `pre-commit install`
+to enable commit hooks. The hooks run these checks before every commit. Use
+`pre-commit run --all-files` to run them on the current checkout. These focused
+checks do not replace `pnpm verify`.
 
 ## Start Dev
 
