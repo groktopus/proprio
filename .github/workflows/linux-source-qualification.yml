@@ -59,17 +59,23 @@ jobs:
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
       - name: Check managed rollback and fresh-target restore
         run: |
-          report="$RUNNER_TEMP/durable-work-acceptance.json"
-          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
-            cli/src/__tests__/update-command.test.ts packages/db/src/backup-lib.test.ts
-          node --input-type=module - "$report" <<'JS'
+          update_report="$RUNNER_TEMP/durable-work-update.json"
+          restore_report="$RUNNER_TEMP/durable-work-restore.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$update_report" \
+            cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update'
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$restore_report" \
+            packages/db/src/backup-lib.test.ts
+          node --input-type=module - "$update_report" "$restore_report" <<'JS'
           import { readFileSync } from 'node:fs';
           import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
-          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+          const readReport = path => JSON.parse(readFileSync(path, 'utf8'));
+          assertRequiredVitestTests(readReport(process.argv[2]), {
             'cli/src/__tests__/update-command.test.ts': [
-              'backs up, installs side-by-side, flips, and rolls back instantly',
-              'rolls back the active payload when restart validation fails',
+              'validates a same-version Git update before retaining its new payload (true)',
+              'validates a same-version Git update before retaining its new payload (false)',
             ],
+          });
+          assertRequiredVitestTests(readReport(process.argv[3]), {
             'packages/db/src/backup-lib.test.ts': [
               'preserves identity generation, sequence options and progress in JavaScript backups',
             ],
