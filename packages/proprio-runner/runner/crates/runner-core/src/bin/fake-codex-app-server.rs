@@ -685,6 +685,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         && !state_path.exists();
     let call_log = argument(&args, "--call-log").map(PathBuf::from);
     let request_log = argument(&args, "--request-log").map(PathBuf::from);
+    if let Some(manifest) = argument(&args, "--verify-skill-files") {
+        let files: Vec<(PathBuf, String)> = serde_json::from_slice(&fs::read(manifest)?)?;
+        let home = PathBuf::from(std::env::var("CODEX_HOME")?).join("skills");
+        for (path, expected) in files {
+            if fs::read_to_string(home.join(&path))? != expected {
+                return Err(format!("Unexpected staged skill contents: {}", path.display()).into());
+            }
+        }
+        log_call(call_log.as_deref(), "verified-staged-skills")?;
+    }
     if args.iter().any(|value| value == "--record-process-start") {
         log_call(call_log.as_deref(), "process-start")?;
     }

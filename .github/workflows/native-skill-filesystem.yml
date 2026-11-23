@@ -7,6 +7,8 @@ on:
       - .github/workflows/native-skill-filesystem.yml
       - packages/proprio-runner/src/drivers/runtime-context-materializer.ts
       - packages/proprio-runner/src/drivers/runtime-context-materializer.test.ts
+      - packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts
+      - packages/proprio-runner/runner/crates/runner-core/src/bin/fake-codex-app-server.rs
 
 permissions:
   contents: read
@@ -15,7 +17,7 @@ jobs:
   skill-staging:
     if: github.repository == 'groktopus/proprio' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,9 +35,14 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends btrfs-progs
           fi
+      - name: Build the native runner and synthetic Codex provider
+        run: |
+          pnpm --filter @groktopus/proprio-runner build:typescript
+          cargo build --manifest-path packages/proprio-runner/runner/Cargo.toml --locked \
+            -p proprio-runner-core --bin proprio-runnerd --bin fake-codex-app-server
       - name: Verify ext4 copies and Btrfs shared extents
         run: |
-          scratch="$(mktemp -d "$RUNNER_TEMP/proprio-skill-fs.XXXXXX")"
+          scratch="$(mktemp -d /tmp/pfs.XXXXXX)"
           mkdir "$scratch/mount"
           trap 'if mountpoint -q "$scratch/mount"; then sudo umount "$scratch/mount"; fi' EXIT
           for filesystem in ext4 btrfs; do
@@ -51,5 +58,10 @@ jobs:
             TMPDIR="$scratch/mount" PROPRIO_TEST_CODEX_SKILL_FILESYSTEM="$filesystem" \
               pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
               src/drivers/runtime-context-materializer.test.ts -t 'measures pinned repository skill staging'
+            if [ "$filesystem" = ext4 ]; then
+              TMPDIR="$scratch/mount" PROPRIO_TEST_NATIVE_SKILL_EXT4=1 \
+                pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+                src/live/runnerd-restart-continuation.test.ts -t 'completes after the real runner and provider are killed'
+            fi
             sudo umount "$scratch/mount"
           done

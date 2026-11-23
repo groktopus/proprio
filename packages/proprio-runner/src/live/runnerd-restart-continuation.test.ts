@@ -1,14 +1,52 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createRunnerdNativeSessionBackend } from "../backends/codex-native-backend.js";
 import type { NativeExecutionInputV1 } from "../contracts/native-execution.js";
 import type { PersistedNativeSession } from "../contracts/native-session-backend.js";
 import type { PrpEvent } from "../protocol/replay-contract.js";
+import { canonicalNativeRuntimeContextDigest, nativeRuntimePromptDigest, NATIVE_RUNTIME_ASSET_SCHEMA,
+  PROPRIO_EXECUTION_PROMPT, PROPRIO_EXECUTION_PROMPT_REVISION, type NativeRuntimeContextSnapshot } from "../contracts/runtime-context.js";
+import { releaseMaterializedNativeRuntimeSkills } from "../drivers/runtime-context-materializer.js";
 import { executeNativeSession } from "../native-session-runtime.js";
 import { unreadSteeredMessageIds } from "../steering-delivery.js";
 import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "./runnerd-codex-transport.js";
+
+// The targeted CI lane gives the runner a disposable ext4 state directory.
+async function pinnedRepositoryFixture(root: string) {
+  const entry = ".proprio-repository/skills/unassigned-sibling/data.txt";
+  const rootFile = ".proprio-repository/shared.txt";
+  const installed: Array<[string, string]> = [];
+  const instructionRoot = join(root, "instructions");
+  await mkdir(instructionRoot);
+  await writeFile(join(instructionRoot, "AGENTS.md"), "Fixture instructions");
+  const bundle = (rootPath: string, digest: string, fileCount: number, totalBytes: number): NativeRuntimeContextSnapshot["instructions"]["bundle"] => ({
+    schema: NATIVE_RUNTIME_ASSET_SCHEMA, rootPath, digest, manifestDigest: digest, fileCount, totalBytes,
+  });
+  const skills: NativeRuntimeContextSnapshot["skills"] = [];
+  for (const [name, revision] of [["first", "a"], ["second", "a"], ["alternate", "b"]] as const) {
+    const source = join(root, "projected", name);
+    const files = [["SKILL.md", name], [entry, `sibling-${revision}`], [rootFile, `root-${revision}`]] as const;
+    for (const [file, bytes] of files) {
+      await mkdir(dirname(join(source, file)), { recursive: true });
+      await writeFile(join(source, file), bytes);
+      installed.push([`${name}/${file}`, bytes]);
+    }
+    skills.push({ key: name, runtimeName: name, versionId: `${name}-${revision}`,
+      bundle: bundle(source, (skills.length + 1).toString().repeat(64), files.length,
+        files.reduce((sum, [, bytes]) => sum + Buffer.byteLength(bytes), 0)) });
+  }
+  const context = {
+    prompt: { revision: PROPRIO_EXECUTION_PROMPT_REVISION, text: PROPRIO_EXECUTION_PROMPT, digest: nativeRuntimePromptDigest() },
+    instructions: { entryPath: "AGENTS.md", bundle: bundle(instructionRoot, "0".repeat(64), 1, 20) },
+    skills,
+    mcp: { assignmentSetId: "fixture", digest: "0".repeat(64), bindingId: null },
+  } satisfies Omit<NativeRuntimeContextSnapshot, "aggregateDigest">;
+  const manifest = join(root, "expected-skills.json");
+  await writeFile(manifest, JSON.stringify(installed));
+  return { context: { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) }, manifest, entry };
+}
 
 it.each(["none", "before-start", "after-start"] as const)("completes after the real runner and provider are killed (second crash: %s)", async (crash) => {
   const root = await mkdtemp(join(tmpdir(), "runner-restart-continuation-"));
@@ -25,10 +63,13 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     } },
     interactionResponses: [], credentialBindings: [],
   };
+  const skills = process.env.PROPRIO_TEST_NATIVE_SKILL_EXT4 === "1" ? await pinnedRepositoryFixture(root) : null;
   const options = {
     runnerBinary: defaultCapabilityRunnerdBinary(),
     codexCommand: resolve(import.meta.dirname, "../../runner/target/debug/fake-codex-app-server"),
-    codexArgs: ["--state-file", join(root, "fake-state.json"), "--call-log", join(root, "calls.log"), "--durable-turn-ids", "--hold-first-durable-turn"],
+    codexArgs: ["--state-file", join(root, "fake-state.json"), "--call-log", join(root, "calls.log"), "--durable-turn-ids", "--hold-first-durable-turn",
+      ...(skills ? ["--verify-skill-files", skills.manifest] : [])],
+    ...(skills ? { runtimeContext: skills.context, sourceCodexHome: join(root, "no-ambient-codex-home") } : {}),
     stateDirectory: root,
     prpIdentity: { runnerInstanceId: "runner-restart", environmentLeaseId: "lease-restart", runId: identity.runId, normalizedSessionId: identity.sessionId, turnId: "turn-restart", itemId: "item-restart" },
   };
@@ -109,6 +150,15 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
     expect(events.filter(event => event.eventType === "run.terminal")).toHaveLength(1);
     if (crash !== "after-start") expect(checkpoints.some(snapshot => snapshot.activeTurnId === "provider-turn-2" && snapshot.terminal === null)).toBe(true);
     expect((await readFile(join(root, "calls.log"), "utf8")).match(/^turn\/start$/gm)).toHaveLength(2);
+    if (skills) {
+      const files = await Promise.all(["first", "second", "alternate"].map(name =>
+        stat(join(root, "codex-home", "skills", name, skills.entry))));
+      expect(files[0]!.ino).toBe(files[1]!.ino);
+      expect(files[0]!.ino).not.toBe(files[2]!.ino);
+      for (const file of files) expect(file.mode & 0o222).toBe(0);
+      const reads = (await readFile(join(root, "calls.log"), "utf8")).match(/^verified-staged-skills$/gm);
+      expect(reads?.length ?? 0).toBeGreaterThanOrEqual(2);
+    }
     const journal = JSON.parse(await readFile(join(root, "control-plane/control-plane-state.json"), "utf8"));
     const submissions = journal.commands.filter((command: { type: string }) => command.type === "turn.start");
     expect(submissions).toHaveLength(2);
@@ -121,6 +171,7 @@ it.each(["none", "before-start", "after-start"] as const)("completes after the r
       kill(evidence.runnerPid);
       kill(evidence.providerPid);
     }
+    if (skills) await releaseMaterializedNativeRuntimeSkills(join(root, "codex-home", "skills"));
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);

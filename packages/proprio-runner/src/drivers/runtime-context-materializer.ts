@@ -1,15 +1,17 @@
 import { isOpenRouterUrl, openRouterCodexHeaders } from "./openrouter-attribution.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
   cp,
+  link,
   lstat,
   mkdir,
   open,
   readdir,
   rename,
   rm,
+  statfs,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -97,6 +99,60 @@ function portableRuntimeNameKey(runtimeName: string): string {
     .toLowerCase();
 }
 
+// The server's repository skill projection keeps the untouched pinned tree
+// under this name. Only local Codex homes on the Linux ext filesystem family
+// need the inode-saving layout. Other filesystems and transports keep copies.
+const REPOSITORY_CONTENT_DIR = ".proprio-repository";
+const LINUX_EXT_FILESYSTEM_MAGIC = 0xef53;
+
+async function repositoryTreeDigest(root: string): Promise<string | null> {
+  const rootStat = await lstat(root).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!rootStat?.isDirectory()) return null;
+
+  const digest = createHash("sha256");
+  async function visit(directory: string) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const entry of entries) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        digest.update(JSON.stringify(["directory", relative(root, file)]));
+        await visit(file);
+        continue;
+      }
+      const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const before = await handle.stat();
+        if (!before.isFile()) throw new Error("runtime repository asset must be a regular file");
+        const bytes = createHash("sha256");
+        for await (const chunk of handle.createReadStream({ autoClose: false })) bytes.update(chunk);
+        const after = await handle.stat();
+        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+          throw new Error("runtime repository asset changed while staging skills");
+        }
+        digest.update(JSON.stringify(["file", relative(root, file), before.mode & 0o555, bytes.digest("hex")]));
+      } finally {
+        await handle.close();
+      }
+    }
+  }
+  await visit(root);
+  return digest.digest("hex");
+}
+
+async function linkPrivateRepository(source: string, destination: string): Promise<void> {
+  await mkdir(destination);
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const copied = join(source, entry.name);
+    const alias = join(destination, entry.name);
+    if (entry.isDirectory()) await linkPrivateRepository(copied, alias);
+    else await link(copied, alias);
+  }
+}
+
 async function protectStagedTree(root: string): Promise<void> {
   const rootHandle = await open(
     root,
@@ -168,7 +224,7 @@ async function unprotectMaterializedTree(root: string): Promise<void> {
         if (!openedChild.isFile()) {
           throw new Error("materialized runtime context asset must be a regular file");
         }
-        await childHandle.chmod(0o600);
+        if (openedChild.nlink === 1) await childHandle.chmod(0o600);
       } finally {
         await childHandle.close();
       }
@@ -209,6 +265,7 @@ export async function materializeNativeRuntimeSkills(
   skillsHome: string,
   dependencies: {
     cloneFiles?: boolean;
+    colocateRepositoryFiles?: boolean;
     /** Internal test seam for failed staging cleanup coverage. */
     removeTree?: (path: string) => Promise<void>;
     /** Internal test seam for publication failure coverage. */
@@ -262,8 +319,15 @@ export async function materializeNativeRuntimeSkills(
   await chmod(parent, 0o700);
   await mkdir(stagingHome, { mode: 0o700 });
   try {
+    const colocate = dependencies.colocateRepositoryFiles && process.platform === "linux"
+      && (context?.skills.length ?? 0) > 1 && (await statfs(stagingHome)).type === LINUX_EXT_FILESYSTEM_MAGIC;
+    const repositories = new Map<string, string>();
     for (const skill of context?.skills ?? []) {
       const target = safeMaterializationTarget(stagingHome, skill.runtimeName);
+      const sourceRepository = join(skill.bundle.rootPath, REPOSITORY_CONTENT_DIR);
+      const stagedRepository = join(target, REPOSITORY_CONTENT_DIR);
+      const digest = colocate && skill.versionId ? await repositoryTreeDigest(sourceRepository) : null;
+      const existing = digest ? repositories.get(digest) : undefined;
       await cp(skill.bundle.rootPath, target, {
         recursive: true,
         ...(dependencies.cloneFiles ? { mode: constants.COPYFILE_FICLONE } : {}),
@@ -271,9 +335,19 @@ export async function materializeNativeRuntimeSkills(
         errorOnExist: true,
         dereference: false,
         verbatimSymlinks: true,
+        ...(existing ? { filter: (source: string) => source !== sourceRepository } : {}),
       });
+      // Link only a private staged copy. Source snapshots and other durable
+      // homes must retain their own inode metadata and lifetimes.
+      if (existing) await linkPrivateRepository(existing, stagedRepository);
       await assertSafeTree(target);
       await protectStagedTree(target);
+      if (digest && !existing) {
+        if (await repositoryTreeDigest(stagedRepository) !== digest) {
+          throw new Error("runtime repository asset changed while copying skills");
+        }
+        repositories.set(digest, stagedRepository);
+      }
     }
 
     // The caller supplies a new isolated home for each provider launch. Never
@@ -337,13 +411,16 @@ export async function prepareIsolatedCodexHome(input: {
   observability?: import("./agent-observability.js").ProviderObservabilityLaunch;
   context: NativeRuntimeContextSnapshot | null;
   codexHome: string;
+  colocateRepositoryFiles?: boolean;
   sourceCodexHome?: string | null;
   apiKey?: string | null;
 }): Promise<void> {
   try {
     // Copy-on-write cloning keeps distinct inodes and falls back to a regular
     // copy across filesystems or on local/remote storage without clone support.
-    await materializeNativeRuntimeSkills(input.context, join(input.codexHome, "skills"), { cloneFiles: true });
+    await materializeNativeRuntimeSkills(input.context, join(input.codexHome, "skills"), {
+      cloneFiles: true, colocateRepositoryFiles: input.colocateRepositoryFiles,
+    });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOSPC" || code === "EDQUOT") {

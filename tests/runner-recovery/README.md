@@ -50,3 +50,12 @@ is qualified, do not score arbitrary process termination as a model failure.
 The [Linux source qualification workflow](../../.github/workflows/linux-source-qualification.yml) builds the CLI, UI, server, and native runner from a pinned source checkout on Ubuntu. It starts the built server in a disposable home and a loopback-only network namespace, drives one synthetic agent through the HTTP API, and checks that its local output appears once. The server process trace detects non-loopback network attempts during this journey. The CLI bundle gets a syntax check and the source CLI runs through its workspace launcher. The workflow can also run on demand.
 
 The same job runs the native Codex fixture with the compiled runner and a synthetic provider. It exercises process termination and checkpoint recovery, cancellation, and injected disk-full errors. The source HTTP journey and native restart fixture use different entry points. The disk-full cases inject errors in controlled paths. A job pass records that scope for its Git revision.
+
+The Native skill filesystem workflow mounts disposable ext4 and Btrfs images.
+On ext4, local Codex staging shares byte- and mode-identical pinned repository
+files inside one private provider home. Independent homes keep separate inodes,
+and remote staging retains its portable copies. The workflow measures allocated
+blocks and checks permissions after removing one home. A separate scenario in
+the same job kills the native runner and synthetic provider and verifies that
+both launches read the assigned repository files and their independently pinned
+versions.
