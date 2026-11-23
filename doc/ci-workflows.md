@@ -8,7 +8,8 @@ It is not a specification for centrally managed workflows or past CI setups.
 ### Stability smoke
 
 `.github/workflows/stability-smoke.yml` runs for pull requests targeting `main`
-when the pull request comes from a branch in this repository. It checks out the
+from both same-repository branches and forks. It also runs when an open pull
+request is retargeted to `main`. It checks out the
 exact pull-request head without persisting checkout credentials, installs the
 workspace from the frozen pnpm lockfile, and runs:
 
@@ -32,7 +33,8 @@ A platform skip does not satisfy those assertions.
 The workflow has read-only repository permissions and a 15-minute timeout. It
 is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
-Fork pull requests do not run the smoke job.
+GitHub can require workflow approval before a first-time external contributor's
+run starts. The smoke job uses a GitHub-hosted runner and no repository secrets.
 
 ### Standalone sandbox-provider dependencies
 
