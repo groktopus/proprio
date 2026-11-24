@@ -79,7 +79,7 @@ function CaseFrame({
 
 const budgetIncidents: BudgetIncident[] = [
   {
-    id: "incident-agent-resolved",
+    id: "incident-agent-open",
     companyId: "company-storybook",
     policyId: "budget-agent-codex",
     scopeType: "agent",
@@ -89,13 +89,13 @@ const budgetIncidents: BudgetIncident[] = [
     windowKind: "calendar_month_utc",
     windowStart,
     windowEnd,
-    thresholdType: "hard",
+    thresholdType: "soft",
     amountLimit: 40_000,
     amountObserved: 42_450,
-    status: "resolved",
-    approvalId: "approval-budget-resolved",
-    approvalStatus: "approved",
-    resolvedAt: at(42),
+    status: "open",
+    approvalId: null,
+    approvalStatus: null,
+    resolvedAt: null,
     createdAt: at(180),
     updatedAt: at(42),
   },
@@ -580,9 +580,9 @@ function BudgetFinanceMatrix() {
           </div>
         </section>
 
-        <Section eyebrow="Incidents" title="BudgetIncidentCard resolution, pending, and escalated states">
+        <Section eyebrow="Incidents" title="BudgetIncidentCard open, pending, and escalated states">
           <div className="grid gap-5 xl:grid-cols-3">
-            <CaseFrame title="Resolved raise-and-resume" detail="Approval approved and incident resolved after the budget was raised." tone="healthy">
+            <CaseFrame title="Open budget warning" detail="Agent spend crossed the warning threshold. Work can continue while the warning is open." tone="warning">
               <BudgetIncidentCard
                 incident={budgetIncidents[0]!}
                 onKeepPaused={() => undefined}
@@ -772,7 +772,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "Budget and finance stories cover incident resolution states, sidebar markers, provider and biller quotas, finance ledgers, and Claude/Codex subscription panels.",
+          "Budget and finance stories cover active incidents, sidebar markers, provider and biller quotas, finance ledgers, and Claude/Codex subscription panels.",
       },
     },
     proprio: {
@@ -783,7 +783,7 @@ const meta = {
       ],
       "implementation": "production",
       "boundary": "fixtures",
-      "notes": "FullMatrix renders BudgetIncidentCard in warning, resolved, pending-approval and escalated hard-stop states. Resolution handlers are no-ops; budget relief and resumption remain unverified. The upstream budget UI distinguishes soft warnings from hard stops; hard incidents retain raise-and-resume and keep-paused controls."
+      "notes": "FullMatrix shows active BudgetIncidentCard examples for an open warning, a hard stop pending approval, and an escalated hard stop. Resolution handlers are no-ops; budget relief and resumption remain unverified. The upstream budget UI distinguishes soft warnings from hard stops; hard incidents retain raise-and-resume and keep-paused controls."
     },
   },
 } satisfies Meta<typeof BudgetFinanceMatrix>;
