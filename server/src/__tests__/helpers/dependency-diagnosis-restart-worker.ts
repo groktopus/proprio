@@ -13,13 +13,17 @@ const heartbeat = heartbeatService(db);
 const recovery = recoveryService(db, {
   enqueueWakeup: (agentId, options) => heartbeat.wakeup(agentId, options),
 });
+let exitCode = 0;
 try {
   const results = [];
   for (const issueId of issueIds) results.push(await recovery.assignedWork.checkIssue({ companyId, issueId }));
   process.stdout.write(`${JSON.stringify({ results })}\n`);
+} catch (error) {
+  console.error(error);
+  exitCode = 1;
 } finally {
   await db.$client.end({ timeout: 0 });
-  // Queue admission is the observable effect under test. Do not wait for or
-  // execute provider work in this worker: its purpose is the recovery cycle.
-  process.exit(0);
 }
+// Queue admission is the effect under test. The runner can deliver the wake
+// in a later process without keeping this recovery worker alive.
+process.exit(exitCode);
