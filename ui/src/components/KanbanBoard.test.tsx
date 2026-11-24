@@ -223,6 +223,31 @@ describe("KanbanBoard", () => {
     expect(container.textContent).toContain("Live");
   });
 
+  it("exposes separate move and status controls without nesting interactive elements", () => {
+    const onUpdateIssue = vi.fn();
+    const { container } = renderBoard({
+      issues: [createIssue(1, "backlog")],
+      onUpdateIssue,
+    });
+
+    const moveButton = container.querySelector('button[aria-label="Move task Issue 1"]');
+    const statusSelect = container.querySelector('select[aria-label="Change status for Issue 1"]') as HTMLSelectElement | null;
+    const taskLink = container.querySelector('a[href="/issues/PAP-1"]');
+
+    expect(moveButton).toBeTruthy();
+    expect(statusSelect).toBeTruthy();
+    expect(moveButton?.querySelector("a")).toBeNull();
+    expect(taskLink?.closest("button")).toBeNull();
+
+    act(() => {
+      if (!statusSelect) throw new Error("status control missing");
+      statusSelect.value = "todo";
+      statusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
+  });
+
   it("resolves drop targets from status rails and cards", () => {
     const issues = [
       createIssue(1, "todo"),

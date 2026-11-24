@@ -4,7 +4,9 @@ import { Link } from "@/lib/router";
 import {
   DndContext,
   DragOverlay,
+  KeyboardSensor,
   PointerSensor,
+  closestCenter,
   useSensor,
   useSensors,
   type DragStartEvent,
@@ -18,6 +20,7 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
+import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
@@ -176,6 +179,7 @@ function KanbanColumn({
   visibleCount,
   revealIncrement,
   onShowMore,
+  onStatusChange,
 }: {
   status: IssueDisplayStatus;
   issues: Issue[];
@@ -187,6 +191,7 @@ function KanbanColumn({
   visibleCount: number;
   revealIncrement: number;
   onShowMore: () => void;
+  onStatusChange: (id: string, status: IssueStatus) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status === "monitoring" });
 
@@ -250,6 +255,7 @@ function KanbanColumn({
               subtreeLiveCount={subtreeLiveCounts?.get(issue.id) ?? 0}
               compact={compactCards}
               className={tone.card}
+              onStatusChange={onStatusChange}
             />
           ))}
         </SortableContext>
@@ -282,6 +288,7 @@ function KanbanCard({
   isOverlay,
   compact = false,
   className,
+  onStatusChange,
 }: {
   issue: Issue;
   agents?: Agent[];
@@ -290,6 +297,7 @@ function KanbanCard({
   isOverlay?: boolean;
   compact?: boolean;
   className?: string;
+  onStatusChange?: (id: string, status: IssueStatus) => void;
 }) {
   const {
     attributes,
@@ -315,29 +323,30 @@ function KanbanCard({
       ref={setNodeRef}
       data-issue-row-details={issue.id}
       style={style}
-      {...attributes}
-      {...listeners}
       className={cn(
-        "block cursor-grab active:cursor-grabbing transition-shadow",
+        "block transition-shadow",
         isDragging && !isOverlay ? "opacity-30" : "",
         isOverlay ? "shadow-lg ring-1 ring-primary/20" : "hover:shadow-sm",
         compact ? "p-2" : "p-2.5",
         className,
       )}
     >
-      <Link
-        to={`/issues/${issue.identifier ?? issue.id}`}
-        disableIssueQuicklook
-        className="block no-underline text-inherit"
-        onClick={(e) => {
-          // Prevent navigation during drag
-          if (isDragging) e.preventDefault();
-        }}
-      >
-        <div className={`flex items-start gap-1.5 ${compact ? "mb-1" : "mb-1.5"}`}>
+      <div className={`flex items-start gap-1.5 ${compact ? "mb-1" : "mb-1.5"}`}>
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          className="shrink-0 cursor-grab rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+          aria-label={`Move task ${issue.title}`}
+          title="Move task with arrow keys"
+        >
+          <span aria-hidden="true">⋮⋮</span>
+        </button>
+        <span className="min-w-0 flex-1">
           <span className="text-xs text-muted-foreground font-mono shrink-0">
             {issue.identifier ?? issue.id.slice(0, 8)}
           </span>
+        </span>
           {isSuccessfulRunHandoffRequired(issue) ? (
             <Badge variant="outline"
               className="border-amber-400/45 bg-amber-50/60 px-1.5 text-(length:--text-nano) text-amber-700 dark:border-amber-300/35 dark:bg-amber-400/10 dark:text-amber-300"
@@ -366,7 +375,15 @@ function KanbanCard({
               {subtreeLiveCount} live below
             </Badge>
           )}
-        </div>
+      </div>
+      <Link
+        to={`/issues/${issue.identifier ?? issue.id}`}
+        disableIssueQuicklook
+        className="block no-underline text-inherit"
+        onClick={(e) => {
+          if (isDragging) e.preventDefault();
+        }}
+      >
         <p className={`${compact ? "mb-1.5 text-xs" : "mb-2 text-sm"} leading-snug line-clamp-2`}>{issue.title}</p>
         <div className="flex items-center gap-2 min-w-0">
           {/* PAP-411: priority UI hidden behind SHOW_TASK_PRIORITY_UI. */}
@@ -383,6 +400,18 @@ function KanbanCard({
           })()}
         </div>
       </Link>
+      <label className="sr-only" htmlFor={`kanban-status-${issue.id}`}>Change status for {issue.title}</label>
+      <select
+        id={`kanban-status-${issue.id}`}
+        value={issue.status}
+        aria-label={`Change status for ${issue.title}`}
+        className="mt-2 min-h-9 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onChange={(event) => onStatusChange?.(issue.id, event.target.value as IssueStatus)}
+      >
+        {boardStatuses.filter((status) => status !== "monitoring").map((status) => (
+          <option key={status} value={status}>{statusLabel(status)}</option>
+        ))}
+      </select>
     </Card>
   );
 }
@@ -401,6 +430,7 @@ export function KanbanBoard({
   onUpdateIssue,
 }: KanbanBoardProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [movementAnnouncement, setMovementAnnouncement] = useState("");
   const paginationKey = `${initialVisibleCount}:${revealIncrement}`;
   const [visibleState, setVisibleState] = useState<{
     paginationKey: string;
@@ -410,7 +440,8 @@ export function KanbanBoard({
   const collapsedStatusSet = useMemo(() => new Set(collapsedStatuses), [collapsedStatuses]);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const columnIssues = useMemo(() => {
@@ -456,7 +487,15 @@ export function KanbanBoard({
 
     if (targetStatus && targetStatus !== issue.status) {
       onUpdateIssue(issueId, { status: targetStatus });
+      setMovementAnnouncement(`${issue.title} moved to ${statusLabel(targetStatus)}`);
     }
+  }
+
+  function handleStatusChange(id: string, status: IssueStatus) {
+    const issue = issues.find((candidate) => candidate.id === id);
+    if (!issue || issue.status === status) return;
+    onUpdateIssue(id, { status });
+    setMovementAnnouncement(`${issue.title} moved to ${statusLabel(status)}`);
   }
 
   function handleDragOver(_event: DragOverEvent) {
@@ -482,6 +521,7 @@ export function KanbanBoard({
           return { paginationKey, counts: { ...counts, [status]: (counts[status] ?? initialVisibleCount) + revealIncrement } };
         });
       }}
+      onStatusChange={handleStatusChange}
     />
   ));
 
@@ -491,10 +531,12 @@ export function KanbanBoard({
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
+      collisionDetection={closestCenter}
     >
       {showOverflowFades
         ? <HorizontalScrollViewport label="Task board columns" contentClassName="flex gap-3 pb-4 px-2">{columns}</HorizontalScrollViewport>
         : <div className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">{columns}</div>}
+      <p className="sr-only" aria-live="polite">{movementAnnouncement}</p>
       <DragOverlay>
         {activeIssue ? (
           <KanbanCard issue={activeIssue} agents={agents} isOverlay compact={compactCards} />
