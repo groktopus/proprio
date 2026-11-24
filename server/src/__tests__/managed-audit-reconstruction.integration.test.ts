@@ -234,9 +234,9 @@ it("reconstructs managed effects from an authenticated process run and an indepe
       expect(response, JSON.stringify(response)).toMatchObject({ status: 200 });
       const record = (response.body.decisions as ToolRunDecision[]).find(item => item.invocation.id === ids.invocationId);
       expect(record).toMatchObject({
-        invocation: { runId: ids.runId, issueId: ids.issueId },
+        invocation: { runId: ids.runId, issueId: ids.issueId, matchedPolicyIds: [policyId] },
         actionRequest: { id: ids.requestId, decidedByUserId: ownerId },
-        policyProvenance: { captureStatus: "recorded", matchedPolicyIds: [policyId] },
+        policyProvenance: { captureStatus: "recorded" },
       });
       const fingerprint = record?.policyProvenance.policies.find(policy => policy.policyId === policyId)?.revisionFingerprint;
       if (!record || !fingerprint) throw new Error("The historical policy revision did not survive restart");
