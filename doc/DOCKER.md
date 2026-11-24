@@ -23,6 +23,21 @@ Build arguments:
 | `PROPRIO_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
 | `PROPRIO_RUNNER_EXPECT_INPUTS_DIGEST` | empty | Inputs digest of the published Runner image a build was given as `runner-artifacts`; the build fails on any other Runner. Leave it empty for a build that makes its own Runner |
 
+```sh
+docker build -t proprio-local \
+  --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
+```
+
+The image starts the server from a runtime bundle, `server/dist-runtime/index.mjs`,
+with plain `node`. The build creates it from the server's `tsc` output with
+`pnpm --filter @groktopus/server build:runtime` (`server/scripts/bundle-runtime.mjs`),
+compiling in the workspace packages that otherwise load as TypeScript source.
+This avoids transpiling them through the tsx loader on every boot. To check a
+build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
+PR CI runs the same check after `pnpm build`.
+
+### Refresh pinned image inputs
+
 The production build pins the external Node image indexes by digest and the
 five top-level harness CLIs by exact npm version. The full-stack Compose file
 also pins PostgreSQL. For the Linux amd64 profile, record the resolved platform
@@ -44,14 +59,6 @@ new build. The checks cover base-image identity and exact top-level harness
 versions. OS packages and npm transitive dependencies can still change on a
 clean rebuild. Promote by tested artifact digest when distributing an image.
 The CLI layer can be refreshed with `CLI_TOOLS_CACHE_EPOCH`.
-
-The image starts the server from a runtime bundle, `server/dist-runtime/index.mjs`,
-with plain `node`. The build creates it from the server's `tsc` output with
-`pnpm --filter @groktopus/server build:runtime` (`server/scripts/bundle-runtime.mjs`),
-compiling in the workspace packages that otherwise load as TypeScript source.
-This avoids transpiling them through the tsx loader on every boot. To check a
-build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
-PR CI runs the same check after `pnpm build`.
 
 ## Image source
 
