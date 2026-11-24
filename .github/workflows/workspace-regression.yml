@@ -4,8 +4,6 @@ run-name: Workspace regression ${{ github.sha }}
 on:
   schedule:
     - cron: "23 8 * * *"
-    # Retry the first deployment's scheduled verification on November 24, 2026.
-    - cron: "57 10 24 11 *"
   workflow_dispatch:
 
 permissions:
