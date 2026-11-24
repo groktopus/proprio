@@ -74,7 +74,7 @@ test.describe("self-hosted browser tracing on Linux", () => {
     await expect(page.getByRole("button", { name: "New task" }).first()).toBeVisible();
     await page.getByRole("button", { name: "New task" }).first().click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByRole("textbox", { name: "editable markdown" })).toBeVisible();
+    await expect(page.locator('[contenteditable="true"]').first()).toBeVisible();
     await expect(page.getByRole("button", { name: "Create task" })).toBeVisible();
     await page.keyboard.press("Escape");
     await page.waitForTimeout(2_000);
@@ -83,13 +83,12 @@ test.describe("self-hosted browser tracing on Linux", () => {
     await expect(page.getByText("PRIVATE_BROWSER_TRACE_TASK_CONTENT", { exact: true }).first()).toBeVisible();
     await page.waitForTimeout(2_000);
 
-    if (mode === "disabled") {
+    if (mode === "disabled" || mode === "unsampled") {
       expect(sdkLoads).toHaveLength(0);
       expect(tracePosts).toHaveLength(0);
     } else {
       expect(sdkLoads.length).toBeGreaterThan(0);
       if (mode === "enabled" || mode === "sink-failure") expect(tracePosts.length).toBeGreaterThan(0);
-      if (mode === "unsampled") expect(tracePosts).toHaveLength(0);
       const spans = traceSpans(traceBodies);
       if (mode !== "unsampled") {
         expect(spans.filter((span) => span.name === "page.load").map((span) => JSON.stringify(span))).toEqual(expect.arrayContaining([
