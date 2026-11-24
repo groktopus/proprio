@@ -20,6 +20,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { PluginLauncherProvider } from "@/plugins/launchers";
 import { SidebarAccountMenu } from "@/components/SidebarAccountMenu";
 import { SidebarCompanyMenu } from "@/components/SidebarCompanyMenu";
+import { SidebarCompanyMenu as ClassicSidebarCompanyMenu } from "@/components/SidebarCompanyMenu.production";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -367,13 +368,16 @@ type Story = StoryObj<typeof meta>;
 
 export const BoardChromeMatrix: Story = {};
 
-async function exerciseOverlay(canvasElement: HTMLElement, trigger: HTMLElement, role: "dialog" | "menu") {
+async function exerciseOverlay(canvasElement: HTMLElement, trigger: HTMLElement, role: "dialog" | "menu",
+  onOpen?: (overlay: HTMLElement) => Promise<void>,
+) {
   const body = within(canvasElement.ownerDocument.body);
   await expect(body.queryByRole(role)).not.toBeInTheDocument();
   trigger.focus();
   await userEvent.keyboard("{Enter}");
   const overlay = await body.findByRole(role);
   await expect(overlay).toContainElement(canvasElement.ownerDocument.activeElement as HTMLElement);
+  await onOpen?.(overlay);
   await userEvent.keyboard("{Escape}");
   await expect(body.queryByRole(role)).not.toBeInTheDocument();
   await expect(trigger).toHaveFocus();
@@ -388,12 +392,33 @@ export const AccountPopover: Story = {
   },
 };
 
+async function exerciseOrganizationMenu(canvasElement: HTMLElement) {
+  const trigger = await within(canvasElement).findByRole("button", { name: /Open .*(organization|company) switcher/ });
+  await exerciseOverlay(canvasElement, trigger, "menu", async (overlay) => {
+    const menu = within(overlay);
+    const edit = await menu.findByRole("menuitem", { name: "Edit" });
+    edit.focus();
+    await userEvent.keyboard("{Enter}");
+    const original = menu.getAllByRole("menuitem", { name: /^Reorder / });
+    await expect(original.length).toBeGreaterThan(1);
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(original[0]).toHaveFocus();
+    await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
+    await expect(menu.getAllByRole("menuitem", { name: /^Reorder / })[1]).toBe(original[0]);
+    await expect(original[0]).toHaveFocus();
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    await expect(menu.getAllByRole("menuitem", { name: /^Reorder / })[0]).toBe(original[0]);
+  });
+}
+
 export const OrganizationMenu: Story = {
   render: () => <SidebarCompanyMenu />,
-  play: async ({ canvasElement }) => {
-    const trigger = await within(canvasElement).findByRole("button", { name: /Open .*organization switcher/ });
-    await exerciseOverlay(canvasElement, trigger, "menu");
-  },
+  play: async ({ canvasElement }) => exerciseOrganizationMenu(canvasElement),
+};
+
+export const ClassicOrganizationMenu: Story = {
+  render: () => <ClassicSidebarCompanyMenu />,
+  play: async ({ canvasElement }) => exerciseOrganizationMenu(canvasElement),
 };
 
 export const OrganizationSwitcher: Story = {
