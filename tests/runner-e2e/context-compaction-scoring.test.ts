@@ -31,10 +31,13 @@ function pair() {
 }
 
 describe("paired Codex context compaction oracle", () => {
-  it("registers one explicit local Codex pair with a bounded run count", () => {
+  it("registers explicit local Codex pairs for API and subscription authentication", () => {
     const cells = runnerMatrix.filter(cell => cell.suite.id === "context-compaction");
-    expect(cells).toHaveLength(1);
-    expect(cells[0]).toMatchObject({ id: "context-compaction.runner-codex.local.matched-continuations",
+    expect(cells.map(cell => [cell.id, cell.requiredCredentials])).toEqual([
+      ["context-compaction.runner-codex.local.matched-continuations", ["OPENAI_API_KEY"]],
+      ["context-compaction.runner-codex-subscription.local.matched-continuations", ["CODEX_AUTH_JSON"]],
+    ]);
+    for (const cell of cells) expect(cell).toMatchObject({
       suite: { manualOnly: true, definitionMetadata: { maximumAttemptsPerCell: 1, providerTurns: 6, compactionOperations: 1 } },
       task: { expectedRunCount: 7 } });
   });

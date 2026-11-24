@@ -330,6 +330,8 @@ The explicit-only [context compaction suite](../tests/runner-e2e/SUITES.md#suite
 compares two native Codex tasks with the same revised requirements and pending
 prerequisite. It checks the manual compaction event against the continuing
 session and grades both saved artifacts against their active requirements.
+It provides separate API-key and isolated subscription-login cells with the
+same fixture and grading rules.
 
 The explicit-only `context-integrity` Product E2E suite covers ordered public
 comment continuation and explicit invocation of an assigned pinned skill across
