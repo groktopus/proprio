@@ -39,7 +39,8 @@ for (const specimen of cases) for (const theme of ["light", "dark"]) {
       await expect(story.getByRole("radio", { name: /Only collapse hidden descendants/ })).toBeVisible();
       await expect(story.getByRole("button", { name: "Send answers" })).toBeVisible();
       await expect(page.getByTestId("task-chat-composer-takeover")).toBeVisible();
-      await expect(page.getByRole("navigation", { name: "Mobile navigation" })).toBeVisible();
+      const navigation = page.getByRole("navigation", { name: "Mobile navigation" });
+      await expect(navigation.getByRole("link", { name: "Needs You", exact: true })).toBeVisible();
     }
     await page.evaluate(() => document.fonts.ready);
     await page.addScriptTag({ path: axePath });
