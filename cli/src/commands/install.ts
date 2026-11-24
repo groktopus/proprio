@@ -27,6 +27,11 @@ import {
 const execFileAsync = promisify(execFile);
 export const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org";
 const DEFAULT_GITHUB_REPO = "groktopus/proprio";
+const RELEASE_RUNTIME_SKILLS_PACKAGES = new Set([
+  "@groktopus/server",
+  "@groktopus/adapter-claude-local",
+  "@groktopus/adapter-codex-local",
+]);
 const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 export type InstallOptions = { canary?: boolean; version?: string; ref?: string; repo?: string; yes?: boolean };
@@ -38,6 +43,14 @@ export type CommandRunner = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 type ReleasePackageEntry = { dir: string; name: string };
+
+const PACKAGE_DEPENDENCY_SECTIONS = ["dependencies", "optionalDependencies", "peerDependencies"] as const;
+type PackageManifest = {
+  version: string;
+  files?: string[];
+  bundleDependencies?: string[];
+  bundledDependencies?: string[];
+} & Partial<Record<(typeof PACKAGE_DEPENDENCY_SECTIONS)[number], Record<string, string>>>;
 
 export async function runCommandWithDiagnostics(
   file: string,
@@ -70,7 +83,7 @@ export function resolveGitInstallWorkspacePackages(checkoutPath: string): Releas
     if (!entry) throw new Error(`Git install cannot stage workspace dependency ${packageName}; it is missing from scripts/release-package-manifest.json.`);
     visiting.add(packageName);
     const packageJson = JSON.parse(fs.readFileSync(path.join(checkoutPath, entry.dir, "package.json"), "utf8")) as Record<string, unknown>;
-    for (const section of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
+    for (const section of PACKAGE_DEPENDENCY_SECTIONS) {
       const dependencies = packageJson[section];
       if (!dependencies || typeof dependencies !== "object") continue;
       for (const dependencyName of Object.keys(dependencies)) {
@@ -84,6 +97,31 @@ export function resolveGitInstallWorkspacePackages(checkoutPath: string): Releas
 
   visit("@groktopus/server");
   return ordered;
+}
+
+function pinBundledWorkspaceDependencies(
+  stagedPackage: string,
+  source: PackageManifest,
+  versions: ReadonlyMap<string, string>,
+): void {
+  // Older source archives stage workspace references at the bundled package's own version.
+  const manifestPath = path.join(stagedPackage, "package.json");
+  const staged = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PackageManifest;
+  for (const section of PACKAGE_DEPENDENCY_SECTIONS) {
+    const dependencies = staged[section];
+    if (!dependencies) continue;
+    for (const [name, specifier] of Object.entries(source[section] ?? {})) {
+      const version = versions.get(name);
+      if (version === undefined || !specifier.startsWith("workspace:") || dependencies[name] === undefined) continue;
+      const range = specifier.slice("workspace:".length);
+      if (range === "*" || range === "^" || range === "~") {
+        dependencies[name] = range === "*" ? version : `${range}${version}`;
+      } else {
+        dependencies[name] = range;
+      }
+    }
+  }
+  fs.writeFileSync(manifestPath, `${JSON.stringify(staged, null, 2)}\n`);
 }
 
 export function assertSupportedNodeVersion(): void {
@@ -143,7 +181,47 @@ async function runGitHubCurl(
 }
 
 export async function resolveGitHubRef(repo: string, ref: string, runCommand: CommandRunner): Promise<string> {
-  const result = await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--header", "Accept: application/vnd.github+json", "--header", "User-Agent: proprio-install", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--header", "Accept: application/vnd.github+json", "--header", "User-Agent: proprio-install", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+    const shaAlias = /^(?:[0-9a-f]{40})(?:\^0)?$/i.exec(ref);
+    if (token || !shaAlias || !/(?:returned error: (?:403|429)|API rate limit exceeded|secondary rate limit)/i.test(detail)) throw error;
+
+    // GitHub's anonymous REST quota is shared by hosted runners. When it is
+    // exhausted, resolve only immutable full SHAs through Git's public smart
+    // transport. Isolate HOME and disable credential helpers/prompts so this
+    // fallback cannot pick up credentials from a developer or runner account.
+    const sha = ref.replace(/\^0$/, "").toLowerCase();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-public-ref-"));
+    const repoPath = path.join(tempRoot, "repo.git");
+    const isolatedHome = path.join(tempRoot, "home");
+    fs.mkdirSync(isolatedHome, { mode: 0o700 });
+    const networkEnv = Object.fromEntries(
+      ["LC_ALL", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]
+        .flatMap((key) => process.env[key] ? [[key, process.env[key]!] as const] : []),
+    );
+    const env = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: isolatedHome,
+      ...networkEnv,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_ALLOW_PROTOCOL: "https",
+    };
+    try {
+      await runCommand("git", ["init", "--bare", repoPath], { env, maxBuffer: 4 * 1024 * 1024 });
+      await runCommand("git", ["-C", repoPath, "-c", "credential.helper=", "-c", "core.askPass=", "fetch", "--depth=1", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", `https://github.com/${repo}.git`, sha], { env, maxBuffer: 4 * 1024 * 1024 });
+      const fetched = await runCommand("git", ["-C", repoPath, "rev-parse", "FETCH_HEAD^{commit}"], { env, maxBuffer: 1024 * 1024 });
+      if (fetched.stdout.trim().toLowerCase() !== sha) throw new Error(`GitHub returned a different commit while resolving ${repo}@${ref}.`);
+      return sha;
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }
   let sha: unknown;
   try { sha = (JSON.parse(result.stdout) as { sha?: unknown }).sha; } catch { throw new Error(`GitHub returned an invalid response while resolving ${repo}@${ref}.`); }
   if (typeof sha !== "string" || !/^[0-9a-f]{40}$/i.test(sha)) throw new Error(`GitHub did not return a full commit SHA for ${repo}@${ref}.`);
@@ -295,15 +373,33 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand(corepack, ["pnpm", "-r", "--filter", "@groktopus/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
-    const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
+    const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath).map((entry) => {
+      const packageDir = path.join(checkoutPath, entry.dir);
+      const packageJson = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as PackageManifest;
+      return { ...entry, packageDir, packageJson };
+    });
+    const workspaceVersions = new Map(workspacePackages.map(({ name, packageJson }) => [name, packageJson.version]));
     for (const [index, workspacePackage] of workspacePackages.entries()) {
-      const packageDir = path.join(checkoutPath, workspacePackage.dir);
-      const packageJson = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")) as { bundleDependencies?: string[]; bundledDependencies?: string[] };
+      const { packageDir, packageJson } = workspacePackage;
+      const skillsPath = path.join(packageDir, "skills");
+      if (RELEASE_RUNTIME_SKILLS_PACKAGES.has(workspacePackage.name)
+        && packageJson.files?.includes("skills") && !fs.existsSync(skillsPath)) {
+        fs.cpSync(path.join(checkoutPath, "skills"), skillsPath, { recursive: true });
+      }
       const bundledDependencies = packageJson.bundleDependencies ?? packageJson.bundledDependencies ?? [];
       if (bundledDependencies.length > 0) {
+        // Staging a bundled package copies its files before npm's prepack hook runs.
+        if (workspacePackage.name === "@groktopus/server" && packageJson.files?.includes("ui-dist")) {
+          await runCommand(corepack, ["pnpm", "--filter", "@groktopus/server", "run", "prepare:ui-dist"], {
+            cwd: checkoutPath,
+            env: buildEnv({ PROPRIO_RELEASE_REUSE_UI_DIST: "1" }),
+            maxBuffer: 32 * 1024 * 1024,
+          });
+        }
         const stagedPackage = path.join(stagingRoot, `workspace-package-${index}`);
         await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "prepare-bundled-package.mjs"), packageDir, stagedPackage], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-        await runCommand("npm", ["pack", stagedPackage, "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
+        pinBundledWorkspaceDependencies(stagedPackage, packageJson, workspaceVersions);
+        await runCommand("npm", ["pack", stagedPackage, "--ignore-scripts", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
       } else {
         await runCommand(corepack, ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PROPRIO_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
       }
@@ -315,7 +411,12 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     if (!cliTarball || workspaceTarballs.length !== workspacePackages.length) {
       throw new Error(`Git install packaging produced ${workspaceTarballs.length} workspace tarballs; expected ${workspacePackages.length}.`);
     }
-    await runCommand("npm", ["install", "--prefix", stagedPayload, path.join(stagingRoot, cliTarball), ...workspaceTarballs.map((entry) => path.join(stagingRoot, entry)), "--no-audit", "--no-fund"], { cwd: stagingRoot, maxBuffer: 32 * 1024 * 1024 });
+    // Keep npm's native executables out of group and world write access.
+    await runCommand("sh", [
+      "-c", 'umask g-w,o-w && exec "$@"', "proprio-npm-install",
+      "npm", "install", "--prefix", stagedPayload, path.join(stagingRoot, cliTarball),
+      ...workspaceTarballs.map((entry) => path.join(stagingRoot, entry)), "--no-audit", "--no-fund",
+    ], { cwd: stagingRoot, maxBuffer: 32 * 1024 * 1024 });
     await smokePayload(stagedPayload, metadata.version, runCommand);
     fs.renameSync(stagedPayload, payloadPath);
     return { payloadPath, reused: false, version: metadata.version };

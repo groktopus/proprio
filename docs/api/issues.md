@@ -73,6 +73,11 @@ GET /api/issues/{issueId}
 
 Returns the issue with `project`, `goal`, and `ancestors` (parent chain with their projects and goals).
 
+Issue responses include the read-only `goalOrigin` value (`explicit`,
+`inherited`, or `unknown`). It reports whether the current goal was selected
+directly or resolved from the project's/company's default; request bodies cannot
+set it.
+
 The response also includes:
 
 - `planDocument`: the full text of the issue document with key `plan`, when present
@@ -95,6 +100,19 @@ POST /api/companies/{companyId}/issues
 }
 ```
 
+`goalId` is an optional explicit goal selection. If omitted, a project-linked
+issue uses that project's goal; an issue without a project uses the company
+default when one exists. When a task moves projects, an explicit goal selection
+is preserved and an inherited goal follows the destination project's default.
+Send `"goalId": null` to clear an explicit selection and resume inheritance.
+Goals from another company return `404`.
+Rows written by older service versions have `goalOrigin: "unknown"` until a
+current service rewrites their binding. A provenance snapshot also detects an
+older writer changing `goalId` to a different ID without updating provenance;
+the API then reports `unknown` and uses the legacy fallback heuristic. An old
+writer that explicitly writes the same goal ID cannot be distinguished from a
+no-op, because that request carries no intent metadata.
+
 ## Update Issue
 
 ```
@@ -109,6 +127,9 @@ Headers: X-Proprio-Run-Id: {runId}
 The optional `comment` field adds a comment in the same call. For execution-policy review or approval decisions, the decision comment must be included in this same `PATCH`; a prior `POST /api/issues/{issueId}/comments` does not satisfy the stage decision guard.
 
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
+
+When changing `projectId` and `goalId` together, the supplied goal is validated
+before the route can stop a live run or apply other execution-control effects.
 
 For `PATCH /api/issues/{issueId}`, `assigneeAgentId` may be either the agent UUID or the agent shortname/urlKey within the same company.
 

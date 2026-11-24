@@ -289,6 +289,33 @@ environments receive foreground `proprio run` guidance.
 `proprio doctor` includes managed-install and service-health diagnostics in
 addition to configuration, storage, database, logging, and port checks.
 
+## Recover a managed Git upgrade
+
+An older managed CLI can fail to build a Git update before activation if it
+cannot stage the server UI or runtime skills. Back up the existing instance with
+`proprio db-backup`. From a trusted source checkout that contains the installer
+fix, install the target ref into the same managed store. Replace `main` with
+the trusted branch or commit selected for the upgrade.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+pnpm --dir cli exec tsx src/index.ts install --ref main --yes
+proprio service restart
+proprio service status --json
+```
+
+Check that the service reports the selected commit and that the existing
+instance data is available. The install preserves the previous payload. If
+the service cannot start after installing the replacement, run
+`proprio update --rollback` to reactivate the previous payload. Payload
+rollback leaves database migrations in place.
+
+When GitHub limits an anonymous commit lookup, the installer can resolve an
+exact full commit SHA with a temporary public Git fetch. It disables credential
+helpers and prompts for that fetch. Named branch and tag lookups keep their
+normal GitHub API behavior.
+
 ## Deployment Modes
 
 Mode taxonomy and design intent are documented in `doc/DEPLOYMENT-MODES.md`.

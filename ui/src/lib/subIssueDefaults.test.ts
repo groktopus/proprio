@@ -42,6 +42,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     projectId: "project-1",
     projectWorkspaceId: "project-workspace-1",
     goalId: "goal-1",
+    goalOrigin: "explicit",
     parentId: null,
     title: "Parent issue",
     description: null,
@@ -136,5 +137,10 @@ describe("buildSubIssueDefaults", () => {
       goalId: "goal-1",
       executionWorkspaceMode: "shared_workspace",
     });
+  });
+
+  it("does not turn an inherited parent goal into an explicit child selection", () => {
+    const defaults = buildSubIssueDefaults(makeIssue({ goalOrigin: "inherited" }));
+    expect(defaults).not.toHaveProperty("goalId");
   });
 });

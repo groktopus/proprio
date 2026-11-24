@@ -187,8 +187,12 @@ export function RunnerGoalWidget({ control }: { control: RunnerGoalControl }) {
   const can = (action: "set" | "pause" | "resume" | "clear") =>
     capability?.availability === "available" && capability.actions.includes(action);
   const resumable = goal && ["paused", "blocked", "limited", "usage_limited"].includes(goal.status);
-  const pendingLabel = projection?.pendingAction ? PENDING_LABELS[projection.pendingAction] : null;
-  const mutationError = control.actionError ?? (control.mutation?.error instanceof Error
+  const pendingLabel = projection?.pendingActionStatus === "reconciling"
+    ? "Checking provider state"
+    : projection?.pendingAction ? PENDING_LABELS[projection.pendingAction] : null;
+  const mutationError = control.actionError ?? (projection?.actionFailure
+    ? "The provider did not confirm the last goal change. Check the displayed goal before trying again."
+    : control.mutation?.error instanceof Error
     ? control.mutation.error.message
     : control.mutation?.error
       ? "The goal action could not be applied."

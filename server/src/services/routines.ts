@@ -59,6 +59,8 @@ import type {
   UpdateRoutineTrigger,
 } from "@groktopus/shared";
 import {
+  assertRoutineTimeZone,
+  nextRoutineCronFire,
   WORKSPACE_BRANCH_ROUTINE_VARIABLE,
   getBuiltinRoutineVariableValues,
   extractRoutineVariableNames,
@@ -70,6 +72,7 @@ import {
   stringifyRoutineVariableValue,
   syncRoutineVariablesWithTemplate,
 } from "@groktopus/shared";
+import { parseRoutineCron } from "@groktopus/shared/routine-cron";
 import { trackRoutineRun } from "@groktopus/shared/telemetry";
 import { HttpError, badRequest, conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -81,7 +84,7 @@ import { assertAssignableAgent } from "./agent-assignability.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
-import { parseCron, validateCron } from "./cron.js";
+import { validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { finalizeRoutineRun, routineExecutionStatusService, syncRoutineRunStatusForIssue } from "./routine-run-status.js";
 import {
@@ -110,16 +113,6 @@ const ACTIVITY_GATE_IGNORED_ACTIONS = [
   "issue.inbox_unarchived",
   "issue.inbox_touched",
 ];
-const WEEKDAY_INDEX: Record<string, number> = {
-  Sun: 0,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
-
 export function routineWebhookUrl(publicId: string): string {
   const baseUrl = runtimePublicOrigin() ?? process.env.PROPRIO_API_URL?.trim();
   if (!baseUrl) throw new Error("PROPRIO_API_URL is required to create a routine webhook");
@@ -194,98 +187,21 @@ function routineWebhookSecretConfigPath(secretId: string) {
 
 function assertTimeZone(timeZone: string) {
   try {
-    getZonedMinuteFormatter(timeZone).format(new Date());
+    assertRoutineTimeZone(timeZone);
   } catch {
     throw unprocessable(`Invalid timezone: ${timeZone}`);
   }
 }
 
-function floorToMinute(date: Date) {
-  const copy = new Date(date.getTime());
-  copy.setUTCSeconds(0, 0);
-  return copy;
-}
-
-// Constructing an Intl.DateTimeFormat costs ~1ms of ICU work, and
-// computeNextRun calls getZonedMinuteParts once per minute-step (up to
-// 366*24*60*5 iterations for sparse schedules), which can block the event
-// loop for minutes per scheduler tick. Formatter instances are immutable,
-// so cache one per timezone. See #8033.
-const zonedMinuteFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function getZonedMinuteFormatter(timeZone: string) {
-  let formatter = zonedMinuteFormatterCache.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hour12: false,
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-      hour: "numeric",
-      minute: "numeric",
-      weekday: "short",
-    });
-    zonedMinuteFormatterCache.set(timeZone, formatter);
-  }
-  return formatter;
-}
-
-function getZonedMinuteParts(date: Date, timeZone: string) {
-  const formatter = getZonedMinuteFormatter(timeZone);
-  const parts = formatter.formatToParts(date);
-  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const weekday = WEEKDAY_INDEX[map.weekday ?? ""];
-  if (weekday == null) {
-    throw new Error(`Unable to resolve weekday for timezone ${timeZone}`);
-  }
-  return {
-    year: Number(map.year),
-    month: Number(map.month),
-    day: Number(map.day),
-    hour: Number(map.hour),
-    minute: Number(map.minute),
-    weekday,
-  };
-}
-
-function matchesCronMinute(cron: ReturnType<typeof parseCron>, timeZone: string, date: Date) {
-  if (timeZone === "UTC" && Number.isFinite(date.getTime()) && (
-    !cron.minutes.includes(date.getUTCMinutes())
-    || !cron.daysOfMonth.includes(date.getUTCDate())
-    || !cron.months.includes(date.getUTCMonth() + 1)
-    || !cron.daysOfWeek.includes(date.getUTCDay())
-  )) return false;
-  const parts = getZonedMinuteParts(date, timeZone);
-  return (
-    cron.minutes.includes(parts.minute) &&
-    cron.hours.includes(parts.hour) &&
-    cron.daysOfMonth.includes(parts.day) &&
-    cron.months.includes(parts.month) &&
-    cron.daysOfWeek.includes(parts.weekday)
-  );
-}
-
 export function nextCronTickInTimeZone(expression: string, timeZone: string, after: Date) {
   const trimmed = expression.trim();
   assertTimeZone(timeZone);
-  let cron: ReturnType<typeof parseCron>;
   try {
-    cron = parseCron(trimmed);
+    return nextRoutineCronFire(trimmed, timeZone, after);
   } catch (error) {
+    if (error instanceof RangeError) throw error;
     throw unprocessable(error instanceof Error ? error.message : String(error));
   }
-
-  const cursor = floorToMinute(after);
-  cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
-  const limit = 366 * 24 * 60 * 5;
-  for (let i = 0; i < limit; i += 1) {
-    if (matchesCronMinute(cron, timeZone, cursor)) {
-      return new Date(cursor.getTime());
-    }
-    cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
-  }
-  return null;
 }
 
 function isSubHourlyCronExpression(expression: string, timeZone: string, after: Date) {
@@ -714,7 +630,6 @@ export function routineService(
     eq(routineTriggers.archived, false),
     eq(routines.status, "active"),
     eq(companies.status, "active"),
-    isNotNull(routineTriggers.nextRunAt),
     isNotNull(routineTriggers.cronExpression),
     isNotNull(routineTriggers.timezone),
   );
@@ -722,6 +637,42 @@ export function routineService(
     eq(routineTriggers.routineId, routines.id),
     eq(routineTriggers.companyId, routines.companyId),
   );
+
+  async function initializeLegacyScheduleDeadlines(now: Date) {
+    const schedules = await db.select({
+      id: routineTriggers.id,
+      companyId: routineTriggers.companyId,
+      expression: routineTriggers.cronExpression,
+      timezone: routineTriggers.timezone,
+    }).from(routineTriggers)
+      .innerJoin(routines, scheduledRoutineJoin())
+      .innerJoin(companies, eq(routines.companyId, companies.id))
+      .where(and(scheduledTriggerEligibility(), isNull(routineTriggers.nextRunAt)));
+
+    for (const { id, companyId, expression, timezone } of schedules) {
+      if (expression === null || timezone === null) continue;
+      let nextRunAt: Date | null;
+      try {
+        const cron = parseRoutineCron(expression);
+        // Only schedules restricting both day fields gain dates from the OR rule.
+        if (cron.daysOfMonth.length === 31 || cron.daysOfWeek.length === 7) continue;
+        nextRunAt = nextRoutineCronFire(cron, timezone, now);
+      } catch {
+        continue;
+      }
+      if (!nextRunAt) continue;
+      await db.update(routineTriggers).set({ nextRunAt, updatedAt: now }).where(and(
+        eq(routineTriggers.id, id),
+        eq(routineTriggers.companyId, companyId),
+        eq(routineTriggers.kind, "schedule"),
+        eq(routineTriggers.enabled, true),
+        eq(routineTriggers.archived, false),
+        eq(routineTriggers.cronExpression, expression),
+        eq(routineTriggers.timezone, timezone),
+        isNull(routineTriggers.nextRunAt),
+      ));
+    }
+  }
 
   async function getRoutineById(id: string) {
     if (!isRoutineUuidInput(id)) return null;
@@ -2992,7 +2943,7 @@ export function routineService(
       const existing = await getTriggerById(id);
       if (!existing) return null;
 
-      let nextRunAt = existing.nextRunAt;
+      let nextRunAt: Date | null | undefined;
       let clearScheduleError = false;
       let cronExpression = existing.cronExpression;
       let timezone = existing.timezone;
@@ -3014,7 +2965,9 @@ export function routineService(
         if (cronError && (patch.cronExpression !== undefined || patch.enabled === true || patch.timezone !== undefined)) {
           throw unprocessable(cronError);
         }
-        if (cronExpression && timezone && !cronError) {
+        const scheduleChanged = cronExpression !== existing.cronExpression || timezone !== existing.timezone;
+        const resumed = (patch.enabled === true && !existing.enabled) || (patch.archived === false && existing.archived);
+        if ((scheduleChanged || resumed) && cronExpression && timezone && !cronError) {
           nextRunAt = nextCronTickInTimeZone(cronExpression, timezone, new Date());
         }
         if ((patch.enabled ?? existing.enabled) === true) {
@@ -3064,12 +3017,12 @@ export function routineService(
           .update(routineTriggers)
           .set({
             label: patch.label === undefined ? existing.label : patch.label,
-            enabled: patch.enabled ?? existing.enabled,
+            enabled: patch.enabled ?? current.enabled,
             ...(patch.setupPending !== undefined ? { setupPending: patch.setupPending } : {}),
             ...(plan.restoredDelivery ? { lastWebhookDelivery: plan.restoredDelivery.value } : {}),
             ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
-            cronExpression,
-            timezone,
+            cronExpression: patch.cronExpression === undefined ? undefined : cronExpression,
+            timezone: patch.timezone === undefined ? undefined : timezone,
             ...(clearScheduleError ? { lastResult: null } : {}),
             nextRunAt,
             signingMode: patch.signingMode === undefined ? current.signingMode : patch.signingMode,
@@ -3684,11 +3637,12 @@ export function routineService(
     },
 
     nextScheduledTriggerAt: async (): Promise<number | null> => {
+      await initializeLegacyScheduleDeadlines(new Date());
       const [row] = await db.select({ at: routineTriggers.nextRunAt })
         .from(routineTriggers)
         .innerJoin(routines, scheduledRoutineJoin())
         .innerJoin(companies, eq(routines.companyId, companies.id))
-        .where(scheduledTriggerEligibility())
+        .where(and(scheduledTriggerEligibility(), isNotNull(routineTriggers.nextRunAt)))
         .orderBy(asc(routineTriggers.nextRunAt)).limit(1);
 
       return row?.at?.getTime() ?? null;

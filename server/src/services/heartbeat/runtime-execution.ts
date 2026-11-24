@@ -16,7 +16,11 @@ import { writeExecutionControl } from "../execution-control-notifications.js";
 import { inspectPluginWorkspaceForFinalization } from "../native-runtime/native-plugin-workspace-finalization.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { drainRunPreparationPhases, measureRunPhase } from "../execution-preparation-timing.js";
-import { parseNativeSessionGoalControl } from "./scheduling.js";
+import {
+  parseNativeSessionGoalControl,
+  type PendingSessionGoalActionRecoveryResult,
+  type PendingSessionGoalActionRecoveryScope,
+} from "./scheduling.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import {
   PROPRIO_WAKE_PAYLOAD_KEY,
@@ -204,6 +208,9 @@ export interface HeartbeatRuntimeExecutionInput {
     executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getStoredById">;
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "releaseForRun">;
+    recoverPendingSessionGoalActions: (
+      scope: PendingSessionGoalActionRecoveryScope,
+    ) => Promise<PendingSessionGoalActionRecoveryResult>;
   };
   // Teardown must observe these updates immediately, including when execution later throws.
   effects: {
@@ -548,6 +555,9 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   const runGoalControlRequestId = readNonEmptyString(
     context.goalControlRequestId,
   );
+  const runGoalReconciliationRequestId = readNonEmptyString(
+    context.goalControlReconciliationRequestId,
+  );
   // The runner posts its accepted result before it returns. Keep the recovery
   // workers off this run until this heartbeat has finished it.
   const releaseLiveNativeFinalization = nativeRuntimeResolution.kind === "native"
@@ -681,6 +691,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               useRunnerd: agent.adapterType === "proprio_runner",
               adapterType: agent.adapterType,
               sessionGoalControl,
+              reconcileSessionGoalRequestId: runGoalReconciliationRequestId,
               sessionCompaction: readContextCompactionRequest(context),
               resumeSessionGoalHeartbeat:
                 context.resumeSessionGoalHeartbeat === true ||
@@ -981,6 +992,18 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       if (!guardedDispatch.dispatched) return { dispatched: false };
       adapterResult = await guardedDispatch.resultPromise;
     }
+    if (issueRef && runGoalReconciliationRequestId) {
+      // A readback heartbeat only resolves the control if it produced an
+      // authoritative provider goal observation. If it completed without one,
+      // leave a durable terminal failure instead of blocking future controls.
+      await failRunnerGoalAction(
+        db,
+        { companyId: run.companyId, issueId: issueRef.id, agentId: agent.id, adapterType: agent.adapterType },
+        runGoalReconciliationRequestId,
+        "session_goal_readback_unresolved",
+        "ambiguous_delivery",
+      ).catch(() => undefined);
+    }
     adapterResult = identityRedactor.redact(adapterResult);
     if (run.runtimeMode === "legacy" && hasWorkspaceRestoreFailure(adapterResult.resultJson)
         && executionTarget?.kind === "remote" && executionTarget.transport === "sandbox") {
@@ -1166,8 +1189,56 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         "provider_session_goal_recovery_failed",
       ).catch(() => undefined);
     }
+    const recoverAmbiguousGoalControl = async (requestId: string) => {
+      const binding = {
+        companyId: run.companyId,
+        issueId: issueRef!.id,
+        agentId: agent.id,
+        adapterType: agent.adapterType,
+      };
+      const scope = { companyId: run.companyId, issueId: issueRef!.id, agentId: agent.id, requestId };
+      try {
+        const result = await input.services.recoverPendingSessionGoalActions(scope);
+        if (result.enqueued === 0 && result.alreadyQueued === 0 && result.invalid === 0) {
+          await failRunnerGoalAction(
+            db,
+            binding,
+            requestId,
+            "goal_control_reconciliation_wake_not_scheduled",
+            "ambiguous_delivery",
+          ).catch(() => undefined);
+        }
+      } catch {
+        await failRunnerGoalAction(
+          db,
+          binding,
+          requestId,
+          "goal_control_reconciliation_wake_failed",
+          "ambiguous_delivery",
+        ).catch(() => undefined);
+      }
+    };
     if (issueRef && runGoalControlRequestId) {
-      await failRunnerGoalAction(
+      const binding = {
+        companyId: run.companyId,
+        issueId: issueRef.id,
+        agentId: agent.id,
+        adapterType: agent.adapterType,
+      };
+      const failure = await failRunnerGoalAction(
+        db,
+        binding,
+        runGoalControlRequestId,
+        adapterErr instanceof Error
+          ? identityRedactor.redact(adapterErr.message)
+          : "session_goal_control_failed",
+      ).catch(() => null);
+      if (failure?.pendingAction) {
+        await recoverAmbiguousGoalControl(runGoalControlRequestId);
+      }
+    }
+    if (issueRef && runGoalReconciliationRequestId) {
+      const failure = await failRunnerGoalAction(
         db,
         {
           companyId: run.companyId,
@@ -1175,11 +1246,15 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           agentId: agent.id,
           adapterType: agent.adapterType,
         },
-        runGoalControlRequestId,
+        runGoalReconciliationRequestId,
         adapterErr instanceof Error
           ? identityRedactor.redact(adapterErr.message)
-          : "session_goal_control_failed",
-      ).catch(() => undefined);
+          : "session_goal_readback_failed",
+        "ambiguous_delivery",
+      ).catch(() => null);
+      if (failure?.pendingAction) {
+        await recoverAmbiguousGoalControl(runGoalReconciliationRequestId);
+      }
     }
     const nativeResumeScheduled =
       nativeRuntimeResolution.kind === "native"

@@ -1,0 +1,28 @@
+name: Trusted durable-work policy
+
+on:
+  workflow_run:
+    workflows: [Stability smoke, Linux source qualification]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  publish-policy:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted default-branch policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify GitHub run metadata and publish the verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/durable-work-policy.mjs

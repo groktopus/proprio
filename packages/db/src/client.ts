@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import {
+  checkMigrationStagingEvidence, pendingMigrationTags,
+  type MigrationStagingEvidence, type MigrationStagingManifest,
+} from "./migration-staging-evidence.js";
 import postgres from "postgres";
 import { installDatabaseWorkSignals } from "./work-signals.js";
 import { installDatabaseResponseCapture } from "./response-capture.js";
@@ -855,6 +860,7 @@ async function recordMigrationHistoryEntry(
 // These idempotent migrations require top-level statements for batch commits
 // or concurrent index builds. History is recorded only after completion.
 const MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS = new Set([
+  "0503_redundant_radioactive_man.sql",
   "0313_private_task_access.sql",
   "0314_private_task_draft_assets.sql",
   "0332_little_night_nurse.sql",
@@ -918,8 +924,53 @@ const MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS = new Set([
   "0383_tool_review_company_expiry.sql",
 ]);
 
-async function applyPendingMigrationsManually(
+async function withMigrationLock<T>(
   url: string,
+  work: (sql: ReturnType<typeof postgres>) => Promise<T>,
+): Promise<T> {
+  const configuredTimeout = process.env.PROPRIO_MIGRATION_LOCK_TIMEOUT_MS?.trim();
+  const timeoutMs = configuredTimeout ? Number(configuredTimeout) : 60_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error("PROPRIO_MIGRATION_LOCK_TIMEOUT_MS must be a positive integer in milliseconds.");
+  }
+
+  const pool = createUtilitySql(url);
+  try {
+    const sql = await pool.reserve();
+    let locked = false;
+    try {
+      // Reserve the session so the lock survives each batch COMMIT. A blocking
+      // lock SELECT holds a snapshot that can prevent a concurrent index build
+      // from finishing. Each try ends its snapshot before sleeping.
+      const deadline = performance.now() + timeoutMs;
+      do {
+        locked = (await sql<{ locked: boolean }[]>`
+          SELECT pg_try_advisory_lock(hashtextextended('proprio:migrations', 0)) AS locked`)[0]?.locked === true;
+        const remainingMs = deadline - performance.now();
+        if (remainingMs <= 0) {
+          throw Object.assign(new Error(
+            `Could not acquire the PostgreSQL migration lock within ${timeoutMs} ms. No migrations started in this attempt. Wait for the other migrator to finish, then retry.`,
+          ), { code: "MIGRATION_LOCK_TIMEOUT" });
+        }
+        if (!locked) await delay(Math.min(100, remainingMs));
+      } while (!locked);
+      return await work(sql);
+    } finally {
+      try {
+        if (locked) await sql`SELECT pg_advisory_unlock(hashtextextended('proprio:migrations', 0))`;
+      } catch {
+        // Preserve the migration error if the session died. PostgreSQL
+        // releases the lock on disconnect.
+      }
+      sql.release();
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+async function applyPendingMigrationsManually(
+  sql: ReturnType<typeof postgres>,
   pendingMigrations: string[],
 ): Promise<void> {
   if (pendingMigrations.length === 0) return;
@@ -930,109 +981,84 @@ async function applyPendingMigrationsManually(
     journalEntries.map((entry) => [entry.fileName, normalizeFolderMillis(entry.folderMillis)]),
   );
 
-  const pool = createUtilitySql(url);
-  try {
-    const sql = await pool.reserve();
-    try {
-      // A session lock survives each batch COMMIT. Reserve the connection so
-      // pool rotation cannot release it while another migrator is waiting.
-      // A blocking lock SELECT retains its statement snapshot while waiting.
-      // A partial concurrent index build can wait for that snapshot, forming a
-      // deadlock with this lock. Each failed try ends its snapshot before sleep.
-      while (!(await sql<{ locked: boolean }[]>`
-        SELECT pg_try_advisory_lock(hashtextextended('proprio:migrations', 0)) AS locked`)[0]?.locked) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
-      const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+  const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
+  const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
 
-      for (const migrationFile of orderedPendingMigrations) {
-        const migrationContent = await readMigrationFileContent(migrationFile);
-        const hash = createHash("sha256").update(migrationContent).digest("hex");
-        const existingEntry = await migrationHistoryEntryExists(
-          sql,
-          qualifiedTable,
-          columnNames,
-          migrationFile,
-          hash,
-        );
-        if (existingEntry) continue;
+  for (const migrationFile of orderedPendingMigrations) {
+    const migrationContent = await readMigrationFileContent(migrationFile);
+    const hash = createHash("sha256").update(migrationContent).digest("hex");
+    const existingEntry = await migrationHistoryEntryExists(
+      sql,
+      qualifiedTable,
+      columnNames,
+      migrationFile,
+      hash,
+    );
+    if (existingEntry) continue;
 
-        const applyMigration = async () => {
-          for (const statement of splitMigrationStatements(migrationContent)) {
-            if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
-              // A cancelled concurrent build leaves an invalid index. IF NOT
-              // EXISTS alone would skip it on retry and journal an incomplete index.
-              const index = statement.replace(/^\s*--.*$/gm, "").trim()
-                .match(/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS "([A-Za-z_][A-Za-z0-9_]*)"/i);
-              if (index) {
-                const invalid = await sql<{ invalid: boolean }[]>`
-                  SELECT NOT i.indisvalid AS invalid FROM pg_index i
-                  JOIN pg_class c ON c.oid = i.indexrelid
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = 'public' AND c.relname = ${index[1]}`;
-                if (invalid[0]?.invalid) {
-                  await sql.unsafe(`DROP INDEX CONCURRENTLY ${quoteIdentifier("public")}.${quoteIdentifier(index[1])}`);
-                }
-              }
+    const applyMigration = async () => {
+      for (const statement of splitMigrationStatements(migrationContent)) {
+        if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
+          // A cancelled concurrent build leaves an invalid index. IF NOT
+          // EXISTS alone would skip it on retry and journal an incomplete index.
+          const index = statement.replace(/^\s*--.*$/gm, "").trim()
+            .match(/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS "([A-Za-z_][A-Za-z0-9_]*)"/i);
+          if (index) {
+            const invalid = await sql<{ invalid: boolean }[]>`
+              SELECT NOT i.indisvalid AS invalid FROM pg_index i
+              JOIN pg_class c ON c.oid = i.indexrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'public' AND c.relname = ${index[1]}`;
+            if (invalid[0]?.invalid) {
+              await sql.unsafe(`DROP INDEX CONCURRENTLY ${quoteIdentifier("public")}.${quoteIdentifier(index[1])}`);
             }
-            // Older dev schemas can lack a replaced constraint. Preserve the
-            // published SQL/hash while allowing the harmless drop to proceed.
-            const executable = statement.replace(
-              /^(\s*ALTER TABLE "[^"]+" DROP CONSTRAINT) (?!IF EXISTS\b)/i,
-              "$1 IF EXISTS ",
-            );
-            await sql.unsafe(executable);
           }
-
-          await recordMigrationHistoryEntry(
-            sql,
-            qualifiedTable,
-            columnNames,
-            migrationFile,
-            hash,
-            folderMillisByFileName.get(migrationFile) ?? Date.now(),
-          );
-        };
-        if (migrationFile === PROJECT_ENVIRONMENT_OVERLAP.dropFile) {
-          const repairFile = PROJECT_ENVIRONMENT_OVERLAP.repairFile;
-          const repairContent = await readMigrationFileContent(repairFile);
-          const repairHash = createHash("sha256").update(repairContent).digest("hex");
-          const dropIndex = orderedPendingMigrations.indexOf(migrationFile);
-          if (hash !== PROJECT_ENVIRONMENT_OVERLAP.dropSha256
-            || repairHash !== PROJECT_ENVIRONMENT_OVERLAP.repairSha256
-            || orderedPendingMigrations[dropIndex + 1] !== repairFile
-            || await migrationHistoryEntryExists(sql, qualifiedTable, columnNames, repairFile, repairHash)) {
-            throw new Error("Project environment migration pair does not match the qualified overlap repair");
-          }
-          await runInTransaction(sql, async () => {
-            await sql.unsafe('LOCK TABLE "public"."projects" IN ACCESS EXCLUSIVE MODE');
-            await sql.unsafe(`CREATE TEMP TABLE proprio_project_environment_overlap ON COMMIT DROP AS
-              SELECT id, environment_id FROM "public"."projects" WHERE environment_id IS NOT NULL`);
-            await applyMigration();
-            for (const statement of splitMigrationStatements(repairContent)) await sql.unsafe(statement);
-            await sql.unsafe(`UPDATE "public"."projects" AS project SET environment_id = legacy.environment_id
-              FROM pg_temp.proprio_project_environment_overlap AS legacy WHERE project.id = legacy.id`);
-            await recordMigrationHistoryEntry(sql, qualifiedTable, columnNames, repairFile, repairHash,
-              folderMillisByFileName.get(repairFile) ?? Date.now());
-          });
-        } else if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
-          await applyMigration();
-        } else {
-          await runInTransaction(sql, applyMigration);
         }
+        // Older dev schemas can lack a replaced constraint. Preserve the
+        // published SQL/hash while allowing the harmless drop to proceed.
+        const executable = statement.replace(
+          /^(\s*ALTER TABLE "[^"]+" DROP CONSTRAINT) (?!IF EXISTS\b)/i,
+          "$1 IF EXISTS ",
+        );
+        await sql.unsafe(executable);
       }
-    } finally {
-      try {
-        await sql`SELECT pg_advisory_unlock(hashtextextended('proprio:migrations', 0))`;
-      } catch {
-        // Preserve the migration error if the session died; PostgreSQL releases
-        // its lock on disconnect, and pool.end() closes any remaining connection.
+
+      await recordMigrationHistoryEntry(
+        sql,
+        qualifiedTable,
+        columnNames,
+        migrationFile,
+        hash,
+        folderMillisByFileName.get(migrationFile) ?? Date.now(),
+      );
+    };
+    if (migrationFile === PROJECT_ENVIRONMENT_OVERLAP.dropFile) {
+      const repairFile = PROJECT_ENVIRONMENT_OVERLAP.repairFile;
+      const repairContent = await readMigrationFileContent(repairFile);
+      const repairHash = createHash("sha256").update(repairContent).digest("hex");
+      const dropIndex = orderedPendingMigrations.indexOf(migrationFile);
+      if (hash !== PROJECT_ENVIRONMENT_OVERLAP.dropSha256
+        || repairHash !== PROJECT_ENVIRONMENT_OVERLAP.repairSha256
+        || orderedPendingMigrations[dropIndex + 1] !== repairFile
+        || await migrationHistoryEntryExists(sql, qualifiedTable, columnNames, repairFile, repairHash)) {
+        throw new Error("Project environment migration pair does not match the qualified overlap repair");
       }
-      sql.release();
+      await runInTransaction(sql, async () => {
+        await sql.unsafe('LOCK TABLE "public"."projects" IN ACCESS EXCLUSIVE MODE');
+        await sql.unsafe(`CREATE TEMP TABLE proprio_project_environment_overlap ON COMMIT DROP AS
+          SELECT id, environment_id FROM "public"."projects" WHERE environment_id IS NOT NULL`);
+        await applyMigration();
+        for (const statement of splitMigrationStatements(repairContent)) await sql.unsafe(statement);
+        await sql.unsafe(`UPDATE "public"."projects" AS project SET environment_id = legacy.environment_id
+          FROM pg_temp.proprio_project_environment_overlap AS legacy WHERE project.id = legacy.id`);
+        await recordMigrationHistoryEntry(sql, qualifiedTable, columnNames, repairFile, repairHash,
+          folderMillisByFileName.get(repairFile) ?? Date.now());
+      });
+    } else if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
+      await applyMigration();
+    } else {
+      await runInTransaction(sql, applyMigration);
     }
-  } finally {
-    await pool.end();
   }
 }
 
@@ -1380,91 +1406,97 @@ export async function reconcilePendingMigrationHistory(
     return { repairedMigrations: [], remainingMigrations: [] };
   }
 
-  const sql = createUtilitySql(url);
+  return withMigrationLock(url, async sql => {
+    const current = await readMigrationState(sql);
+    if (current.status !== "needsMigrations" || current.reason !== "pending-migrations") {
+      return { repairedMigrations: [], remainingMigrations: [] };
+    }
+    const repairedMigrations = await reconcileMigrationHistory(sql, current.pendingMigrations);
+    const refreshed = await readMigrationState(sql);
+    return {
+      repairedMigrations,
+      remainingMigrations: refreshed.status === "needsMigrations" ? refreshed.pendingMigrations : [],
+    };
+  });
+}
+
+async function reconcileMigrationHistory(
+  sql: ReturnType<typeof postgres>,
+  pendingMigrations: string[],
+): Promise<string[]> {
   const repairedMigrations: string[] = [];
-
-  try {
-    const journalEntries = await listJournalMigrationEntries();
-    const folderMillisByFile = new Map(journalEntries.map((entry) => [entry.fileName, entry.folderMillis]));
-    const migrationTableSchema = await discoverMigrationTableSchema(sql);
-    if (!migrationTableSchema) {
-      return { repairedMigrations, remainingMigrations: state.pendingMigrations };
-    }
-
-    const columnNames = await getMigrationTableColumnNames(sql, migrationTableSchema);
-    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
-
-    for (const migrationFile of state.pendingMigrations) {
-      const migrationContent = await readMigrationFileContent(migrationFile);
-      const alreadyApplied = await migrationContentAlreadyApplied(sql, migrationContent);
-      if (!alreadyApplied) break;
-
-      const hash = createHash("sha256").update(migrationContent).digest("hex");
-      const folderMillis = folderMillisByFile.get(migrationFile) ?? Date.now();
-      const existingByHash = columnNames.has("hash")
-        ? await sql.unsafe<{ created_at: string | number | null }[]>(
-            `SELECT created_at FROM ${qualifiedTable} WHERE hash = ${quoteLiteral(hash)} ORDER BY created_at DESC LIMIT 1`,
-          )
-        : [];
-      const existingByName = columnNames.has("name")
-        ? await sql.unsafe<{ created_at: string | number | null }[]>(
-            `SELECT created_at FROM ${qualifiedTable} WHERE name = ${quoteLiteral(migrationFile)} ORDER BY created_at DESC LIMIT 1`,
-          )
-        : [];
-      if (existingByHash.length > 0 || existingByName.length > 0) {
-        if (columnNames.has("created_at")) {
-          const existingHashCreatedAt = Number(existingByHash[0]?.created_at ?? -1);
-          if (existingByHash.length > 0 && Number.isFinite(existingHashCreatedAt) && existingHashCreatedAt < folderMillis) {
-            await sql.unsafe(
-              `UPDATE ${qualifiedTable} SET created_at = ${quoteLiteral(String(folderMillis))} WHERE hash = ${quoteLiteral(hash)} AND created_at < ${quoteLiteral(String(folderMillis))}`,
-            );
-          }
-
-          const existingNameCreatedAt = Number(existingByName[0]?.created_at ?? -1);
-          if (existingByName.length > 0 && Number.isFinite(existingNameCreatedAt) && existingNameCreatedAt < folderMillis) {
-            await sql.unsafe(
-              `UPDATE ${qualifiedTable} SET created_at = ${quoteLiteral(String(folderMillis))} WHERE name = ${quoteLiteral(migrationFile)} AND created_at < ${quoteLiteral(String(folderMillis))}`,
-            );
-          }
-        }
-
-        repairedMigrations.push(migrationFile);
-        continue;
-      }
-
-      const insertColumns: string[] = [];
-      const insertValues: string[] = [];
-
-      if (columnNames.has("hash")) {
-        insertColumns.push(quoteIdentifier("hash"));
-        insertValues.push(quoteLiteral(hash));
-      }
-      if (columnNames.has("name")) {
-        insertColumns.push(quoteIdentifier("name"));
-        insertValues.push(quoteLiteral(migrationFile));
-      }
-      if (columnNames.has("created_at")) {
-        insertColumns.push(quoteIdentifier("created_at"));
-        insertValues.push(quoteLiteral(String(folderMillis)));
-      }
-
-      if (insertColumns.length === 0) break;
-
-      await sql.unsafe(
-        `INSERT INTO ${qualifiedTable} (${insertColumns.join(", ")}) VALUES (${insertValues.join(", ")})`,
-      );
-      repairedMigrations.push(migrationFile);
-    }
-  } finally {
-    await sql.end();
+  const journalEntries = await listJournalMigrationEntries();
+  const folderMillisByFile = new Map(journalEntries.map((entry) => [entry.fileName, entry.folderMillis]));
+  const migrationTableSchema = await discoverMigrationTableSchema(sql);
+  if (!migrationTableSchema) {
+    return repairedMigrations;
   }
 
-  const refreshed = await inspectMigrations(url);
-  return {
-    repairedMigrations,
-    remainingMigrations:
-      refreshed.status === "needsMigrations" ? refreshed.pendingMigrations : [],
-  };
+  const columnNames = await getMigrationTableColumnNames(sql, migrationTableSchema);
+  const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+
+  for (const migrationFile of pendingMigrations) {
+    const migrationContent = await readMigrationFileContent(migrationFile);
+    const alreadyApplied = await migrationContentAlreadyApplied(sql, migrationContent);
+    if (!alreadyApplied) break;
+
+    const hash = createHash("sha256").update(migrationContent).digest("hex");
+    const folderMillis = folderMillisByFile.get(migrationFile) ?? Date.now();
+    const existingByHash = columnNames.has("hash")
+      ? await sql.unsafe<{ created_at: string | number | null }[]>(
+          `SELECT created_at FROM ${qualifiedTable} WHERE hash = ${quoteLiteral(hash)} ORDER BY created_at DESC LIMIT 1`,
+        )
+      : [];
+    const existingByName = columnNames.has("name")
+      ? await sql.unsafe<{ created_at: string | number | null }[]>(
+          `SELECT created_at FROM ${qualifiedTable} WHERE name = ${quoteLiteral(migrationFile)} ORDER BY created_at DESC LIMIT 1`,
+        )
+      : [];
+    if (existingByHash.length > 0 || existingByName.length > 0) {
+      if (columnNames.has("created_at")) {
+        const existingHashCreatedAt = Number(existingByHash[0]?.created_at ?? -1);
+        if (existingByHash.length > 0 && Number.isFinite(existingHashCreatedAt) && existingHashCreatedAt < folderMillis) {
+          await sql.unsafe(
+            `UPDATE ${qualifiedTable} SET created_at = ${quoteLiteral(String(folderMillis))} WHERE hash = ${quoteLiteral(hash)} AND created_at < ${quoteLiteral(String(folderMillis))}`,
+          );
+        }
+
+        const existingNameCreatedAt = Number(existingByName[0]?.created_at ?? -1);
+        if (existingByName.length > 0 && Number.isFinite(existingNameCreatedAt) && existingNameCreatedAt < folderMillis) {
+          await sql.unsafe(
+            `UPDATE ${qualifiedTable} SET created_at = ${quoteLiteral(String(folderMillis))} WHERE name = ${quoteLiteral(migrationFile)} AND created_at < ${quoteLiteral(String(folderMillis))}`,
+          );
+        }
+      }
+
+      repairedMigrations.push(migrationFile);
+      continue;
+    }
+
+    const insertColumns: string[] = [];
+    const insertValues: string[] = [];
+
+    if (columnNames.has("hash")) {
+      insertColumns.push(quoteIdentifier("hash"));
+      insertValues.push(quoteLiteral(hash));
+    }
+    if (columnNames.has("name")) {
+      insertColumns.push(quoteIdentifier("name"));
+      insertValues.push(quoteLiteral(migrationFile));
+    }
+    if (columnNames.has("created_at")) {
+      insertColumns.push(quoteIdentifier("created_at"));
+      insertValues.push(quoteLiteral(String(folderMillis)));
+    }
+
+    if (insertColumns.length === 0) break;
+
+    await sql.unsafe(
+      `INSERT INTO ${qualifiedTable} (${insertColumns.join(", ")}) VALUES (${insertValues.join(", ")})`,
+    );
+    repairedMigrations.push(migrationFile);
+  }
+  return repairedMigrations;
 }
 
 async function discoverMigrationTableSchema(sql: ReturnType<typeof postgres>): Promise<string | null> {
@@ -1488,31 +1520,26 @@ async function discoverMigrationTableSchema(sql: ReturnType<typeof postgres>): P
 
 export async function inspectMigrations(url: string): Promise<MigrationState> {
   const sql = createUtilitySql(url);
-
   try {
-    const availableMigrations = await listMigrationFiles();
-    const tableCountResult = await sql<{ count: number }[]>`
-      select count(*)::int as count
-      from information_schema.tables
-      where table_schema = 'public'
-        and table_type = 'BASE TABLE'
-    `;
-    const tableCount = tableCountResult[0]?.count ?? 0;
+    return await readMigrationState(sql);
+  } finally {
+    await sql.end();
+  }
+}
 
-    const migrationTableSchema = await discoverMigrationTableSchema(sql);
-    if (!migrationTableSchema) {
-      if (tableCount > 0) {
-        return {
-          status: "needsMigrations",
-          tableCount,
-          availableMigrations,
-          appliedMigrations: [],
-          pendingMigrations: availableMigrations,
-          journalEntryCount: 0,
-          reason: "no-migration-journal-non-empty-db",
-        };
-      }
+async function readMigrationState(sql: ReturnType<typeof postgres>): Promise<MigrationState> {
+  const availableMigrations = await listMigrationFiles();
+  const tableCountResult = await sql<{ count: number }[]>`
+    select count(*)::int as count
+    from information_schema.tables
+    where table_schema = 'public'
+      and table_type = 'BASE TABLE'
+  `;
+  const tableCount = tableCountResult[0]?.count ?? 0;
 
+  const migrationTableSchema = await discoverMigrationTableSchema(sql);
+  if (!migrationTableSchema) {
+    if (tableCount > 0) {
       return {
         status: "needsMigrations",
         tableCount,
@@ -1520,24 +1547,7 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
         appliedMigrations: [],
         pendingMigrations: availableMigrations,
         journalEntryCount: 0,
-        reason: "no-migration-journal-empty-db",
-      };
-    }
-
-    const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
-    const journalCountRows = await sql.unsafe<{ count: number }[]>(
-      `SELECT count(*)::int AS count FROM ${qualifiedMigrationTable}`,
-    );
-    const journalEntryCount = journalCountRows[0]?.count ?? 0;
-    const appliedMigrations = await loadAppliedMigrations(sql, migrationTableSchema, availableMigrations);
-    const pendingMigrations = availableMigrations.filter((name) => !appliedMigrations.includes(name));
-    if (pendingMigrations.length === 0) {
-      return {
-        status: "upToDate",
-        tableCount,
-        availableMigrations,
-        appliedMigrations,
-        journalEntryCount,
+        reason: "no-migration-journal-non-empty-db",
       };
     }
 
@@ -1545,58 +1555,96 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
       status: "needsMigrations",
       tableCount,
       availableMigrations,
-      appliedMigrations,
-      pendingMigrations,
-      journalEntryCount,
-      reason: "pending-migrations",
+      appliedMigrations: [],
+      pendingMigrations: availableMigrations,
+      journalEntryCount: 0,
+      reason: "no-migration-journal-empty-db",
     };
-  } finally {
-    await sql.end();
   }
+
+  const qualifiedMigrationTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+  const journalCountRows = await sql.unsafe<{ count: number }[]>(
+    `SELECT count(*)::int AS count FROM ${qualifiedMigrationTable}`,
+  );
+  const journalEntryCount = journalCountRows[0]?.count ?? 0;
+  const appliedMigrations = await loadAppliedMigrations(sql, migrationTableSchema, availableMigrations);
+  const pendingMigrations = availableMigrations.filter((name) => !appliedMigrations.includes(name));
+  if (pendingMigrations.length === 0) {
+    return {
+      status: "upToDate",
+      tableCount,
+      availableMigrations,
+      appliedMigrations,
+      journalEntryCount,
+    };
+  }
+
+  return {
+    status: "needsMigrations",
+    tableCount,
+    availableMigrations,
+    appliedMigrations,
+    pendingMigrations,
+    journalEntryCount,
+    reason: "pending-migrations",
+  };
 }
 
-export async function applyPendingMigrations(url: string): Promise<void> {
-  const initialState = await inspectMigrations(url);
-  if (initialState.status === "upToDate") return;
+type MigrationRolloutEvidence = {
+  manifest: MigrationStagingManifest;
+  evidence?: MigrationStagingEvidence;
+};
 
-  if (initialState.reason === "no-migration-journal-empty-db") {
-    // Use the same per-file executor for bootstrap and upgrades: Drizzle wraps
-    // the whole journal in one transaction and cannot run committing backfills.
-    await applyPendingMigrationsManually(url, initialState.pendingMigrations);
-    const bootstrappedState = await inspectMigrations(url);
-    if (bootstrappedState.status === "upToDate") return;
-    throw new Error(
-      `Failed to bootstrap migrations: ${bootstrappedState.pendingMigrations.join(", ")}`,
-    );
+async function verifyMigrationRollout(
+  rollout: MigrationRolloutEvidence | undefined,
+  pending: readonly string[],
+): Promise<void> {
+  if (!rollout) return;
+  const tags = pendingMigrationTags(pending);
+  const { errors } = checkMigrationStagingEvidence(rollout.manifest, rollout.evidence, tags);
+  if (!errors.length) {
+    const entries = new Map(rollout.manifest.migrationCompatibility.migrations.map(entry => [entry.tag, entry]));
+    for (const [index, file] of pending.entries()) {
+      const digest = createHash("sha256").update(await readMigrationFileContent(file)).digest("hex");
+      if (entries.get(tags[index]!)?.sqlSha256 !== digest) errors.push(`${file}: pending SQL does not match the rollout manifest.`);
+    }
   }
+  if (errors.length) throw new Error(`Migration rollout blocked:\n${errors.join("\n")}`);
+}
 
-  if (initialState.reason === "no-migration-journal-non-empty-db") {
-    throw new Error(
-      "Database has tables but no migration journal; automatic migration is unsafe. Initialize migration history manually.",
-    );
+export async function applyPendingMigrations(url: string, rollout?: MigrationRolloutEvidence): Promise<void> {
+  if ((await inspectMigrations(url)).status === "upToDate") {
+    await verifyMigrationRollout(rollout, []);
+    return;
   }
-
-  let state = await inspectMigrations(url);
-  if (state.status === "upToDate") return;
-
-  const repair = await reconcilePendingMigrationHistory(url);
-  if (repair.repairedMigrations.length > 0) {
-    state = await inspectMigrations(url);
+  await withMigrationLock(url, async sql => {
+    let state = await readMigrationState(sql);
+    await verifyMigrationRollout(rollout, state.status === "upToDate" ? [] : state.pendingMigrations);
     if (state.status === "upToDate") return;
-  }
+    if (state.reason === "no-migration-journal-non-empty-db") {
+      throw new Error(
+        "Database has tables but no migration journal; automatic migration is unsafe. Initialize migration history manually.",
+      );
+    }
+    const bootstrapping = state.reason === "no-migration-journal-empty-db";
+    if (!bootstrapping) {
+      const repaired = await reconcileMigrationHistory(sql, state.pendingMigrations);
+      if (repaired.length > 0) state = await readMigrationState(sql);
+      if (state.status === "upToDate") return;
+      if (state.reason !== "pending-migrations") {
+        throw new Error("Migrations are still pending after migration-history reconciliation; run inspectMigrations for details.");
+      }
+    }
 
-  if (state.status !== "needsMigrations" || state.reason !== "pending-migrations") {
-    throw new Error("Migrations are still pending after migration-history reconciliation; run inspectMigrations for details.");
-  }
-
-  await applyPendingMigrationsManually(url, state.pendingMigrations);
-
-  const finalState = await inspectMigrations(url);
-  if (finalState.status !== "upToDate") {
-    throw new Error(
-      `Failed to apply pending migrations: ${finalState.pendingMigrations.join(", ")}`,
-    );
-  }
+    // Bootstrap and upgrades both use the per-file executor. Drizzle wraps the
+    // whole journal in one transaction and cannot run committing backfills.
+    await applyPendingMigrationsManually(sql, state.pendingMigrations);
+    const finalState = await readMigrationState(sql);
+    if (finalState.status !== "upToDate") {
+      const action = bootstrapping ? "bootstrap migrations" : "apply pending migrations";
+      throw new Error(`Failed to ${action}: ${finalState.pendingMigrations.join(", ")}`);
+    }
+  });
 }
 
 export type MigrationBootstrapResult =
@@ -1605,9 +1653,7 @@ export type MigrationBootstrapResult =
   | { migrated: false; reason: "not-empty-no-migration-journal"; tableCount: number };
 
 export async function migratePostgresIfEmpty(url: string): Promise<MigrationBootstrapResult> {
-  const sql = createUtilitySql(url);
-
-  try {
+  return withMigrationLock(url, async sql => {
     const migrationTableSchema = await discoverMigrationTableSchema(sql);
 
     const tableCountResult = await sql<{ count: number }[]>`
@@ -1627,12 +1673,10 @@ export async function migratePostgresIfEmpty(url: string): Promise<MigrationBoot
       return { migrated: false, reason: "not-empty-no-migration-journal", tableCount };
     }
 
-    await applyPendingMigrationsManually(url, await listMigrationFiles());
+    await applyPendingMigrationsManually(sql, await listMigrationFiles());
 
     return { migrated: true, reason: "migrated-empty-db", tableCount: 0 };
-  } finally {
-    await sql.end();
-  }
+  });
 }
 
 export async function ensurePostgresDatabase(

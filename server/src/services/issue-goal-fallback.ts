@@ -1,4 +1,31 @@
+import type { IssueGoalOrigin } from "@groktopus/shared";
+export type { IssueGoalOrigin } from "@groktopus/shared";
+
 type MaybeId = string | null | undefined;
+
+export function effectiveIssueGoalOrigin(input: {
+  goalId: MaybeId;
+  goalOrigin: IssueGoalOrigin;
+  goalOriginGoalId?: MaybeId;
+}): IssueGoalOrigin {
+  return input.goalOriginGoalId === undefined || input.goalOriginGoalId === input.goalId
+    ? input.goalOrigin
+    : "unknown";
+}
+
+export function resolveIssueGoalBinding(input: {
+  projectId: MaybeId;
+  goalId: MaybeId;
+  goalOrigin?: IssueGoalOrigin;
+  projectGoalId?: MaybeId;
+  defaultGoalId: MaybeId;
+}): { goalId: string | null; goalOrigin: IssueGoalOrigin } {
+  const inherited = input.goalOrigin === "inherited";
+  return {
+    goalId: resolveIssueGoalId({ ...input, goalId: inherited ? null : input.goalId }),
+    goalOrigin: input.goalOrigin ?? (input.goalId ? "explicit" : "inherited"),
+  };
+}
 
 export function resolveIssueGoalId(input: {
   projectId: MaybeId;
@@ -17,9 +44,12 @@ export function resolveNextIssueGoalId(input: {
   currentProjectGoalId?: MaybeId;
   projectId?: MaybeId;
   goalId?: MaybeId;
+  goalOrigin?: IssueGoalOrigin;
   projectGoalId?: MaybeId;
   defaultGoalId: MaybeId;
-}): string | null {
+  currentGoalOrigin?: IssueGoalOrigin;
+  currentGoalOriginGoalId?: MaybeId;
+}): { goalId: string | null; goalOrigin: IssueGoalOrigin } {
   const projectId =
     input.projectId !== undefined ? input.projectId : input.currentProjectId;
   const projectGoalId =
@@ -35,7 +65,28 @@ export function resolveNextIssueGoalId(input: {
   };
 
   if (input.goalId !== undefined) {
-    return input.goalId ?? resolveFallbackGoalId(projectId, projectGoalId);
+    const goalOrigin = input.goalOrigin ?? (input.goalId ? "explicit" : "inherited");
+    return resolveIssueGoalBinding({
+      projectId,
+      goalId: input.goalId,
+      goalOrigin,
+      projectGoalId,
+      defaultGoalId: input.defaultGoalId,
+    });
+  }
+
+  const currentGoalOrigin = effectiveIssueGoalOrigin({
+    goalId: input.currentGoalId,
+    goalOrigin: input.currentGoalOrigin ?? "unknown",
+    goalOriginGoalId: input.currentGoalOriginGoalId,
+  });
+
+  if (currentGoalOrigin === "explicit") {
+    return { goalId: input.currentGoalId ?? null, goalOrigin: "explicit" };
+  }
+
+  if (currentGoalOrigin === "inherited") {
+    return { goalId: resolveFallbackGoalId(projectId, projectGoalId), goalOrigin: "inherited" };
   }
 
   const currentFallbackGoalId = resolveFallbackGoalId(
@@ -45,12 +96,12 @@ export function resolveNextIssueGoalId(input: {
   const nextFallbackGoalId = resolveFallbackGoalId(projectId, projectGoalId);
 
   if (!input.currentGoalId) {
-    return nextFallbackGoalId;
+    return { goalId: nextFallbackGoalId, goalOrigin: "unknown" };
   }
 
   if (input.currentGoalId === currentFallbackGoalId) {
-    return nextFallbackGoalId;
+    return { goalId: nextFallbackGoalId, goalOrigin: "unknown" };
   }
 
-  return input.currentGoalId;
+  return { goalId: input.currentGoalId, goalOrigin: "unknown" };
 }

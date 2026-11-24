@@ -181,7 +181,7 @@ function ScheduleRow({
       </PopoverTrigger>
       {/* Wider when Pause/Resume joins Remove and Save, so the footer stays on one row. */}
       <PopoverContent align="start" className={cn("flex flex-col gap-4", onSetPaused ? "w-96" : "w-80")}>
-        <ScheduleEditor value={cron} onChange={setCron} onValidityChange={setValid} />
+        <ScheduleEditor value={cron} timezone={timezone} onChange={setCron} onValidityChange={setValid} />
         {!trigger.enabled && !trigger.nextRunAt && trigger.lastResult && (
           <p className="text-xs text-destructive" role="status">{trigger.lastResult}</p>
         )}

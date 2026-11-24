@@ -7,7 +7,7 @@ All commands below assume you are in the **project root** (the directory contain
 ## Building the image
 
 ```sh
-docker build -t proprio-local .
+docker build --target production -t proprio-local .
 ```
 
 The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
@@ -18,18 +18,13 @@ Build arguments:
 |-----|---------|---------|
 | `USER_UID` | `1000` | UID for the container `node` user (match your host UID to avoid permission issues on bind mounts) |
 | `USER_GID` | `1000` | GID for the container `node` group |
-| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh the CLI-install layer; CI supplies the current ISO week |
+| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh OS package and transitive npm resolution |
 | `PROPRIO_BUILD_VERSION` | empty | Runtime version when Git metadata is unavailable |
 | `PROPRIO_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
 | `PROPRIO_RUNNER_EXPECT_INPUTS_DIGEST` | empty | Inputs digest of the published Runner image a build was given as `runner-artifacts`; the build fails on any other Runner. Leave it empty for a build that makes its own Runner |
 
-Changing the build version or commit preserves the CLI-install cache. The
-tool layer refreshes when its weekly epoch, base image, installation command,
-or earlier build inputs change. Local builds can set a new epoch explicitly
-to refresh tools without clearing the entire build cache.
-
 ```sh
-docker build -t proprio-local \
+docker build --target production -t proprio-local \
   --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
 ```
 
@@ -41,95 +36,279 @@ This avoids transpiling them through the tsx loader on every boot. To check a
 build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
 PR CI runs the same check after `pnpm build`.
 
-## Image source
+### Refresh pinned image inputs
 
-Proprio does not publish or promote images for this bootstrap. Build from this
-checkout, and do not substitute a container image from a different project.
+The production build pins the external Node image indexes by digest and the
+five top-level harness CLIs by exact npm version. The full-stack Compose file
+also pins PostgreSQL. For the Linux amd64 profile, record the resolved platform
+manifest with `docker buildx imagetools inspect --raw` and retain it with the
+build evidence. The index digest fixes its platform manifests.
 
-## One-liner (build + run)
+To refresh the pins, resolve the new image index and CLI versions, update
+`Dockerfile` and the full-stack Compose file in a PR, and run:
 
 ```sh
-docker build -t proprio-local . && \
-docker run --name proprio \
-  -p 3100:3100 \
-  -e HOST=0.0.0.0 \
-  -e PROPRIO_HOME=/proprio \
-  -e BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
-  -e PROPRIO_TOOL_ACTION_SIGNING_SECRET=$(openssl rand -hex 32) \
-  -v "$(pwd)/data/docker-proprio:/proprio" \
-  proprio-local
+node scripts/check-self-hosted-image-pins.mjs
+docker build --pull --no-cache --platform linux/amd64 --target production -t proprio-local .
+docker run --rm --entrypoint npm proprio-local ls --global --depth=0 --json \
+  | node scripts/check-self-hosted-image-pins.mjs --installed
 ```
 
-Open: `http://localhost:3100`
+Run both Compose readiness and state retention checks before qualifying the
+new build. The checks cover base-image identity and exact top-level harness
+versions. OS packages and npm transitive dependencies can still change on a
+clean rebuild. Promote by tested artifact digest when distributing an image.
+The CLI layer can be refreshed with `CLI_TOOLS_CACHE_EPOCH`.
 
-Data persistence:
+## Image source
 
-- Embedded PostgreSQL data
-- uploaded assets
-- local secrets key
-- local agent workspace data
-
-All persisted under your bind mount (`./data/docker-proprio` in the example above).
+For a published Linux amd64 image, use its release record and follow the
+[digest verification and installation instructions](LINUX-IMAGE-RELEASE.md#verify-and-install).
+For a source checkout, build its `production` target above.
 
 ## Docker Compose
 
-### Persistent signing secrets
+Run these commands from the repository root with Docker Engine 28.0.0 or later,
+Docker Compose, and OpenSSL. For a new instance, copy the example once:
 
-Before the first launch, generate two independent values with `openssl rand -hex 32`
-and save them in `docker/.env`. Keep any existing deployment's values unchanged:
+```sh
+test ! -e docker/.env && install -m 600 docker/.env.compose.example docker/.env
+```
+
+Generate separate values with `openssl rand -hex 32` for `BETTER_AUTH_SECRET`
+and `PROPRIO_TOOL_ACTION_SIGNING_SECRET`. Set them in `docker/.env`, keep that
+file private, and reuse the same values across restarts and upgrades. For the
+full stack, generate a third hex value for `PROPRIO_POSTGRES_PASSWORD`. A hex
+password can be used directly in the PostgreSQL connection URL.
+
+Existing deployments should keep their signing values. If you previously left
+the tool-action secret unset, keep that setting to retain signatures derived
+from the persisted secrets master key. Resolve outstanding approvals before
+rotating signing values. Keep the signing values and master key with backups.
+
+### Quickstart with embedded PostgreSQL
+
+```sh
+docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml up --build -d --wait
+curl -fsS http://localhost:3100/api/health
+```
+
+Look for `"status":"ok"` and open <http://localhost:3100>. The application
+health check waits for readiness, including startup recovery. The quickstart
+persists database files, uploads, keys and workspaces under the bind mount
+`./data/docker-proprio`. A relative `PROPRIO_DATA_DIR` is relative to the
+Compose file, so `../data/pc` maps to `data/pc` in the repository root.
+
+For a custom port and data directory, put these values in `docker/.env`
+before running the same launch command:
 
 ```dotenv
-BETTER_AUTH_SECRET=<session-signing-secret>
-PROPRIO_TOOL_ACTION_SIGNING_SECRET=<tool-action-signing-secret>
+PROPRIO_PORT=3200
+PROPRIO_DATA_DIR=../data/pc
 ```
 
-Restrict this file to its owner (`chmod 600 docker/.env`) and keep it out of version
-control. Compose reads it for both commands below. Reuse the values on every
-restart. Rotate the tool-action secret only after outstanding approvals are
-resolved, because pending signatures use the previous value.
+Open <http://localhost:3200>. The default public URL follows the configured
+port. If you already set `PROPRIO_PUBLIC_URL`, update it to match. Supply
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` when you want to exercise those
+adapters.
 
-### Quickstart (embedded SQLite)
-
-Single container, no external database. Data persists via a bind mount.
+### Full stack with PostgreSQL 17
 
 ```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d --wait
+curl -fsS http://localhost:3100/api/health
 ```
 
-Defaults:
+PostgreSQL uses the `pgdata` volume. The server uses the `proprio-data` volume
+for instance configuration, keys, uploads and workspaces. Keep the same
+Compose project name and both volumes when upgrading.
 
-- host port: `3100`
-- persistent data dir: `./data/docker-proprio`
-
-Optional overrides:
+If your existing full stack used the old built-in database password, back up
+the database and the Proprio volume before switching files. Set the new hex
+password in `docker/.env`. With the original Compose project name, stop the
+server and start only the database from the new configuration:
 
 ```sh
-PROPRIO_PORT=3200 PROPRIO_DATA_DIR=../data/pc \
-  docker compose -f docker/docker-compose.quickstart.yml up --build
+docker compose --env-file docker/.env -f docker/docker-compose.yml stop server
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --wait db
+docker compose --env-file docker/.env -f docker/docker-compose.yml exec db psql -U proprio -d proprio
 ```
 
-**Note:** `PROPRIO_DATA_DIR` is resolved relative to the compose file (`docker/`), so `../data/pc` maps to `data/pc` in the project root.
+At the `psql` prompt, run `\password proprio` and enter the same new password
+twice. Then run `\q`, start the full stack, and verify readiness and your
+existing records. Changing the initialization variable alone does not change a
+role password in an existing volume.
 
-If you change host port or use a non-local domain, set `PROPRIO_PUBLIC_URL` to the external URL you will use in browser/auth flows.
+### Network access
 
-Pass `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` to enable local adapter runs.
+Both stacks publish the web port on `127.0.0.1` by default. Use Docker Engine
+28.0.0 or later for host-only publication. See [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/). Keep it there for
+a reverse proxy on the same host and set `PROPRIO_PUBLIC_URL` to the external
+HTTPS origin. To bind directly to a LAN or tailnet IP, set `PROPRIO_BIND_IP`
+to that interface's address and `PROPRIO_PUBLIC_URL` to the URL clients use.
+List any extra trusted hostnames in `PROPRIO_ALLOWED_HOSTNAMES`. Keep
+authenticated access enabled and restrict access at the network or proxy.
 
-### Full stack (with PostgreSQL)
+PostgreSQL stays on the Compose network. See [Local PostgreSQL](DATABASE.md#2-local-postgresql-docker)
+to opt in to a loopback-only port for development tools.
 
-Proprio server + PostgreSQL 17. The database is health-checked before the server starts.
+### Back up and restore Compose data
 
-```sh
-docker compose -f docker/docker-compose.yml up --build
+Keep the exact source SHA or image digest, project name, Compose files and
+overrides, and a protected copy of `docker/.env` with each backup. Retain
+the local secrets master key in `/proprio`, or save the external key using
+your deployment's secret store. Back up any workspace bind mounts, object
+storage, or other external artifact directories separately. The commands
+below cover the default storage layout.
+
+Run from the repository root. Use the same Compose project name and overrides
+you used when launching. For each backup of either layout, create a private
+directory outside the checkout and application volumes. The commands publish
+the recovery set as `backup` after all archive commands succeed.
+
+```bash
+umask 077
+backup_root="$(mktemp -d)" && backup_dir="$backup_root/backup"
 ```
 
-PostgreSQL data persists in a named Docker volume (`pgdata`). Proprio data persists in `proprio-data`.
+#### Embedded PostgreSQL quickstart
 
-Both Compose files pass `PROPRIO_TOOL_ACTION_SIGNING_SECRET` to the server.
-When configured, keep it independent from `BETTER_AUTH_SECRET`. When unset,
-the server derives a separate signing key from its persisted secrets master key.
-Keep that key with database backups, and share the signing key or master key
-across processes serving the same instance. Approvals fail closed if valid key
-material cannot be loaded; rotating it can invalidate approvals and retry matching.
+Stop Proprio before copying embedded PostgreSQL files. The archive includes
+the database, instance configuration, local keys, storage, and workspaces
+under the bind mount.
+
+```bash
+(
+  set -euo pipefail
+  quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
+  staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${quick[@]}" stop proprio
+  "${quick[@]}" run --rm --no-deps -T --entrypoint tar proprio \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
+```
+
+Keep the archive off the host. After a routine backup, restart the same
+project with `up -d --wait`. For a pre-upgrade backup, keep the app and
+other writers stopped until the upgrade step below.
+
+To restore, use a clean checkout of the recorded revision and copy
+`compose.env` from the backup to a private `docker/restore.env`. Set
+`PROPRIO_DATA_DIR` to a new, empty path, `PROPRIO_PORT` to a free port, and
+`PROPRIO_PUBLIC_URL` to a matching URL if it was set explicitly. Use a new
+Compose project, for example `proprio-restore`. Build the image if needed.
+
+Before the first rehearsal boot, use a disposable host or enforce an
+outbound firewall policy for the restore network. Block access to production
+integrations and agent runtimes. Mount only copies of external workspaces,
+artifact storage, and other shared data. Save the following override as
+`docker/restore-only.yml`, using `server` in place of `proprio` for the full
+stack. This disables scheduled heartbeats during the rehearsal. Keep the
+external isolation in place because startup still performs recovery.
+
+```yaml
+services:
+  proprio:
+    environment:
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
+```
+
+```bash
+(
+  set -euo pipefail
+  quick_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml)
+  "${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${quick_restore[@]}" up -d --wait
+)
+```
+
+#### Separate PostgreSQL full stack
+
+Stop the app and any other database writers. Leave PostgreSQL running and
+use its native logical backup, then save the Proprio volume separately.
+Do not copy a live PostgreSQL data directory.
+
+```bash
+(
+  set -euo pipefail
+  full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
+  staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${full[@]}" stop server
+  "${full[@]}" exec -T db sh -ec 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    > "$staged/postgres.dump"
+  "${full[@]}" exec -T db pg_restore --list < "$staged/postgres.dump" >/dev/null
+  "${full[@]}" run --rm --no-deps -T --entrypoint tar server \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
+```
+
+Use the same restart guidance as for the embedded layout. Restore with a
+fresh Compose project and fresh named volumes on the recorded version.
+Use the restored environment, outbound isolation, and `server` override
+described above. Keep the signing values and master key from the backup.
+
+```bash
+(
+  set -euo pipefail
+  full_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.yml -f docker/restore-only.yml)
+  "${full_restore[@]}" up -d --wait db
+  "${full_restore[@]}" exec -T db sh -ec '
+    pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$backup_dir/postgres.dump"
+  "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${full_restore[@]}" up -d --wait
+)
+```
+
+If a restore fails, use a fresh target for the next attempt. After either
+restore succeeds, check `/api/health` for `"status":"ok"`, sign in, and
+verify a known board record and any required files. Rehearse in isolation
+before pointing production traffic at the restored deployment. Linux
+host-loss recovery is tracked separately in
+[#134](https://github.com/groktopus/proprio/issues/134).
+
+### Upgrade the Compose application
+
+1. Record the running revision or digest and back up the topology using the
+   commands above. Keep the original keys, configuration, and backup. Keep
+   production traffic and other writers off the instance until the candidate
+   is verified.
+2. Check out the selected candidate. Use the same Compose project name, data
+   path or volumes, and signing values. Review its release notes for database
+   and credential changes.
+3. Run the normal `up --build -d --wait` command against the candidate.
+   Check readiness, sign in, and verify a known board record and file.
+4. If the new revision fails after a database migration, follow the release's
+   recovery path. Restore into a fresh project on the known-good revision
+   unless the documented change supports a payload rollback on the new
+   schema. Never use `down --volumes` on an existing installation to upgrade.
+
+Run `scripts/compose-state-smoke.sh` on a disposable Docker host to rehearse
+application recreation and fresh restore for both default topologies. The
+script creates isolated projects, signs in through the normal board API,
+and runs a synthetic local agent. It checks the same company, successful
+run, and single persisted receipt after recreation and restore. It reports
+the PostgreSQL versions on both sides and the dump and restore client
+versions for the full stack.
+Pass a locally available image or immutable image reference as its argument
+to check that image without rebuilding. The smoke uses synthetic credentials
+and requires Docker Compose, Bash, Python 3, OpenSSL, curl, and jq.
 
 ### Untrusted PR review
 

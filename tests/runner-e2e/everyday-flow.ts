@@ -40,6 +40,8 @@ import {
   type StoryInteraction,
 } from "./everyday-decisions.js";
 import { LATE_REQUIREMENT, SLUGIFY_REVISION, SLUGIFY_DEPLOYMENT_SOAK, requiresEverydayArtifactOracle } from "./everyday-cases.js";
+import { SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
+import { runSessionGoalRecovery } from "./session-goal-recovery-flow.js";
 import { everydayReliabilitySignatures, isEverydayReliabilityCase } from "./everyday-reliability-cases.js";
 import { driveReliabilityScenario, type ReliabilityOutcome } from "./everyday-reliability-flow.js";
 import {
@@ -656,6 +658,9 @@ export async function runEverydayFlow(input: Input) {
       "catalog.ts",
       "remote-workspace-storage.ts",
     ];
+    if (execution.suite.id === SESSION_GOAL_RECOVERY_SUITE) {
+      harnessFiles.push("session-goal-recovery-cases.ts", "session-goal-recovery-flow.ts", "session-goal-recovery-artifact.py");
+    }
     if (execution.suite.id === CONNECTION_GUIDANCE_SUITE) {
       harnessFiles.push("connection-guidance-cases.ts", "connection-guidance-evidence.ts");
       const [company, agent] = await Promise.all([
@@ -1232,6 +1237,15 @@ export async function runEverydayFlow(input: Input) {
         interactionId: pendingInteraction.id,
         status: decisionStatus,
       });
+    }
+    if (execution.suite.id === SESSION_GOAL_RECOVERY_SUITE) {
+      ev.checks.push(...await runSessionGoalRecovery({
+        page, api, issue: parent!, companyId: fixtures.company.id, agentId: fixtures.agent.id,
+        nonce, workspacePath: input.workspacePath, privateDir: path.join(input.privateDir, "snapshots"),
+        deadlineAt: input.deadlineAt, restart: () => input.restart(), allowInterrupted: runId => ev.allowedInterruptedRuns.push(runId),
+        settled: () => settled(), openParent,
+        evidence: input.evidence, note,
+      }));
     }
     await settled(
       caseId === "stop-redirect" ? `Reference ${nonce}`

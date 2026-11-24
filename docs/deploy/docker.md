@@ -5,36 +5,45 @@ summary: Docker Compose quickstart
 
 Run Proprio in Docker without installing Node or pnpm locally.
 
-## Compose Quickstart (Recommended)
+## Compose quickstart
+
+Clone the repository and run these commands from its root. Install Docker
+Engine 28.0.0 or later, Docker Compose, and OpenSSL on the host. For a fresh checkout, copy
+the environment template:
 
 ```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
+test ! -e docker/.env && install -m 600 docker/.env.compose.example docker/.env
 ```
 
-Open [http://localhost:3100](http://localhost:3100).
-
-Defaults:
-
-- Host port: `3100`
-- Data directory: `./data/docker-proprio`
-
-Override with environment variables:
+Run `openssl rand -hex 32` twice. Save the first value as
+`BETTER_AUTH_SECRET` and the second as `PROPRIO_TOOL_ACTION_SIGNING_SECRET`
+in `docker/.env`. Retain those values for future starts.
 
 ```sh
-PROPRIO_PORT=3200 PROPRIO_DATA_DIR=../data/pc \
-  docker compose -f docker/docker-compose.quickstart.yml up --build
+docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml up --build -d --wait
+curl -fsS http://localhost:3100/api/health
 ```
 
-**Note:** `PROPRIO_DATA_DIR` is resolved relative to the compose file (`docker/`), so `../data/pc` maps to `data/pc` in the project root.
+When the response contains `"status":"ok"`, open
+[http://localhost:3100](http://localhost:3100). The web port is local to the
+Docker host and the stack uses embedded PostgreSQL.
 
-## Manual Docker Build
+For a custom port, set `PROPRIO_PORT=3200` in `docker/.env` and run the same
+launch command. Open <http://localhost:3200>. The default public URL follows
+the port. If you set an explicit `PROPRIO_PUBLIC_URL`, update it as well.
+
+See the [Docker operations guide](https://github.com/groktopus/proprio/blob/main/doc/DOCKER.md)
+for full-stack PostgreSQL, host access settings, and the database password
+migration for existing installations.
+
+## Manual Docker build
 
 ```sh
-docker build -t proprio-local .
+docker build --target production -t proprio-local .
 docker run --name proprio \
-  -p 3100:3100 \
-  -e HOST=0.0.0.0 \
-  -e PROPRIO_HOME=/proprio \
+  --env-file docker/.env \
+  -p 127.0.0.1:3100:3100 \
+  -e PROPRIO_PUBLIC_URL=http://localhost:3100 \
   -v "$(pwd)/data/docker-proprio:/proprio" \
   proprio-local
 ```
@@ -61,9 +70,9 @@ Pass API keys to enable local adapter runs inside the container:
 
 ```sh
 docker run --name proprio \
-  -p 3100:3100 \
-  -e HOST=0.0.0.0 \
-  -e PROPRIO_HOME=/proprio \
+  --env-file docker/.env \
+  -p 127.0.0.1:3100:3100 \
+  -e PROPRIO_PUBLIC_URL=http://localhost:3100 \
   -e OPENAI_API_KEY=sk-... \
   -e ANTHROPIC_API_KEY=sk-... \
   -e GEMINI_API_KEY=... \

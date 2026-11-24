@@ -82,6 +82,8 @@ export interface RunnerGoalProjection {
   workingNow: boolean;
   activeRunId: string | null;
   pendingAction: RunnerGoalPendingAction | null;
+  pendingActionStatus?: "pending" | "reconciling" | null;
+  actionFailure?: boolean;
   revision: number;
   observedAt: string | null;
 }

@@ -52,7 +52,7 @@ export async function readRegisteredArtifacts(api: ArtifactReader, issueId: stri
     if (bytes.length !== attachment.byteSize || sha256 !== attachment.sha256) {
       throw new Error(`Downloaded registered artifact ${name} disagrees with stored bytes`);
     }
-    return { name, mimeType: attachment.contentType, content: bytes.toString("utf8"),
-      contentVerified: true, attachmentId: attachment.id, workProductId: product.id, sha256 };
+    return { name, title: product.title, mimeType: attachment.contentType, byteSize: bytes.length,
+      content: bytes.toString("utf8"), contentVerified: true, attachmentId: attachment.id, workProductId: product.id, sha256 };
   }));
 }

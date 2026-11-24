@@ -14,7 +14,46 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
-  smoke:
+  route-durable-work:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      applicable: ${{ steps.route.outputs.applicable }}
+    steps:
+      - name: Check out the trusted target policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: target-policy
+          persist-credentials: false
+      - name: Read GitHub's PR comparison commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: pr-comparison
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Route durable-work acceptance
+        id: route
+        working-directory: pr-comparison
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          policy=../target-policy/scripts/ci/durable-work-acceptance.mjs
+          if [[ -f "$policy" ]]; then
+            node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
+          else
+            echo "Target branch predates routing. Require the full Linux lane."
+            echo 'applicable=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  durable-work:
+    needs: route-durable-work
+    if: needs.route-durable-work.outputs.applicable == 'true'
+    uses: ./.github/workflows/linux-source-qualification.yml
+
+  stability-checks:
     # Fork heads run with a read-only token on a GitHub-hosted runner.
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
@@ -43,8 +82,16 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Check self-hosted Docker image pins
+        run: |
+          node --test scripts/check-self-hosted-image-pins.test.mjs
+          node scripts/check-self-hosted-image-pins.mjs
+      - name: Lint server, UI, and CLI source
+        run: pnpm lint
       - name: Check authorization, audit access, and credential lifecycle
         run: node scripts/ci/run-security-regressions.mjs
+      - name: Check durable-work workflow and lifecycle harness
+        run: node --test scripts/ci/durable-work-acceptance.test.mjs scripts/ci/durable-work-policy.test.mjs scripts/ci/durable-work-release-evidence.test.mjs scripts/ci/write-durable-work-acceptance.test.mjs scripts/create-github-release.test.mjs scripts/__tests__/e2e-update-migrations.test.mjs
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
@@ -104,7 +151,23 @@ jobs:
       - name: Check managed restart and same-version updates
         run: |
           pnpm exec vitest run cli/src/__tests__/managed-service-restart.test.ts cli/src/__tests__/service-health-check.test.ts server/src/__tests__/managed-restart-health.test.ts
-          pnpm exec vitest run cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update'
+          report="$RUNNER_TEMP/managed-update-results.json"
+          pnpm exec vitest run --reporter=default --reporter=json --outputFile="$report" \
+            cli/src/__tests__/update-command.test.ts -t 'validates a same-version Git update|settles overlapping managed Git updates'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'cli/src/__tests__/update-command.test.ts': [
+              'validates a same-version Git update before retaining its new payload (true)',
+              'validates a same-version Git update before retaining its new payload (false)',
+              'settles overlapping managed Git updates when older passes',
+              'settles overlapping managed Git updates when older fails',
+              'settles overlapping managed Git updates when both fail',
+              'settles overlapping managed Git updates when staging fails',
+            ],
+          });
+          JS
       - name: Check database backup CLI output
         run: pnpm exec vitest run cli/src/__tests__/db-backup.test.ts
       - name: Check cost summaries and database backups
@@ -114,18 +177,34 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { join } from 'node:path';
           const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'stability-results.json'), 'utf8'));
-          const assertions = result.testResults.flatMap(file => file.assertionResults);
-          const required = [
-            'aggregates run wall-clock duration across the recursive issue tree',
-            'reclaims aged orphan output while preserving a concurrent backup',
-            'preserves aged staging owned by a different live process and reclaims it after exit',
-            'preserves identity generation, sequence options and progress in JavaScript backups',
-          ];
-          for (const title of required) {
-            if (!assertions.some(test => test.title === title && test.status === 'passed')) {
-              throw new Error(`Required PostgreSQL test did not pass: ${title}`);
-            }
-          }
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(result, {
+            'server/src/__tests__/costs-service.test.ts': [
+              'aggregates run wall-clock duration across the recursive issue tree',
+            ],
+            'packages/db/src/backup-lib-binary.test.ts': [
+              'reclaims aged orphan output while preserving a concurrent backup',
+              'preserves aged staging owned by a different live process and reclaims it after exit',
+            ],
+            'packages/db/src/backup-lib.test.ts': [
+              'preserves identity generation, sequence options and progress in JavaScript backups',
+              'preserves foreign-key validation state in a JavaScript fallback restore',
+            ],
+          });
+          JS
+      - name: Check migration lock timeout and retry
+        run: |
+          report="$RUNNER_TEMP/migration-lock-results.json"
+          pnpm exec vitest run --project @groktopus/db --reporter=default --reporter=json --outputFile="$report" packages/db/src/migration-lock.test.ts
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'packages/db/src/migration-lock.test.ts': [
+              'times out the CLI while another session owns the lock and retries cleanly',
+              'waits for the lock before repairing migration history at startup',
+            ],
+          });
           JS
       - name: Check linked goal deletion
         run: |
@@ -144,6 +223,19 @@ jobs:
             'returns an actionable task deletion conflict',
             'deletes a standalone goal once and logs the successful mutation',
             'rolls back goal deletion when its activity record cannot be inserted',
+          ] });
+          JS
+      - name: Check migration staging handoff and overlap
+        run: |
+          test_file=packages/db/src/migration-staging-evidence.test.ts
+          report="$RUNNER_TEMP/migration-staging-results.json"
+          pnpm exec vitest run --project @groktopus/db --reporter=default --reporter=json --outputFile="$report" "$test_file"
+          node --input-type=module - "$report" "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), { [process.argv[3]]: [
+            'blocks a gated migration before DDL without evidence or matching packaged SQL',
+            'preserves reads and writes from both releases during an expand migration',
           ] });
           JS
       - name: Check Agent Chat supersession and Stop
@@ -247,6 +339,27 @@ jobs:
           ];
           assertRequiredVitestTests(result, { [path]: required });
           JS
+      - name: Check orphaned session-goal recovery
+        run: |
+          report="$RUNNER_TEMP/session-goal-recovery.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/__tests__/assigned-work-invariant.test.ts \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts \
+            -t 'retries an orphaned session goal|does not enqueue goal recovery beside|goal recovery at queued admission and provider dispatch'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/__tests__/assigned-work-invariant.test.ts': [
+              'retries an orphaned session goal and leaves an independent goal recoverable',
+              'does not enqueue goal recovery beside a live run',
+              'does not enqueue goal recovery beside a queued successor',
+            ],
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts':
+              ['legacy', 'current', 'paused', 'superseded', 'control_pending'].map(
+                state => `rechecks ${state} goal recovery at queued admission and provider dispatch`),
+          });
+          JS
       - name: Check recovery of unrecorded routine occurrences
         run: |
           test_file=server/src/__tests__/routine-schedule-work.test.ts
@@ -280,6 +393,28 @@ jobs:
             ],
             'server/src/__tests__/plugin-scheduled-work.test.ts': [
               'clears a saved malformed plugin deadline and still allows manual execution',
+            ],
+          });
+          JS
+      - name: Check automatic continuation against current review state
+        run: |
+          report="$RUNNER_TEMP/current-review-results.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
+            server/src/modules/run-dispatch/adapters/postgres.test.ts server/src/__tests__/issue-continuation-summary.test.ts \
+            server/src/__tests__/heartbeat-clean-continuation-dispatch.test.ts \
+            -t 'checks the current .* gate|drops the generated review wait|preserves an explicit approval wait|approval opens after queue admission'
+          node --input-type=module - "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
+            'server/src/modules/run-dispatch/adapters/postgres.test.ts': ['resolved', 'review', 'approval', 'response', 'optional_response']
+              .map(gate => `checks the current ${gate} gate before dispatching an automatic continuation`),
+            'server/src/__tests__/issue-continuation-summary.test.ts': [
+              'drops the generated review wait when execution returns to in progress',
+              'preserves an explicit approval wait after a task status change',
+            ],
+            'server/src/__tests__/heartbeat-clean-continuation-dispatch.test.ts': [
+              'cancels an automatic continuation when an approval opens after queue admission',
             ],
           });
           JS
@@ -362,3 +497,23 @@ jobs:
           pnpm --filter @groktopus/server typecheck
           pnpm --filter @groktopus/hermes-proprio-adapter build
           node scripts/run-tsc.mjs -p server/tsconfig.build.json
+
+  smoke:
+    if: ${{ always() && github.repository == 'groktopus/proprio' }}
+    needs: [stability-checks, route-durable-work, durable-work]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require smoke tests and applicable qualification
+        env:
+          STABILITY_RESULT: ${{ needs.stability-checks.result }}
+          ROUTING_RESULT: ${{ needs.route-durable-work.result }}
+          APPLICABLE: ${{ needs.route-durable-work.outputs.applicable }}
+          DURABLE_WORK_RESULT: ${{ needs.durable-work.result }}
+        run: |
+          test "$STABILITY_RESULT" = success
+          test "$ROUTING_RESULT" = success
+          case "$APPLICABLE:$DURABLE_WORK_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Durable-work gate failed ($APPLICABLE:$DURABLE_WORK_RESULT)" >&2; exit 1 ;;
+          esac

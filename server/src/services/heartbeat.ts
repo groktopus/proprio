@@ -485,10 +485,6 @@ import {
   issueTreeControlService,
 } from "./issue-tree-control.js";
 import {
-  continuationSummaryParksExecutor,
-} from "./issue-continuation-summary.js";
-
-import {
   executionWorkspaceService,
 } from "./execution-workspaces.js";
 import {
@@ -540,6 +536,7 @@ import {
   isNonAssigneeWorkspaceBusyRetry,
   extractWakeCommentIds,
   deriveCommentId,
+  isAutomaticIssueContinuationWake,
   isResolvedInteractionContinuationWakeContext,
 } from "../modules/run-dispatch/index.js";
 import {
@@ -3139,7 +3136,8 @@ export function heartbeatService(
           return { dispatched: false };
         }
         const enforceContinuationOwnership = Boolean(issueId && (isFailedChatRunRetry || isResolvedInteractionContinuationWakeContext(context) ||
-          typeof context.workspaceReconstructionActionId === "string" ||
+          isAutomaticIssueContinuationWake(context, run.scheduledRetryReason) ||
+          context.resumeSessionGoalHeartbeat === true || typeof context.workspaceReconstructionActionId === "string" ||
           ["native_safe_replacement", "native_provider_overloaded", "native_environment_blocker", "native_agent_blocker_continuation"].includes(run.scheduledRetryReason ?? "")));
         if (issueId && enforceContinuationOwnership) {
           await options.beforeResolvedInteractionContinuationDispatchCheck?.({ runId: run.id, issueId });
@@ -3561,6 +3559,7 @@ export function heartbeatService(
         const adapter = getServerAdapter(agent.adapterType);
         const durableGoalControlRun =
           readNonEmptyString(context.goalControlRequestId) !== null ||
+          readNonEmptyString(context.goalControlReconciliationRequestId) !== null ||
           context.resumeSessionGoalHeartbeat === true;
         // Compaction resumes a runner session; a direct adapter would run it as a prompt.
         if (isContextCompactionRun(context) && agent.adapterType !== "proprio_runner") {
@@ -3570,6 +3569,16 @@ export function heartbeatService(
         // direct adapter or let an old goal-control wake become a normal prompt.
         if (durableGoalControlRun && agent.adapterType !== "proprio_runner") {
           const requestId = readNonEmptyString(context.goalControlRequestId);
+          const reconciliationRequestId = readNonEmptyString(context.goalControlReconciliationRequestId);
+          if (issueRef && reconciliationRequestId) {
+            await failRunnerGoalAction(
+              db,
+              { companyId: run.companyId, issueId: issueRef.id, agentId: agent.id, adapterType: agent.adapterType },
+              reconciliationRequestId,
+              "goal_control_readback_unavailable_for_adapter",
+              "confirmed_rejection",
+            );
+          }
           if (issueRef && requestId) {
             await failRunnerGoalAction(
               db,
@@ -3581,6 +3590,7 @@ export function heartbeatService(
               },
               requestId,
               "direct_adapter_goal_controller_unavailable",
+              "confirmed_rejection",
             );
           }
           throw new Error("direct_adapter_goal_controller_unavailable");
@@ -3793,6 +3803,7 @@ export function heartbeatService(
             },
             recordCurrentHeartbeatRunRuntimeProgress,
             dispatchPendingNativeStatusWakeups,
+            recoverPendingSessionGoalActions,
           },
           effects: {
             onUsageCaptureReady: (value) => { persistUsageCaptureFailure = value; },

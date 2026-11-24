@@ -10,6 +10,14 @@ interface LinkActor {
   userId?: string | null;
 }
 
+export async function hasPendingLinkedIssueApproval(db: Pick<Db, "select">, scope: { companyId: string; issueId: string }) {
+  const [approval] = await db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
+    eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId),
+  )).where(and(eq(issueApprovals.companyId, scope.companyId), eq(issueApprovals.issueId, scope.issueId),
+    inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+  return Boolean(approval);
+}
+
 export function issueApprovalService(db: Db) {
   async function getIssue(issueId: string) {
     return db

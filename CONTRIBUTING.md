@@ -7,6 +7,7 @@ The current focus is reliable Linux self-hosting. Reproducible bug reports, focu
 - For changes to task authority, runtime isolation, session recovery, data layout, or external services, discuss the design before implementation. Say how to roll it back without losing work.
 - Attribute any patch imported from upstream and verify it independently on Proprio. A green result in a different repository is not evidence here.
 
+Use the [product vision](VISION.md) to evaluate proposal scope.
 See [the stability triage plan](STABILITY.md) for initial priorities and [SECURITY.md](SECURITY.md) for private reporting.
 
 ## Reviewing and merging
