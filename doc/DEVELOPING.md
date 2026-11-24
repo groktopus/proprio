@@ -562,6 +562,31 @@ For normal issue work, start with the smallest targeted check that proves the ch
 Use the incremental command above and required final-revision CI for PR handoff.
 Run broad local checks when an unresolved risk or explicit qualification needs them.
 
+## Board browser accessibility
+
+The required Stability smoke check runs a focused board browser accessibility
+suite when source, styles, fixtures, or dependencies can affect the UI. The
+suite opens production components in Storybook with fixture data. It checks
+selected axe rules and keyboard interactions on Chromium. Run it after
+installing the locked workspace dependencies and Chromium:
+
+```sh
+pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+pnpm exec playwright install chromium
+pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
+```
+
+The tests start a local Storybook preview. To reuse an existing preview, set
+`STORYBOOK_TEST_BASE_URL` to its origin. CI builds Storybook before starting
+Chromium so the tests load compiled fixtures. To use the same path locally,
+run `pnpm build-storybook` and set `BOARD_A11Y_STORYBOOK_DIR=ui/storybook-static`
+when invoking Playwright from the repository root. GitHub Actions publishes
+the report and failure traces in its `board-accessibility-<attempt>` artifact.
+The aggregate smoke check reports when changes do not require the suite. If a
+PR predates the suite and CI asks for an update, bring its branch up to date
+with `main` before retrying. Manual keyboard and screen-reader review still
+applies to interactions outside these fixtures.
+
 ## Storybook
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
