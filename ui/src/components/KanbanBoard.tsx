@@ -1,5 +1,5 @@
 import { AgentIdentity } from "@/components/AgentIdentity";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "@/lib/router";
 import {
   DndContext,
@@ -180,6 +180,7 @@ function KanbanColumn({
   revealIncrement,
   onShowMore,
   onStatusChange,
+  onKeyboardMove,
   moveButtonRef,
 }: {
   status: IssueDisplayStatus;
@@ -193,6 +194,7 @@ function KanbanColumn({
   revealIncrement: number;
   onShowMore: () => void;
   onStatusChange: (id: string, status: IssueStatus) => void;
+  onKeyboardMove: (event: KeyboardEvent<HTMLButtonElement>, issue: Issue) => void;
   moveButtonRef: (id: string, element: HTMLButtonElement | null) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status === "monitoring" });
@@ -258,6 +260,7 @@ function KanbanColumn({
               compact={compactCards}
               className={tone.card}
               onStatusChange={onStatusChange}
+              onKeyboardMove={onKeyboardMove}
               moveButtonRef={(element) => moveButtonRef(issue.id, element)}
             />
           ))}
@@ -292,6 +295,7 @@ function KanbanCard({
   compact = false,
   className,
   onStatusChange,
+  onKeyboardMove,
   moveButtonRef,
 }: {
   issue: Issue;
@@ -302,6 +306,7 @@ function KanbanCard({
   compact?: boolean;
   className?: string;
   onStatusChange?: (id: string, status: IssueStatus) => void;
+  onKeyboardMove?: (event: KeyboardEvent<HTMLButtonElement>, issue: Issue) => void;
   moveButtonRef?: (element: HTMLButtonElement | null) => void;
 }) {
   const {
@@ -342,6 +347,7 @@ function KanbanCard({
           ref={moveButtonRef}
           {...attributes}
           {...listeners}
+          onKeyDown={(event) => onKeyboardMove?.(event, issue)}
           className="shrink-0 cursor-grab rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
           aria-label={`Move task ${issue.title}`}
           title="Move task with arrow keys"
@@ -439,6 +445,7 @@ export function KanbanBoard({
   const [movementAnnouncement, setMovementAnnouncement] = useState("");
   const moveButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [focusIssueId, setFocusIssueId] = useState<string | null>(null);
+  const [keyboardMove, setKeyboardMove] = useState<{ issueId: string; targetIndex: number } | null>(null);
   const paginationKey = `${initialVisibleCount}:${revealIncrement}`;
   const [visibleState, setVisibleState] = useState<{
     paginationKey: string;
@@ -517,6 +524,40 @@ export function KanbanBoard({
     setMovementAnnouncement(`${issue.title} moved to ${statusLabel(status)}`);
   }
 
+  function handleKeyboardMove(event: React.KeyboardEvent<HTMLButtonElement>, issue: Issue) {
+    if (event.key !== " " && event.key !== "Enter" && event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const statuses = boardStatuses.filter((status) => status !== "monitoring");
+    const currentIndex = statuses.indexOf(issue.status as typeof statuses[number]);
+    if (currentIndex < 0) return;
+    const activeMove = keyboardMove?.issueId === issue.id ? keyboardMove : null;
+    if (event.key === "Escape") {
+      setKeyboardMove(null);
+      setMovementAnnouncement("");
+      return;
+    }
+    if (!activeMove && (event.key === " " || event.key === "Enter")) {
+      setKeyboardMove({ issueId: issue.id, targetIndex: currentIndex });
+      setMovementAnnouncement(`Use arrow keys to choose a column for ${issue.title}`);
+      return;
+    }
+    if (!activeMove) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const delta = event.key === "ArrowLeft" ? -1 : 1;
+      const targetIndex = Math.max(0, Math.min(statuses.length - 1, activeMove.targetIndex + delta));
+      setKeyboardMove({ issueId: issue.id, targetIndex });
+      setMovementAnnouncement(`${issue.title}: ${statusLabel(statuses[targetIndex]!)}`);
+      return;
+    }
+    const targetStatus = statuses[activeMove.targetIndex];
+    setKeyboardMove(null);
+    if (targetStatus && targetStatus !== issue.status) {
+      handleStatusChange(issue.id, targetStatus);
+      setFocusIssueId(issue.id);
+    }
+  }
+
   function handleDragOver(_event: DragOverEvent) {
     // Could be used for visual feedback; keeping simple for now
   }
@@ -541,6 +582,7 @@ export function KanbanBoard({
         });
       }}
       onStatusChange={handleStatusChange}
+      onKeyboardMove={handleKeyboardMove}
       moveButtonRef={(id, element) => { moveButtonRefs.current[id] = element; }}
     />
   ));

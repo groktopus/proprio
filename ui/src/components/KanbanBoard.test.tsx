@@ -225,7 +225,7 @@ describe("KanbanBoard", () => {
 
   it("exposes separate move and status controls without nesting interactive elements", () => {
     const onUpdateIssue = vi.fn();
-    const { container } = renderBoard({
+    const { container, render } = renderBoard({
       issues: [createIssue(1, "backlog")],
       onUpdateIssue,
     });
@@ -247,6 +247,26 @@ describe("KanbanBoard", () => {
     });
 
     expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
+  });
+
+  it("moves Backlog to Todo with Space, ArrowRight, Space and restores focus", () => {
+    const onUpdateIssue = vi.fn();
+    const { container, render } = renderBoard({
+      issues: [createIssue(1, "backlog")],
+      onUpdateIssue,
+    });
+    const moveButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task Issue 1"]')!;
+    moveButton.focus();
+    expect(document.activeElement).toBe(moveButton);
+
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
+
+    expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Todo");
+    render({ issues: [{ ...createIssue(1, "todo"), displayStatus: "todo" }], onUpdateIssue });
+    expect(document.activeElement).toBe(container.querySelector('button[aria-label="Move task Issue 1"]'));
   });
 
   it("resolves drop targets from status rails and cards", () => {
