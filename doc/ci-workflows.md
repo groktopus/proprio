@@ -105,6 +105,26 @@ summary retains both revisions and the executed case outcomes. The active-work
 schema migration and its run and workspace recovery evidence remain tracked in
 [#127](https://github.com/groktopus/proprio/issues/127).
 
+### Scheduled Linux source qualification
+
+GitHub Actions runs Linux source qualification on the default branch daily at
+07:43 UTC, after the 06:23 workspace regression window starts. The scheduled run uses the event's exact `main` SHA and the
+`v0.0.1` upgrade baseline. Use **Run workflow** on `main` to repeat the
+current checkout. For a pinned candidate and predecessor, use the
+[paired SHA dispatch above](#durable-work-acceptance).
+
+The job summary identifies the test revision and attempt. It reports the
+locked install, managed update and rollback, source build, first synthetic
+task and persisted receipt, fresh-target restore, and Runner recovery.
+Failed, skipped and incomplete stages remain visible. Successful runs
+retain the linked `durable-work-acceptance` artifact on the run page.
+
+The [repository owner](../.github/CODEOWNERS) triages failed and interrupted jobs. Open the
+first failed stage and route a source or Runner regression to the owning
+maintainer. Record the revision and run link when filing or updating the
+issue. A passing scheduled run is a regression baseline. For release
+publication, use the separately recorded dispatch described below.
+
 ### Source publication gate
 
 Before creating or editing a GitHub source release, `scripts/create-github-release.sh`
