@@ -40,8 +40,8 @@ Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
 
 For a fork contribution, open or retarget the pull request to `main`. If
-GitHub holds its workflow, a maintainer reviews the proposed changes and uses
-**Approve and run** on the pull request. Open the run from the Checks tab and
+GitHub holds its workflow, a maintainer reviews the proposed changes, opens **Awaiting approval** to see the **Merge status** panel, then
+selects **Approve workflows to run**. Open the run from the Checks tab and
 match its head SHA to the pull request's current head. Confirm that
 `stability-checks` executed and passed, and that the required `smoke` check
 passed. The aggregate job requires a successful test job and routing job, plus
@@ -52,12 +52,18 @@ needs its own successful run.
 The first fork qualification used [PR #144](https://github.com/groktopus/proprio/pull/144)
 at `1bffbc100ac85d0f0c48c5c4347de9cc72645f5a`. The
 [successful smoke job](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137783508363)
-checked out that head and ran tests, typecheck, and build. The cancelled
-attempt did not supply the passing check. This run predates the split of the
+was attempt 3. It checked out that head and ran tests, typecheck, and build.
+[Attempt 1](https://github.com/groktopus/proprio/actions/runs/45195834705/attempts/1)
+required approval and ran no jobs.
+[Attempt 2](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137771466960)
+was cancelled during typecheck and build. These attempts provide no passing
+evidence. The run predates the split of the
 test job and aggregate check. For the current split on a same-repository PR,
-see [PR #257](https://github.com/groktopus/proprio/pull/257) and its
+see [PR #257](https://github.com/groktopus/proprio/pull/257) at
+`a3ade7df7c560734f4a88cc54de64d96050c23c4` and its
 [executed test job](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138206578219)
 and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
+Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
 
 ### Durable-work acceptance
 
