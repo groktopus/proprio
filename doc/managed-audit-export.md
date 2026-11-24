@@ -37,3 +37,26 @@ Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
 An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
+
+## Restore qualification and limits
+
+`server/src/__tests__/agent-action-audit-routes.test.ts` exercises the normal
+export API against an older JavaScript logical backup restored into a sibling
+database. It writes delivered page bytes and the resume checkpoint to files
+outside both databases, resumes by that checkpoint, and verifies the archived
+ID watermark after a source row is deleted. The old checkpoint reports
+`snapshot_incomplete` when its row is missing. After restoring the older backup
+and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint reports
+`source_epoch_changed`; it is not a new complete export. A fresh API snapshot
+uses the restored data and current access, omits a private-task event, and
+removes expired snapshot records. The fixture qualifies an isolated logical
+restore/fork, not production PITR or an external archive provider.
+
+The 24-hour expiry applies to export snapshots, not individual managed audit
+events. There is no event-level expiry marker or restore-time deletion ledger
+for this source. The independent archive owner must apply its own retention and
+erasure rules. Before reopening export after an older restore, reconcile
+product deletion obligations from the separately retained records; rotating
+the source epoch only fences old checkpoints and does not identify rows a
+restore may have resurrected. The test demonstrates snapshot-gap and epoch
+signals, not automatic reconciliation of event deletion obligations.
