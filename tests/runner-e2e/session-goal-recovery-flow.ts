@@ -61,6 +61,18 @@ async function readGoal(api: RunnerApi, issueId: string, agentId: string): Promi
   return api.get<Row>(`/api/issues/${issueId}/runner-goal?agentId=${encodeURIComponent(agentId)}`);
 }
 
+export function normalizeIssueRunRows(rows: readonly Row[]): Array<Row & { id: string }> {
+  return rows.map(row => {
+    const id = typeof row.runId === "string" ? row.runId : row.id;
+    if (typeof id !== "string" || !id) throw new Error("issue_run_projection_missing_run_id");
+    return { ...row, id };
+  });
+}
+
+async function readIssueRuns(api: RunnerApi, issueId: string): Promise<Array<Row & { id: string }>> {
+  return normalizeIssueRunRows(await api.get<Row[]>(`/api/issues/${issueId}/runs`));
+}
+
 export function isSessionGoalControllerReady(value: {
   goal: Row;
   activeRun: Row | null | undefined;
@@ -140,7 +152,7 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
     load: async () => {
       const [goal, runs] = await Promise.all([
         readGoal(input.api, input.issue.id, input.agentId),
-        input.api.get<Row[]>(`/api/issues/${input.issue.id}/runs`),
+        readIssueRuns(input.api, input.issue.id),
       ]);
       const activeRun = runs.find((run: Row) => run.id === goal.activeRunId && run.status === "running");
       const events = activeRun
@@ -186,7 +198,7 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
       const [goal, issue, runs, checkpoint] = await Promise.all([
         readGoal(input.api, input.issue.id, input.agentId),
         input.api.get<Row>(`/api/issues/${input.issue.id}`),
-        input.api.get<Row[]>(`/api/issues/${input.issue.id}/runs`),
+        readIssueRuns(input.api, input.issue.id),
         readCheckpoint(input.workspacePath, input.nonce),
       ]);
       return { goal, issue, runs, checkpoint };
@@ -252,7 +264,7 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
     load: async () => {
       const [goal, runs] = await Promise.all([
         readGoal(input.api, input.issue.id, input.agentId),
-        input.api.get<Row[]>(`/api/issues/${input.issue.id}/runs`),
+        readIssueRuns(input.api, input.issue.id),
       ]);
       return { goal, runs };
     },
@@ -271,7 +283,7 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
   await input.openParent();
   const finalGoalProjection = await readGoal(input.api, input.issue.id, input.agentId);
   const finalIssue = await input.api.get<Row>(`/api/issues/${input.issue.id}`);
-  const finalRuns = await input.api.get<Row[]>(`/api/issues/${input.issue.id}/runs`);
+  const finalRuns = await readIssueRuns(input.api, input.issue.id);
   const latestRun = finalRuns.filter(run => run.agentId === input.agentId)
     .sort((a, b) => Date.parse(String(b.finishedAt ?? b.createdAt)) - Date.parse(String(a.finishedAt ?? a.createdAt)))[0];
   if (!latestRun) throw new Error("session_goal_final_run_missing");

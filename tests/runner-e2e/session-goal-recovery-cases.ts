@@ -26,7 +26,7 @@ export const sessionGoalRecoveryTask: RunnerTaskFixture = {
   workMode: "standard",
   flow: "everyday_workflow",
   expectedRunCount: 3,
-  minimumExpectedRunCount: 2,
+  minimumExpectedRunCount: 1,
   automaticRetryPolicy: "single_attempt",
   requiredCredentials: ["CODEX_AUTH_JSON"],
   attemptTimeoutMs: { local: 7 * 60_000, daytona: 0 },

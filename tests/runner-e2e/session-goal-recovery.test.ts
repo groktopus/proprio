@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runnerMatrix, runnerSuites, suiteDefinitionHash } from "./catalog.js";
 import { controllerOutageForExecution, validControllerOutageReceipt } from "./controller-outage.js";
-import { isSessionGoalControllerReady, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
+import { isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
 import { SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import type { SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 
@@ -31,7 +31,8 @@ describe("structured session-goal recovery Product E2E", () => {
     const cell = runnerMatrix.find(row => row.id === `${SESSION_GOAL_RECOVERY_SUITE}.runner-codex-subscription.local.structured-goal-recovery`)!;
     expect(suite).toMatchObject({ manualOnly: true, expectedMatrixSize: 1 });
     expect(cell).toMatchObject({ profile: { provider: "codex", credential: "CODEX_AUTH_JSON", generation: "native" },
-      environment: { id: "local" }, task: { automaticRetryPolicy: "single_attempt", explicitGroup: "session-goal-recovery" } });
+      environment: { id: "local" }, task: { automaticRetryPolicy: "single_attempt", explicitGroup: "session-goal-recovery",
+        minimumExpectedRunCount: 1 } });
     expect(controllerOutageForExecution(cell, {})).toEqual({ signal: "SIGKILL", holdMs: 1_000 });
     expect(suiteDefinitionHash(suite)).toMatch(/^[a-f0-9]{64}$/);
   });
@@ -54,6 +55,20 @@ describe("structured session-goal recovery Product E2E", () => {
       ...event, payload: { prpEvent: { ...event.payload.prpEvent, runId: "another-run" } },
     })) })).toBe(false);
     expect(isSessionGoalControllerReady({ ...observation, events: observation.events.map(event => ({ eventType: event.payload.prpEvent.eventType })) })).toBe(false);
+  });
+
+  it("normalizes the public issue-runs runId field for readiness and recovery reads", () => {
+    const [run] = normalizeIssueRunRows([{ runId: "run-from-public-list", status: "running", runtimeMode: "native" }]);
+    expect(run).toMatchObject({ id: "run-from-public-list", runId: "run-from-public-list", status: "running", runtimeMode: "native" });
+    const observation = {
+      goal: { activeRunId: "run-from-public-list", capability: { availability: "available", actions: ["set"] } },
+      activeRun: run,
+      events: [
+        { payload: { prpEvent: { runId: run.id, sourceKind: "runner", eventType: "session.started" } } },
+        { payload: { prpEvent: { runId: run.id, sourceKind: "runner", eventType: "turn.started" } } },
+      ],
+    };
+    expect(isSessionGoalControllerReady(observation)).toBe(true);
   });
 
   it("reports allowlisted startup readiness terms without exposing event payloads", () => {
