@@ -1,18 +1,16 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db } from "@groktopus/db";
-import { and, asc, eq, exists, gte, inArray, isNull, lt, lte, or } from "drizzle-orm";
-import { conflict, notFound } from "../errors.js";
+import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
+import { and, asc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or } from "drizzle-orm";
+import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { authorizationService, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
+import { heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
-type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
-
 type ExportScope = {
   companyId: string;
-  userId: string;
   sourceEpoch: string;
   actor: AuthorizationActor;
   retainAfter: Date | null;
@@ -20,23 +18,53 @@ type ExportScope = {
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
 
+function actorUserId(scope: ExportScope) {
+  if (scope.actor.type !== "board" || !scope.actor.userId) {
+    throw forbidden("Managed audit exports require authenticated board access");
+  }
+  return scope.actor.userId;
+}
+
+async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope) {
+  const userId = actorUserId(scope);
+  const allowed = await authorizationService(tx).decide({
+    actor: scope.actor,
+    action: "audit:view_agent_actions",
+    resource: { type: "company", companyId: scope.companyId },
+  });
+  if (!allowed.allowed) throw forbidden("Missing permission: audit:view_agent_actions");
+  return userId;
+}
+
 async function visibleEvents(db: DbTransaction, { companyId, actor }: ExportScope) {
-  const readable = await issueReadSqlCondition(db, actor, { enforcePrivacy: true });
   const hasIssueAccess = (issueId: typeof managedAuditEvents.taskId | typeof heartbeatRuns.issueId) =>
     exists(db.select({ id: issues.id }).from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), readable)));
-  const runVisible = exists(db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(and(
-      eq(heartbeatRuns.companyId, companyId),
-      eq(heartbeatRuns.id, managedAuditEvents.runId),
-      or(eq(heartbeatRuns.scopeKind, "company"), hasIssueAccess(heartbeatRuns.issueId)),
-    )));
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), issuePrivacySqlCondition(actor))));
+  const runVisible = await heartbeatRunReadSqlCondition(db, actor, companyId, managedAuditEvents.runId);
   return and(
     eq(managedAuditEvents.companyId, companyId),
     eq(managedAuditEvents.source, "tool_gateway"),
     or(isNull(managedAuditEvents.taskId), hasIssueAccess(managedAuditEvents.taskId)),
     or(isNull(managedAuditEvents.runId), runVisible),
   );
+}
+
+async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportScope, window: { from: Date; to: Date }) {
+  // This detects retained events whose task/run binding disappeared. It cannot
+  // detect a producer that never persisted an event for an in-scope decision.
+  const sourceWindow = and(
+    eq(managedAuditEvents.companyId, scope.companyId),
+    eq(managedAuditEvents.source, "tool_gateway"),
+    gte(managedAuditEvents.occurredAt, window.from),
+    lt(managedAuditEvents.occurredAt, window.to),
+  );
+  const missingRun = and(isNotNull(managedAuditEvents.runId), not(exists(tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
+  const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
+    .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
+    .where(and(sourceWindow, or(missingRun, missingTask))).limit(1);
+  if (missing) throw conflict("Managed audit source has unavailable event bindings. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
 }
 
 function exportReceipt(snapshot: typeof managedAuditExports.$inferSelect) {
@@ -64,16 +92,18 @@ export async function createManagedAuditExport(
   scope: ExportScope & { captureFrom: Date },
   window: { from: Date; to: Date },
 ) {
-  assertRetainedWindow(scope, window.from);
-  if (window.from < scope.captureFrom) {
-    throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
-  }
   const publications: ActivityPublication[] = [];
   const snapshot = await db.transaction(async tx => {
+    const userId = await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
     const now = new Date();
     await tx.delete(managedAuditExports).where(and(
       eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
     ));
+    await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
       .where(and(visible, gte(managedAuditEvents.occurredAt, window.from), lt(managedAuditEvents.occurredAt, window.to)))
@@ -82,7 +112,7 @@ export async function createManagedAuditExport(
     const watermark = createHash("sha256").update(JSON.stringify(eventIds)).digest("hex");
     const [saved] = await tx.insert(managedAuditExports).values({
       companyId: scope.companyId,
-      userId: scope.userId,
+      userId,
       sourceEpoch: scope.sourceEpoch,
       ...window,
       eventIds,
@@ -92,7 +122,7 @@ export async function createManagedAuditExport(
     await logActivity(tx as unknown as Db, {
       companyId: scope.companyId,
       actorType: "user",
-      actorId: scope.userId,
+      actorId: userId,
       action: "audit.managed_export_created",
       entityType: "company",
       entityId: scope.companyId,
@@ -129,10 +159,11 @@ export async function readManagedAuditExportPage(
   cursor?: string,
 ) {
   return db.transaction(async tx => {
+    const userId = await assertCurrentAuditAuthority(tx, scope);
     const [snapshot] = await tx.select().from(managedAuditExports).where(and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),
-      eq(managedAuditExports.userId, scope.userId),
+      eq(managedAuditExports.userId, userId),
     ));
     if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {

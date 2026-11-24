@@ -29,6 +29,8 @@ import {
   runDatabaseRestore,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { errorHandler } from "../middleware/error-handler.js";
+import { readManagedAuditExportPage } from "../services/managed-audit-export.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -43,9 +45,7 @@ async function createApp(db: Db, actor: Express.Request["actor"]) {
     next();
   });
   app.use("/api", activityRoutes(db));
-  app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(error.status ?? 500).json({ error: error.message ?? "Internal server error", ...(error.details ? { details: error.details } : {}) });
-  });
+  app.use(errorHandler);
   return app;
 }
 
@@ -61,6 +61,8 @@ describePostgres("agent action audit routes", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(managedAuditExports);
+    await db.delete(managedAuditEvents);
     await db.delete(caseEvents);
     await db.delete(cases);
     await db.delete(issueDocuments);
@@ -131,7 +133,7 @@ describePostgres("agent action audit routes", () => {
     return { company, agent, otherAgent, issue, comment, issueDocument, run };
   }
 
-  it("exports a frozen managed audit window beyond the CSV cap and detects lost evidence", async () => {
+  it("exports a frozen managed audit window beyond the CSV cap and detects known missing bindings", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
@@ -142,7 +144,7 @@ describePostgres("agent action audit routes", () => {
     });
     const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
     const anon = request(await createApp(db, { type: "none", source: "none" }));
-    const epoch = randomUUID();
+    const epoch = randomUUID().toUpperCase();
     const at = new Date("2026-07-17T00:00:01.000Z");
     const baseEvent = {
       companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
@@ -173,11 +175,29 @@ describePostgres("agent action audit routes", () => {
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     try {
       expect((await anon.post(path).send(window)).status).toBe(403);
+      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
       expect((await board.post(path).send({ ...window, from: "2026-07-16T00:00:00Z" })).body)
         .toMatchObject({ details: { reasonCode: "unsupported_interval" } });
+      expect((await board.post(path).send({ ...window, from: "2026-07-17T00:00:00.000900Z" })).status).toBe(400);
+      expect((await board.post(path).send({ ...window, to: "2026-07-17T00:00:02.000900Z" })).status).toBe(400);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", "2026-07-17T00:00:00.000900Z");
+      expect((await board.post(path).send(window)).status).toBe(403);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+      const [deletedRun] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id }).returning();
+      await db.insert(managedAuditEvents).values({ ...baseEvent, runId: deletedRun.id, invocationId: randomUUID() });
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, deletedRun.id));
+      const orphaned = await board.post(path).send(window);
+      expect(orphaned.status, orphaned.text).toBe(409);
+      expect(orphaned.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
+      expect((await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created")).toHaveLength(0);
+      await db.delete(managedAuditEvents).where(eq(managedAuditEvents.runId, deletedRun.id));
       const receipt = await board.post(path).send(window);
       expect(receipt.status, receipt.text).toBe(201);
-      expect(receipt.body).toMatchObject({ eventCount: eventRows.length, sourceEpoch: epoch });
+      expect(receipt.body).toMatchObject({ eventCount: eventRows.length, sourceEpoch: epoch.toLowerCase() });
+      const exportAudit = (await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created");
+      expect(exportAudit).toHaveLength(1);
+      expect(exportAudit[0]).toMatchObject({ companyId: company.id, actorType: "user", actorId: userId, entityType: "company", entityId: company.id, details: { exportId: receipt.body.exportId } });
       const exportPath = `${path}/${receipt.body.exportId}`;
       await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
       const first = await board.get(exportPath);
@@ -204,6 +224,10 @@ describePostgres("agent action audit routes", () => {
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
       expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
       await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
+      await expect(readManagedAuditExportPage(db, {
+        companyId: company.id, sourceEpoch: epoch.toLowerCase(),
+        actor: { type: "board", source: "session", userId, companyIds: [company.id] },
+      }, receipt.body.exportId)).rejects.toMatchObject({ status: 403 });
       expect((await board.get(exportPath)).status).toBe(403);
     } finally {
       vi.unstubAllEnvs();

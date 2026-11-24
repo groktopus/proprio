@@ -62556,24 +62556,91 @@
           "activity"
         ],
         "summary": "Create a minimized managed audit export snapshot",
+        "description": "Detects retained events with missing task/run bindings before snapshot creation. This cannot detect decisions a producer never persisted.",
         "responses": {
           "201": {
-            "description": "Success",
+            "description": "Managed audit export receipt",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": {}
+                  "properties": {
+                    "exportId": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "tool_gateway"
+                      ]
+                    },
+                    "coverage": {
+                      "type": "string",
+                      "enum": [
+                        "initial_gateway_decisions"
+                      ]
+                    },
+                    "sourceEpoch": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "watermark": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "eventCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "expiresAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "exportId",
+                    "source",
+                    "coverage",
+                    "sourceEpoch",
+                    "from",
+                    "to",
+                    "watermark",
+                    "eventCount",
+                    "expiresAt"
+                  ]
                 }
               }
             }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Invalid window",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62583,7 +62650,26 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62593,17 +62679,55 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "Export cannot be created for this window or source state. For retention_window_expired, start the window at or after the configured retention cutoff.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62615,8 +62739,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -62648,13 +62771,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       }
     },
@@ -62666,22 +62786,186 @@
         "summary": "Read a managed audit export page",
         "responses": {
           "200": {
-            "description": "Success",
+            "description": "Managed audit export page",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": {}
+                  "properties": {
+                    "exportId": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "tool_gateway"
+                      ]
+                    },
+                    "coverage": {
+                      "type": "string",
+                      "enum": [
+                        "initial_gateway_decisions"
+                      ]
+                    },
+                    "sourceEpoch": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "watermark": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "eventCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "expiresAt": {
+                      "type": "string"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "companyId": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "schemaVersion": {
+                            "type": "integer"
+                          },
+                          "eventType": {
+                            "type": "string"
+                          },
+                          "phase": {
+                            "type": "string"
+                          },
+                          "occurredAt": {
+                            "type": "string"
+                          },
+                          "runId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "taskId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "invocationId": {
+                            "type": "string"
+                          },
+                          "requestId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "connectionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "actorType": {
+                            "type": "string"
+                          },
+                          "actorId": {
+                            "type": "string"
+                          },
+                          "decision": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "companyId",
+                          "source",
+                          "schemaVersion",
+                          "eventType",
+                          "phase",
+                          "occurredAt",
+                          "runId",
+                          "taskId",
+                          "invocationId",
+                          "requestId",
+                          "connectionId",
+                          "actorType",
+                          "actorId",
+                          "decision",
+                          "status",
+                          "reasonCode"
+                        ]
+                      }
+                    },
+                    "deliveredThrough": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "exportId",
+                    "source",
+                    "coverage",
+                    "sourceEpoch",
+                    "from",
+                    "to",
+                    "watermark",
+                    "eventCount",
+                    "expiresAt",
+                    "events",
+                    "deliveredThrough",
+                    "nextCursor",
+                    "complete"
+                  ]
                 }
               }
             }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Invalid cursor or identifiers",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62691,7 +62975,26 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62701,27 +63004,84 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Export not found",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "Export requires reconciliation. For retention_window_expired, open a new export beginning at or after the configured retention cutoff.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
@@ -62733,8 +63093,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           },
           {
@@ -62742,8 +63101,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           },
           {
@@ -62762,13 +63120,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       }
     },
