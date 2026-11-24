@@ -1,9 +1,5 @@
-import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
-
-async function json(response: APIResponse) {
-  expect(response.ok(), `${response.status()} ${await response.text()}`).toBe(true);
-  return response.json();
-}
+import { expect, test, type APIRequestContext } from "@playwright/test";
+import { json } from "./http";
 
 async function company(request: APIRequestContext, name: string) {
   const fixture = await json(await request.post("/api/companies", { data: { name } }));
@@ -19,7 +15,6 @@ async function company(request: APIRequestContext, name: string) {
 
 async function enableMobileTaskUi(request: APIRequestContext) {
   await json(await request.patch("/api/instance/settings/experimental", { data: {
-    enableAgentChat: true,
     enableClassicTaskInterface: false,
     enableStreamlinedUi: true,
   } }));
@@ -35,6 +30,7 @@ test.describe("issue #164 mobile WebKit journeys", () => {
 
       const editor = page.getByRole("textbox", { name: "editable markdown", exact: true });
       await expect(editor).toBeVisible();
+      await expect(editor).toBeFocused();
       await editor.fill("Draft this task on mobile WebKit");
       await expect(editor).toHaveText("Draft this task on mobile WebKit");
       await expect(page.getByRole("button", { name: "Create task", exact: true })).toBeVisible();
@@ -55,12 +51,21 @@ test.describe("issue #164 mobile WebKit journeys", () => {
       const editor = composer.getByRole("textbox", { name: "editable markdown", exact: true });
       await expect(editor).toBeVisible({ timeout: 30_000 });
 
-      await page.setViewportSize({ width: 390, height: 430 });
+      await page.evaluate(() => {
+        const viewport = window.visualViewport;
+        if (!viewport) throw new Error("visualViewport is unavailable");
+        Object.defineProperty(viewport, "height", { configurable: true, value: 430 });
+        viewport.dispatchEvent(new Event("resize"));
+      });
       await editor.fill("Keep the composer reachable while the keyboard is open");
       const viewportHeight = await page.evaluate(() => window.visualViewport?.height ?? window.innerHeight);
       const bounds = await composer.boundingBox();
+      const send = page.getByTestId("task-chat-composer-send").last();
+      const sendBounds = await send.boundingBox();
       expect(bounds).not.toBeNull();
+      expect(sendBounds).not.toBeNull();
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewportHeight + 1);
+      expect(sendBounds!.y + sendBounds!.height).toBeLessThanOrEqual(viewportHeight + 1);
       await expect(editor).toHaveText("Keep the composer reachable while the keyboard is open");
     } finally {
       await request.delete(`/api/companies/${fixture.id}`);
@@ -83,7 +88,13 @@ test.describe("issue #164 mobile WebKit journeys", () => {
       const tasksTab = page.getByRole("option", { name: /Tasks/ });
       await expect(tasksTab).toBeVisible({ timeout: 30_000 });
       await tasksTab.click();
-      await expect(page.getByRole("link", { name: /WebKit nested task/ })).toBeVisible();
+      const child = page.getByRole("link", { name: /WebKit nested task/ });
+      await expect(child).toBeVisible();
+      const subtasks = page.getByRole("button", { name: "Subtasks", exact: true });
+      await subtasks.tap();
+      await expect(child).toBeHidden();
+      await subtasks.tap();
+      await expect(child).toBeVisible();
     } finally {
       await request.delete(`/api/companies/${fixture.id}`);
     }

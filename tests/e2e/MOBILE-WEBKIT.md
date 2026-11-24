@@ -14,6 +14,17 @@ pnpm exec playwright install webkit
 pnpm test:e2e:mobile-webkit
 ```
 
+On Linux, install WebKit system libraries as well:
+
+```sh
+pnpm exec playwright install --with-deps webkit
+```
+
+The dedicated configuration clears `DATABASE_URL` and
+`DATABASE_MIGRATION_URL` and disables checkout `.env` loading before the
+throwaway server starts. The suite therefore uses only its embedded test
+database.
+
 The suite uses Playwright WebKit with an emulated iPhone 13 viewport. This is
 browser-engine and viewport evidence. It does not prove iOS Safari's native
 virtual keyboard, safe-area insets, or visual viewport event timing.
