@@ -110,6 +110,10 @@ for profile in embedded external; do
     '{name:"Compose smoke", $email, $password}' | post auth/sign-up/email >/dev/null
   printf '{}' | post bootstrap/claim | jq -e '.claimed' >/dev/null
   company_id="$(printf '{"name":"Compose state smoke"}' | post companies | jq -er '.id')"
+  invite_url="$(printf '{"allowedJoinTypes":"human"}' | post "companies/$company_id/invites" |
+    jq -er --arg url "$url" '.inviteUrl | select(startswith($url + "/invite/"))')"
+  curl --fail --silent --show-error "$url/api/invites/${invite_url##*/}" |
+    jq -e --arg company "$company_id" '.companyId == $company' >/dev/null
   compose "$source" exec -T "$service" sh -c 'mkdir -p /proprio/smoke && printf retained > /proprio/smoke/receipt'
   assert_record
 
