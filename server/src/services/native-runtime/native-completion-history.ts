@@ -15,10 +15,12 @@ import {
   workAssessments,
 } from "@groktopus/db";
 import type {
+  NativeCompletionCriterionAssessment,
   NativeCompletionEvidenceKind,
   NativeCompletionEvidenceOutcome,
   NativeCompletionEvidenceReference,
   NativeCompletionHistoryEntry,
+  NativeCompletionVerificationAssessment,
 } from "@groktopus/shared";
 
 type RecordValue = Record<string, unknown>;
@@ -180,14 +182,14 @@ export async function readNativeCompletionHistory(db: Db, scope: { companyId: st
     const criteriaRows = Array.isArray(assessmentJson.criterionAssessments) ? assessmentJson.criterionAssessments : [];
     const verificationRows = Array.isArray(assessmentJson.verificationAssessments) ? assessmentJson.verificationAssessments : [];
     const [criterionAssessments, verificationAssessments] = await Promise.all([
-      Promise.all(criteriaRows.map(async (value) => {
+      Promise.all(criteriaRows.map(async (value): Promise<NativeCompletionCriterionAssessment> => {
         const item = record(value);
         const sources = Array.isArray(item.evidenceRefs) ? item.evidenceRefs.map(evidenceSource).filter((entry): entry is EvidenceSource => !!entry) : [];
         return { criterionId: text(item.criterionId) ?? "unknown", claimStatus: item.claimStatus === "satisfied" || item.claimStatus === "not_satisfied" || item.claimStatus === "unknown" ? item.claimStatus : null,
           outcome: outcome(item.outcome), reasonCode: text(item.reasonCode) ?? "assessment_reason_unavailable",
           evidence: await Promise.all(sources.map((source) => evidenceReference(db, { ...scope, runId: row.runId }, source))) };
       })),
-      Promise.all(verificationRows.map(async (value) => {
+      Promise.all(verificationRows.map(async (value): Promise<NativeCompletionVerificationAssessment> => {
         const item = record(value);
         const source = evidenceSource(item.evidenceRef);
         return { commandOrCheck: text(item.commandOrCheck) ?? "Verification", claimStatus: item.claimStatus === "passed" || item.claimStatus === "failed" || item.claimStatus === "not_run" ? item.claimStatus : "not_run",
