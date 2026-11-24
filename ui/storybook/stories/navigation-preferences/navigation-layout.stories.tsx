@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 import {
   Bot,
   CircleDot,
@@ -19,6 +20,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { PluginLauncherProvider } from "@/plugins/launchers";
 import { SidebarAccountMenu } from "@/components/SidebarAccountMenu";
 import { SidebarCompanyMenu } from "@/components/SidebarCompanyMenu";
+import { SidebarCompanyMenu as ClassicSidebarCompanyMenu } from "@/components/SidebarCompanyMenu.production";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -248,24 +250,20 @@ function NavigationLayoutStories() {
           </div>
         </Section>
 
-        <Section eyebrow="Menus" title="Account, company, and switcher menus in open state">
+        <Section eyebrow="Menus" title="Account, company, and switcher triggers">
           <div className="grid gap-5 xl:grid-cols-3">
             <div className="relative h-[440px] overflow-hidden border border-border bg-background">
               <div className="absolute bottom-0 left-0 w-72">
-                <SidebarAccountMenu
-                  deploymentMode="authenticated"
-                  open
-                  onOpenChange={() => undefined}
-                />
+                <SidebarAccountMenu deploymentMode="authenticated" />
               </div>
             </div>
 
             <div className="h-[260px] overflow-hidden border border-border bg-background p-3">
-              <SidebarCompanyMenu open onOpenChange={() => undefined} />
+              <SidebarCompanyMenu />
             </div>
 
             <div className="h-[320px] overflow-hidden border border-border bg-background p-4">
-              <CompanySwitcher open onOpenChange={() => undefined} />
+              <CompanySwitcher />
             </div>
           </div>
         </Section>
@@ -358,7 +356,8 @@ const meta = {
         "navigation-preferences/navigation"
       ],
       "implementation": "production",
-      "boundary": "fixtures"
+      "boundary": "fixtures",
+      "notes": "BoardChromeMatrix compares the shell and closed menu triggers. The isolated account, organization menu, and switcher stories exercise one production overlay at a time."
     },
   },
 } satisfies Meta<typeof NavigationLayoutStories>;
@@ -368,6 +367,67 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const BoardChromeMatrix: Story = {};
+
+async function exerciseOverlay(canvasElement: HTMLElement, trigger: HTMLElement, role: "dialog" | "menu",
+  onOpen?: (overlay: HTMLElement) => Promise<void>,
+) {
+  const body = within(canvasElement.ownerDocument.body);
+  await expect(body.queryByRole(role)).not.toBeInTheDocument();
+  trigger.focus();
+  await userEvent.keyboard("{Enter}");
+  const overlay = await body.findByRole(role);
+  await expect(overlay).toContainElement(canvasElement.ownerDocument.activeElement as HTMLElement);
+  await onOpen?.(overlay);
+  await userEvent.keyboard("{Escape}");
+  await expect(body.queryByRole(role)).not.toBeInTheDocument();
+  await expect(trigger).toHaveFocus();
+  canvasElement.dataset.navigationOverlayVerified = "true";
+}
+
+export const AccountPopover: Story = {
+  render: () => <SidebarAccountMenu deploymentMode="authenticated" />,
+  play: async ({ canvasElement }) => {
+    const trigger = await within(canvasElement).findByRole("button", { name: "Open account menu" });
+    await exerciseOverlay(canvasElement, trigger, "dialog");
+  },
+};
+
+async function exerciseOrganizationMenu(canvasElement: HTMLElement) {
+  const trigger = await within(canvasElement).findByRole("button", { name: /Open .*(organization|company) switcher/ });
+  await exerciseOverlay(canvasElement, trigger, "menu", async (overlay) => {
+    const menu = within(overlay);
+    const edit = await menu.findByRole("menuitem", { name: "Edit" });
+    edit.focus();
+    await userEvent.keyboard("{Enter}");
+    const original = menu.getAllByRole("menuitem", { name: /^Reorder / });
+    await expect(original.length).toBeGreaterThan(1);
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(original[0]).toHaveFocus();
+    await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
+    await expect(menu.getAllByRole("menuitem", { name: /^Reorder / })[1]).toBe(original[0]);
+    await expect(original[0]).toHaveFocus();
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    await expect(menu.getAllByRole("menuitem", { name: /^Reorder / })[0]).toBe(original[0]);
+  });
+}
+
+export const OrganizationMenu: Story = {
+  render: () => <SidebarCompanyMenu />,
+  play: async ({ canvasElement }) => exerciseOrganizationMenu(canvasElement),
+};
+
+export const ClassicOrganizationMenu: Story = {
+  render: () => <ClassicSidebarCompanyMenu />,
+  play: async ({ canvasElement }) => exerciseOrganizationMenu(canvasElement),
+};
+
+export const OrganizationSwitcher: Story = {
+  render: () => <CompanySwitcher />,
+  play: async ({ canvasElement }) => {
+    const trigger = await within(canvasElement).findByRole("button");
+    await exerciseOverlay(canvasElement, trigger, "menu");
+  },
+};
 
 // PAP-10676 verification harness: renders the real Sidebar at a fixed width so a
 // screenshot of the expanded state and a screenshot of the pinned-collapsed rail

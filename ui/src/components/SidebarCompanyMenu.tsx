@@ -77,14 +77,15 @@ function SortableCompanyItem({
   isEditing,
   isSelected,
   onSelect,
+  onMove,
 }: {
   company: Company;
   isEditing: boolean;
   isSelected: boolean;
   onSelect: (company: Company) => void;
+  onMove: (companyId: string, direction: -1 | 1) => boolean;
 }) {
   const {
-    attributes,
     listeners,
     setActivatorNodeRef,
     setNodeRef,
@@ -96,6 +97,17 @@ function SortableCompanyItem({
   return (
     <DropdownMenuItem
       ref={setNodeRef}
+      aria-label={isEditing ? `Reorder ${company.name}` : undefined}
+      aria-keyshortcuts={isEditing ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+      onKeyDown={(event) => {
+        if (!isEditing || !event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const item = event.currentTarget;
+        if (onMove(company.id, event.key === "ArrowUp" ? -1 : 1)) {
+          requestAnimationFrame(() => { if (item.isConnected) item.focus(); });
+        }
+      }}
       data-selected={isSelected || undefined}
       style={{
         transform: CSS.Transform.toString(transform),
@@ -127,20 +139,14 @@ function SortableCompanyItem({
         )}
       </span>
       {isEditing ? (
-        <button
-          type="button"
+        <span
           ref={setActivatorNodeRef}
-          aria-label={`Reorder ${company.name}`}
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-(length:--rad-2) focus-visible:ring-ring"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-          }}
-          {...attributes}
+          aria-hidden="true"
+          className="inline-flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           {...listeners}
         >
-          <GripVertical className="size-4" aria-hidden="true" />
-        </button>
+          <GripVertical className="size-4" />
+        </span>
       ) : (
         <span className="flex size-5 shrink-0 items-center justify-center">
           {isSelected ? <Check className="size-4 text-foreground" /> : null}
@@ -161,6 +167,7 @@ export function SidebarCompanyMenu({ showChevron, ...props }: SidebarCompanyMenu
 function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = true }: SidebarCompanyMenuProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const [isEditingOrder, setIsEditingOrder] = useState(false);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState("");
   const { companies, selectedCompany, setSelectedCompanyId, companyListUnavailable, retryCompanies } =
     useCompany();
   const { openOnboarding } = useDialogActions();
@@ -206,7 +213,10 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = 
   const signOutMutation = useSignOut({ onSignedOut: closeNavigationChrome });
 
   function handleOpenChange(nextOpen: boolean) {
-    if (!nextOpen) setIsEditingOrder(false);
+    if (!nextOpen) {
+      setIsEditingOrder(false);
+      setReorderAnnouncement("");
+    }
     setOpen(nextOpen);
   }
 
@@ -257,8 +267,17 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = 
     [orderedCompanies, persistOrder],
   );
 
+  function moveCompany(companyId: string, direction: -1 | 1) {
+    const index = orderedCompanies.findIndex((company) => company.id === companyId);
+    const position = index + direction;
+    if (index < 0 || position < 0 || position >= orderedCompanies.length) return false;
+    persistOrder(arrayMove(orderedCompanies.map((company) => company.id), index, position));
+    setReorderAnnouncement(`${orderedCompanies[index]!.name} moved to position ${position + 1} of ${orderedCompanies.length}`);
+    return true;
+  }
+
   return (
-    <DropdownMenu open={open} onOpenChange={handleOpenChange}>
+    <DropdownMenu modal={false} open={open} onOpenChange={handleOpenChange}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -304,23 +323,28 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = 
           <DropdownMenuLabel className="p-0 text-(length:--text-compact) font-semibold text-foreground">
             Organizations
           </DropdownMenuLabel>
-          <button
-            type="button"
-            onClick={(event) => {
+          <DropdownMenuItem
+            onSelect={(event) => {
               event.preventDefault();
-              event.stopPropagation();
               setIsEditingOrder((current) => !current);
             }}
             className="rounded px-1.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
             {isEditingOrder ? "Done" : "Edit"}
-          </button>
+          </DropdownMenuItem>
         </FlyoutHeader>
         <FlyoutOptions className="flex max-h-96 flex-col gap-0.5 overflow-y-auto px-2.5 pb-2 pt-1">
+          {isEditingOrder && (
+            <p className="px-2.5 py-1 text-xs text-muted-foreground">
+              Press Alt+Up or Alt+Down to move the focused organization.
+            </p>
+          )}
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
             onDragEnd={handleDragEnd}
+            // Drag announcements are live regions, outside the menu item tree.
+            accessibility={{ container: typeof document === "undefined" ? undefined : document.body }}
           >
             <SortableContext
               items={orderedCompanies.map((company) => company.id)}
@@ -333,6 +357,7 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = 
                   isEditing={isEditingOrder}
                   isSelected={company.id === selectedCompany?.id}
                   onSelect={selectCompany}
+                  onMove={moveCompany}
                 />
               ))}
             </SortableContext>
@@ -411,6 +436,7 @@ function BuiltinCompanyMenu({ open: controlledOpen, onOpenChange, showChevron = 
           ) : null}
         </FlyoutOptions>
       </DropdownMenuContent>
+      <span role="status" className="sr-only">{reorderAnnouncement}</span>
     </DropdownMenu>
   );
 }
