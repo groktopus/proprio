@@ -98,6 +98,33 @@ assert_record() {
       'any(.[]; .id == $id and .name == $name)' >/dev/null
 }
 
+run_status() {
+  curl --max-time 5 --fail --silent --show-error --cookie "$cookie" "$url/api/heartbeat-runs/$run_id" |
+    jq -er --arg id "$run_id" 'select(.id == $id) | .status'
+}
+
+run_synthetic_agent() {
+  local agent_id deadline status=pending
+  local program='const fs = require("node:fs"); const path = process.argv[1]; fs.mkdirSync(require("node:path").dirname(path), { recursive: true }); fs.appendFileSync(path, process.argv[2] + "\n");'
+  agent_id="$(jq -n --arg path "$receipt_path" --arg value "$receipt_value" --arg program "$program" '{
+    name: "Synthetic agent", role: "ceo", adapterType: "process",
+    adapterConfig: {command: "node", args: ["-e", $program, $path, $value]}
+  }' | post "companies/$company_id/agents" | jq -er '.id')"
+  run_id="$(printf '{"source":"on_demand","reason":"Compose state smoke"}' |
+    post "agents/$agent_id/wakeup" | jq -er '.id')"
+  deadline=$(( SECONDS + 45 ))
+  while (( SECONDS < deadline )); do
+    status="$(run_status)"
+    case "$status" in
+      succeeded) return 0 ;;
+      failed|cancelled|timed_out|interrupted) break ;;
+    esac
+    sleep 1
+  done
+  printf 'Synthetic run %s ended the wait in status %s\n' "$run_id" "$status" >&2
+  return 1
+}
+
 ready() {
   local instance="$1" attempt output
   for attempt in 1 2 3; do
@@ -115,7 +142,8 @@ ready() {
 }
 
 assert_receipt() {
-  compose "$1" exec -T "$service" grep -qxF "$receipt_value" "$receipt_path"
+  [[ "$(run_status)" == succeeded ]]
+  compose "$1" exec -T "$service" sh -ec 'printf "%s\n" "$1" | cmp - "$2"' sh "$receipt_value" "$receipt_path"
 }
 
 db_version() {
@@ -161,8 +189,9 @@ for profile in embedded external; do
     jq -er --arg url "$url" '.inviteUrl | select(startswith($url + "/invite/"))')"
   curl --fail --silent --show-error "$url/api/invites/${invite_url##*/}" |
     jq -e --arg company "$company_id" '.companyId == $company' >/dev/null
-  compose "$source" exec -T "$service" sh -ec 'mkdir -p "${1%/*}"; printf "%s\n" "$2" > "$1"' sh "$receipt_path" "$receipt_value"
+  run_synthetic_agent
   assert_record
+  assert_receipt "$source"
 
   # Recreate the app on the same mount before backing it up.
   compose "$source" up -d --wait --wait-timeout 180 --no-build --force-recreate --no-deps "$service"
@@ -199,7 +228,7 @@ for profile in embedded external; do
   assert_receipt "$target"
   printf '%s restored PostgreSQL version:\n' "$profile"
   db_version "$target"
-  printf '%s profile retained its board record and data file through recreation and fresh restore.\n' "$profile"
+  printf '%s profile retained its company, succeeded run %s, and one receipt through recreation and fresh restore.\n' "$profile" "$run_id"
   for instance in "${cleanup_projects[@]}"; do
     remove_instance "$instance"
   done

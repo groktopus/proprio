@@ -285,7 +285,10 @@ host-loss recovery is tracked separately in
 Run `scripts/compose-state-smoke.sh` on a disposable Docker host to rehearse
 application recreation and fresh restore for both default topologies. The
 script creates isolated projects, signs in through the normal board API,
-and checks the same company record and file after recreation and restore.
+and runs a synthetic local agent. It checks the same company, successful
+run, and single persisted receipt after recreation and restore. It reports
+the PostgreSQL versions on both sides and the dump and restore client
+versions for the full stack.
 Pass a locally available image or immutable image reference as its argument
 to check that image without rebuilding. The smoke uses synthetic credentials
 and requires Docker Compose, Bash, Python 3, OpenSSL, curl, and jq.
