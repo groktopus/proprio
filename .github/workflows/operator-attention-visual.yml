@@ -1,0 +1,137 @@
+name: Operator attention visual
+run-name: Operator attention visual at ${{ github.event.pull_request.head.sha || github.sha }}
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - "ui/**"
+      - "packages/shared/**"
+      - "tests/storybook-visual/**"
+      - ".github/workflows/operator-attention-visual.yml"
+      - "scripts/storybook-visual-baseline.mjs"
+      - "scripts/serve-storybook-static.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".nvmrc"
+  workflow_dispatch:
+    inputs:
+      capture:
+        description: Capture a candidate baseline for review
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: operator-attention-visual-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  visual:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'operator-attention-visual') || contains(github.event.pull_request.labels.*.name, 'storybook-baseline-capture')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CAPTURE: ${{ inputs.capture || contains(github.event.pull_request.labels.*.name, 'storybook-baseline-capture') }}
+      SUBJECT: ${{ github.event.pull_request.head.sha || github.sha }}
+      STORYBOOK_VISUAL_BASELINE_MANIFEST: tests/storybook-visual/operator-attention-baseline.json
+    steps:
+      - name: Check out the exact visual subject
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SUBJECT }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked workspace dependencies and Chromium
+        run: |
+          test "$(git rev-parse HEAD)" = "$SUBJECT"
+          printf 'Subject: `%s` (Ubuntu 24.04 amd64, locked Chromium). Capture: `%s`.\n' "$SUBJECT" "$CAPTURE" >> "$GITHUB_STEP_SUMMARY"
+          npm install --global --ignore-scripts "$(node -p 'require("./package.json").packageManager')"
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Verify the design token checks
+        run: pnpm check:token-gates
+      - name: Build Storybook
+        run: pnpm build-storybook
+      - name: Retrieve the approved test archive
+        if: env.CAPTURE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(jq -er '.testArtifact.runId | select(type == "number" and . > 0)' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
+          artifact="$(jq -er '.testArtifact.name | select(test("^operator-attention-baseline-candidate-[1-9][0-9]*$"))' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
+          source_commit="$(jq -er '.sourceCommit | select(test("^[0-9a-f]{40}$"))' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
+          artifact_id="$(jq -er '.testArtifact.artifactId | select(type == "number" and . > 0)' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" | jq -e \
+            --arg name "$artifact" --argjson run "$run_id" --arg sha "$source_commit" \
+            '.name == $name and .workflow_run.id == $run and .workflow_run.head_sha == $sha and .expired == false' >/dev/null
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$RUNNER_TEMP/operator-attention-reference"
+      - name: Verify the approved reference before testing
+        if: env.CAPTURE != 'true'
+        run: |
+          pnpm storybook-visual:baseline download --archive "$RUNNER_TEMP/operator-attention-reference/snapshots.tgz"
+      - name: Compare the selected journey or capture a reviewed candidate
+        run: |
+          args=()
+          if [[ "$CAPTURE" == true ]]; then args+=(--update-snapshots); fi
+          pnpm exec playwright test operator-attention.spec.ts \
+            --config tests/storybook-visual/playwright.config.ts --project operator-attention \
+            --workers 1 --retries 0 "${args[@]}"
+      - name: Verify that a deliberate visual difference produces a diff
+        if: env.CAPTURE != 'true'
+        run: |
+          snapshots=tests/storybook-visual/.snapshots
+          light="$snapshots/operator-attention-find-pending-request-light.png"
+          dark="$snapshots/operator-attention-find-pending-request-dark.png"
+          backup="$RUNNER_TEMP/operator-attention-light.png"
+          probe=test-results/operator-attention-probe
+          cp "$light" "$backup"
+          trap 'cp "$backup" "$light"' EXIT
+          cp "$dark" "$light"
+          if pnpm exec playwright test operator-attention.spec.ts \
+            --config tests/storybook-visual/playwright.config.ts --project operator-attention \
+            --workers 1 --retries 0 --reporter list --output "$probe" \
+            -g 'find-pending-request in light$'; then
+            echo 'The comparison passed with a deliberately different reference.'
+            exit 1
+          fi
+          for result in actual expected diff; do
+            find "$probe" -name "*-${result}.png" -size +0c -print -quit | grep -q .
+          done
+      - name: Pack the candidate for review
+        if: env.CAPTURE == 'true'
+        run: |
+          set -o pipefail
+          pnpm storybook-visual:baseline pack --test-artifact --out "$RUNNER_TEMP/snapshots.tgz" \
+            | tee "$RUNNER_TEMP/baseline-candidate.txt"
+          git rev-parse HEAD >> "$RUNNER_TEMP/baseline-candidate.txt"
+      - name: Retain the candidate archive and metadata
+        if: env.CAPTURE == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operator-attention-baseline-candidate-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/snapshots.tgz
+            ${{ runner.temp }}/baseline-candidate.txt
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain comparison results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operator-attention-comparison-${{ github.run_attempt }}
+          path: |
+            test-results/operator-attention-probe/
+            playwright-report/
+            tests/storybook-visual/playwright-report/
+            tests/storybook-visual/test-results/
+          if-no-files-found: ignore

@@ -322,7 +322,7 @@ export function startTracingSdk(
     });
     span.end(time);
     // Vitals are usually reported as the tab hides; send them before unload.
-    if (document.visibilityState === "hidden") void provider.forceFlush();
+    if (document.visibilityState === "hidden") void provider.forceFlush().catch(() => undefined);
   };
   onLCP(reportVital);
   onINP(reportVital);

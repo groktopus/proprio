@@ -1,0 +1,43 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const queueStory = "pages-decisions-desk--todays-desk";
+
+async function openStory(page: Page, story: string, width: number, coordinator: boolean) {
+  await page.setViewportSize({ width, height: width < 600 ? 844 : 900 });
+  await page.route("**/api/workspace-preferences/me", route => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ userId: "user-board", coordinatorWorkspaceEnabled: coordinator }),
+  }));
+  await page.goto(`/iframe.html?id=${story}&viewMode=story&globals=theme:light`, { waitUntil: "load" });
+  await expect(page.locator(".sb-show-errordisplay")).toHaveCount(0);
+  await expect(page.locator("#storybook-root")).not.toBeEmpty();
+}
+
+for (const scenario of [
+  { name: "Classic desktop", story: "attention-queue-shells--classic-desktop", width: 1440, coordinator: false, label: "Needs You" },
+  { name: "Coordinator desktop", story: "attention-queue-shells--coordinator-desktop", width: 1440, coordinator: true, label: "Needs You" },
+  { name: "Classic phone", story: "attention-queue-shells--classic-phone", width: 390, coordinator: false, label: "Inbox" },
+  { name: "Coordinator phone", story: "attention-queue-shells--coordinator-phone", width: 390, coordinator: true, label: "Needs You" },
+] as const) {
+  test(`${scenario.name} exposes the Needs You request entry`, async ({ page }) => {
+    await openStory(page, scenario.story, scenario.width, scenario.coordinator);
+    const entry = page.getByRole("link", { name: new RegExp(scenario.label) }).first();
+    await expect(entry).toBeVisible();
+    await expect(entry).toHaveAttribute("href", scenario.label === "Needs You" ? /\/decisions$/ : /\/inbox$/);
+  });
+}
+
+test("fixture-backed request exposes a followable source task and returns to the queue", async ({ page }) => {
+  await openStory(page, queueStory, 1440, true);
+  const sourceTask = page.getByTestId("source-task-journey").locator('a[href*="/issues/"]').first();
+  await expect(sourceTask).toBeVisible();
+  const initialPath = await page.getByTestId("storybook-router-path").textContent();
+  const href = await sourceTask.getAttribute("href");
+  expect(href).toMatch(/\/issues\//);
+  await sourceTask.click();
+  await expect(page.getByTestId("storybook-router-path")).toContainText("/issues/");
+  await page.getByRole("button", { name: "Back to Needs You", exact: true }).click();
+  await expect(page.getByTestId("storybook-router-path")).toHaveText(initialPath ?? "");
+  await expect(page.getByTestId("source-task-journey")).toBeVisible();
+});
