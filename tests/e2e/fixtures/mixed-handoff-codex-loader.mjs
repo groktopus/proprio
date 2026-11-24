@@ -3,8 +3,9 @@
 import { accessSync, constants } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
-const command = fileURLToPath(new URL("./codex", import.meta.url));
+const command = resolve(fileURLToPath(new URL("./recovery-bin/codex", import.meta.url)));
 accessSync(command, constants.X_OK);
 registerHooks({
   load(url, context, nextLoad) {

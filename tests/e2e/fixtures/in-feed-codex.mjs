@@ -5,7 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-if (process.argv.includes('--version')) { console.log('codex-cli 0.115.0 (in-feed fixture)'); process.exit(0); }
+if (process.argv.includes('--version') || process.argv.includes('exec')) {
+  const response = process.argv.includes('--version')
+    ? 'codex-cli 0.115.0 (in-feed fixture)'
+    : JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'hello' } });
+  process.stdout.write(`${response}\n`);
+  process.exit(0);
+}
 let threadId = `fixture-${randomUUID()}`;
 let turnId, toolSequence = 0, declined = false;
 let helloProbe = false;
@@ -13,6 +19,7 @@ const recoveryFixture = process.env.PROPRIO_RECOVERY_FIXTURE === "1";
 let currentObjective = "";
 let emitCeoLineage = false;
 let completionContract = { revision: "1", criterionIds: ["objective"] };
+let advertisedDynamicTools = [];
 const pending = new Map();
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const call = (tool, args) => new Promise((resolve, reject) => {
@@ -120,19 +127,35 @@ async function execute() {
     // this provider session pinned its tools. The next session must do the read.
     text = 'Access is ready. I will continue the archive read with the updated tools.';
   } else {
-    await mcp('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'in-feed-fixture', version: '1' } });
-    const list = await mcp('tools/list');
-    const tool = list.tools.find((item) => (query === 'gmail-fixture' ? /gmail-fixture/.test(item.description ?? '') : /heliotrope/.test(item.description ?? '')));
-    if (!tool) throw new Error('Updated native tool snapshot does not contain archive_read');
-    const result = await mcp('tools/call', { name: tool.name, arguments: {} });
-    if (result.isError) throw new Error(JSON.stringify(result));
-    text = result.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+    if (recoveryFixture) {
+      // Recovery runs receive provider-ready dynamic tools in the thread
+      // context. Invoke that exact binding through item/tool/call so the
+      // production authority and MCP connection handle the external request.
+      const service = query === 'gmail-fixture' ? 'gmail' : 'archive';
+      const prefix = `app_mcp_app_gallery_link_${service}_read_`;
+      const tool = advertisedDynamicTools.find((item) =>
+        typeof item?.name === 'string' && item.name.startsWith(prefix));
+      if (!tool) throw new Error(`Task context did not advertise ${service} archive_read`);
+      const result = unwrap(await call(tool.name, {}));
+      if (result?.isError) throw new Error(JSON.stringify(result));
+      const content = result?.data?.content ?? result?.contentItems ?? result?.content ?? [];
+      if (!Array.isArray(content)) throw new Error('Advertised archive_read returned no text content');
+      text = content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+    } else {
+      await mcp('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'in-feed-fixture', version: '1' } });
+      const list = await mcp('tools/list');
+      const tool = list.tools.find((item) => (query === 'gmail-fixture' ? /gmail-fixture/.test(item.description ?? '') : /heliotrope/.test(item.description ?? '')));
+      if (!tool) throw new Error('Updated native tool snapshot does not contain archive_read');
+      const result = await mcp('tools/call', { name: tool.name, arguments: {} });
+      if (result.isError) throw new Error(JSON.stringify(result));
+      text = result.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+    }
     if (recoveryFixture && text.includes('RECOVERY-INJECT-')) {
       // An unrelated informational event must not terminate the root. The next
       // event deliberately supplies the terminal failure used by recovery tests.
       send({ method: 'thread/status/changed', params: { threadId: 'unrelated-fixture-thread', status: { type: 'idle' } } });
       if (text.includes('RECOVERY-INJECT-UNKNOWN-WRITE')) {
-        send({ method: 'item/started', params: { threadId, turnId, item: { id: 'uncertain-email-write', type: 'commandExecution', command: 'send_fixture_email', status: 'inProgress' } } });
+        send({ method: 'item/started', params: { threadId, turnId, item: { id: 'uncertain-email-write', type: 'mcpToolCall', tool: 'send_fixture_email', readOnlyHint: false, status: 'inProgress' } } });
       }
       send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { code: 'fixture_checkpoint_unusable', message: 'Deterministic failed provider session after Gmail access' } } } });
       return;
@@ -156,12 +179,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (recoveryFixture) send({ method: 'configWarning', params: { message: 'Recovery fixture startup notice before the first turn' } });
     if (method === 'thread/resume' && message.params?.threadId) threadId = message.params.threadId;
     if (message.params?.completionContract) completionContract = message.params.completionContract;
-    const model = process.argv.includes('--completion-stream-fixture') ? message.params?.model ?? 'in-feed-fixture' : 'in-feed-fixture';
+    if (Array.isArray(message.params?.dynamicTools)) advertisedDynamicTools = message.params.dynamicTools;
+    const model = recoveryFixture || process.argv.includes('--completion-stream-fixture')
+      ? message.params?.model ?? 'in-feed-fixture'
+      : 'in-feed-fixture';
     send({ id, result: { model, modelProvider: 'fixture', thread: { id: threadId, sessionId: threadId } } });
   }
   else if (method === 'thread/read') send({ id, result: { thread: { id: threadId, turns: [] } } });
   else if (method === 'turn/start') {
-    helloProbe = process.argv.includes('--completion-stream-fixture')
+    helloProbe = recoveryFixture
       && JSON.stringify(message.params?.input).includes('Respond only with hello. Do not use tools or inspect files.');
     emitCeoLineage = JSON.stringify(message.params).includes('CEO descendant fixture');
     declined = /connection_intent/.test(JSON.stringify(message.params)) && /rejected/.test(JSON.stringify(message.params));
@@ -175,6 +201,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         }
         if (contract?.revision && contract.criteria) completionContract = { revision: contract.revision, criterionIds: contract.criteria.map((criterion) => criterion.id) };
       } catch { /* Non-envelope text is ordinary task context. */ }
+    }
+    if (recoveryFixture && /Now summarize my Gmail emails about launch decisions/i.test(JSON.stringify(message.params?.input))) {
+      currentObjective = 'Now summarize my Gmail emails about launch decisions, with the source link.';
     }
     turnId = randomUUID();
     send({ id, result: { turn: { id: turnId, status: 'inProgress' } } });

@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { listenOnFetchAllowedPort } from "../fetch-allowed-port";
 
 // Each attempt starts the source CLI's test-drive without --data-dir. The model
@@ -17,6 +17,7 @@ for (const journey of [
   test(`fresh execution recovery and current-request journey: ${journey}`, async ({
     page,
   }, info) => {
+    if (journey === "uncertain") test.setTimeout(180_000);
     const root = resolve(import.meta.dirname, "../../..");
     let processHandle: ChildProcess | undefined;
     let logs = "";
@@ -49,13 +50,25 @@ for (const journey of [
     }
 
     const calls: string[] = [];
+    const externalEffects: { operation: string; sequence: number }[] = [];
     let gmailReadCount = 0;
     const fixture = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/effects") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ effects: externalEffects }));
+        return;
+      }
       const chunks: Buffer[] = [];
       for await (const part of req) chunks.push(Buffer.from(part));
       const message = JSON.parse(Buffer.concat(chunks).toString() || "{}");
       const gmail = req.url === "/gmail";
       calls.push(`${gmail ? "gmail" : "notion"}:${message.method}`);
+      if (journey === "uncertain" && gmail && message.method === "tools/call") {
+        // The failed provider turn reports that this external send may have
+        // happened. Track its effect in the remote fixture independently of
+        // the API's run/retry records.
+        externalEffects.push({ operation: "send_fixture_email", sequence: externalEffects.length + 1 });
+      }
       if (message.id === undefined) {
         res.writeHead(202);
         res.end();
@@ -109,12 +122,16 @@ for (const journey of [
     });
     try {
       const port = await listenOnFetchAllowedPort(fixture);
+      const codexHome = info.outputPath("codex-home");
+      await mkdir(codexHome, { recursive: true });
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         PROPRIO_RECOVERY_CEO_LINEAGE: journey === "ceo_lineage" ? "1" : "0",
         IN_FEED_FIXTURE_KEY: "not-a-real-model-key",
+        CODEX_HOME: codexHome,
         NODE_ENV: "test",
         PATH: `${root}/tests/e2e/fixtures/recovery-bin:${process.env.PATH}`,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(root, "tests/e2e/fixtures/mixed-handoff-codex-loader.mjs")}`,
       };
       delete env.DATABASE_URL;
       delete env.DATABASE_MIGRATION_URL;
@@ -160,6 +177,11 @@ for (const journey of [
         expect(response.ok(), await response.text()).toBeTruthy();
         return response.json();
       };
+      const fixtureEffects = async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/effects`);
+        expect(response.ok).toBe(true);
+        return response.json();
+      };
       const isSettledRun = (run: { status: string; errorCode?: string }) =>
         run.status === "succeeded" ||
         (run.status === "cancelled" &&
@@ -180,7 +202,7 @@ for (const journey of [
       });
       const [company] = await api("/companies");
       let [agent] = await api(`/companies/${company.id}/agents`);
-      expect(agent.adapterType).toBe("codex_local");
+      expect(["codex_local", "proprio_runner"]).toContain(agent.adapterType);
       expect(await api(`/companies/${company.id}/issues`)).toEqual([]);
       expect(await api(`/companies/${company.id}/heartbeat-runs`)).toEqual([]);
       expect(
@@ -190,6 +212,11 @@ for (const journey of [
         base,
         companyId: company.id,
         agentId: agent.id,
+        agent: await api(`/agents/${agent.id}`).then((row: Record<string, unknown>) => ({
+          status: row.status,
+          adapterType: row.adapterType,
+          lifecycleHolds: row.lifecycleHolds,
+        })),
         tasks: (await api(`/companies/${company.id}/issues`)).map(
           (task: Record<string, unknown>) => ({
             id: task.id,
@@ -197,15 +224,19 @@ for (const journey of [
             assigneeAgentId: task.assigneeAgentId,
           }),
         ),
-        runs: (await api(`/companies/${company.id}/heartbeat-runs`)).map(
-          (run: Record<string, unknown>) => ({
+        runs: await Promise.all((await api(`/companies/${company.id}/heartbeat-runs`)).map(async (run: Record<string, unknown>) => {
+          const detail = await api(`/heartbeat-runs/${run.id}`);
+          return {
             id: run.id,
             status: run.status,
             runtimeMode: run.runtimeMode,
-            error: run.error,
-            errorCode: run.errorCode,
-          }),
-        ),
+            error: run.error ?? detail.error,
+            errorCode: run.errorCode ?? detail.errorCode,
+            stderrExcerpt: detail.stderrExcerpt,
+            stdoutExcerpt: detail.stdoutExcerpt,
+          };
+        })),
+        fixtureEffects: await fixtureEffects().catch((error: unknown) => ({ error: String(error) })),
       });
       const dataDir = logs
         .match(/Data directory: ([^\n\r]+)/)![1]!
@@ -274,38 +305,49 @@ for (const journey of [
             (await api("/instance/settings/experimental")).enableNativeRunner,
         )
         .toBe(true);
-      await page.goto(base + prefix + `/agents/${agent.id}/configuration`);
-      await page.getByRole("button", { name: "Codex", exact: true }).click();
-      await page.getByRole("button", { name: /Proprio Runner/ }).click();
-      await page
-        .getByRole("button", { name: /^Save(?: changes)?$/ })
-        .first()
-        .click();
-      await expect
-        .poll(async () => (await api(`/agents/${agent.id}`)).adapterType)
-        .toBe("proprio_runner");
+      if (agent.adapterType !== "proprio_runner") {
+        await page.goto(base + prefix + `/agents/${agent.id}/configuration`);
+        await page.getByRole("button", { name: "Codex", exact: true }).click();
+        await page.getByRole("button", { name: /Proprio Runner/ }).click();
+        await page
+          .getByRole("button", { name: /^Save(?: changes)?$/ })
+          .first()
+          .click();
+        await expect
+          .poll(async () => (await api(`/agents/${agent.id}`)).adapterType)
+          .toBe("proprio_runner");
+      }
       const nativeAgent = await api(`/agents/${agent.id}`);
       expect(nativeAgent.adapterConfig.env).toEqual(agent.adapterConfig.env);
       if (journey !== "ceo_lineage") {
-        const { instructionsFilePath: _instructions, ...executorConfig } =
-          nativeAgent.adapterConfig;
+        const runnerCwd = info.outputPath("runner-workspace");
+        await mkdir(runnerCwd, { recursive: true });
         agent = await api(`/companies/${company.id}/agents`, "POST", {
           name: "Executor",
           role: "engineer",
           adapterType: "proprio_runner",
-          adapterConfig: executorConfig,
+          adapterConfig: {
+            provider: "codex",
+            model: "gpt-6.1-sol",
+            cwd: runnerCwd,
+            lifecycleMode: "per_turn",
+            codexPermissionMode: "never",
+            timeoutSec: 50,
+            env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "not-a-real-model-key" },
+          },
         });
       }
-      const holder = await api(`/companies/${company.id}/agents`, "POST", {
-        name: "Archive holder",
-        role: "qa",
-        adapterType: "process",
-        adapterConfig: {
-          command: process.execPath,
-          args: ["-e", "process.exit(0)"],
-        },
-      });
-      const connections: Record<string, { id: string; name: string }> = {};
+      if (journey === "uncertain") {
+        const probeAgent = await api(`/agents/${agent.id}`);
+        const probeResponse = await page.request.post(
+          `${base}/api/companies/${company.id}/adapters/proprio_runner/test-environment`,
+          { data: { agentId: agent.id, adapterConfig: probeAgent.adapterConfig } },
+        );
+        const probeResult = await probeResponse.json();
+        expect(probeResponse.ok(), JSON.stringify(probeResult)).toBe(true);
+        expect(probeResult.status, JSON.stringify(probeResult.checks)).toBe("pass");
+      }
+      const connectionIds = new Set<string>();
       for (const service of ["notion", "gmail"]) {
         await page.goto(base + prefix + "/apps");
         const custom = page
@@ -324,10 +366,13 @@ for (const journey of [
         await page
           .getByRole("button", { name: "Continue", exact: true })
           .click();
-        await page.getByRole("button", { name: "Change", exact: true }).click();
+        const connectWizard = page.getByRole("main").filter({
+          has: page.getByRole("heading", { name: "Connect your own MCP server" }),
+        });
+        await connectWizard.getByRole("button", { name: "Change", exact: true }).nth(1).click();
         await page.getByRole("radio", { name: "Just agents I pick" }).click();
         await page.getByRole("button", { name: /Select agents/ }).click();
-        await page.getByRole("checkbox", { name: /Archive holder/ }).check();
+        await page.getByRole("checkbox", { name: new RegExp(agent.name) }).check();
         await page.keyboard.press("Escape");
         await page.getByRole("button", { name: /Check link/i }).click();
         await expect(
@@ -337,17 +382,13 @@ for (const journey of [
           await api(`/companies/${company.id}/tools/connections`)
         ).connections.find(
           (row: { id: string }) =>
-            !Object.values(connections).some(
-              (existing) => existing.id === row.id,
-            ),
+            !connectionIds.has(row.id),
         );
-        connections[service] = connection;
+        connectionIds.add(connection.id);
         const installs = (
           await api(`/tool-connections/${connection.id}/installs`)
         ).installs;
-        expect(installs).toEqual([
-          expect.objectContaining({ targetId: holder.id }),
-        ]);
+        expect(installs).toEqual([expect.objectContaining({ targetId: agent.id })]);
       }
       await page.getByRole("link", { name: "Tasks", exact: true }).click();
       await page
@@ -355,44 +396,20 @@ for (const journey of [
         .last()
         .click();
       await page
-        .getByPlaceholder("Task title")
+        .getByRole("textbox", { name: "editable markdown" })
         .fill(
           `${journey === "ceo_lineage" ? "CEO descendant fixture: " : ""}Find the heliotrope launch notes and summarize the decisions with a source link`,
         );
-      await page.getByRole("button", { name: "Assignee", exact: true }).click();
-      await page.getByRole("button", { name: agent.name, exact: true }).click();
+      await page.getByRole("button", { name: "Select assignee", exact: true }).click();
+      await page.getByRole("option").filter({ hasText: agent.name }).click();
       await page
-        .getByRole("button", { name: "Create Task", exact: true })
+        .getByRole("button", { name: "Create task", exact: true })
         .click();
       await page
         .getByRole("complementary")
         .getByRole("link", { name: /Find the heliotrope launch notes/ })
         .click();
       await expect(page).toHaveURL(/issues\/(?:[a-f0-9-]+|[A-Z]+-\d+)/);
-      const connectPending = async (service: "notion" | "gmail") => {
-        const connection = connections[service]!;
-        const card = page
-          .getByTestId("connection-intent-focus-target")
-          .filter({ hasText: connection.name });
-        await expect(
-          card.getByRole("button", { name: /Connect \/ Use existing/ }),
-        ).toBeVisible({ timeout: 60_000 });
-        await page.screenshot({
-          path: info.outputPath(`${service}-pending.png`),
-          fullPage: true,
-        });
-        await card
-          .getByRole("button", { name: /Connect \/ Use existing/ })
-          .click();
-        await expect(page.getByRole("dialog")).toBeVisible();
-        await page
-          .getByRole("dialog")
-          .getByRole("button", { name: new RegExp(connection.name) })
-          .click();
-        await expect(
-          card.getByText(`${connection.name} connected`, { exact: true }),
-        ).toBeVisible({ timeout: 30_000 });
-      };
       if (journey === "ceo_lineage")
         await expect(
           page
@@ -401,7 +418,6 @@ for (const journey of [
             })
             .first(),
         ).toBeVisible({ timeout: 60_000 });
-      await connectPending("notion");
       await expect(
         page.getByText(/HELIOTROPE-42: Launch in two stages/).first(),
       ).toBeVisible({ timeout: 60_000 });
@@ -416,14 +432,22 @@ for (const journey of [
         .toBe(true);
       const [task] = await api(`/companies/${company.id}/issues`);
       const originalTitle = task.title;
-      await page
-        .getByRole("textbox")
-        .last()
-        .fill(
-          "Now summarize my Gmail emails about launch decisions, with the source link.",
-        );
-      await page.getByRole("button", { name: "Send", exact: true }).click();
-      await connectPending("gmail");
+      if (journey === "uncertain") {
+        await api(`/issues/${task.id}`, "PATCH", {
+          status: "todo",
+          reopen: true,
+          comment: "Now summarize my Gmail emails about launch decisions, with the source link.",
+        });
+        await page.reload();
+      } else {
+        await page
+          .getByRole("textbox")
+          .last()
+          .fill(
+            "Now summarize my Gmail emails about launch decisions, with the source link.",
+          );
+        await page.getByRole("button", { name: "Send", exact: true }).click();
+      }
       if (journey === "safe_restart") {
         await expect
           .poll(
@@ -496,17 +520,56 @@ for (const journey of [
         expect(gmailReadCount).toBe(journey === "ceo_lineage" ? 1 : 2);
       } else {
         await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 100_000 }).toBe("blocked");
-        await expect(page.getByText("Blocked", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+        await page.reload();
+        await expect(page.getByRole("button", { name: "Change status (current: Blocked)", exact: true })).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByText(/Deterministic failed provider session after Gmail access/)).toBeVisible();
         expect(gmailReadCount).toBe(1);
+        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
         await expect(page.getByText(/GMAIL-73/)).toHaveCount(0);
         await expect(page.getByRole("button", { name: /Reconcile and continue|Try again/ })).toHaveCount(0);
         await expect(page.getByRole("dialog", { name: "Reconcile execution" })).toHaveCount(0);
-        const recovery = (await api(`/issues/${task.id}`)).activeRecoveryAction;
-        expect(recovery).toBeNull();
         await page.screenshot({ path: info.outputPath("uncertain-automatic-no-replay.png"), fullPage: true });
-        // Past the retry delay, unknown effects still cannot be replayed.
+        const issueBeforeRestart = await api(`/issues/${task.id}`);
+        const recoveryBeforeRestart = issueBeforeRestart.activeRecoveryAction;
+        const runsBeforeRestart = await api(`/companies/${company.id}/heartbeat-runs`);
+        const beforeRestartRunIds = runsBeforeRestart.map((run: { id: string }) => run.id);
+        const uncertainRunId = runsBeforeRestart.find((run: { errorCode?: string }) => run.errorCode === "adapter_failed")?.id;
+        expect(uncertainRunId).toBeTruthy();
+        expect(recoveryBeforeRestart).toMatchObject({
+          ownerType: "board",
+          cause: "native_continuation_requires_reconciliation",
+          nextAction: expect.stringContaining("continues the task from its last saved work"),
+          evidence: {
+            runId: uncertainRunId,
+            originalFailureCode: "adapter_failed",
+            nativeFailureBlock: { runId: uncertainRunId },
+          },
+        });
+        await stopDrive();
+        const startOffset = logs.length;
+        processHandle = spawn(
+          process.execPath,
+          ["cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts", "test-drive", "--data-dir", dataDir,
+            "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY", "--no-browser"],
+          { cwd: root, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
+        );
+        processHandle.stdout!.on("data", (chunk) => { logs += chunk.toString(); });
+        processHandle.stderr!.on("data", (chunk) => { logs += chunk.toString(); });
+        await expect.poll(() => logs.slice(startOffset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1],
+          { timeout: 100_000 }).toBeTruthy();
+        base = logs.slice(startOffset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)![1]!;
+        expect((await api("/companies"))[0].id).toBe(company.id);
+        await page.goto(base + prefix + `/issues/${task.id}`);
+        await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 30_000 }).toBe("blocked");
+        const issueAfterRestart = await api(`/issues/${task.id}`);
+        expect(issueAfterRestart.activeRecoveryAction).toMatchObject(recoveryBeforeRestart);
+        expect(await api(`/companies/${company.id}/heartbeat-runs`)).toHaveLength(beforeRestartRunIds.length);
+        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
+        // Past the retry delay and a process restart, the uncertain effect is
+        // still held and was neither replayed nor duplicated.
         await page.waitForTimeout(35_000);
         expect(gmailReadCount).toBe(1);
+        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
       }
       await expect(composer).toHaveText(
         "An unsent draft stays available during recovery.",
@@ -585,7 +648,7 @@ for (const journey of [
           companyId: company.id,
           agentId: agent.id,
           taskId: task.id,
-          connections,
+          connectionIds: [...connectionIds],
           runs: finalRuns.map((run: Record<string, unknown>) => ({
             id: run.id,
             runtimeMode: run.runtimeMode,
@@ -596,7 +659,7 @@ for (const journey of [
           })),
           dependency: "fixture",
           provider: "codex",
-          fixtureModel: "in-feed-fixture",
+          fixtureModel: agent.adapterConfig?.model ?? "in-feed-fixture",
           calls,
         },
         null,
