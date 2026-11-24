@@ -107,6 +107,22 @@ artifact URLs when the gate passes. `--dry-run` remains available without
 publication evidence. Use an authenticated GitHub CLI session with Actions read
 access when publishing locally.
 
+### Workspace regression
+
+[Workspace regression](../.github/workflows/workspace-regression.yml) runs on
+the exact `main` revision selected by the daily 06:23 UTC schedule or manual
+dispatch. Each lane installs frozen dependencies on GitHub-hosted Ubuntu
+24.04. The workflow uses the stable test runner's existing general, chat,
+serialized, native Runner, and workspace groupings. A separate baseline job
+verifies that the CLI install, update, and server health files ran and passed.
+
+Each lane retains its Vitest results, retry timings, and a summary with the
+tested SHA and counts for executed, failed, skipped, and unresolved cases.
+A failed or incomplete required lane fails the workflow. A test that passes
+on retry is visible in the summary. Live provider journeys, real browser E2E,
+and non-Linux environments remain separate coverage. The CI maintainers
+triage failures and record any excluded environments and test skips.
+
 ### Standalone sandbox-provider dependencies
 
 `.github/workflows/sandbox-providers.yml` checks same-repository PRs that touch

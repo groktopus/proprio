@@ -1,0 +1,110 @@
+name: Workspace regression
+run-name: Workspace regression ${{ github.sha }}
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Workspace regression / ${{ matrix.lane }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: server-1
+            args: --mode general --group general-server-without-chat-or-native-runner --shard-index 0 --shard-count 3
+          - lane: server-2
+            args: --mode general --group general-server-without-chat-or-native-runner --shard-index 1 --shard-count 3
+          - lane: server-3
+            args: --mode general --group general-server-without-chat-or-native-runner --shard-index 2 --shard-count 3
+          - lane: server-serialized
+            args: --mode serialized
+          - lane: chat-1
+            args: --mode general --group general-chat --shard-index 0 --shard-count 2
+          - lane: chat-2
+            args: --mode general --group general-chat --shard-index 1 --shard-count 2
+          - lane: server-runner
+            args: --mode general --group general-server-native-runner
+          - lane: cli-and-health-baseline
+            args: baseline
+          - lane: cli-and-ui
+            args: --mode general --group general-workspaces-a
+          - lane: other-workspaces
+            args: --mode general --group general-workspaces-b
+          - lane: database
+            args: --mode general --group general-workspaces-c
+    env:
+      PROPRIO_WORKSPACE_REGRESSION_DIR: ${{ runner.temp }}/workspace-regression
+      PROPRIO_VITEST_RETRY: '1'
+      PROPRIO_CI_PROFILE: 'true'
+      PROPRIO_CI_PROFILE_DIR: ${{ runner.temp }}/workspace-regression/timings
+      PROPRIO_CI_PROFILE_JOB: ${{ matrix.lane }}
+    steps:
+      - name: Verify the default-branch event
+        run: |
+          test "$GITHUB_REPOSITORY" = groktopus/proprio
+          test "$GITHUB_REF" = refs/heads/main
+      - name: Check out the event SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install frozen dependencies
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm preflight:workspace-links
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Build Runner test binaries
+        if: matrix.lane == 'server-runner'
+        run: pnpm --filter @groktopus/proprio-runner run build:runner-binaries
+      - name: Execute deterministic workspace tests
+        id: tests
+        env:
+          TEST_ARGS: ${{ matrix.args }}
+        run: |
+          if [[ "$TEST_ARGS" == baseline ]]; then
+            mkdir -p "$PROPRIO_WORKSPACE_REGRESSION_DIR"
+            export PROPRIO_VITEST_JSON_REPORT="$PROPRIO_WORKSPACE_REGRESSION_DIR/vitest-1.json"
+            pnpm exec vitest run --retry=1 cli/src/__tests__/install-command.test.ts \
+              cli/src/__tests__/update-command.test.ts server/src/__tests__/health.test.ts
+          else
+            read -r -a args <<< "$TEST_ARGS"
+            node scripts/run-vitest-stable.mjs "${args[@]}"
+          fi
+      - name: Summarize retained lane results
+        if: always()
+        env:
+          LANE: ${{ matrix.lane }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          if [[ ! -f scripts/ci/summarize-workspace-regression.mjs ]]; then
+            printf 'Lane %s could not check out revision %s.\n' "$LANE" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          node scripts/ci/summarize-workspace-regression.mjs \
+            "$PROPRIO_WORKSPACE_REGRESSION_DIR" "$LANE" "$GITHUB_SHA" "${TEST_OUTCOME:-incomplete}"
+      - name: Retain workspace regression results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workspace-regression-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ env.PROPRIO_WORKSPACE_REGRESSION_DIR }}
+          if-no-files-found: error
+          retention-days: 30
