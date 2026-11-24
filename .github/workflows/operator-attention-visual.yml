@@ -1,0 +1,95 @@
+name: Operator attention visual
+run-name: Operator attention visual at ${{ github.event.pull_request.head.sha || github.sha }}
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - "ui/**"
+      - "packages/shared/**"
+      - "tests/storybook-visual/**"
+      - ".github/workflows/operator-attention-visual.yml"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+    inputs:
+      capture:
+        description: Capture a candidate baseline for review
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-attention-visual-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  visual:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'storybook-visual') || contains(github.event.pull_request.labels.*.name, 'storybook-baseline-capture')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CAPTURE: ${{ inputs.capture || contains(github.event.pull_request.labels.*.name, 'storybook-baseline-capture') }}
+      SUBJECT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out the exact visual subject
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SUBJECT }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked workspace dependencies and Chromium
+        run: |
+          test "$(git rev-parse HEAD)" = "$SUBJECT"
+          printf 'Subject: `%s` (Ubuntu 24.04 amd64, locked Chromium). Capture: `%s`.\n' "$SUBJECT" "$CAPTURE" >> "$GITHUB_STEP_SUMMARY"
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Verify the design token checks
+        run: pnpm check:token-gates
+      - name: Build Storybook
+        run: pnpm build-storybook
+      - name: Download and verify the approved baseline
+        if: env.CAPTURE != 'true'
+        run: |
+          pnpm storybook-visual:baseline download
+          pnpm storybook-visual:baseline verify
+      - name: Compare the selected journey or capture a reviewed candidate
+        run: |
+          args=()
+          if [[ "$CAPTURE" == true ]]; then args+=(--update-snapshots); fi
+          pnpm exec playwright test operator-attention.spec.ts \
+            --config tests/storybook-visual/playwright.config.ts --project stories \
+            --workers 1 --retries 0 "${args[@]}"
+      - name: Pack the candidate for review
+        if: env.CAPTURE == 'true'
+        run: |
+          pnpm storybook-visual:baseline pack --out "$RUNNER_TEMP/snapshots.tgz" \
+            | tee "$RUNNER_TEMP/baseline-candidate.txt"
+          git rev-parse HEAD >> "$RUNNER_TEMP/baseline-candidate.txt"
+      - name: Retain the candidate archive and metadata
+        if: env.CAPTURE == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operator-attention-baseline-candidate-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/snapshots.tgz
+            ${{ runner.temp }}/baseline-candidate.txt
+          if-no-files-found: error
+      - name: Retain comparison results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operator-attention-comparison-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            tests/storybook-visual/playwright-report/
+            tests/storybook-visual/test-results/
+          if-no-files-found: ignore
