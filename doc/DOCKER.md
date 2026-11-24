@@ -62,8 +62,9 @@ The CLI layer can be refreshed with `CLI_TOOLS_CACHE_EPOCH`.
 
 ## Image source
 
-Proprio does not publish or promote images for this bootstrap. Build from this
-checkout, and do not substitute a container image from a different project.
+For a published Linux amd64 image, use its release record and follow the
+[digest verification and installation instructions](LINUX-IMAGE-RELEASE.md#verify-and-install).
+For a source checkout, build its `production` target above.
 
 ## Docker Compose
 
