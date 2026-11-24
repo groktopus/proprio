@@ -171,7 +171,7 @@ function ClassicWhatNeedsMe() {
   );
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Decisions" }]);
+    setBreadcrumbs([{ label: "Needs You" }]);
   }, [setBreadcrumbs]);
 
   // Re-hydrate per-company preferences when the company changes.
@@ -614,7 +614,7 @@ function ClassicWhatNeedsMe() {
       </Sheet>
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-xl font-bold">Decisions</h1>
+          <h1 className="text-xl font-bold">Needs You</h1>
           <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}>
             <History className="h-4 w-4" />
             Decision history
