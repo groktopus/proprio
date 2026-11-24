@@ -66,6 +66,16 @@ see [PR #257](https://github.com/groktopus/proprio/pull/257) at
 and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
 Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
 
+### Board performance
+
+The [Board performance workflow](../.github/workflows/board-performance.yml)
+runs on applicable pull requests and by manual dispatch. A pinned Chromium on
+Ubuntu uses a production board and an isolated seeded instance. The workflow
+checks deterministic request and browser work and retains a separate timing
+report, readiness samples, and Playwright failure artifacts. Diagnostic timing
+outcomes do not determine the work check. The workflow is informational for
+`main`. [Local command and fixture scope](../tests/perf/collections/README.md#focused-ci-suite)
+
 ### Durable-work acceptance
 
 The required `smoke` job combines Stability smoke with [Linux source

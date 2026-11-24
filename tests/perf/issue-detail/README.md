@@ -128,6 +128,84 @@ running when the sample ends is listed with `pending: true`. Run samples
 serially and record whether each task's data was already cached (a revisit) or
 not.
 
+### Release report and cohort matrix
+
+Run the six-cohort matrix with the production board of an exact build on a
+disposable loopback instance. The suite creates a company, two saved
+conversations and a credential-free process adapter. It verifies that the
+live-run task has a running process during its samples and cancels it when
+finished. Run serially, once per build.
+
+```sh
+PROPRIO_ISSUE_PERF_BASE_URL=http://127.0.0.1:3293 \
+PROPRIO_TASK_OPEN_BUILD="$(git rev-parse HEAD)" \
+PROPRIO_TASK_OPEN_OUTPUT=./test-results/task-open-current.json \
+  pnpm exec playwright test --config tests/perf/issue-detail/playwright.config.ts \
+  task-open-cohorts.spec.ts
+```
+
+For a cold direct open the harness starts at navigation time. The uncached
+click fixture intercepts speculative task-data reads until the click starts.
+The cached-return fixture opens the task in the same browser context first
+and closes the warm page to save its read cache before the return.
+
+Use the same harness for each task-open cohort. Add `cohort` and `taskKind` to
+each call:
+
+| Cohort | Journey | Required task kinds |
+| --- | --- | --- |
+| `cold-direct` | New browser context, direct task URL | `live-run`, `saved-history` |
+| `uncached-in-app` | Issues list click after task data is cleared | `live-run`, `saved-history` |
+| `cached-return` | Return to the task with the saved read cache present | `live-run`, `saved-history` |
+
+The harness reports `ready` when both the composer and latest message are
+visible. It reports visible `error` and `timeout` outcomes. If a browser tab
+closes before the result is observable, retain the attempt as
+`outcome: "closed"`; do not silently remove it. `cls`, `latestMoves`,
+`requests.beforeReady`, `requests.pending`, `requests.releasedBy`, and
+`serverMs` provide the layout and request diagnostics for each sample.
+
+Wrap the samples in a versioned evidence file. The `build` object must contain
+the exact application commit, target identity, browser identity, and UTC capture
+time:
+
+```json
+{
+  "build": {
+    "commit": "<full git SHA>",
+    "server": "<server release or image identity>",
+    "ui": "<UI asset build identity>",
+    "target": "<disposable local or staging target>",
+    "browser": "<browser and version>",
+    "capturedAt": "<UTC timestamp>"
+  },
+  "samples": [{
+    "cohort": "uncached-in-app",
+    "taskKind": "saved-history",
+    "outcome": "ready",
+    "marks": { "composerVisible": 120, "latestVisible": 180 },
+    "cls": 0,
+    "latestMoves": [],
+    "requests": { "beforeReady": 3, "pending": 0, "releasedBy": [] }
+  }]
+}
+```
+
+Generate p50/p95 ready-only timings, all outcome counts, layout/request
+diagnostics, and a versioned comparison with:
+
+```sh
+node tests/perf/issue-detail/task-open-report.mjs current.json previous.json report.md
+```
+
+Use at least five attempts per cohort/task kind for a release comparison. Keep
+the raw JSON beside the Markdown report. A report is diagnostic evidence only:
+state the disposable or staging target, task fixture provenance, browser, exact
+build, and sample limits. Staging clicks and managed browser telemetry cover
+different populations and readiness definitions. Local fixtures do not prove
+managed latency, object-store behavior, provider execution, or release
+performance.
+
 The summary labels each sample (`sample 1`, ...) instead of the task reference.
 It replaces query values and every path segment that contains a digit with a
 placeholder. Other path segments can stay, so review the output before you

@@ -3,8 +3,8 @@
 // Paste into DevTools (or run via a browser automation tool) on an Issues list
 // page such as /<company>/issues?view=mine, then call:
 //
-//   await __taskOpenHarness.measure("ABC-123")          // click the row, time it
-//   await __taskOpenHarness.series(["ABC-1", "ABC-2"])  // back to the list between samples
+//   await __taskOpenHarness.measure("ABC-123", { cohort: "uncached-in-app", taskKind: "saved-history" })
+//   await __taskOpenHarness.series(["ABC-1", "ABC-2"], { cohort: "cached-return", taskKind: "live-run" })
 //
 // Each sample starts at the row click and records, on every animation frame:
 //   composerVisible  the composer input is rendered and not concealed
@@ -15,6 +15,10 @@
 // every API request started after the click with its server time (Server-Timing).
 // A fetch that is still running when the sample ends is reported with
 // `pending: true` and the time it has run so far.
+// Pass `cohort` (`cold-direct`, `uncached-in-app`, or `cached-return`) and
+// `taskKind` (`live-run` or `saved-history`) so task-open-report.mjs can group
+// samples. A sample is `ready`, `error`, or `timeout`; a tab closed before the
+// result can be observed must be recorded by the caller as `outcome: "closed"`.
 //
 // The summary labels each sample ("sample 1", ...) instead of the task
 // reference. In request paths it replaces query values and every path segment
@@ -46,17 +50,18 @@
 
   let sampleCount = 0;
 
-  async function measure(issueRef, { timeoutMs = 20_000, quietMs = 3_000, label } = {}) {
+  async function measure(issueRef, { timeoutMs = 20_000, quietMs = 3_000, label, cohort, taskKind } = {}) {
     performance.setResourceTimingBufferSize(10_000);
-    const link = document.querySelector(`a[href$="/issues/${issueRef}"]`);
-    if (!link) throw new Error(`No visible row link for ${issueRef}`);
+    const direct = cohort === "cold-direct";
+    const link = direct ? null : document.querySelector(`a[href$="/issues/${issueRef}"]`);
+    if (!direct && !link) throw new Error(`No visible row link for ${issueRef}`);
     sampleCount += 1;
     const sample = label ?? `sample ${sampleCount}`;
     const shifts = [];
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) if (!entry.hadRecentInput) shifts.push(entry);
     });
-    observer.observe({ type: "layout-shift", buffered: false });
+    observer.observe({ type: "layout-shift", buffered: direct });
     const marks = {};
     const latestChanges = [];
     const latestMoves = [];
@@ -78,8 +83,8 @@
       result.then(finish, finish);
       return result;
     };
-    const t0 = performance.now();
-    link.click();
+    const t0 = direct ? 0 : performance.now();
+    link?.click();
     await new Promise((resolve) => {
       const tick = () => {
         const t = performance.now() - t0;
@@ -112,10 +117,14 @@
           latestTop = top;
         }
         const lastEvent = Math.max(latestChanges.at(-1) ?? 0, latestMoves.at(-1)?.t ?? 0);
+        const error = [...document.querySelectorAll('[role="alert"]')].find((element) =>
+          visible(element) && /failed|could not|unavailable|try again/i.test(element.textContent || ""));
+        if (marks.errorVisible === undefined && error) marks.errorVisible = t;
         if (marks.composerVisible !== undefined && marks.latestVisible !== undefined && t - lastEvent > quietMs) {
           marks.settled = t;
           return resolve();
         }
+        if (marks.errorVisible !== undefined) return resolve();
         if (t > timeoutMs) return resolve();
         requestAnimationFrame(tick);
       };
@@ -125,6 +134,7 @@
     window.fetch = originalFetch;
     const end = performance.now();
     const ready = Math.max(marks.composerVisible ?? Infinity, marks.latestVisible ?? Infinity);
+    const observedOutcome = Number.isFinite(ready) ? "ready" : marks.errorVisible !== undefined ? "error" : "timeout";
     const completed = performance
       .getEntriesByType("resource")
       .filter((entry) => entry.startTime >= t0 - 5 && isApi(entry.name))
@@ -149,6 +159,9 @@
     for (const request of requests) counts[request.url] = (counts[request.url] ?? 0) + 1;
     return {
       sample,
+      cohort,
+      taskKind,
+      outcome: observedOutcome,
       marks: Object.fromEntries(Object.entries(marks).map(([key, value]) => [key, Math.round(value)])),
       cls: Number(shifts.reduce((sum, entry) => sum + entry.value, 0).toFixed(4)),
       latestMoves,
