@@ -562,6 +562,31 @@ For normal issue work, start with the smallest targeted check that proves the ch
 Use the incremental command above and required final-revision CI for PR handoff.
 Run broad local checks when an unresolved risk or explicit qualification needs them.
 
+## Board browser accessibility
+
+The required Stability smoke check runs a focused board browser accessibility
+suite when source, styles, fixtures, or dependencies can affect the UI. The
+suite opens production components in Storybook with fixture data. It checks
+selected axe rules and keyboard interactions on Chromium. Run it after
+installing the locked workspace dependencies and Chromium:
+
+```sh
+pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+pnpm exec playwright install chromium
+pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
+```
+
+The tests start a local Storybook preview. To reuse an existing preview, set
+`STORYBOOK_TEST_BASE_URL` to its origin. CI builds Storybook before starting
+Chromium so the tests load compiled fixtures. To use the same path locally,
+run `pnpm build-storybook` and set `BOARD_A11Y_STORYBOOK_DIR=ui/storybook-static`
+when invoking Playwright from the repository root. GitHub Actions publishes
+the report and failure traces in its `board-accessibility-<attempt>` artifact.
+The aggregate smoke check reports when changes do not require the suite. If a
+PR predates the suite and CI asks for an update, bring its branch up to date
+with `main` before retrying. Manual keyboard and screen-reader review still
+applies to interactions outside these fixtures.
+
 ## Storybook
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
@@ -607,29 +632,6 @@ STORYBOOK_TEST_BASE_URL=http://localhost:6006 pnpm exec playwright test <name>.s
 To publish a branch's Storybook, see
 [Publish a branch Storybook](STORYBOOK-DEPLOYMENT.md#publish-a-branch-storybook).
 
-The required Stability smoke check runs a focused board browser accessibility
-suite when source, styles, fixtures, or dependencies can affect the UI. The
-suite opens production components in Storybook with fixture data. It checks
-selected axe rules and keyboard interactions on Chromium. Run it after
-installing the locked workspace dependencies and Chromium:
-
-```sh
-pnpm --filter @groktopus/plugin-sdk ensure-build-deps
-pnpm exec playwright install chromium
-pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
-```
-
-The tests start a local Storybook preview. To reuse an existing preview, set
-`STORYBOOK_TEST_BASE_URL` to its origin. CI builds Storybook before starting
-Chromium so the tests load compiled fixtures. To use the same path locally,
-run `pnpm build-storybook` and set `BOARD_A11Y_STORYBOOK_DIR=ui/storybook-static`
-when invoking Playwright from the repository root. GitHub Actions publishes
-the report and failure traces in its `board-accessibility-<attempt>` artifact.
-The aggregate smoke check reports when changes do not require the suite. If a
-PR predates the suite and CI asks for an update, bring its branch up to date
-with `main` before retrying. Manual keyboard and
-screen-reader review still applies to interactions outside these fixtures.
-
 The Storybook visual regression suite uses external PNG baselines instead of
 committed screenshots:
 
@@ -644,11 +646,19 @@ Accepted visual changes should update the manifest metadata and publish a new
 immutable archive with `pnpm storybook-visual:baseline pack` and
 `pnpm storybook-visual:baseline upload`; do not commit generated PNG snapshots.
 
-Storybook visual baselines use the Linux environment pinned in the manifest.
-Run visual comparison or capture in that environment. Font rasterization and
-subpixel differences can change snapshots on other platforms. The checked-in
-Stability smoke workflow runs the focused browser accessibility lane. The
-full visual suite is available through the local commands above.
+Known limitation: Storybook visual baselines are Linux/Ubuntu-only. The manifest
+pins the capture environment to `ubuntu-24.04` and the Playwright suite uses
+pixel-exact comparison, so local runs on macOS, Windows, or other non-matching
+platforms can report false-positive diffs from font rasterization and subpixel
+rendering. Use the `Storybook Visual` GitHub Actions workflow on `ubuntu-latest`
+as the source of truth, or run locally in a matching Linux environment before
+accepting or updating baselines.
+
+PR visual checks are opt-in while the suite stabilizes. Add the
+`storybook-visual` label to a PR, or run the `Storybook Visual` GitHub Actions
+workflow manually, to produce downloadable Playwright report/test-result
+artifacts. Normal PR visual runs use read-only repository permissions and do not
+upload or mutate baseline objects.
 
 ## CLI Client Operations
 
