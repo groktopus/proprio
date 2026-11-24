@@ -7,12 +7,11 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 ## Scope and evidence
 
-On November 24, 2026, all 40 draft heads matched GitHub and composed without
+On November 24, 2026, all 41 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `463b9b6b278be8abeadeb8f89a1737641685af7d`. The last
-composition changed only release documentation and scripts from the preceding
-40-draft tree. The pull requests record the exact heads and test scope for the
-individual results below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
+rehearsal revision is `8782f3d06f7eebba2a3c1b2215337eb510f98c5a`. The pull
+requests record the exact heads and test scope for the individual results
+below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
 - **Parent liveness, diagnosis, and restart.** PostgreSQL tests interrupted a
   claimed diagnostic wake and checked recovery after controller restart. A
@@ -24,7 +23,9 @@ individual results below. [Milestone 04](https://github.com/groktopus/proprio/mi
   denial, and authorized acceptance. Native finalization tests exercised
   corrected scope and withdrawal. Chromium displayed completion evidence and
   retained an earlier accepted recovery revision after a newer acceptance.
-  [Native handoff #342](https://github.com/groktopus/proprio/pull/342) · [Completion history #335](https://github.com/groktopus/proprio/pull/335) · [Scope correction #345](https://github.com/groktopus/proprio/pull/345) · [Recovery history #355](https://github.com/groktopus/proprio/pull/355)
+  A controller restart test compared the full accept, clarification, and
+  decline receipts and checked the task's Case audit events after restart.
+  [Native handoff #342](https://github.com/groktopus/proprio/pull/342) · [Completion history #335](https://github.com/groktopus/proprio/pull/335) · [Scope correction #345](https://github.com/groktopus/proprio/pull/345) · [Recovery history #355](https://github.com/groktopus/proprio/pull/355) · [Decision restart #364](https://github.com/groktopus/proprio/pull/364)
 - **Bound signoff and shared spend.** PostgreSQL tests exercised an edit racing
   with signoff, concurrent sibling reservations, reparenting, overlapping
   limits, and unknown usage. Board tests covered exact review targets and
@@ -48,7 +49,8 @@ The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
 passed 4,429 selected tests with one skip, 13 additional Runner contract
 tests, layered server and UI typechecks, and OpenAPI verification. The next
 composition `b57a8c358f9a83a8c0802d2535a73487cabd0eef` passed 17 catalog and
-native Case tests after the catalog repair. The 40-draft rehearsal passed
+native Case tests after the catalog repair. The 40-draft rehearsal
+`463b9b6b278be8abeadeb8f89a1737641685af7d` passed
 both history scenarios in Chromium with embedded PostgreSQL. It also
 passed OpenAPI verification and all 17 tests of the source publication
 script with local fixtures.
