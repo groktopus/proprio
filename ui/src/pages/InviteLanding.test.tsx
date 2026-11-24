@@ -1299,4 +1299,85 @@ describe("InviteLandingPage", () => {
     expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Retry")).toBe(false);
     await act(async () => root.unmount());
   });
+
+  it("opens the organization for an approved member on reload without accepting again", async () => {
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+    });
+    getInviteMock.mockResolvedValue({
+      id: "invite-1",
+      companyId: "company-1",
+      companyName: "Acme Robotics",
+      inviteType: "company_join",
+      allowedJoinTypes: "both",
+      joinRequestType: "human",
+      joinRequestStatus: "approved",
+    });
+    listCompaniesMock.mockResolvedValue([{ id: "company-1", name: "Acme Robotics" }]);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => renderInviteLanding(root, queryClient));
+    await flushReact();
+    await flushReact();
+
+    expect(acceptInviteMock).not.toHaveBeenCalled();
+    expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
+    await act(async () => root.unmount());
+  });
+
+  it("does not accept while the authoritative invite read is still unavailable", async () => {
+    const invite = {
+      id: "invite-1",
+      companyId: "company-1",
+      companyName: "Acme Robotics",
+      inviteType: "company_join",
+      allowedJoinTypes: "both",
+    };
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+    });
+    let resolveInvite: ((value: typeof invite) => void) | null = null;
+    getInviteMock.mockImplementation(() => new Promise((resolve) => { resolveInvite = resolve; }));
+    listCompaniesMock.mockResolvedValue([]);
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => renderInviteLanding(root, queryClient));
+    await flushReact();
+    expect(acceptInviteMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading invite");
+
+    await act(async () => resolveInvite?.(invite));
+    await flushReact();
+    await flushReact();
+    expect(acceptInviteMock).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("does not accept when the membership read fails", async () => {
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+    });
+    getInviteMock.mockResolvedValue({
+      id: "invite-1",
+      companyId: "company-1",
+      companyName: "Acme Robotics",
+      inviteType: "company_join",
+      allowedJoinTypes: "both",
+    });
+    listCompaniesMock.mockRejectedValue({ status: 500 });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => renderInviteLanding(root, queryClient));
+    await flushReact();
+    await flushReact();
+
+    expect(acceptInviteMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("check your organization access");
+    expect(container.querySelector('[data-query-view="error"]')).not.toBeNull();
+    await act(async () => root.unmount());
+  });
 });

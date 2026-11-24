@@ -7,7 +7,7 @@ import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
 import { useCompany } from "@/context/CompanyContext";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { accessApi } from "../api/access";
-import { describeError, isTransientError } from "../api/errors";
+import { classifyError, describeError, isTransientError } from "../api/errors";
 import { AuthApiError, authApi, authErrorServerMessage } from "../api/auth";
 import { fetchCompanyListForCurrentAccount, useCompanyListQuery } from "../api/companies-query";
 import { healthApi } from "../api/health";
@@ -17,6 +17,7 @@ import { clearPendingInviteToken, rememberPendingInviteToken } from "../lib/invi
 import { queryKeys } from "../lib/queryKeys";
 import { cn, formatDate } from "../lib/utils";
 import { ANALYTICS_NO_CAPTURE_CLASS } from "@/lib/analytics/privacy";
+import { QueryErrorState, QueryPlaceholder, useQueryView } from "../components/QueryView";
 
 type AuthMode = "sign_in" | "sign_up";
 type AuthFeedback = { tone: "error" | "info"; message: string };
@@ -249,6 +250,8 @@ export function InviteLandingPage() {
     queryKey: queryKeys.access.invite(token),
     queryFn: () => accessApi.getInvite(token),
     enabled: token.length > 0,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   // Whose list this is, is no longer this page's problem: the entry is keyed by
@@ -273,7 +276,7 @@ export function InviteLandingPage() {
   // the flag cannot be true without one, and if the session lapses the observer
   // re-keys to the anonymous entry and holds no data to leak.
   const membershipListIsCurrent = membershipIsAccountScoped
-    ? companiesQuery.isFetchedAfterMount
+    ? companiesQuery.isFetchedAfterMount && companiesQuery.isSuccess && companiesQuery.data?.unauthorized === false
     : true;
   const companyList = membershipListIsCurrent ? companiesQuery.data?.companies ?? [] : [];
 
@@ -295,6 +298,8 @@ export function InviteLandingPage() {
   }, [companiesQuery.data, inviteQuery.data, membershipListIsCurrent, token]);
 
   const invite = inviteQuery.data;
+  const inviteView = useQueryView(inviteQuery);
+  const membershipView = useQueryView(companiesQuery);
   const isCheckingExistingMembership =
     Boolean(sessionQuery.data) &&
     Boolean(invite?.companyId) &&
@@ -313,6 +318,15 @@ export function InviteLandingPage() {
   const canCompleteAcceptedHumanInvite =
     inviteJoinRequestType === "human" &&
     (inviteJoinRequestStatus === "pending_approval" || inviteJoinRequestStatus === "approved");
+  const inviteReadIsAuthoritative = inviteQuery.isSuccess && inviteQuery.isFetchedAfterMount && inviteView.kind === "ready";
+
+  useEffect(() => {
+    if (inviteJoinRequestStatus !== "approved" || inviteJoinRequestType !== "human" || !isCurrentMember) return;
+    if (!invite?.companyId) return;
+    clearPendingInviteToken(token);
+    setSelectedCompanyId(invite.companyId, { source: "manual" });
+    navigate("/", { replace: true });
+  }, [invite?.companyId, inviteJoinRequestStatus, inviteJoinRequestType, isCurrentMember, navigate, setSelectedCompanyId, token]);
   const requiresHumanAccount =
     healthQuery.data?.deploymentMode === "authenticated" &&
     !sessionQuery.data &&
@@ -320,7 +334,7 @@ export function InviteLandingPage() {
   const showsAgentForm = invite?.inviteType !== "bootstrap_ceo" && invite?.allowedJoinTypes === "agent";
   const shouldAutoAcceptHumanInvite =
     Boolean(sessionQuery.data) &&
-    inviteQuery.isSuccess &&
+    inviteReadIsAuthoritative &&
     !showsAgentForm &&
     invite?.inviteType !== "bootstrap_ceo" &&
     (!inviteJoinRequestStatus || canCompleteAcceptedHumanInvite) &&
@@ -341,6 +355,9 @@ export function InviteLandingPage() {
   const acceptMutation = useMutation({
     mutationFn: async () => {
       if (!invite) throw new Error("Invite not found");
+      if (!inviteReadIsAuthoritative) {
+        throw new Error("Refreshing the invite details. Try again in a moment.");
+      }
       if (isCheckingExistingMembership) {
         throw new Error("Checking your organization access. Try again in a moment.");
       }
@@ -455,23 +472,50 @@ export function InviteLandingPage() {
   }
 
   if (isCheckingExistingMembership) {
-    return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Checking your access...</div>;
+    if (membershipView.kind === "error" || companiesQuery.data?.unauthorized === true) {
+      return (
+        <div className="mx-auto max-w-xl py-10">
+          <QueryErrorState
+            size="panel"
+            error={membershipView.error ?? { status: 403 }}
+            action="check your organization access"
+            onRetry={membershipView.retry}
+            retrying={membershipView.isFetching}
+          />
+        </div>
+      );
+    }
+    return (
+      <div className="mx-auto max-w-xl py-10">
+        <QueryPlaceholder label={membershipView.kind === "reconnecting" ? "Reconnecting to check your access" : "Checking your access"} />
+        <p className="text-sm text-muted-foreground">
+          {membershipView.kind === "reconnecting" ? "Reconnecting to check your access..." : "Checking your access..."}
+        </p>
+        <Button type="button" className="mt-4 rounded-none" onClick={membershipView.retry} disabled={membershipView.isFetching}>
+          {membershipView.kind === "reconnecting" && membershipView.isFetching ? "Retrying…" : "Retry"}
+        </Button>
+      </div>
+    );
   }
 
-  if (inviteQuery.error || !invite) {
-    const inviteIsTemporarilyUnavailable = isTransientError(inviteQuery.error);
+  if (!invite) {
+    const inviteErrorKind = classifyError(inviteQuery.error);
+    const inviteIsNotFound = inviteErrorKind === "not_found";
+    const inviteIsTemporarilyUnavailable = inviteView.kind === "reconnecting" || isTransientError(inviteQuery.error);
     return (
       <div className="mx-auto max-w-xl py-10">
         <div className="border border-border bg-card p-6" data-testid="invite-error">
           <h1 className="text-lg font-semibold">
-            {inviteIsTemporarilyUnavailable ? "Invite temporarily unavailable" : "Invite not available"}
+            {inviteIsNotFound ? "Invite not available" : inviteIsTemporarilyUnavailable ? "Invite temporarily unavailable" : "Invite could not be loaded"}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {inviteIsTemporarilyUnavailable
               ? "Proprio couldn’t load this invite right now. Your link is still safe to use; try again in a moment."
-              : "This invite may be expired, revoked, or already used."}
+              : inviteIsNotFound
+                ? "This invite may be expired, revoked, or already used. Ask the person who invited you to send a new link."
+                : "Proprio could not confirm this invite. Try again, and contact the person who invited you if the problem continues."}
           </p>
-          {inviteIsTemporarilyUnavailable ? (
+          {!inviteIsNotFound ? (
             <Button
               type="button"
               className="mt-4 rounded-none"
@@ -484,14 +528,6 @@ export function InviteLandingPage() {
         </div>
       </div>
     );
-  }
-
-  if (
-    inviteJoinRequestStatus === "approved" &&
-    inviteJoinRequestType === "human" &&
-    isCurrentMember
-  ) {
-    return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Opening organization...</div>;
   }
 
   if (inviteJoinRequestStatus === "pending_approval" && !canCompleteAcceptedHumanInvite) {
@@ -638,6 +674,15 @@ export function InviteLandingPage() {
                 Signed in as <span className="font-medium">{sessionLabel}</span>.
               </div>
             ) : null}
+            {inviteQuery.error ? (
+              <QueryErrorState
+                size="inline"
+                error={inviteQuery.error}
+                action="refresh the invite"
+                onRetry={inviteView.retry}
+                retrying={inviteView.isFetching}
+              />
+            ) : null}
           </section>
 
           <section className={`${panelClassName} h-fit`}>
@@ -685,7 +730,7 @@ export function InviteLandingPage() {
                 {error ? <p className="text-xs text-red-400">{error}</p> : null}
                 <Button
                   className="w-full rounded-none"
-                  disabled={acceptMutation.isPending || agentName.trim().length === 0 || !selectedAdapterType}
+                  disabled={acceptMutation.isPending || !inviteReadIsAuthoritative || isCheckingExistingMembership || agentName.trim().length === 0 || !selectedAdapterType}
                   onClick={() => acceptMutation.mutate()}
                 >
                   {acceptMutation.isPending ? "Working..." : joinButtonLabel}
@@ -871,7 +916,7 @@ export function InviteLandingPage() {
                 ) : (
                   <Button
                     className="w-full rounded-none"
-                    disabled={acceptMutation.isPending}
+                    disabled={acceptMutation.isPending || !inviteReadIsAuthoritative || isCheckingExistingMembership}
                     onClick={() => {
                       if (isCurrentMember && invite.companyId) {
                         clearPendingInviteToken(token);
