@@ -1016,6 +1016,8 @@ pnpm test:e2e:runner -- --id context-compaction.runner-codex-subscription.local.
 The API-key cell uses `OPENAI_API_KEY`. The subscription cell uses a privately
 supplied `CODEX_AUTH_JSON` login through the isolated company fixture.
 Select one cell to keep the comparison bounded to one profile and model.
+For a local run, use a clean checkout and set
+`PROPRIO_RUNNER_E2E_SOURCE_SHA` to its full commit SHA before launching.
 
 ACPX Claude is a separate coverage case. Credential-free grader tests calibrate
 the oracle. A live Codex result requires a completed pair with retained evidence.
