@@ -14,10 +14,11 @@ node scripts/ci/critical-journey-qa.mjs 2026-11-24
 
 - **Time to green** measures wall time from creation of the earliest Stability
   smoke run for the final PR head to completion of its first executed passing
-  required check. The denominator is PRs merged during the seven-day UTC
+  required check before merge. The denominator is PRs merged during the seven-day UTC
   window with a passing smoke result on that head. Missing evidence, cancelled
   attempts, infrastructure dispositions recorded by GitHub, and other
-  nonpassing attempts get separate counts. An unclassified failure stays in
+  nonpassing attempts get separate counts. Checks that finish after merge
+  do not count as review feedback. An unclassified failure stays in
   the other nonpassing count.
 - **Retry-confirmed flake rate** is passed-after-retry case executions divided
   by executed case observations in retained workspace regression profiles.

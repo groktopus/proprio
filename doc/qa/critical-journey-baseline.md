@@ -36,6 +36,7 @@ UTC window `2026-11-17T00:00:00.000Z` inclusive through `2026-11-24T00:00:00.000
 - [PR #232](https://github.com/groktopus/proprio/pull/232) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45227379994/job/137877398864) · `1678252158dd`
 - [PR #247](https://github.com/groktopus/proprio/pull/247) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45227762030/job/137878751290) · `208ddd0d3415`
 - [PR #231](https://github.com/groktopus/proprio/pull/231) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45226091601/job/137872852927) · `3257c41930eb`
+- [PR #233](https://github.com/groktopus/proprio/pull/233) · [failure smoke](https://github.com/groktopus/proprio/actions/runs/45226088839/job/137872843343)
 - [PR #233](https://github.com/groktopus/proprio/pull/233) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45226088839/job/137880346323) · `ad6725c146dd`
 - [PR #246](https://github.com/groktopus/proprio/pull/246) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45209309412/job/137813469212) · `fded06a6ac80`
 - [PR #229](https://github.com/groktopus/proprio/pull/229) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45207067279/job/137805536958) · `ee8bb1c6fa08`
@@ -49,7 +50,9 @@ UTC window `2026-11-17T00:00:00.000Z` inclusive through `2026-11-24T00:00:00.000
 - [PR #86](https://github.com/groktopus/proprio/pull/86) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45119795500/job/137510709624) · `83739aac5056`
 - [PR #80](https://github.com/groktopus/proprio/pull/80) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45117182327/job/137502574625) · `fb96360772ad`
 - [PR #81](https://github.com/groktopus/proprio/pull/81) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45117632246/job/137503997233) · `dec1ca1cecae`
+- [PR #71](https://github.com/groktopus/proprio/pull/71) · [cancelled smoke](https://github.com/groktopus/proprio/actions/runs/45116169890/job/137499488024)
 - [PR #71](https://github.com/groktopus/proprio/pull/71) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45116542718/job/137500675189) · `c8bb31144304`
+- [PR #54](https://github.com/groktopus/proprio/pull/54) · [cancelled smoke](https://github.com/groktopus/proprio/actions/runs/45106658390/job/137469471404)
 - [PR #54](https://github.com/groktopus/proprio/pull/54) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45106721629/job/137469672808) · `759fade5e19e`
 - [PR #51](https://github.com/groktopus/proprio/pull/51) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45098560878/job/137443831277) · `996492f51f9b`
 - [PR #47](https://github.com/groktopus/proprio/pull/47) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45094599949/job/137431488634) · `3c04c5099dfc`
@@ -61,7 +64,9 @@ UTC window `2026-11-17T00:00:00.000Z` inclusive through `2026-11-24T00:00:00.000
 - [PR #42](https://github.com/groktopus/proprio/pull/42) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45090183263/job/137417737175) · `faf9d694f108`
 - [PR #41](https://github.com/groktopus/proprio/pull/41) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45088582579/job/137412716342) · `7d416c5c3670`
 - [PR #27](https://github.com/groktopus/proprio/pull/27) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45071243498/job/137358443946) · `29f6fd4fe1e2`
+- [PR #24](https://github.com/groktopus/proprio/pull/24) · [cancelled smoke](https://github.com/groktopus/proprio/actions/runs/45045888837/job/137280289336)
 - [PR #24](https://github.com/groktopus/proprio/pull/24) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45045888922/job/137280293354) · `e5ad777b48d0`
+- [PR #30](https://github.com/groktopus/proprio/pull/30) · [cancelled smoke](https://github.com/groktopus/proprio/actions/runs/45045898952/job/137280320303)
 - [PR #30](https://github.com/groktopus/proprio/pull/30) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/45045899400/job/137280325352) · `2c49922786bc`
 - [PR #25](https://github.com/groktopus/proprio/pull/25) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/44987458116/job/137101063990) · `447d4c3a5672`
 - [PR #29](https://github.com/groktopus/proprio/pull/29) · [executed smoke](https://github.com/groktopus/proprio/actions/runs/44987190395/job/137100236551) · `e59143db2a30`

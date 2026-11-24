@@ -47,7 +47,7 @@ for (const pr of merged.filter(pr => inWindow(pr.merged))) {
       const jobs = rows(`${prefix}/actions/runs/${workflow.id}/attempts/${attempt}/jobs?per_page=100`,
         '.jobs[] | {name, conclusion, completed_at, html_url, steps:[.steps[]? | {name, conclusion}]}');
       const smoke = jobs.find(({ name }) => name === "smoke");
-      if (!smoke) continue;
+      if (!smoke?.completed_at || date(smoke.completed_at) > date(pr.merged)) continue;
       attempts.push({ ...smoke, workflow });
     }
   }
@@ -69,6 +69,11 @@ for (const pr of merged.filter(pr => inWindow(pr.merged))) {
     else entry.timing.push(minutes);
   }
   if (!attempts.length) unclassified += 1;
+  for (const attempt of attempts) {
+    if (!["success", "neutral"].includes(attempt.conclusion)) {
+      evidence.add(`- [PR #${pr.number}](${github}/pull/${pr.number}) · [${attempt.conclusion} smoke](${attempt.html_url})`);
+    }
+  }
   if (firstPass) evidence.add(`- [PR #${pr.number}](${github}/pull/${pr.number}) · [executed smoke](${firstPass.html_url}) · \`${pr.head.slice(0, 12)}\``);
 }
 
