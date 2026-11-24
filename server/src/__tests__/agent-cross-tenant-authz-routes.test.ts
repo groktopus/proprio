@@ -470,7 +470,7 @@ describe("agent cross-tenant route authorization", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId, "user");
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       companyId,
       actorType: "user",
@@ -557,7 +557,7 @@ describe("agent cross-tenant route authorization", () => {
       resource: { type: "agent", companyId, agentId },
       scope: { requiresChangeGrant: true },
     }));
-    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId, "user");
   });
 
   it.each([
