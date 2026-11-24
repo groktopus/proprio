@@ -7,17 +7,21 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 ## Scope and evidence
 
-On November 24, 2026, all 41 draft heads matched GitHub and composed without
+On November 24, 2026, all 43 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `8782f3d06f7eebba2a3c1b2215337eb510f98c5a`. The pull
+rehearsal revision is `acefc3add06d130d3eca819b863ee466cd0f00b3`. The pull
 requests record the exact heads and test scope for the individual results
 below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
 - **Parent liveness, diagnosis, and restart.** PostgreSQL tests interrupted a
   claimed diagnostic wake and checked recovery after controller restart. A
   reassignment case checked stale-write denial and continued work on another
-  eligible parent. Chromium checked investigation and readback after reload.
-  [Liveness #306](https://github.com/groktopus/proprio/pull/306) · [Investigation #325](https://github.com/groktopus/proprio/pull/325) · [Restart #329](https://github.com/groktopus/proprio/pull/329) · [Reassignment #330](https://github.com/groktopus/proprio/pull/330)
+  eligible parent. The controller fixture counted one actual process invocation
+  after recovery with the retained assignee and zero by the former assignee
+  after reassignment. Chromium checked a completed investigation and an
+  exhausted receipt after reload. The exhausted browser case uses seeded
+  state to exercise the production read paths.
+  [Liveness #306](https://github.com/groktopus/proprio/pull/306) · [Investigation #325](https://github.com/groktopus/proprio/pull/325) · [Restart #329](https://github.com/groktopus/proprio/pull/329) · [Reassignment #330](https://github.com/groktopus/proprio/pull/330) · [Effect count #365](https://github.com/groktopus/proprio/pull/365) · [Exhausted diagnosis #367](https://github.com/groktopus/proprio/pull/367)
 - **Native Case handoff and completion recovery.** Embedded PostgreSQL and a
   scripted Codex app-server exercised the opt-in transfer, stale decision
   denial, and authorized acceptance. Native finalization tests exercised
@@ -34,7 +38,9 @@ below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 - **Mixed-runner handoff and uncertain effects.** Chromium exercised the
   legacy process adapter to native Rust Runner with a scripted Codex
   app-server, then back to a legacy verifier. Restart and revocation tests
-  checked retained dispatch and restored authority. A separate native
+  checked retained dispatch and restored authority. All three variants
+  passed on the rehearsal tree after the static fixture loader and Task
+  Detail render fixes. A separate native
   uncertainty case counted one external effect in a synthetic fixture and
   observed the hold after restart.
   [Mixed handoff #319](https://github.com/groktopus/proprio/pull/319) · [Restart #323](https://github.com/groktopus/proprio/pull/323) · [Authority #332](https://github.com/groktopus/proprio/pull/332) · [Uncertain effect #341](https://github.com/groktopus/proprio/pull/341)
