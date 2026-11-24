@@ -1,22 +1,39 @@
 ---
 name: release-changelog
-description: >
-  Generate the stable Proprio release changelog at releases/vYYYY.MDD.P.md by
-  reading commits, changesets, and merged PR context since the last stable tag.
+description: Write or revise public Proprio release notes for Linux source prereleases and historical stable releases from the exact shipped range.
 ---
 
 # Release Changelog Skill
 
-Generate the user-facing changelog for the **stable** Proprio release.
+## Write for people using Proprio
+
+The reader uses Proprio or maintains an installation. Lead with a familiar task
+and what works differently now. Prefer plain words, active verbs, and short
+paragraphs or bullets. Group fixes by the workflow they affect. Use product
+labels readers recognize. Explain what they can do, what they will see when
+something fails, and any action they need to take.
+
+For example, a retry fix can read “If linked tasks fail to load on an approval,
+you can retry from that page.” Include compatibility limits and upgrade steps
+when they affect the reader's decision. Scope performance and support claims
+to the evidence. Include implementation detail when it helps the reader act.
+
+Keep test counts, CI jobs, benchmark setup, fixture timings, and commit hashes
+in the linked qualification record. Before publishing, read the exact text intended
+for GitHub from top to bottom as an operator. Check that each paragraph helps the
+reader understand a change, decide whether to upgrade, or take the next step.
+Remove repeated provenance and jargon that only makes sense to the release team.
 
 ## Proprio Linux source prereleases
 
 For a `v0.0.x` source prerelease, use the
-[source release runbook](../../../doc/RELEASING.md). Draft the notes for the
-exact range from the preceding published source tag. Include the candidate SHA,
-passing qualification and artifact links, supported scope, upgrade and restore
-outcomes, and known gaps. Keep the notes outside the candidate checkout and
-pass them to the release command with `--notes-file`.
+[source release runbook](../../../doc/RELEASING.md). Draft from the exact range
+since the preceding published source tag. State the supported release scope,
+give any required upgrade or backup steps, and link the installation guide
+and the qualification record. Keep the public notes outside the candidate
+checkout and pass them to the release command with `--notes-file`.
+On an authorized edit to a published release, read the existing body first and
+verify the updated public body after the edit.
 
 The remainder of this skill documents the historical calendar-versioned npm
 workflow.
