@@ -54,6 +54,40 @@ export interface CaseHandoffRecipientDecision {
   message?: string;
 }
 
+export const caseHandoffRecoveryHistorySchema = z.object({
+  entries: z.array(z.object({
+    id: z.string().uuid(),
+    status: z.string(),
+    ownerType: z.string(),
+    ownerAgentId: z.string().uuid().nullable(),
+    ownerUserId: z.string().nullable(),
+    cause: z.string(),
+    nextAction: z.string(),
+    attemptCount: z.number().int().nonnegative(),
+    maxAttempts: z.number().int().nullable(),
+    outcome: z.string().nullable(),
+    resolutionNote: z.string().nullable(),
+    decisionId: z.string().uuid(),
+    assessmentId: z.string().uuid(),
+    assessedRevision: z.number().int().positive(),
+    criteria: z.array(z.object({
+      criterionId: z.string(),
+      requirement: z.string().nullable(),
+      outcome: z.string().nullable(),
+      reasonCode: z.string().nullable(),
+      evidence: z.array(z.object({ outcome: z.string().nullable(), reasonCode: z.string().nullable() })),
+    })),
+    attempts: z.array(z.object({
+      runId: z.string().uuid(),
+      decisionId: z.string().uuid(),
+      assessmentId: z.string().uuid(),
+      assessedContractId: z.string().uuid(),
+      reasonCode: z.string(),
+    })),
+  })),
+});
+export type CaseHandoffRecoveryHistory = z.infer<typeof caseHandoffRecoveryHistorySchema>;
+
 export const agentCaseHandoffSchema = z.object({
   to: z.never().optional(),
   idempotencyKey: z.string().trim().min(1).max(240),

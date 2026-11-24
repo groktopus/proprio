@@ -25,6 +25,13 @@ export function caseHandoffRoutes(db: Db) {
     assertCompanyAccess(req, row.companyId);
     res.json(await service.list(req.actor, caseId, listSchema.parse(req.query)));
   });
+  router.get("/cases/:caseId/handoffs/:handoffId/recovery-history", async (req, res) => {
+    const caseId = req.params.caseId as string;
+    const row = await service.visible(req.actor, caseId);
+    if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
+    assertCompanyAccess(req, row.companyId);
+    res.json(await service.recoveryHistory(req.actor, caseId, req.params.handoffId as string));
+  });
   router.post("/cases/:caseId/handoffs/:handoffId/decision", validate(caseHandoffRecipientDecisionSchema), async (req, res) => {
     const caseId = req.params.caseId as string;
     const row = await service.visible(req.actor, caseId);

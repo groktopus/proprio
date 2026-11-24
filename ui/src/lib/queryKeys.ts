@@ -547,6 +547,7 @@ export const queryKeys = {
   },
   cases: {
     handoffs: (id: string) => ["cases", "handoffs", id] as const,
+    handoffRecoveryHistory: (caseId: string, handoffId: string) => ["cases", "handoff-recovery-history", caseId, handoffId] as const,
     list: (companyId: string) => ["cases", companyId] as const,
     detail: (id: string) => ["cases", "detail", id] as const,
     documents: (id: string) => ["cases", "documents", id] as const,

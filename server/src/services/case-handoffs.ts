@@ -18,6 +18,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
 import { documentService } from "./documents.js";
+import { readCaseHandoffRecoveryHistory } from "./case-handoff-recovery-history.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
@@ -694,6 +695,22 @@ export function caseHandoffService(db: Db) {
       }
       return { items: page.map(row => ({ ...publicHandoff(row), toAgentName: row.toAgentId ? names.get(row.toAgentId) ?? null : null, fromAgentName: row.fromAgentId ? names.get(row.fromAgentId) ?? null : null, canControl })),
         nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ at: last.createdAt.toISOString(), id: last.id })).toString("base64url") : null, canControl };
+    },
+
+    async recoveryHistory(actor: AuthorizationActor, caseId: string, handoffId: string) {
+      await assertEnabled(db);
+      const caseRow = await visible(actor, caseId);
+      if (!isUuidLike(handoffId)) throw notFound("Handoff not found");
+      const [handoff] = await db.select().from(caseHandoffs).where(and(
+        eq(caseHandoffs.companyId, caseRow.companyId), eq(caseHandoffs.caseId, caseId),
+        eq(caseHandoffs.id, handoffId),
+      )).limit(1);
+      if (!handoff) throw notFound("Handoff not found");
+      const [access] = await authorizationService(db).decideReads(actor, [{
+        type: "issue", companyId: caseRow.companyId, issueId: handoff.issueId,
+      }]);
+      if (!access?.allowed) throw notFound("Handoff not found");
+      return readCaseHandoffRecoveryHistory(db, handoff);
     },
 
     async recordRecipientDecision(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffRecipientDecisionInput) {

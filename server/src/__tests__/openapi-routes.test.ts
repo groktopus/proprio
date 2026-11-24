@@ -583,7 +583,10 @@ describe("openapi routes", () => {
     expect(paths.filter((path) => path.startsWith("/api/cases/{caseId}")).sort()).toEqual([
       "/api/cases/{caseId}/handoffs",
       "/api/cases/{caseId}/handoffs/{handoffId}/cancel",
+      "/api/cases/{caseId}/handoffs/{handoffId}/decision",
+      "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history",
       "/api/cases/{caseId}/handoffs/{handoffId}/retry",
+      "/api/cases/{caseId}/handoffs/{handoffId}/withdraw",
     ]);
     expect(spec.paths["/api/companies/{companyId}/cases"].post).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/case-handoffs"].post).toBeDefined();

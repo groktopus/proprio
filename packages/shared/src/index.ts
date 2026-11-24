@@ -1,4 +1,5 @@
 export type { InboxMineSnapshot, InboxSourceError } from "./types/inbox-mine.js";
+export { caseHandoffRecoveryHistorySchema, type CaseHandoffRecoveryHistory } from "./case-handoffs.js";
 export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffOfferSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferInput, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
 export * from "./slack-app-manifest.js";
 export * from "./analytics-consent.js";

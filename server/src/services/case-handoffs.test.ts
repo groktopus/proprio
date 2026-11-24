@@ -5,7 +5,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, completionContracts, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRuns, issueComments, issueDocuments, issues, issueWorkProducts } from "@groktopus/db";
+import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, completionContracts, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRuns, issueComments, issueDocuments, issueRecoveryActions, issues, issueWorkProducts } from "@groktopus/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { caseHandoffRoutes } from "../routes/case-handoffs.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -172,6 +172,66 @@ describe("durable same-task case handoffs", () => {
     app.use(errorHandler);
     return request(app).post(`/api/cases/${f.first.caseId}/handoffs/${f.receipt.handoffId}/decision`);
   }
+
+  it("reads recovery decisions only for the authorized accepted handoff revision", async () => {
+    const f = await versionedOffer();
+    const recipient = { type: "agent" as const, source: "agent_key" as const, companyId: f.companyId, agentId: f.engineer };
+    const app = express();
+    let actor: AuthorizationActor = board;
+    app.use((req, _res, next) => { req.actor = actor as typeof req.actor; next(); });
+    app.use("/api", caseHandoffRoutes(db));
+    app.use(errorHandler);
+    const path = `/api/cases/${f.first.caseId}/handoffs/${f.receipt.handoffId}/recovery-history`;
+    await request(app).get(path).expect(200, { entries: [] });
+    await recipientDecisionRequest(recipient, f).send({
+      outcome: "accepted", expectedHandoffVersion: f.receipt.handoffVersion, requirementRevisionId: f.contract.id,
+    }).expect(200);
+    const [handoff] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.receipt.handoffId));
+    const decisionId = randomUUID(), assessmentId = randomUUID(), runId = randomUUID();
+    const receipt = {
+      schema: "proprio.case-handoff-completion-recovery.v1",
+      caseHandoff: { id: handoff!.id, version: handoff!.version, requirementsDigest: handoff!.offerContract!.requirementsDigest,
+        acceptedRequirementRevision: { id: f.contract.id } },
+      decision: { id: decisionId, statusDecisionReasonCode: "completion_evidence_incomplete" },
+      assessment: { id: assessmentId, assessedContractId: f.contract.id, assessedContractRevision: { revision: 1 },
+        criteriaNeedingWork: [{ criterionId: "verified", requirement: "Verification passes", outcome: "missing", reasonCode: "criterion_evidence_missing",
+          evidence: [{ outcome: "missing", reasonCode: "event_missing", ref: "private event body" }] }] },
+      attempts: [{ runId, decisionId, assessmentId, assessedContractId: f.contract.id, reasonCode: "completion_evidence_incomplete" }],
+    };
+    const recovery = {
+      companyId: f.companyId, sourceIssueId: f.first.taskId, kind: "active_run_watchdog",
+      status: "cancelled", ownerType: "agent", ownerAgentId: f.engineer, cause: "completion_evidence_incomplete",
+      nextAction: "Add the verification receipt.", attemptCount: 1, maxAttempts: 3, outcome: "cancelled",
+      resolutionNote: "A new failure with a different identity superseded this recovery action.",
+    };
+    const [old] = await db.insert(issueRecoveryActions).values([
+      { ...recovery, fingerprint: "old", evidence: { runId, caseHandoffCompletion: receipt } },
+      { ...recovery, fingerprint: "unrelated", evidence: { caseHandoffCompletion: {
+        ...receipt, caseHandoff: { ...receipt.caseHandoff, requirementsDigest: "different-revision" },
+      } } },
+    ]).returning();
+    await db.update(cases).set({ handoffVersion: handoff!.version + 1 }).where(eq(cases.id, f.first.caseId));
+    const result = await request(app).get(path).expect(200);
+    expect(result.body.entries).toEqual([expect.objectContaining({
+      id: old!.id, status: "cancelled", ownerType: "agent", ownerAgentId: f.engineer,
+      outcome: "cancelled", resolutionNote: recovery.resolutionNote, decisionId, assessmentId, attemptCount: 1, maxAttempts: 3,
+      attempts: [expect.objectContaining({ runId, decisionId, assessmentId })],
+      criteria: [{ criterionId: "verified", requirement: "Verification passes", outcome: "missing", reasonCode: "criterion_evidence_missing",
+        evidence: [{ outcome: "missing", reasonCode: "event_missing" }] }],
+    })]);
+    expect(result.text).not.toContain("private event body");
+    actor = { ...recipient, companyId: randomUUID() };
+    await request(app).get(path).expect(404);
+
+    // The current Case can still be visible after its earlier task becomes private.
+    const restrictedTaskId = randomUUID();
+    await db.insert(issues).values({ id: restrictedTaskId, companyId: f.companyId, title: "Previous private task",
+      visibility: "private", assigneeAgentId: f.triage });
+    await db.update(caseHandoffs).set({ issueId: restrictedTaskId }).where(eq(caseHandoffs.id, handoff!.id));
+    actor = recipient;
+    expect(await canActorReadCase(db, actor, f.first.caseId)).toBe(true);
+    await request(app).get(path).expect(404);
+  });
 
   function withdrawalRequest(actor: AuthorizationActor, f: Awaited<ReturnType<typeof versionedOffer>>) {
     const app = express();
