@@ -39,7 +39,7 @@ function RouteProbe() {
 function SourceTaskJourneyFixture() {
   const source = DESK_ITEMS.find(item => item.id === "review-1");
   if (!source) return null;
-  return <div data-testid="source-task-journey" className="mt-4"><AttentionQueueRow item={source} companyId={companyId} expanded={false} onToggleExpand={() => {}} currentUserId={STORYBOOK_USER_ID} /></div>;
+  return <div data-testid="source-task-journey" className="mt-4"><AttentionQueueRow item={source} companyId={companyId} expanded={false} onToggleExpand={() => {}} onDismiss={() => {}} currentUserId={STORYBOOK_USER_ID} /></div>;
 }
 
 // --- fixture builders -------------------------------------------------------
