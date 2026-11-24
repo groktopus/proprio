@@ -35,6 +35,18 @@ function traceSpans(bodies: string[]): Array<Record<string, unknown>> {
   });
 }
 
+function pageLoadRoutes(bodies: string[]): string[] {
+  return traceSpans(bodies)
+    .filter((span) => span.name === "page.load")
+    .flatMap((span) => {
+      const attributes = Array.isArray(span.attributes)
+        ? span.attributes as Array<{ key?: unknown; value?: { stringValue?: unknown } }>
+        : [];
+      const route = attributes.find((attribute) => attribute.key === "proprio.page.route");
+      return typeof route?.value?.stringValue === "string" ? [route.value.stringValue] : [];
+    });
+}
+
 test.describe("self-hosted browser tracing on Linux", () => {
   test("proves opt-in, sampling, sink failure, redaction, and task-list/detail samples", async ({ page, request }, testInfo) => {
     const session = await json<{
@@ -77,10 +89,15 @@ test.describe("self-hosted browser tracing on Linux", () => {
     await expect(page.locator('[contenteditable="true"]').first()).toBeVisible();
     await expect(page.getByRole("button", { name: "Create task" })).toBeVisible();
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(2_000);
+    if (mode === "enabled" || mode === "sink-failure") {
+      await expect.poll(() => pageLoadRoutes(traceBodies), { timeout: 15_000 }).toContain("/:companyPrefix/issues");
+    }
     await page.goto(`/${fixture.company.issuePrefix}/issues/${fixture.task.identifier}`);
     await expect(page.getByRole("button", { name: "Open account menu" })).toBeVisible();
     await expect(page.getByText("PRIVATE_BROWSER_TRACE_TASK_CONTENT", { exact: true }).first()).toBeVisible();
+    if (mode === "enabled" || mode === "sink-failure") {
+      await expect.poll(() => pageLoadRoutes(traceBodies), { timeout: 15_000 }).toContain("/:companyPrefix/issues/:issueId");
+    }
     // BatchSpanProcessor flushes on its interval while the page remains visible;
     // allow that flush to complete before asserting collector traffic.
     await page.waitForTimeout(7_000);
@@ -91,13 +108,10 @@ test.describe("self-hosted browser tracing on Linux", () => {
     } else {
       expect(sdkLoads.length).toBeGreaterThan(0);
       if (mode === "enabled" || mode === "sink-failure") expect(tracePosts.length).toBeGreaterThan(0);
-      const spans = traceSpans(traceBodies);
-      if (mode !== "unsampled") {
-        expect(spans.filter((span) => span.name === "page.load").map((span) => JSON.stringify(span))).toEqual(expect.arrayContaining([
-          expect.stringContaining("/:companyPrefix/issues"),
-          expect.stringContaining("/:companyPrefix/issues/:issueId"),
-        ]));
-      }
+      expect(pageLoadRoutes(traceBodies)).toEqual(expect.arrayContaining([
+        "/:companyPrefix/issues",
+        "/:companyPrefix/issues/:issueId",
+      ]));
       const serialized = traceBodies.join("\n");
       expect(serialized).not.toContain("PRIVATE_BROWSER_TRACE_TASK_CONTENT");
       expect(serialized).not.toContain(fixture.task.identifier);

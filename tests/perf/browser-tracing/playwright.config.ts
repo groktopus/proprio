@@ -49,6 +49,6 @@ export default defineConfig({
       PROPRIO_BROWSER_TRACING_BUILD_ID: process.env.PROPRIO_BROWSER_TRACING_BUILD_ID ?? "local",
     },
   },
-  outputDir: "../../../test-results/browser-tracing",
+  outputDir: path.resolve(import.meta.dirname, `../../../test-results/browser-tracing/${mode}`),
   reporter: [["list"]],
 });
