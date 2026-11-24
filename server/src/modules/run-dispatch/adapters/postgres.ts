@@ -211,6 +211,7 @@ function buildReviewParticipantFacts(input: {
 async function verifyDispatchStallWake(db: Db, input: {
   companyId: string;
   issueId: string;
+  runId: string;
   contextSnapshot: Record<string, unknown>;
   wakeupRequestId: string | null;
 }) {

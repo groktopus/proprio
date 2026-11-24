@@ -1347,10 +1347,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
       // The run's wake request records who asked for it.
       const blockerStallVerified = unresolvedBlockerCount > 0 && await verifyBlockerStallWake(db, {
-        companyId: run.companyId, issueId, contextSnapshot: context,
+        companyId: run.companyId, issueId, runId: run.id, contextSnapshot: context,
         requestedByActorType: run.wakeupRequestId
           ? (await db.select({ actor: agentWakeupRequests.requestedByActorType }).from(agentWakeupRequests)
-            .where(eq(agentWakeupRequests.id, run.wakeupRequestId)).then(rows => rows[0]?.actor ?? null))
+            .where(and(eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.id, run.wakeupRequestId)))
+            .then(rows => rows[0]?.actor ?? null))
           : null,
       });
       if (

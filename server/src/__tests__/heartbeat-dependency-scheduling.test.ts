@@ -1117,7 +1117,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     }).returning();
 
     const dispatch = createPostgresRunDispatchAdapter(db);
-    expect(await dispatch.evaluateScheduledRetryGate({ companyId, runId: retry!.id, now: new Date() }))
+    expect(await dispatch.evaluateScheduledRetryGate({ companyId, runId: retry!.id, retryReasonOverride: "transient_failure", now: new Date() }))
       .toMatchObject({ allowed: false, errorCode: "issue_dependency_diagnosis_superseded" });
     expect(await dispatch.cancelStaleQueuedRun({ companyId, runId: queued!.id, expectedStatus: "queued", now: new Date() }))
       .toMatchObject({ outcome: "cancelled", errorCode: "issue_dependency_diagnosis_superseded" });
