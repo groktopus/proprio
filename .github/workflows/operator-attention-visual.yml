@@ -65,10 +65,11 @@ jobs:
         run: |
           run_id="$(jq -er '.testArtifact.runId | select(type == "number" and . > 0)' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
           artifact="$(jq -er '.testArtifact.name | select(test("^operator-attention-baseline-candidate-[1-9][0-9]*$"))' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
+          source_commit="$(jq -er '.sourceCommit | select(test("^[0-9a-f]{40}$"))' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
           artifact_id="$(jq -er '.testArtifact.artifactId | select(type == "number" and . > 0)' "$STORYBOOK_VISUAL_BASELINE_MANIFEST")"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" | jq -e \
-            --arg name "$artifact" --argjson run "$run_id" \
-            '.name == $name and .workflow_run.id == $run and .expired == false' >/dev/null
+            --arg name "$artifact" --argjson run "$run_id" --arg sha "$source_commit" \
+            '.name == $name and .workflow_run.id == $run and .workflow_run.head_sha == $sha and .expired == false' >/dev/null
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$RUNNER_TEMP/operator-attention-reference"
       - name: Verify the approved reference before testing
         if: env.CAPTURE != 'true'
@@ -96,7 +97,7 @@ jobs:
           if pnpm exec playwright test operator-attention.spec.ts \
             --config tests/storybook-visual/playwright.config.ts --project stories \
             --workers 1 --retries 0 --reporter list --output "$probe" \
-            -g '^find-pending-request in light$'; then
+            -g 'find-pending-request in light$'; then
             echo 'The comparison passed with a deliberately different reference.'
             exit 1
           fi
