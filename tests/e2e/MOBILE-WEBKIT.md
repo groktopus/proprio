@@ -25,6 +25,10 @@ The dedicated configuration clears `DATABASE_URL` and
 throwaway server starts. The suite therefore uses only its embedded test
 database.
 
+WebKit may retain focus on the dialog while the rich New task editor
+initializes; that journey uses an explicit editor tap before typing and does
+not claim that opening the dialog opens a native keyboard.
+
 The suite uses Playwright WebKit with an emulated iPhone 13 viewport. This is
 browser-engine and viewport evidence. It does not prove iOS Safari's native
 virtual keyboard, safe-area insets, or visual viewport event timing.

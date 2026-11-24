@@ -30,6 +30,9 @@ test.describe("issue #164 mobile WebKit journeys", () => {
 
       const editor = page.getByRole("textbox", { name: "editable markdown", exact: true });
       await expect(editor).toBeVisible();
+      // WebKit keeps focus on the dialog while the rich editor initializes.
+      // A direct tap is the supported mobile interaction before editing.
+      await editor.tap();
       await expect(editor).toBeFocused();
       await editor.fill("Draft this task on mobile WebKit");
       await expect(editor).toHaveText("Draft this task on mobile WebKit");
