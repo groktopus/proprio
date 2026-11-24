@@ -43,6 +43,7 @@ import { automaticRunCreationHeldUntil, readAutomaticWorkStatus, reserveAutomati
 import { isReattachPhaseActive, reattachPhaseRecheckAt } from "../heartbeat/run-admission.js";
 import { wakeBecameFreshContinuation } from "./wake-became-fresh-continuation.js";
 import { continueSweepTaskFromSavedWork } from "./sweep-saved-work-continuation.js";
+import { reconcileParentDependencyDiagnosis } from "./parent-dependency-diagnosis.js";
 import { STRANDED_CONTINUATION_MAX_AGE_MS, STRANDED_KIND, strandedHoldContinuesAutomatically, type StrandedHoldRun } from "./stranded-hold-continuation.js";
 import {
   continuationActivityMessage,
@@ -563,10 +564,9 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         and ${activeIssueInteractionCondition()})`,
       // Plain waits on someone else, decided without the full read. The
       // predicate re-checks every task this lets through.
-      sql`not exists (select 1 from issue_relations rel inner join issues blocker
-        on blocker.id = rel.issue_id and blocker.company_id = rel.company_id
-        where rel.company_id = ${issues.companyId} and rel.related_issue_id = ${issues.id}
-          and rel.type = 'blocks' and blocker.status not in ('done', 'cancelled'))`,
+      // Explicit blocker waits need the full predicate so dependency diagnosis
+      // can distinguish active work, named holds, and a missing path. Parent
+      // hierarchy alone is not a blocker.
       sql`not exists (select 1 from issue_approvals ia inner join approvals ap on ap.id = ia.approval_id
         where ia.company_id = ${issues.companyId} and ia.issue_id = ${issues.id} and ap.status = 'pending')`,
       // A credential or board-confirmation hold waits on a person; any active
@@ -603,6 +603,15 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
     const facts = (await loadFacts(scope.companyId, [issue])).get(issue.id)!;
     const at = now();
     const verdict = evaluateAssignedWork(facts, at);
+    if (facts.openBlockers > 0 && verdict.kind === "ok" && verdict.clause === "waiting" && verdict.reason === "dependency") {
+      const diagnosis = await reconcileParentDependencyDiagnosis(db, { companyId: issue.companyId, issueId: issue.id,
+        enqueueWakeup: deps.enqueueWakeup as never, now: at });
+      if (diagnosis.accepted) {
+        const check = { verdict, outcome: "repaired" as const, retryAt: null };
+        passLog.record(check);
+        return check;
+      }
+    }
     const check = await act(issue, facts, verdict, at);
     if (check.retryAt) scope.onDeferredDeadline?.(check.retryAt.getTime(), { unchanged: check.outcome === "waiting_unchanged" });
     passLog.record(check);

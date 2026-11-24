@@ -332,7 +332,7 @@ function waitingReason(facts: AssignedWorkFacts, now: Date): WaitingReason | nul
   }
   if (facts.pendingInteractions > 0) return "question";
   if (facts.pendingApprovals > 0) return "approval";
-  if (facts.openBlockers > 0 || facts.openChildren > 0) return "dependency";
+  if (facts.openBlockers > 0) return "dependency";
   if (facts.reviewPending) return "review";
   if (facts.budgetStop) return "budget";
   if (facts.companyPaused) return "company_paused";

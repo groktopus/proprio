@@ -165,7 +165,6 @@ describe("assigned-work invariant", () => {
       ["question", { pendingInteractions: 1 }],
       ["approval", { pendingApprovals: 1 }],
       ["dependency", { openBlockers: 1 }],
-      ["dependency", { openChildren: 2 }],
       ["review", { reviewPending: true }],
       ["budget", { budgetStop: true }],
       ["company_paused", { companyPaused: true }],
@@ -192,6 +191,11 @@ describe("assigned-work invariant", () => {
         expect(evaluateAssignedWork(facts(overrides), now)).toEqual({ kind: "ok", clause: "waiting", reason });
       });
     }
+
+    it("does not treat ordinary open children as a required dependency wait", () => {
+      expect(evaluateAssignedWork(facts({ openChildren: 2 }), now))
+        .toEqual({ kind: "violation", reason: "no_pending_path", stale: false });
+    });
 
     it("does not accept a provider limit with no resume time", () => {
       expect(evaluateAssignedWork(facts({ activeRecoveryAction: { cause: "provider_quota", ownerType: "board", resumeAt: null } }), now))
