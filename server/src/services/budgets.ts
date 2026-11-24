@@ -8,7 +8,7 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, inArray, sql, or, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 
 import {
@@ -45,6 +45,7 @@ import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notificatio
 import { listPendingBudgetCancellationScopes } from "./heartbeat/budget-cancellation.js";
 import { withBudgetSpan } from "./budget-tracing.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
+import { resolvableApprovalStatuses } from "../lib/approval-records.js";
 export { computeObservedSpend, computeObservedSpends } from "./budget-exposure.js";
 export type { BudgetExposure } from "./budget-exposure.js";
 
@@ -684,11 +685,21 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     });
   }
 
-  async function listOpenIncidents(companyId: string): Promise<BudgetIncident[]> {
+  async function listOpenIncidents(companyId: string, options: { approvalReadCondition?: SQL<boolean> } = {}): Promise<BudgetIncident[]> {
+    const readableApproval = options.approvalReadCondition
+      ? exists(db.select({ id: approvals.id }).from(approvals).where(and(
+        eq(approvals.id, budgetIncidents.approvalId),
+        options.approvalReadCondition,
+      )))
+      : undefined;
     return hydrateIncidentRows(await db
       .select()
       .from(budgetIncidents)
-      .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.status, "open")))
+      .where(and(
+        eq(budgetIncidents.companyId, companyId),
+        eq(budgetIncidents.status, "open"),
+        readableApproval ? or(isNull(budgetIncidents.approvalId), readableApproval) : undefined,
+      ))
       .orderBy(desc(budgetIncidents.createdAt)));
   }
 
@@ -1029,17 +1040,19 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     /** The `activeIncidents` of `overview`, without the spend of every policy. */
     openIncidents: listOpenIncidents,
 
-    overview: async (companyId: string): Promise<BudgetOverview> => {
+    overview: async (companyId: string, options: { approvalReadCondition?: SQL<boolean> } = {}): Promise<BudgetOverview> => {
       const rows = await listPolicyRows(companyId);
       const policies = await mapBudgetReads(rows, buildPolicySummary);
-      const activeIncidents = await listOpenIncidents(companyId);
+      const activeIncidents = await listOpenIncidents(companyId, options);
       return {
         companyId,
         policies,
         activeIncidents,
         pausedAgentCount: new Set(policies.filter((policy) => policy.scopeType === "agent" && policy.paused).map((policy) => policy.scopeId)).size,
         pausedProjectCount: new Set(policies.filter((policy) => policy.scopeType === "project" && policy.paused).map((policy) => policy.scopeId)).size,
-        pendingApprovalCount: activeIncidents.filter((incident) => incident.approvalStatus === "pending").length,
+        // Revision requests remain pending reviewer action in the Approvals view.
+        pendingApprovalCount: activeIncidents.filter((incident) =>
+          resolvableApprovalStatuses.includes(incident.approvalStatus ?? "")).length,
       };
     },
 
