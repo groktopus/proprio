@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, lstat } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { configuredControllerOutage, controllerOutageForExecution, parseControllerOutage, replaceController, retireControllerCache, validControllerOutageReceipt } from "./controller-outage.js";
+import { configuredControllerOutage, controllerOutageForExecution, parseControllerOutage, replaceController, retireControllerCache, retireControllerCachePreservingDurableSessions, validControllerOutageReceipt } from "./controller-outage.js";
 import { parseRunnerSelectors, selectRunnerExecutions } from "./selectors.js";
 
 function fixture() {
@@ -130,6 +130,26 @@ it("does not mistake a missing retirement parent for an already absent cache", a
     await mkdir(cache); await writeFile(join(cache, "evidence"), "saved");
     await expect(retireControllerCache(cache, join(root, "missing", "retired"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(join(cache, "evidence"), "utf8")).toBe("saved");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("retires volatile controller entries while retaining durable sessions and workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "controller-cache-preserve-durable-"));
+  const cache = join(root, "cache"), retired = join(root, "retired"), workspace = join(root, "workspace");
+  try {
+    await mkdir(join(cache, "durable-sessions", "session"), { recursive: true });
+    await writeFile(join(cache, "durable-sessions", "session", "identity.json"), "durable identity");
+    await mkdir(join(cache, "controller", "ephemeral"), { recursive: true });
+    await writeFile(join(cache, "controller", "ephemeral", "cache.json"), "controller cache");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "project.txt"), "persistent workspace");
+
+    await retireControllerCachePreservingDurableSessions(cache, retired);
+
+    expect(await readFile(join(cache, "durable-sessions", "session", "identity.json"), "utf8")).toBe("durable identity");
+    await expect(lstat(join(retired, "durable-sessions"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(retired, "controller", "ephemeral", "cache.json"), "utf8")).toBe("controller cache");
+    expect(await readFile(join(workspace, "project.txt"), "utf8")).toBe("persistent workspace");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 it.each(["missing", "previous-revision", "previous-tree", "replacement-revision", "replacement-tree", "reversed"])(

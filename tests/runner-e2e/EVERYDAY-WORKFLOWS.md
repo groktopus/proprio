@@ -57,6 +57,23 @@ exact execution ID explicitly.
 | Continue work after a controller restart | `recover-controller` | Observe saved source, persist a user message, restart the isolated controller, and independently test the delivered result. Native Daytona cases keep the controller offline for 125 seconds before restarting. |
 | Stop work and change direction | `stop-redirect` | Click Stop, send one new request, reload, observe exactly one stored user message and the new answer, and reach Done. |
 | Create and edit a company skill | `create-skill-studio` | Create one skill through the runner, verify its persisted library entry and activity-feed card, open Skill Studio, save an edit, and verify the edit after returning. Local Codex, local ACPX Claude, and warm Daytona cells are explicit. |
+| Recover a structured session goal | `structured-goal-recovery` | Create a provider goal with a dependent two-step deliverable, record the exact first checkpoint, interrupt and replace the controller, then require the same goal/budget, exactly-once milestone effects, a persisted fault receipt, and an independently executed downloaded archive. |
+
+Structured session-goal recovery is an explicit-only, local native Codex
+subscription cell. It has one attempt, no automatic retries, a 1,000-cent
+company/agent hard stop, and a two-turn target. The fault receipt must be saved
+after the exact checkpoint bytes are independently recorded and before resumed
+execution earns credit. The downloaded ZIP is checked by the pinned Python
+container oracle with network disabled. A provider completion claim before the
+first checkpoint, missing or duplicate milestone, absent fault receipt, silent
+stall, or disagreement among provider observations, public goal projection,
+task state, and final run is a failure. The deterministic grader does not
+qualify a live model/provider run.
+
+```sh
+pnpm test:e2e:runner -- --list --suite session-goal-recovery --group session-goal-recovery
+pnpm test:e2e:runner -- --id session-goal-recovery.runner-codex-subscription.local.structured-goal-recovery --max-automatic-retries 0
+```
 
 For normal completion, all story tasks must reach Done, with no active run,
 pending completion confirmation, or scheduled recovery. Runs must prove native

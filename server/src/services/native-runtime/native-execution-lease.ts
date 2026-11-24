@@ -126,6 +126,62 @@ export async function lockNativeExecutionLeaseForReacquire(tx: Pick<Db, "execute
   return false;
 }
 
+type NativeExecutionOwner = {
+  runId: string; companyId: string; issueId: string; leaseOwner: string; attempt: number;
+  controller: NativeControllerIdentity;
+};
+
+type NativeSettlementAuthorityInput = NativeExecutionOwner & {
+  controllerGeneration: number; remote: boolean;
+};
+
+type NativeSettlementTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+function nativeExecutionOwnerCondition(input: NativeExecutionOwner): SQL {
+  return and(
+    eq(nativeRunFinalizations.runId, input.runId),
+    eq(nativeRunFinalizations.companyId, input.companyId),
+    eq(nativeRunFinalizations.issueId, input.issueId),
+    eq(nativeRunFinalizations.leaseOwner, input.leaseOwner),
+    eq(nativeRunFinalizations.attempt, input.attempt),
+    eq(nativeRunFinalizations.controllerBootId, input.controller.bootId),
+    eq(nativeRunFinalizations.controllerPid, input.controller.pid),
+    eq(nativeRunFinalizations.controllerProcessStartedAt, input.controller.processStartedAt),
+  )!;
+}
+
+/**
+ * Acquire the coordinator/run locks and return the complete authority predicate
+ * for a pre-result failure settlement.
+ */
+export async function nativeFailureSettlementAuthority(
+  tx: NativeSettlementTransaction,
+  input: NativeSettlementAuthorityInput,
+): Promise<SQL> {
+  await lockNativeExecutionLeaseForReacquire(tx, { ...input, preResultOnly: true });
+  return and(
+    nativeExecutionOwnerCondition(input),
+    eq(nativeRunFinalizations.controllerGeneration, input.controllerGeneration),
+    isNull(nativeRunFinalizations.resultId),
+    nativeExecutionLeaseHeldCondition({ remote: input.remote, controllerGeneration: input.controllerGeneration }),
+  )!;
+}
+
+/**
+ * Acquire the coordinator/run locks and return the complete authority predicate
+ * for releasing this executor's claim after result handling.
+ */
+export async function nativeClaimReleaseAuthority(
+  tx: NativeSettlementTransaction,
+  input: NativeSettlementAuthorityInput,
+): Promise<SQL> {
+  await lockNativeExecutionLeaseForReacquire(tx, input);
+  return and(
+    nativeExecutionOwnerCondition(input),
+    nativeExecutionLeaseHeldCondition({ remote: input.remote, controllerGeneration: input.controllerGeneration, relinquishAccepted: true }),
+  )!;
+}
+
 type OwnNativeRecoveryClaimInput = {
   companyId: string; runId: string; leaseOwner: string; controller?: NativeControllerIdentity;
 };
@@ -326,17 +382,7 @@ async function renewNativeSessionExecutionLeaseDeadline(
       })
       .where(
         and(
-          eq(nativeRunFinalizations.runId, input.runId),
-          eq(nativeRunFinalizations.companyId, input.companyId),
-          eq(nativeRunFinalizations.issueId, input.issueId),
-          eq(nativeRunFinalizations.leaseOwner, input.leaseOwner),
-          eq(nativeRunFinalizations.attempt, input.attempt),
-          eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-          eq(nativeRunFinalizations.controllerPid, controller.pid),
-          eq(
-            nativeRunFinalizations.controllerProcessStartedAt,
-            controller.processStartedAt,
-          ),
+          nativeExecutionOwnerCondition({ ...input, controller }),
           nativeExecutionLeaseHeldCondition({ remote: !input.reacquire,
             controllerGeneration: input.reacquire?.controllerGeneration }),
         ),

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveIssueGoalBinding,
   resolveIssueGoalId,
   resolveNextIssueGoalId,
+  effectiveIssueGoalOrigin,
 } from "../services/issue-goal-fallback.ts";
 
 describe("issue goal fallback", () => {
@@ -37,6 +39,29 @@ describe("issue goal fallback", () => {
     ).toBe("goal-2");
   });
 
+  it("resolves copied inherited goals against the destination project", () => {
+    expect(resolveIssueGoalBinding({
+      projectId: "project-b",
+      goalId: "goal-a",
+      goalOrigin: "inherited",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+    })).toEqual({ goalId: "goal-b", goalOrigin: "inherited" });
+  });
+
+  it("invalidates provenance when an older writer changes the goal ID", () => {
+    expect(effectiveIssueGoalOrigin({
+      goalId: "new-goal",
+      goalOrigin: "explicit",
+      goalOriginGoalId: "old-goal",
+    })).toBe("unknown");
+    expect(effectiveIssueGoalOrigin({
+      goalId: "same-goal",
+      goalOrigin: "explicit",
+      goalOriginGoalId: "same-goal",
+    })).toBe("explicit");
+  });
+
   it("does not force a company goal when the project has no goal", () => {
     expect(
       resolveIssueGoalId({
@@ -56,7 +81,7 @@ describe("issue goal fallback", () => {
         currentProjectGoalId: null,
         defaultGoalId: "goal-1",
       }),
-    ).toBe("goal-1");
+    ).toEqual({ goalId: "goal-1", goalOrigin: "unknown" });
   });
 
   it("switches from the company fallback to the project goal when a project is added later", () => {
@@ -70,7 +95,7 @@ describe("issue goal fallback", () => {
         projectGoalId: "goal-2",
         defaultGoalId: "goal-1",
       }),
-    ).toBe("goal-2");
+    ).toEqual({ goalId: "goal-2", goalOrigin: "inherited" });
   });
 
   it("backfills the project goal for legacy project-linked issues on update", () => {
@@ -81,19 +106,83 @@ describe("issue goal fallback", () => {
         currentProjectGoalId: "goal-2",
         defaultGoalId: "goal-1",
       }),
-    ).toBe("goal-2");
+    ).toEqual({ goalId: "goal-2", goalOrigin: "unknown" });
   });
 
   it("preserves an explicit goal across project fallback changes", () => {
-    expect(
-      resolveNextIssueGoalId({
+    expect(resolveNextIssueGoalId({
         currentProjectId: "project-1",
         currentGoalId: "goal-explicit",
         currentProjectGoalId: "goal-2",
         projectId: "project-2",
         projectGoalId: "goal-3",
         defaultGoalId: "goal-1",
+        currentGoalOrigin: "explicit",
       }),
-    ).toBe("goal-explicit");
+    ).toEqual({ goalId: "goal-explicit", goalOrigin: "explicit" });
+  });
+
+  it("preserves an explicit selection even when it matched the old project default", () => {
+    expect(resolveNextIssueGoalId({
+      currentProjectId: "project-a",
+      currentGoalId: "goal-a",
+      currentProjectGoalId: "goal-a",
+      projectId: "project-b",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+      currentGoalOrigin: "explicit",
+    })).toEqual({ goalId: "goal-a", goalOrigin: "explicit" });
+  });
+
+  it("moves inherited selections to the destination project's default", () => {
+    expect(resolveNextIssueGoalId({
+      currentProjectId: "project-a",
+      currentGoalId: "goal-a",
+      currentProjectGoalId: "goal-a",
+      projectId: "project-b",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+      currentGoalOrigin: "inherited",
+    })).toEqual({ goalId: "goal-b", goalOrigin: "inherited" });
+  });
+
+  it("records explicit selections and treats a cleared goal as inherited", () => {
+    expect(resolveIssueGoalBinding({
+      projectId: "project-a",
+      goalId: "goal-a",
+      projectGoalId: "goal-a",
+      defaultGoalId: "company-goal",
+    })).toEqual({ goalId: "goal-a", goalOrigin: "explicit" });
+    expect(resolveNextIssueGoalId({
+      currentProjectId: "project-a",
+      currentGoalId: "goal-a",
+      currentProjectGoalId: "goal-a",
+      projectId: "project-a",
+      projectGoalId: "goal-a",
+      goalId: null,
+      defaultGoalId: "company-goal",
+      currentGoalOrigin: "explicit",
+    })).toEqual({ goalId: "goal-a", goalOrigin: "inherited" });
+  });
+
+  it("retains the legacy fallback heuristic when origin is unknown", () => {
+    expect(resolveNextIssueGoalId({
+      currentProjectId: "project-a",
+      currentGoalId: "goal-a",
+      currentProjectGoalId: "goal-a",
+      projectId: "project-b",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+      currentGoalOrigin: "unknown",
+    })).toEqual({ goalId: "goal-b", goalOrigin: "unknown" });
+    expect(resolveNextIssueGoalId({
+      currentProjectId: "project-a",
+      currentGoalId: "goal-c",
+      currentProjectGoalId: "goal-a",
+      projectId: "project-b",
+      projectGoalId: "goal-b",
+      defaultGoalId: "company-goal",
+      currentGoalOrigin: "unknown",
+    })).toEqual({ goalId: "goal-c", goalOrigin: "unknown" });
   });
 });

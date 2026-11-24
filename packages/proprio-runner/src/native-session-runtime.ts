@@ -400,6 +400,8 @@ export interface ExecuteNativeSessionOptions {
   sessionGoalControl?: NativeSessionGoalControl | null;
   /** Resume the active durable session goal after a bounded heartbeat rollover. */
   resumeSessionGoalHeartbeat?: boolean;
+  /** Read the provider's current goal to reconcile an ambiguous control without replaying it. */
+  reconcileSessionGoalRequestId?: string;
   /**
    * Compact the resumed provider session's context instead of starting an
    * ordinary turn. The run settles with a synthesized result once the
@@ -1224,6 +1226,7 @@ async function consumeTurn(
   sessionGoal?: {
     input: NativeExecutionInput;
     requestId: string;
+    readbackOnly?: boolean;
   },
   initialGoal?: HarnessThreadGoal | null,
   resumeInterruptedTurn?: (event: PrpEvent, signal: AbortSignal) => Promise<boolean>,
@@ -1681,8 +1684,8 @@ async function consumeTurn(
           goalControlObserved &&
           (providerFailure === null || providerFailure.recoverable) &&
           eventGoal !== undefined &&
-          goalStatus(eventGoal) !== "active" &&
-          payload.workingNow !== true
+          (sessionGoal?.readbackOnly ||
+            (goalStatus(eventGoal) !== "active" && payload.workingNow !== true))
         ) {
           await settlePendingDeltas();
           return {
@@ -2956,7 +2959,7 @@ export async function executeNativeSession(
   };
   let executionSucceeded = false;
   let goalCheckpointRequiresSuspension = Boolean(
-    options.sessionGoalControl || options.resumeSessionGoalHeartbeat || persistedSession?.goal,
+    options.sessionGoalControl || options.resumeSessionGoalHeartbeat || options.reconcileSessionGoalRequestId || persistedSession?.goal,
   );
   let executionFailure: { error: unknown } | null = null;
   try {
@@ -3110,7 +3113,7 @@ export async function executeNativeSession(
           // A compaction-only run never continues task work after a restart.
           // Runnerd records a restart-lost turn only for these providers, after
           // proving the old process ended and restoring the same conversation.
-          !["codex", "acpx", "opencode"].includes(input.provider.kind) || options.sessionCompaction || options.sessionGoalControl || options.resumeSessionGoalHeartbeat ||
+          !["codex", "acpx", "opencode"].includes(input.provider.kind) || options.sessionCompaction || options.sessionGoalControl || options.resumeSessionGoalHeartbeat || options.reconcileSessionGoalRequestId ||
           recoveredSnapshot.goal || persistedSession?.semanticResult || persistedSession?.pendingRuntimeRequests?.length ||
           event.eventType !== "turn.failed" || !isNativeRestartInterruption(event.payload.error)) return false;
       const snapshot = await session.snapshot();
@@ -3289,10 +3292,11 @@ export async function executeNativeSession(
               quarantineSession,
               options.resolveGovernedWait,
               consumptionAbort.signal,
-              options.sessionGoalControl || options.resumeSessionGoalHeartbeat
+              options.sessionGoalControl || options.resumeSessionGoalHeartbeat || options.reconcileSessionGoalRequestId
                 ? {
                     input,
-                    requestId: options.sessionGoalControl?.requestId ?? `recovery_${input.binding.runId}`,
+                    requestId: options.sessionGoalControl?.requestId ?? options.reconcileSessionGoalRequestId ?? `recovery_${input.binding.runId}`,
+                    ...(options.reconcileSessionGoalRequestId ? { readbackOnly: true } : {}),
                   }
                 : undefined,
               recoveredSnapshot.goal,
@@ -3360,6 +3364,12 @@ export async function executeNativeSession(
           // particular, pause/clear/edit must reach a recovered session even
           // while its provider turn is still active.
           await applyNativeSessionGoalControl(session, options.sessionGoalControl);
+          await checkpoint();
+        } else if (options.reconcileSessionGoalRequestId) {
+          // An ambiguous Clear/Pause must never be replayed against a goal that
+          // may have changed after delivery. Read back the provider state only.
+          if (!session.goal) throw new Error("native_session_goal_unavailable");
+          await session.goal({ action: "get", requestId: options.reconcileSessionGoalRequestId });
           await checkpoint();
         } else if (options.resumeSessionGoalHeartbeat && shouldStartFreshTurn) {
           const requestId = `recovery_${input.binding.runId}`;

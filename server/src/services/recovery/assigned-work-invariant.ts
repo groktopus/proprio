@@ -24,7 +24,7 @@ export const PENDING_INTENTS = [
   "scheduled_monitor",
   "native_recovery",
   "pending_handoff",
-  "session_goal",
+  "session_goal_control",
   "system_recovery_working",
   "saved_work_recovery",
 ] as const;
@@ -158,7 +158,8 @@ export type AssignedWorkFacts = {
   pendingWakes: number;
   nativeRecoveryPending: boolean;
   pendingHandoff: boolean;
-  sessionGoal: "active" | "paused" | null;
+  sessionGoal: "active" | "paused" | "control_pending" | null;
+  sessionGoalBinding?: { sessionId: string; revision: number };
   /** The user-visible interruption projection (task-interruption-presentation.ts). */
   interruption: {
     responsibility: "system" | "user";
@@ -288,7 +289,7 @@ function pendingIntent(facts: AssignedWorkFacts, now: Date, queuedRunStalled = f
   if (facts.activeRuns.some(run => run.status === "scheduled_retry")) return "scheduled_retry";
   if (facts.nativeRecoveryPending) return "native_recovery";
   if (facts.pendingHandoff) return "pending_handoff";
-  if (facts.sessionGoal === "active") return "session_goal";
+  if (facts.sessionGoal === "control_pending") return "session_goal_control";
   if (facts.issue.monitorNextCheckAt && facts.issue.monitorNextCheckAt.getTime() > now.getTime()) return "scheduled_monitor";
   if (facts.savedWorkRecovery && savedWorkRecoveryPending(facts.savedWorkRecovery, now)) return "saved_work_recovery";
   const interruption = facts.interruption;

@@ -72,7 +72,7 @@ Required for live publishes:
 ```bash
 export AWS_REGION=us-east-1
 export PROPRIO_PAGE_BUCKET=proprio-pages-prod
-export PROPRIO_PAGE_BASE_URL=https://pages.paperclip.ing
+export PROPRIO_PAGE_BASE_URL='<deployed-pages-https-url>'
 export PROPRIO_PAGE_AWS_ACCESS_KEY_ID=...
 export PROPRIO_PAGE_AWS_SECRET_ACCESS_KEY=...
 ```
@@ -122,7 +122,7 @@ create buckets, mutate IAM, change DNS, or manage CloudFront.
 export AWS_PROFILE=proprio-admin
 export AWS_REGION=us-east-1
 export BUCKET=proprio-pages-prod
-export DOMAIN=pages.paperclip.ing
+export DOMAIN=pages.example.com  # Replace with the hostname you operate.
 export UPLOADER_USER=proprio-page-uploader
 export CLOUDFRONT_COMMENT="Proprio pages"
 
@@ -457,24 +457,25 @@ endpoint.
 
 Cloudflare UI:
 
-- Open the `paperclip.ing` zone.
+- Open the zone that owns `DOMAIN`, such as `example.com` for `pages.example.com`.
 - Add `CNAME`:
-  - Name: `pages`
+  - Name: the configured `DOMAIN`
   - Target: the CloudFront domain, for example `d111111abcdef8.cloudfront.net`
   - Proxy status: DNS only or Proxied
   - TTL: Auto
 
-API equivalent:
+For the API, use the ID of the zone that owns `DOMAIN` and a token scoped to
+DNS edits in that zone.
 
 ```bash
-export CF_ZONE_ID=<proprio.ing-zone-id>
-export CF_API_TOKEN=<token-with-zone-dns-edit>
+export CF_ZONE_ID='<zone-id-for-domain>'
+export CF_API_TOKEN='<token-with-zone-dns-edit>'
 
 curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
   -H "Authorization: Bearer $CF_API_TOKEN" \
   -H "Content-Type: application/json" \
   --data "$(jq -n \
-    --arg name pages \
+    --arg name "$DOMAIN" \
     --arg content "$DISTRIBUTION_DOMAIN" \
     '{type:"CNAME", name:$name, content:$content, ttl:1, proxied:false}')"
 ```
@@ -504,6 +505,7 @@ pnpm proprio secrets create \
   --value-env PROPRIO_PAGE_AWS_SECRET_ACCESS_KEY
 ```
 
+Replace the URL placeholder with the HTTPS URL that passed the smoke check.
 Bind runtime env to publishing agents. Use the namespaced names — never the
 global `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, which would shadow the
 host `AWS_PROFILE` identity for the entire agent run:
@@ -522,7 +524,7 @@ host `AWS_PROFILE` identity for the entire agent run:
   },
   "AWS_REGION": { "type": "plain", "value": "us-east-1" },
   "PROPRIO_PAGE_BUCKET": { "type": "plain", "value": "proprio-pages-prod" },
-  "PROPRIO_PAGE_BASE_URL": { "type": "plain", "value": "https://pages.paperclip.ing" },
+  "PROPRIO_PAGE_BASE_URL": { "type": "plain", "value": "<deployed-pages-https-url>" },
   "PROPRIO_PAGE_DEFAULT_PREFIX": { "type": "plain", "value": "" }
 }
 ```

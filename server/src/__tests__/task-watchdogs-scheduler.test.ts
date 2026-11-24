@@ -17,6 +17,8 @@ import {
   issueWorkProducts,
   issues,
   issueWatchdogs,
+  goals,
+  projects,
 } from "@groktopus/db";
 import {
   normalizeProprioWakePayload,
@@ -63,6 +65,8 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(goals);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -118,6 +122,10 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       originKind: overrides.originKind,
       originId: overrides.originId,
       originFingerprint: overrides.originFingerprint,
+      projectId: overrides.projectId,
+      goalId: overrides.goalId,
+      goalOrigin: overrides.goalOrigin,
+      goalOriginGoalId: overrides.goalOriginGoalId,
       updatedAt: overrides.updatedAt,
       // Default to an "established" issue (created well before the first-run
       // grace window) so the pending-first-run guard does not defer it. Tests
@@ -243,6 +251,57 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       waitsByIssueId: {},
     });
     expect(watchdog?.triggerCount).toBe(1);
+  });
+
+  it("copies inherited goal provenance when creating and reopening its watchdog issue", async () => {
+    const companyId = await seedCompany();
+    const [goalA, goalB] = await db.insert(goals).values([
+      { companyId, title: "Watchdog A", level: "company", status: "active" },
+      { companyId, title: "Watchdog B", level: "company", status: "active" },
+    ]).returning();
+    const [projectA, projectB] = await db.insert(projects).values([
+      { companyId, name: "Watchdog project A", goalId: goalA!.id },
+      { companyId, name: "Watchdog project B", goalId: goalB!.id },
+    ]).returning();
+    const sourceId = await seedIssue(companyId, {
+      identifier: "WDOG-GOAL",
+      status: "done",
+      projectId: projectA!.id,
+      goalId: goalA!.id,
+      goalOrigin: "inherited",
+      goalOriginGoalId: goalA!.id,
+    });
+    const childId = await seedIssue(companyId, { parentId: sourceId, status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service } = createService();
+
+    await service.reconcileTaskWatchdogs({ companyId });
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const watchdogIssueId = watchdog!.watchdogIssueId!;
+    const [created] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(created).toMatchObject({ goalId: goalA!.id, goalOrigin: "inherited", goalOriginGoalId: goalA!.id });
+
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, watchdogIssueId));
+    await service.reconcileTaskWatchdogs({ companyId });
+    await db.update(issues).set({
+      projectId: projectB!.id,
+      goalId: goalB!.id,
+      goalOrigin: "inherited",
+      goalOriginGoalId: goalB!.id,
+    }).where(eq(issues.id, sourceId));
+    await db.update(issues).set({ status: "blocked", updatedAt: new Date(Date.now() + 60_000) })
+      .where(eq(issues.id, childId));
+    await service.reconcileTaskWatchdogs({ companyId });
+
+    const [reopened] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(reopened).toMatchObject({
+      projectId: projectB!.id,
+      goalId: goalB!.id,
+      goalOrigin: "inherited",
+      goalOriginGoalId: goalB!.id,
+      status: "todo",
+    });
   });
 
   it("delivers board-supplied watchdog instructions all the way into the rendered mandate", async () => {

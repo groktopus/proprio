@@ -1,9 +1,11 @@
-import { lstat, rename } from "node:fs/promises";
+import { lstat, mkdir, readdir, rename } from "node:fs/promises";
+import { join } from "node:path";
 import type { ServingArtifact } from "./upgrade-artifacts.js";
 import type { ControllerRecoveryReceipt } from "./controller-recovery-observer.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { MatrixExecution } from "./types.js";
 import { isRollingWebDeployment } from "./controller-rolling-deployment.js";
+import { SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
 
 export interface ControllerOutage {
   signal: "SIGTERM" | "SIGKILL";
@@ -56,8 +58,12 @@ export function configuredControllerOutage(env: NodeJS.ProcessEnv, defaultHoldMs
 
 export function controllerOutageForExecution(execution: MatrixExecution, env: NodeJS.ProcessEnv): ControllerOutage | undefined {
   if (isRollingWebDeployment(execution)) return undefined;
-  if (execution.task.flow !== "everyday_workflow" || execution.task.id !== "recover-controller"
-    || execution.environment.id !== "daytona" || execution.profile.generation !== "native"
+  const structuredGoalRecovery = execution.suite.id === SESSION_GOAL_RECOVERY_SUITE
+    && execution.task.id === "structured-goal-recovery" && execution.environment.id === "local"
+    && execution.profile.id === "runner-codex-subscription";
+  const everydayRecovery = execution.task.flow === "everyday_workflow" && execution.task.id === "recover-controller"
+    && execution.environment.id === "daytona";
+  if (!(structuredGoalRecovery || everydayRecovery) || execution.profile.generation !== "native"
     || (execution.profile.provider !== "codex" && execution.profile.provider !== "acpx")) return undefined;
   const declaredHoldMs = execution.suite.definitionMetadata?.controllerDowntimeMs;
   if (typeof declaredHoldMs !== "number") throw new Error("Controller recovery suite must declare its outage duration");
@@ -174,5 +180,22 @@ export async function retireControllerCache(cache: string, retired: string): Pro
       throw missing;
     }
     throw error;
+  }
+}
+
+/** Retire volatile controller cache while retaining provider-owned durable
+ * session state across the replacement. Used only by structured goal recovery.
+ */
+export async function retireControllerCachePreservingDurableSessions(cache: string, retired: string): Promise<void> {
+  try {
+    await lstat(cache);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await mkdir(retired, { recursive: false });
+  for (const entry of await readdir(cache)) {
+    if (entry === "durable-sessions") continue;
+    await rename(join(cache, entry), join(retired, entry));
   }
 }

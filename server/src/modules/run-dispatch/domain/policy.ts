@@ -119,6 +119,8 @@ export type QueuedRunStalenessErrorCode =
   | "issue_execution_lock_changed"
   | "issue_blocked"
   | "issue_review_participant_changed"
+  | "session_goal_recovery_superseded"
+  | "session_goal_reconciliation_superseded"
   | "issue_continuation_waiting_on_review"
   | "issue_in_backlog";
 
@@ -168,6 +170,8 @@ export type QueuedRunFacts = {
   continuationParkApplies: boolean;
   /** The pre-classified verdict on whatever continuation summary body applies; only meaningful when continuationParkApplies is true. */
   continuationParksExecutor: boolean;
+  sessionGoalRecoveryCurrent?: boolean;
+  goalControlReconciliationCurrent?: boolean;
   continuationSummaryBody: string | null;
   wakeReason: string | null;
   retryReason: string | null;
@@ -560,6 +564,24 @@ export function decideQueuedRunStaleness(
     }
   }
 
+  if (facts.sessionGoalRecoveryCurrent === false) {
+    return {
+      stale: true,
+      errorCode: "session_goal_recovery_superseded",
+      reason: "Cancelled because the session goal changed or has a pending control before recovery could start",
+      details: { issueId: facts.issueId },
+    };
+  }
+
+  if (facts.goalControlReconciliationCurrent === false) {
+    return {
+      stale: true,
+      errorCode: "session_goal_reconciliation_superseded",
+      reason: "Cancelled because the provider goal changed before ambiguous-control readback could start",
+      details: { issueId: facts.issueId },
+    };
+  }
+
   if (facts.pendingResponse) {
     return { stale: true, errorCode: "issue_waiting_for_response",
       reason: "Cancelled because the continuation is still waiting for an authorized response",
@@ -571,7 +593,7 @@ export function decideQueuedRunStaleness(
       stale: true,
       errorCode: "issue_continuation_waiting_on_review",
       reason:
-        "Cancelled because the continuation summary says the executor should wait for reviewer feedback or approval before more work starts",
+        "Cancelled because the task is waiting for reviewer feedback or approval before more work starts",
       details: {
         issueId: facts.issueId,
         wakeReason: facts.wakeReason,

@@ -13,6 +13,7 @@ from forks and branches in this repository, including PRs retargeted to
 persisting checkout credentials, and installs the workspace from the frozen
 pnpm lockfile. Its checks include:
 
+- `pnpm lint` for server, UI, and CLI source using the locked workspace version of Oxlint;
 - the named authorization, credential lifecycle, and audit cases described in
   [Secure engineering](SECURE-ENGINEERING.md);
 - the `AGENTS.md` local-link check and its Node test suite;
@@ -37,6 +38,140 @@ is a focused smoke lane. The server typecheck and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
+
+For a fork contribution, open or retarget the pull request to `main`. If
+GitHub holds its workflow, a maintainer reviews the proposed changes, opens **Awaiting approval** to see the **Merge status** panel, then
+selects **Approve workflows to run**. Open the run from the Checks tab and
+match its head SHA to the pull request's current head. Confirm that
+`stability-checks` executed and passed, and that the required `smoke` check
+passed. The aggregate job requires a successful test job and routing job, plus
+a successful Linux qualification when routing selects it. A missing,
+skipped, failed, or superseded test run provides no merge evidence. A new head
+needs its own successful run.
+
+The first fork qualification used [PR #144](https://github.com/groktopus/proprio/pull/144)
+at `1bffbc100ac85d0f0c48c5c4347de9cc72645f5a`. The
+[successful smoke job](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137783508363)
+was attempt 3. It checked out that head and ran tests, typecheck, and build.
+[Attempt 1](https://github.com/groktopus/proprio/actions/runs/45195834705/attempts/1)
+required approval and ran no jobs.
+[Attempt 2](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137771466960)
+was cancelled during typecheck and build. These attempts provide no passing
+evidence. The run predates the split of the
+test job and aggregate check. For the current split on a same-repository PR,
+see [PR #257](https://github.com/groktopus/proprio/pull/257) at
+`a3ade7df7c560734f4a88cc54de64d96050c23c4` and its
+[executed test job](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138206578219)
+and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
+Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
+
+### Durable-work acceptance
+
+The required `smoke` job combines Stability smoke with [Linux source
+qualification](../.github/workflows/linux-source-qualification.yml) when
+[the target branch's routing rules](../scripts/ci/durable-work-acceptance.mjs)
+match the PR diff. The router compares GitHub's comparison commit with its
+target-branch parent and verifies the PR head. During bootstrap it requires
+Linux qualification for every PR whose base predates the policy. Both
+execution jobs use read-only permissions and check out the exact PR head.
+
+The separate [trusted policy workflow](../.github/workflows/durable-work-policy.yml)
+uses the default branch and the GitHub API to classify all changed paths. It
+checks the qualification job for the open PR's current head and publishes
+`trusted durable-work acceptance`. The workflow reads run metadata only. It
+does not check out PR code or use PR artifacts. Add that status to the main
+ruleset after validating both an applicable run and an unrelated PR.
+
+If the PR changes the workflow or its routing and report checks, run the
+Linux workflow on `main` with its PR number, exact head SHA, and exact base
+SHA. The trusted policy uses that default-branch run as evidence. To qualify a
+source candidate outside a PR, select `main`, then provide the candidate's
+exact source SHA and the exact previous-release SHA as `test_head` and
+`base_sha`. The run title and report bind both values; for the first source
+qualification, use the `v0.0.1` tag's commit as the base.
+
+The Linux lane requires a source build, a fresh disposable agent run, native
+PostgreSQL 18 backup and restore into a fresh target, and named runner recovery
+cases. A managed update builds a Git payload and restarts a real systemd user
+service. The check verifies the running commit and a saved database record
+after the update and after rollback to the original commit. Chromium also reads
+the output from the task recovered by that same managed update, then reloads
+that task URL and reads the output again. The workflow requires the recovered-task
+browser check to pass. It uploads one `durable-work-acceptance` artifact
+containing exact source/base SHAs and the five required case outcomes with links
+to the workflow attempt. The existing
+simulated backup and restart cases also run in Stability smoke. The Linux job
+summary retains both revisions and the executed case outcomes. The active-work
+schema migration and its run and workspace recovery evidence remain tracked in
+[#127](https://github.com/groktopus/proprio/issues/127).
+
+### Scheduled Linux source qualification
+
+GitHub Actions runs Linux source qualification on the default branch daily at
+07:43 UTC. See [Workspace regression](#workspace-regression) for its schedule. The
+scheduled source run uses the event's exact `main` SHA and the `v0.0.1`
+upgrade baseline. Use **Run workflow** on `main` to repeat the
+current checkout. For a pinned candidate and predecessor, use the
+[paired SHA dispatch above](#durable-work-acceptance).
+
+The job summary identifies the test revision and attempt. It reports the
+locked install, managed update and rollback, source build, first synthetic
+task and persisted receipt, fresh-target restore, and Runner recovery.
+Failed, skipped and incomplete stages remain visible. Successful runs
+retain the linked `durable-work-acceptance` artifact on the run page.
+
+The [repository owner](../.github/CODEOWNERS) triages failed and interrupted jobs. Open the
+first failed stage and route a source or Runner regression to the owning
+maintainer. Record the revision and run link when filing or updating the
+issue. A passing scheduled run is a regression baseline. For release
+publication, use the separately recorded dispatch described below.
+
+### Source publication gate
+
+For a `v0.0.x` source prerelease, use the
+[release runbook](RELEASING.md). Before tagging, the command verifies a trusted
+`main` dispatch for the exact candidate and previous published source tag.
+The `source-and-runner` job must pass on the same attempt and retain the
+unexpired `durable-work-acceptance` artifact. The source dry run also verifies
+the report and performs no remote writes.
+
+The report binds the exact source and base SHAs. It requires passed evidence
+for managed update and rollback, fresh-target backup and restore,
+interruption and restart/cancellation/disk pressure, and browser task
+readback. A tracked migration SQL change also requires active-run recovery
+evidence with recovery time and observed data loss. Without that change the
+migration case records `not_applicable`. Each case links to the validated
+`groktopus/proprio` run attempt.
+
+The legacy calendar and suffixed release paths use the durable-work diff
+classifier and check matching evidence before creating or editing the
+GitHub release.
+
+### Workspace regression
+
+[Workspace regression](../.github/workflows/workspace-regression.yml) runs on
+the exact `main` revision selected by the daily 08:23 UTC schedule or manual
+dispatch. Each lane installs frozen dependencies on GitHub-hosted Ubuntu
+24.04. The workflow uses the stable test runner's existing general, chat,
+serialized, native Runner, and workspace groupings. Server lanes build the
+Runner TypeScript package before collecting tests. The native Runner lane
+also builds its test binaries. A separate baseline job verifies that the
+CLI install, update, and server health files ran and passed.
+
+Each lane retains its Vitest results, retry timings, and a summary with the
+tested SHA and counts for executed, failed, skipped, and unresolved cases.
+The summary names incomplete suites and counts tests blocked by suite setup
+separately from intentional skips.
+A failed or incomplete required lane fails the workflow. A test that passes
+on retry is visible in the summary. Live provider journeys, real browser E2E,
+and non-Linux environments remain separate coverage. The CI maintainers
+triage failures and record any excluded environments and test skips.
+
+The first [manual baseline](https://github.com/groktopus/proprio/actions/runs/45338518747)
+tested `8c88f5605cdfa48f9d73bf8b41703c2a5688534e` on Ubuntu 24.04. The
+CLI install, update, and health lane passed all 71 tests. The full run
+reported failures in the broader workspace lanes, including Runner package
+collection errors before the server lanes built its TypeScript exports.
 
 ### Standalone sandbox-provider dependencies
 

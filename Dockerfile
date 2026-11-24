@@ -370,9 +370,8 @@ RUN --mount=type=bind,from=runner-artifacts,target=/runner-artifacts \
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
-# Refreshes the tool layer below when it changes (CI stamps an ISO week, so
-# the @latest CLI tools advance weekly). Without it the cached layer would
-# freeze the tools until an unrelated cache bust.
+# Refresh the OS and transitive npm resolution while preserving the exact
+# top-level harness versions below.
 ARG CLI_TOOLS_CACHE_EPOCH=""
 WORKDIR /app
 # Tool and OS layer BEFORE the app copy: it references nothing from /app, and
@@ -380,7 +379,7 @@ WORKDIR /app
 # (the single most expensive layer: four CLI toolchains + apt, per arch) can
 # never hit the layer cache and rebuilds on every build.
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
-  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@2.1.331 @openai/codex@0.172.0 opencode-ai@1.19.6 @google/gemini-cli@0.71.1 @moonshot-ai/kimi-code@2.7.3 \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \

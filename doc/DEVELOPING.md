@@ -203,25 +203,15 @@ case.
 
 ## Docker Quickstart (No local Node install)
 
-Build and run Proprio in Docker:
+Follow the [Docker guide](DOCKER.md) to create the Compose environment file,
+build the self-hosted production image, and choose a storage layout. From
+the repository root, start the quickstart and wait for readiness:
 
 ```sh
-docker build -t proprio-local .
-docker run --name proprio \
-  -p 3100:3100 \
-  -e HOST=0.0.0.0 \
-  -e PROPRIO_HOME=/proprio \
-  -v "$(pwd)/data/docker-proprio:/proprio" \
-  proprio-local
+docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml up --build -d --wait
 ```
 
-Or use Compose:
-
-```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
-```
-
-See `doc/DOCKER.md` for API key wiring (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) and persistence details.
+Use the same guide for direct image builds, API keys, and persistent data.
 
 ## Docker For Untrusted PR Review
 
@@ -404,8 +394,8 @@ pnpm lint
 ```
 
 This checks `server/src`, `ui/src`, and `cli/src` with the shared Oxlint configuration.
-Oxlint errors fail the command; the existing warning backlog does not. A first run
-may need registry access to download the pinned Oxlint version with `pnpm dlx`.
+Oxlint errors fail the command. The existing warning backlog does not. Install
+workspace dependencies before running the linter.
 
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.

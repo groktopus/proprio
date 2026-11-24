@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { useState } from "react";
+import { act as reactAct, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +95,23 @@ describe("ScheduleEditor", () => {
     expect(container.textContent).toContain("Valid cron.");
 
     act(() => root.unmount());
+  });
+
+  it("updates upcoming fires when the schedule timezone changes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-16T10:00:00Z"));
+    const root = createRoot(container);
+    try {
+      await reactAct(() => root.render(<ScheduleEditor value="0 9 1 * 1" timezone="UTC" onChange={() => {}} />));
+      const utc = new Date("2026-11-23T09:00:00Z").toLocaleString(undefined, { timeZone: "UTC" });
+      expect(container.textContent).toContain(`Next: ${utc}`);
+      await reactAct(() => root.render(<ScheduleEditor value="0 9 1 * 1" timezone="America/New_York" onChange={() => {}} />));
+      const eastern = new Date("2026-11-16T14:00:00Z").toLocaleString(undefined, { timeZone: "America/New_York" });
+      expect(container.textContent).toContain(`Next: ${eastern}`);
+    } finally {
+      await reactAct(() => root.unmount());
+      vi.useRealTimers();
+    }
   });
 
   it("keeps Custom open while partial edits and pasted valid cron values round-trip through parent state", () => {

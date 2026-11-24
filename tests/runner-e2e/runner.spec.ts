@@ -52,6 +52,7 @@ import { assertNativeBlockerReply } from "./native-blocker-visible.js";
 import { warmManagedFileEvidence } from "./warm-managed-files.js";
 import { summarizeStartupReuse } from "../../packages/adapter-utils/src/startup-reuse.js";
 import { gitFinalizationEvidence, gitStreamingEvidence, setupGitStreamingWorkspace } from "./daytona-git-streaming.js";
+import { SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
 import { runsCompletionUpdateProbe, completionQualityControls, completionQualityStatus, judgeCompletionQuality, reserveCompletionQuality, type CompletionQualityRecord } from "./completion-quality.js";
 import { runNativeProviderLossFlow } from "./native-provider-loss-flow.js";
 import { ownedActiveCleanupRunIds, mayAllocateRemoteResources, runCleanupWithObservers, verifyCleanupAssertions, type CleanupAssertion } from "./cleanup-verification.js";
@@ -1036,6 +1037,12 @@ for (const execution of executions) {
           : {}),
       });
       expect(experimental.enableNativeRunner).toBe(nativeRolloutEnabled);
+
+      if (execution.suite.id === SESSION_GOAL_RECOVERY_SUITE && execution.task.id === "structured-goal-recovery") {
+        // Recovery must retain a real project source across controller cache
+        // replacement. Seed the disposable local project before it is created.
+        await setupGitStreamingWorkspace(workspacePath);
+      }
 
       if (execution.suite.id === "extended-harnesses" && execution.profile.qualificationCandidate === "pi" && execution.task.id === "file-edit-validate") {
         piFileSeed = await seedPiFile(workspacePath, nonce);

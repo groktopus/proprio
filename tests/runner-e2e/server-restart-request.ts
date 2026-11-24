@@ -9,6 +9,7 @@ import { controllerOutageForExecution, parseControllerOutage, type ControllerOut
 import { parseRecoveryBinding, type RecoveryBinding } from "./controller-recovery-observer.js";
 import { parseFinalizationCrashBinding, type FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { parseRestartRunnerIdentity, type RestartRunnerIdentity } from "./process-tree-owner.js";
+import { SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
 
 export interface RestartRequest {
   requestId: string;
@@ -18,6 +19,7 @@ export interface RestartRequest {
   discardControllerCache?: boolean;
   crashAfterResult?: FinalizationCrashBinding;
   controllerOutage?: ControllerOutage;
+  preserveDurableRunnerSessions?: boolean;
   rollingDeployment?: true;
   recoveryBinding?: RecoveryBinding;
 }
@@ -102,6 +104,12 @@ export async function readRestartRequest(restartRequestPath: string, executionId
   const crashAfterResult = (value as { crashAfterResult?: unknown }).crashAfterResult;
   const controllerOutage = (value as { controllerOutage?: unknown }).controllerOutage;
   const recoveryBinding = (value as { recoveryBinding?: unknown }).recoveryBinding;
+  const preserveDurableRunnerSessions = controllerOutage !== undefined && executionIds.length === 1
+    && (() => {
+      const execution = runnerMatrix.find(row => row.id === executionIds[0]);
+      return execution?.suite.id === SESSION_GOAL_RECOVERY_SUITE && execution.task.id === "structured-goal-recovery"
+        && execution.environment.id === "local" && execution.profile.id === "runner-codex-subscription";
+    })();
   if (recoveryBinding !== undefined && controllerOutage === undefined && !rollingDeployment) throw new Error("Recovery observation requires a controller outage");
   if (rollingDeployment && (!discardControllerCache || controllerOutage !== undefined || controllerDowntimeMs !== undefined
     || preserveRunner !== undefined || crashAfterResult !== undefined)) throw new Error("Rolling deployment cannot combine an outage or another fault");
@@ -113,6 +121,7 @@ export async function readRestartRequest(restartRequestPath: string, executionId
   }
   return { requestId, discardControllerCache, ...(rollingDeployment ? { rollingDeployment: true as const } : {}), ...(kimiCandidateAdmission ? { kimiCandidateAdmission } : {}), ...(controllerDowntimeMs === undefined ? {} : { controllerDowntimeMs: Number(controllerDowntimeMs) }),
     ...(recoveryBinding === undefined ? {} : { recoveryBinding: parseRecoveryBinding(recoveryBinding) }),
+    ...(preserveDurableRunnerSessions ? { preserveDurableRunnerSessions: true } : {}),
     ...(controllerOutage === undefined ? {} : { controllerOutage: parseControllerOutage(controllerOutage) }),
     ...(preserveRunner === undefined ? {} : { preserveRunner: parseRestartRunnerIdentity(preserveRunner) }),
     ...(crashAfterResult === undefined ? {} : { crashAfterResult: parseFinalizationCrashBinding(crashAfterResult) }) };

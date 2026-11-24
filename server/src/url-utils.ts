@@ -32,24 +32,20 @@ export function rewriteUrlPort(rawUrl: string | undefined, port: number): string
 }
 
 /**
- * Like {@link rewriteUrlPort}, but only for loopback hosts.
- *
- * Used at server startup for the main instance's `authPublicBaseUrl`. An explicit
- * *external* base URL (e.g. a Tailscale Serve listener on a non-default port like
- * :8443) must survive untouched: rewriting its port to the internal listen port
- * yields an unreachable URL (scheme/port mismatch) that then propagates to spawned
- * agents as a dead PROPRIO_API_URL. (BRO-1558)
+ * Keep a loopback URL that advertises a separate port, such as a Docker
+ * publishing port. Only rewrite local URLs that followed the requested
+ * server listener when detect-port moves that listener.
  */
 export function rewriteLoopbackUrlPort(
   rawUrl: string | undefined,
-  port: number,
+  requestedPort: number,
+  listenPort: number,
 ): string | undefined {
   if (!rawUrl) return undefined;
   try {
     const parsed = new URL(rawUrl);
-    if (!parsed.port) return rawUrl;
-    if (!isLoopbackHost(parsed.hostname)) return rawUrl;
-    parsed.port = String(port);
+    if (!isLoopbackHost(parsed.hostname) || parsed.port !== String(requestedPort)) return rawUrl;
+    parsed.port = String(listenPort);
     return parsed.toString();
   } catch {
     return rawUrl;

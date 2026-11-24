@@ -942,6 +942,8 @@ export interface Issue {
   projectId: string | null;
   projectWorkspaceId: string | null;
   goalId: string | null;
+  /** Read-only provenance used to preserve explicit goal choices when tasks move. */
+  goalOrigin?: IssueGoalOrigin;
   parentId: string | null;
   /** Present on current API responses; optional for compatibility with older plugin payloads. */
   visibility?: IssueVisibility;
@@ -1046,6 +1048,8 @@ export interface Issue {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type IssueGoalOrigin = "explicit" | "inherited" | "unknown";
 
 export type IssueInboxArchiveFilter = "include" | "archived";
 

@@ -45,7 +45,7 @@ import { releaseRetainedNativeSessionCleanup } from "../retained-native-session-
 import { registerIdleLocalWorkProbe, type IdleLocalWork } from "../idle-local-work.js";
 import { isLeavingRunStartsToReplacement, subscribeRunStartHandoverChanges } from "../run-start-handover.js";
 import type { NativeCleanupOutcome } from "./retained-native-session-cleanup.js";
-import { notifyNativeStatusReassessment } from "../native-status-reassessment-notifications.js";
+import { settleNativeFailureTask } from "./native-failure-task-settlement.js";
 import { notifyNativeFinalizationWork } from "../native-finalization-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
@@ -54,7 +54,7 @@ import { providerPackWorkspaceId, recordAdmittedRemoteProviderPack, resolveRemot
 import { nativeProviderPackAdmissionFailureCode, prepareNativeProviderPackAdmission, rememberAdmittedNativeProviderPack, rememberRecoveredNativeProviderPack, recordNativeProviderPackAdmission, type NativeProviderPackAdmissionSource } from "./native-provider-pack-admission.js";
 import { type ProviderPackInstallation, providerPackIncompatible, verifyRemoteProviderPack as verifyRemoteProviderPackIdentity } from "./remote-provider-pack-verification.js";
 import { writeEnvironmentCleanup } from "../environment-cleanup-notifications.js";
-import { NATIVE_SESSION_EXECUTION_LEASE_TTL_MS, lockNativeExecutionLeaseForReacquire, nativeExecutionLeaseHeldCondition, releaseUnstartedNativeExecutionClaim, startNativeSessionExecutionLeaseRenewal, type NativeExecutionLeaseRenewal } from "./native-execution-lease.js";
+import { NATIVE_SESSION_EXECUTION_LEASE_TTL_MS, nativeClaimReleaseAuthority, nativeFailureSettlementAuthority, releaseUnstartedNativeExecutionClaim, startNativeSessionExecutionLeaseRenewal, type NativeExecutionLeaseRenewal } from "./native-execution-lease.js";
 export { renewNativeSessionExecutionLease } from "./native-execution-lease.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { writeExecutionControl } from "../execution-control-notifications.js";
@@ -324,7 +324,6 @@ import { resolveProprioInstanceRoot } from "../../home-paths.js";
 import { localCodexRepositoryCache } from "./local-codex-repository-cache.js";
 import { documentService } from "../documents.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
-import { issueService } from "../issues.js";
 import {
   NATIVE_STATUS_ARBITER_POLICY_VERSION,
   type NativeAuthoritativeIssueStatus,
@@ -10633,6 +10632,7 @@ export async function executeProprioNativeSession(input: {
   taskSessionPublication?: NativeTaskSessionPublicationContext;
   sessionGoalControl?: NativeSessionGoalControl | null;
   resumeSessionGoalHeartbeat?: boolean;
+  reconcileSessionGoalRequestId?: string | null;
   /** Compact the resumed provider session instead of running a task turn. */
   sessionCompaction?: { requestId: string; contextTokensBefore?: number } | null;
   preparationSpans?: NativeRunHistoricalSpan[];
@@ -12836,6 +12836,7 @@ async function executeProprioNativeSessionAttempt(
             keepSessionOpen: warmSessionId !== null,
             sessionGoalControl: input.sessionGoalControl,
             resumeSessionGoalHeartbeat: input.resumeSessionGoalHeartbeat,
+            reconcileSessionGoalRequestId: input.reconcileSessionGoalRequestId ?? undefined,
             sessionCompaction: input.sessionCompaction,
             requireSessionCloseBeforeReturn: runnerdBackend !== null || input.instructionWorkingCopy !== undefined,
             onSessionClosed: input.instructionWorkingCopy?.collectStopped,
@@ -12863,7 +12864,8 @@ async function executeProprioNativeSessionAttempt(
               if (
                 snapshot.goal ||
                 input.sessionGoalControl ||
-                input.resumeSessionGoalHeartbeat
+                input.resumeSessionGoalHeartbeat ||
+                input.reconcileSessionGoalRequestId
               ) {
                 await input.onGoalCheckpoint?.(snapshot);
               }
@@ -13528,7 +13530,10 @@ async function executeProprioNativeSessionAttempt(
           .for("update");
         // Issue → coordinator → run, as below. A lease that lapsed untouched
         // (host sleep) is still this owner's to settle; see the held condition.
-        await lockNativeExecutionLeaseForReacquire(tx, { ...input.execution.binding, leaseOwner, preResultOnly: true });
+        const settlementAuthority = await nativeFailureSettlementAuthority(tx, {
+          ...input.execution.binding, leaseOwner, attempt, controller, controllerGeneration,
+          remote: input.runnerExecutionTarget?.kind === "remote",
+        });
         await notifyExecutionRunWork(tx, { companyId: input.execution.binding.companyId, runId: input.execution.binding.runId });
         await notifyNativeFinalizationWork(tx, input.execution.binding);
         const updated = await tx
@@ -13666,31 +13671,7 @@ async function executeProprioNativeSessionAttempt(
             )`,
             updatedAt: now,
           })
-          .where(
-            and(
-              eq(nativeRunFinalizations.runId, input.execution.binding.runId),
-              eq(
-                nativeRunFinalizations.companyId,
-                input.execution.binding.companyId,
-              ),
-              eq(
-                nativeRunFinalizations.issueId,
-                input.execution.binding.issueId,
-              ),
-              eq(nativeRunFinalizations.leaseOwner, leaseOwner),
-              eq(nativeRunFinalizations.attempt, attempt),
-              eq(nativeRunFinalizations.controllerGeneration, controllerGeneration),
-              isNull(nativeRunFinalizations.resultId),
-              eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-              eq(nativeRunFinalizations.controllerPid, controller.pid),
-              eq(
-                nativeRunFinalizations.controllerProcessStartedAt,
-                controller.processStartedAt,
-              ),
-              nativeExecutionLeaseHeldCondition({ remote: input.runnerExecutionTarget?.kind === "remote",
-                controllerGeneration }),
-            ),
-          )
+          .where(settlementAuthority)
           .returning({ runId: nativeRunFinalizations.runId, resultId: nativeRunFinalizations.resultId })
           .then((rows) => rows[0] ?? null);
         if (!updated) {
@@ -13799,33 +13780,17 @@ async function executeProprioNativeSessionAttempt(
         ) {
           terminalRunToReport = updatedRun;
         }
-        const stillOwnsTask =
-          failureTask?.assigneeAgentId === input.execution.binding.agentId &&
-          ["in_progress", "in_review"].includes(failureTask.status) &&
-          (!failureTask.executionRunId ||
-            failureTask.executionRunId === input.execution.binding.runId) &&
-          (!failureTask.checkoutRunId ||
-            failureTask.checkoutRunId === input.execution.binding.runId);
-        let failureBlockStatusVersion: number | undefined;
-        if (stillOwnsTask && recoveryProjection.issueStatus) {
-          const projected = await issueService(tx as unknown as Db).update(
-            input.execution.binding.issueId,
-            { status: recoveryProjection.issueStatus },
-            tx,
-          );
-          if (projected?.status === "blocked") failureBlockStatusVersion = projected.statusVersion;
-        }
-        if (
-          !ownershipUnverified &&
-          stillOwnsTask &&
-          phase === "terminal_failure"
-        ) {
-          await notifyNativeStatusReassessment(tx, { companyId: input.execution.binding.companyId, issueId: input.execution.binding.issueId });
-          await tx
-            .update(issues)
-            .set({ executionRunId: null, checkoutRunId: null, updatedAt: now })
-            .where(eq(issues.id, input.execution.binding.issueId));
-        }
+        const { stillOwnsTask, failureBlockStatusVersion } = await settleNativeFailureTask(tx, {
+          failureTask,
+          agentId: input.execution.binding.agentId,
+          companyId: input.execution.binding.companyId,
+          issueId: input.execution.binding.issueId,
+          runId: input.execution.binding.runId,
+          phase,
+          ownershipUnverified,
+          recoveryIssueStatus: recoveryProjection.issueStatus,
+          now,
+        });
         if (!stillOwnsTask) return;
         // The hold's reset deadline belongs to the provider-limit owner.
         if (providerLimit?.plan.automatic) await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerLimitResume,
@@ -14184,7 +14149,10 @@ async function executeProprioNativeSessionAttempt(
       const releaseNow = new Date();
       const released = await timeController("coordinator_release", () => input.db.transaction(async tx => {
         // A lease that lapsed untouched (host sleep) is still this owner's to release.
-        await lockNativeExecutionLeaseForReacquire(tx, { ...input.execution.binding, leaseOwner });
+        const releaseAuthority = await nativeClaimReleaseAuthority(tx, {
+          ...input.execution.binding, leaseOwner, attempt, controller, controllerGeneration,
+          remote: input.runnerExecutionTarget?.kind === "remote",
+        });
         await notifyNativeFinalizationWork(tx, input.execution.binding);
         return tx.update(nativeRunFinalizations)
           .set({
@@ -14194,23 +14162,7 @@ async function executeProprioNativeSessionAttempt(
             recoveryRequestId: null,
             updatedAt: releaseNow,
           })
-          .where(
-            and(
-              eq(nativeRunFinalizations.runId, input.execution.binding.runId),
-              eq(nativeRunFinalizations.companyId, input.execution.binding.companyId),
-              eq(nativeRunFinalizations.issueId, input.execution.binding.issueId),
-              eq(nativeRunFinalizations.leaseOwner, leaseOwner),
-              eq(nativeRunFinalizations.attempt, attempt),
-              eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-              eq(nativeRunFinalizations.controllerPid, controller.pid),
-              eq(
-                nativeRunFinalizations.controllerProcessStartedAt,
-                controller.processStartedAt,
-              ),
-              nativeExecutionLeaseHeldCondition({ remote: input.runnerExecutionTarget?.kind === "remote",
-                controllerGeneration, relinquishAccepted: true }),
-            ),
-          )
+          .where(releaseAuthority)
           .returning({ runId: nativeRunFinalizations.runId })
           .then((rows) => rows[0] ?? null);
       }));

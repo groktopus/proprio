@@ -101,8 +101,8 @@ describe("GET /health", () => {
       PROPRIO_CLOUD_STACK_ID: "stack-1",
       PROPRIO_STACK_SLUG: "acme",
       PROPRIO_CLOUD_ACCOUNT_GROUP_ID: "account-group-1",
-      PROPRIO_PRIMARY_HOST: "acme.paperclip.app",
-      PROPRIO_CLOUD_API_ORIGIN: "https://app.paperclip.app",
+      PROPRIO_PRIMARY_HOST: "acme.proprio.app",
+      PROPRIO_CLOUD_API_ORIGIN: "https://app.proprio.app",
     });
 
     const res = await request(app).get("/health");
@@ -112,14 +112,14 @@ describe("GET /health", () => {
       managed: true,
       managedBy: "proprio-cloud",
       stackSlug: "acme",
-      cloudBaseUrl: "https://app.paperclip.app",
+      cloudBaseUrl: "https://app.proprio.app",
     });
   });
 
   it("publishes deployment harness policy and reflects configuration updates", async () => {
     const env = {
       PROPRIO_CLOUD_TENANT_SERVER_TOKEN: "tenant-token",
-      PROPRIO_PRIMARY_HOST: "example.paperclip.app",
+      PROPRIO_PRIMARY_HOST: "example.proprio.app",
       PROPRIO_AVAILABLE_HARNESSES: '["gemini_local","plugin:example"]',
     };
     const app = createApp(undefined, testServerInfo, undefined, env);
@@ -153,7 +153,7 @@ describe("GET /health", () => {
   it("reveals staging experiments while retaining other Cloud settings restrictions", async () => {
     const env = {
       PROPRIO_CLOUD_TENANT_SERVER_TOKEN: "tenant-token",
-      PROPRIO_PRIMARY_HOST: "team.paperclip.app",
+      PROPRIO_PRIMARY_HOST: "team.proprio.app",
       PROPRIO_HIDDEN_SETTINGS: "instance.plugins,instance.experimental,instance.experimental.*",
     };
     const app = createApp(undefined, testServerInfo, undefined, env);
@@ -161,7 +161,7 @@ describe("GET /health", () => {
     expect(production.body.hiddenSettings).toContain("instance.experimental");
     expect(production.body.hiddenSettings).toContain("instance.experimental.enableChatConnectors");
 
-    env.PROPRIO_PRIMARY_HOST = "team.staging.paperclip.app";
+    env.PROPRIO_PRIMARY_HOST = "team.staging.proprio.app";
     const staging = await request(app).get("/health");
     expect(staging.body.hiddenSettings).toContain("instance.plugins");
     expect(staging.body.hiddenSettings).toContain("instance.experimental.enableManagedSandboxOnly");
@@ -169,7 +169,7 @@ describe("GET /health", () => {
     expect(staging.body.hiddenSettings).not.toContain("instance.experimental");
     expect(staging.body.hiddenSettings).not.toContain("instance.experimental.enableChatConnectors");
 
-    env.PROPRIO_PRIMARY_HOST = "team.paperclip.app";
+    env.PROPRIO_PRIMARY_HOST = "team.proprio.app";
     expect((await request(app).get("/health")).body.hiddenSettings).toEqual(production.body.hiddenSettings);
   });
 
