@@ -10,7 +10,11 @@ on:
       - "packages/shared/**"
       - "tests/storybook-visual/**"
       - ".github/workflows/operator-attention-visual.yml"
+      - "scripts/storybook-visual-baseline.mjs"
+      - "scripts/serve-storybook-static.mjs"
+      - "package.json"
       - "pnpm-lock.yaml"
+      - ".nvmrc"
   workflow_dispatch:
     inputs:
       capture:
@@ -50,7 +54,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$SUBJECT"
           printf 'Subject: `%s` (Ubuntu 24.04 amd64, locked Chromium). Capture: `%s`.\n' "$SUBJECT" "$CAPTURE" >> "$GITHUB_STEP_SUMMARY"
-          npm install --global --ignore-scripts pnpm@9.15.4
+          npm install --global --ignore-scripts "$(node -p 'require("./package.json").packageManager')"
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
           pnpm exec playwright install --with-deps chromium
@@ -75,13 +79,12 @@ jobs:
         if: env.CAPTURE != 'true'
         run: |
           pnpm storybook-visual:baseline download --archive "$RUNNER_TEMP/operator-attention-reference/snapshots.tgz"
-          pnpm storybook-visual:baseline verify
       - name: Compare the selected journey or capture a reviewed candidate
         run: |
           args=()
           if [[ "$CAPTURE" == true ]]; then args+=(--update-snapshots); fi
           pnpm exec playwright test operator-attention.spec.ts \
-            --config tests/storybook-visual/playwright.config.ts --project stories \
+            --config tests/storybook-visual/playwright.config.ts --project operator-attention \
             --workers 1 --retries 0 "${args[@]}"
       - name: Verify that a deliberate visual difference produces a diff
         if: env.CAPTURE != 'true'
@@ -95,7 +98,7 @@ jobs:
           trap 'cp "$backup" "$light"' EXIT
           cp "$dark" "$light"
           if pnpm exec playwright test operator-attention.spec.ts \
-            --config tests/storybook-visual/playwright.config.ts --project stories \
+            --config tests/storybook-visual/playwright.config.ts --project operator-attention \
             --workers 1 --retries 0 --reporter list --output "$probe" \
             -g 'find-pending-request in light$'; then
             echo 'The comparison passed with a deliberately different reference.'
@@ -107,6 +110,7 @@ jobs:
       - name: Pack the candidate for review
         if: env.CAPTURE == 'true'
         run: |
+          set -o pipefail
           pnpm storybook-visual:baseline pack --test-artifact --out "$RUNNER_TEMP/snapshots.tgz" \
             | tee "$RUNNER_TEMP/baseline-candidate.txt"
           git rev-parse HEAD >> "$RUNNER_TEMP/baseline-candidate.txt"

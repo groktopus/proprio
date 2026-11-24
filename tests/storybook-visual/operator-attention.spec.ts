@@ -1,4 +1,12 @@
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
+
+const require = createRequire(import.meta.url);
+const addon = require.resolve("@storybook/addon-a11y/package.json", {
+  paths: [resolve(import.meta.dirname, "../../ui")],
+});
+const axePath = require.resolve("axe-core/axe.min.js", { paths: [addon] });
 
 const cases = [
   { name: "find-pending-request", story: "pages-decisions-views--for-you", width: 1200, height: 800 },
@@ -34,6 +42,21 @@ for (const specimen of cases) for (const theme of ["light", "dark"]) {
       await expect(page.getByRole("navigation", { name: "Mobile navigation" })).toBeVisible();
     }
     await page.evaluate(() => document.fonts.ready);
+    await page.addScriptTag({ path: axePath });
+    await expect.poll(async () => story.evaluate(async (element) => {
+      const { axe } = window as Window & {
+        axe: { run: (context: Element, options: unknown) => Promise<{ violations: { id: string; nodes: { target: string[] }[] }[] }> };
+      };
+      try {
+        const { violations } = await axe.run(element, {
+          runOnly: ["label", "button-name", "link-name", "aria-input-field-name", "aria-allowed-role"],
+        });
+        return violations.map(({ id, nodes }) => ({ id, targets: nodes.map((node) => node.target) }));
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Axe is already running")) return ["Axe is busy"];
+        throw error;
+      }
+    }), { message: `${specimen.name} in ${theme} has accessible controls` }).toEqual([]);
     await expect(page).toHaveScreenshot(`operator-attention-${specimen.name}-${theme}.png`);
   });
 }
