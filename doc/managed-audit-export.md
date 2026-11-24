@@ -35,8 +35,10 @@ Keep this boundary outside the database rollback domain.
    array of archived event IDs in lexicographic order.
 
 An export belongs to the creating operator and company. Company, audit and task
-access are checked for eligible events. A page with unavailable evidence returns
-`snapshot_incomplete` and sends no partial page. Preserve the checkpoint and
+access are checked for eligible events. Before releasing a page, the API checks
+every event in the snapshot because the count and watermark describe all pages.
+If any event is unavailable, the API returns `snapshot_incomplete` without
+returning the page, count or watermark. Preserve the checkpoint and
 reconcile before opening a new export. A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.

@@ -234,6 +234,53 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
+  it("invalidates a frozen audit export when evidence on another page loses visibility", async () => {
+    const { company, agent, issue } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const event = {
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized",
+    };
+    const privateCandidateId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await db.insert(managedAuditEvents).values([
+      ...Array.from({ length: 200 }, (_, i) => ({
+        ...event, id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, invocationId: randomUUID(),
+      })),
+      { ...event, id: privateCandidateId, taskId: issue.id, invocationId: randomUUID() },
+    ]);
+
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const created = await board.post(path).send(window).expect(201);
+      expect(created.body.eventCount).toBe(201);
+      const exportPath = `${path}/${created.body.exportId}`;
+      const first = await board.get(exportPath).expect(200);
+      const second = await board.get(exportPath).query({ cursor: first.body.nextCursor }).expect(200);
+      expect(second.body.events).toMatchObject([{ id: privateCandidateId }]);
+
+      await db.update(issues).set({ visibility: "private", responsibleUserId: randomUUID() }).where(eq(issues.id, issue.id));
+      const replay = await board.get(exportPath).expect(409);
+      expect(replay.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      expect(replay.body).not.toHaveProperty("eventCount");
+      expect(replay.body).not.toHaveProperty("watermark");
+      expect(replay.body).not.toHaveProperty("events");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("retains archive bytes and checkpoints outside an older restore and rotates the source epoch", async ({ skip }) => {
     const oldEpoch = randomUUID();
     const newEpoch = randomUUID();

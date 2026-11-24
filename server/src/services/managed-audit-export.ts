@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or } from "drizzle-orm";
+import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -176,20 +176,26 @@ export async function readManagedAuditExportPage(
     const offset = decodeCursor(snapshot, cursor);
     const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
     const visible = await visibleEvents(tx, scope);
+    if (snapshot.eventIds.length > 0) {
+      // Counts and watermarks also describe rows on other pages. Check all
+      // snapshot members in the same transaction before returning either.
+      const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
+        .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(snapshot.eventIds, managedAuditExports.eventIds)})`));
+      if (available.eventCount !== snapshot.eventIds.length) {
+        throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
+      }
+    }
     const events = ids.length
       ? await tx.select().from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
         .orderBy(asc(managedAuditEvents.id))
       : [];
-    if (events.length !== ids.length) {
-      throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
-    }
-    const count = offset + events.length;
+    const deliveredThrough = offset + events.length;
     return {
       ...exportReceipt(snapshot),
       events,
-      deliveredThrough: count,
-      nextCursor: count < snapshot.eventIds.length ? encodeCursor(snapshot, count) : null,
-      complete: count === snapshot.eventIds.length,
+      deliveredThrough,
+      nextCursor: deliveredThrough < snapshot.eventIds.length ? encodeCursor(snapshot, deliveredThrough) : null,
+      complete: deliveredThrough === snapshot.eventIds.length,
     };
   }, repeatableRead);
 }
