@@ -9,7 +9,7 @@ import { readProprioRuntimeSkillEntries, resolveLegacyProprioDesiredSkillNames }
 import { prepareClaudePromptBundle } from "../../../packages/adapters/claude-local/src/server/prompt-cache.js";
 import { stageCodexHomeForSync } from "../../../packages/adapters/codex-local/src/server/codex-home.js";
 
-describe("default feedback skill delivery", () => {
+describe("operator-selected feedback skill delivery", () => {
   const cleanup: string[] = [];
   const keys = ["proprio", "complain", "suggestion-box"].map(name => `groktopus/proprio/${name}`);
   afterEach(async () => {
@@ -17,21 +17,21 @@ describe("default feedback skill delivery", () => {
     await Promise.all(cleanup.splice(0).map(root => rm(root, { recursive: true, force: true })));
   });
 
-  it.each([undefined, []])("resolves defaults for Codex and Claude with selection %s", async (desiredSkills) => {
+  it.each([undefined, []])("keeps feedback opt-in for Codex and Claude with selection %s", async (desiredSkills) => {
     const config = desiredSkills ? { proprioSkillSync: { desiredSkills } } : {};
     for (const [adapterType, list] of [["codex_local", listCodexSkills], ["claude_local", listClaudeSkills]] as const) {
       const snapshot = await list({ agentId: "agent", companyId: "company", adapterType, config });
-      expect(snapshot.desiredSkills).toEqual(expect.arrayContaining(keys));
-      expect(snapshot.entries.filter(e => keys.includes(e.key)).every(e => e.state === "configured")).toBe(true);
+      expect(snapshot.desiredSkills).toContain(keys[0]);
+      expect(snapshot.desiredSkills).not.toEqual(expect.arrayContaining(keys.slice(1)));
     }
   });
 
-  it("mounts both skills and their shared helper for Codex, Claude and the Codex sandbox home", async () => {
+  it("mounts the selected skills and shared helper for Codex, Claude and the Codex sandbox home", async () => {
     const root = await mkdtemp(join(tmpdir(), "proprio-commentary-skills-"));
     cleanup.push(root);
     vi.stubEnv("PROPRIO_HOME", root);
     const entries = await readProprioRuntimeSkillEntries({}, import.meta.dirname, [fileURLToPath(new URL("../../../skills", import.meta.url))]);
-    const desiredSkillNames = resolveLegacyProprioDesiredSkillNames({}, entries);
+    const desiredSkillNames = resolveLegacyProprioDesiredSkillNames({ proprioSkillSync: { desiredSkills: keys.slice(1) } }, entries);
     const selected = entries.filter(e => desiredSkillNames.includes(e.key));
     const codexHome = join(root, "codex");
     await ensureCodexSkillsInjected(async () => {}, { skillsHome: join(codexHome, "skills"), skillsEntries: entries, desiredSkillNames });
@@ -44,7 +44,7 @@ describe("default feedback skill delivery", () => {
       }
       expect(await readFile(join(skills, "proprio", "scripts", "submit-agent-commentary.mjs"), "utf8")).toContain("process.stdin");
     }
-    // Runtime policy removes entries before default selection; never resurrect them.
+    // Runtime policy removes entries before explicit selection; never resurrect them.
     const restricted = entries.filter(e => e.key === keys[0]);
     expect(resolveLegacyProprioDesiredSkillNames({}, restricted)).toEqual([keys[0]]);
     expect(await readProprioRuntimeSkillEntries({ proprioRuntimeSkills: [] }, import.meta.dirname)).toEqual([]);

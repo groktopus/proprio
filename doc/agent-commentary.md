@@ -6,29 +6,39 @@ Both are free-form, internally attributed records, not anonymous feedback.
 
 ## Agent entry points
 
-Skill-capable legacy adapters automatically receive `complain` and
-`suggestion-box` alongside the `proprio` operational skill, including existing
-agents with empty optional-skill selections. The shared helper lives in that
-operational skill at `scripts/submit-agent-commentary.mjs`. It reads the body
-from stdin and uses the existing `PROPRIO_API_URL`, `PROPRIO_API_KEY`,
-`PROPRIO_COMPANY_ID`, and `PROPRIO_RUN_ID`. The helper uses the existing
-Node.js runtime with no additional dependencies; custom runtimes can call HTTP
-directly. Sandboxed runs use the callback bridge.
+Proactive feedback is off by default. Operators enable it per agent by selecting
+either `groktopus/proprio/complain` or
+`groktopus/proprio/suggestion-box` in that agent's desired skills. Legacy
+adapters then mount the selected skills alongside the `proprio` operational
+skill. The shared helper lives in that operational skill at
+`scripts/submit-agent-commentary.mjs`. It reads the body from stdin and uses the
+existing `PROPRIO_API_URL`, `PROPRIO_API_KEY`, `PROPRIO_COMPANY_ID`, and
+`PROPRIO_RUN_ID`. The helper uses the existing Node.js runtime with no
+additional dependencies; custom runtimes can call HTTP directly. Sandboxed
+runs use the callback bridge.
 
-Native runs receive `submit_complaint({body, idempotencyKey})` and
-`submit_suggestion({body, idempotencyKey})` in standard, ask, and planning modes.
+Earlier releases mounted both feedback skills for skill-capable legacy agents
+by default. After upgrading, agents need an explicit selection to receive them;
+existing commentary records remain available through the same company-scoped
+inspection API and Audit → Commentary page. The app continues to ship the skills
+and helper.
+
+Native runs expose `submit_complaint({body, idempotencyKey})` in standard, ask,
+and planning modes when `complain` is selected, and expose
+`submit_suggestion({body, idempotencyKey})` when `suggestion-box` is selected.
 Specialized completion-review runs retain their restricted tool set. Native
-submission uses the bound authority without a shell or API credential.
-Submit before finishing the run.
+submission uses the bound authority without a shell or API credential. Once
+enabled, agents may submit through the same company-scoped store.
 
 Instructions closely adapt Warp's
 [complain](https://github.com/warpdotdev/common-skills/blob/main/.agents/skills/complain/SKILL.md)
 and [suggestion-box](https://github.com/warpdotdev/common-skills/blob/main/.agents/skills/suggestion-box/SKILL.md)
 skills, with their MIT notices included. Proprio changes the transport,
-attribution, suggestion form, and size limit. Agents submit proactively when
-warranted, without routine previews or announcements, then continue working.
-Answer truthfully if a user asks about feedback or submitted content. Operators
-can exclude these legacy skills through the existing runtime skill policy.
+attribution, suggestion form, and size limit. When enabled, agents submit
+proactively when warranted, without routine previews or announcements, then
+continue working. Answer truthfully if a user asks about feedback or submitted
+content. The existing legacy runtime skill policy takes precedence over
+per-agent selection and can exclude either feedback skill.
 Brevity and at most three suggestions per run are guidance, not server quotas.
 Do not report the same incident through both paths or retry failed submissions.
 

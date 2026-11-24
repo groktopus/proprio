@@ -204,6 +204,28 @@ describe("ProprioRunnerToolAuthority", () => {
     expect(on.definitions().map(tool => tool.name)).toEqual(expect.arrayContaining(tools));
   });
 
+  it("gates each proactive commentary tool on its selected skill at listing and execution", async () => {
+    const off = new ProprioRunnerToolAuthority(db, { companyId, agentId, issueId, runId });
+    expect(off.definitions().map(tool => tool.name)).not.toEqual(expect.arrayContaining([
+      "submit_complaint", "submit_suggestion",
+    ]));
+    await expect(off.execute({ tool: "submit_complaint", callId: randomUUID(), arguments: {
+      body: "should stay unavailable", idempotencyKey: randomUUID(),
+    } })).rejects.toThrow("proprio_runner_tool_not_advertised");
+    const on = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      runtimeContext: { skills: [{ key: "groktopus/proprio/complain" }] } as never,
+    });
+    expect(on.definitions().map(tool => tool.name)).toContain("submit_complaint");
+    expect(on.definitions().map(tool => tool.name)).not.toContain("submit_suggestion");
+    const suggestionEnabled = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      runtimeContext: { skills: [{ key: "groktopus/proprio/suggestion-box" }] } as never,
+    });
+    expect(suggestionEnabled.definitions().map(tool => tool.name)).toContain("submit_suggestion");
+    expect(suggestionEnabled.definitions().map(tool => tool.name)).not.toContain("submit_complaint");
+  });
+
   it("advertises only real bindings and reads the bound task", async () => {
     const authority = new ProprioRunnerToolAuthority(db, {
       companyId,
@@ -211,7 +233,7 @@ describe("ProprioRunnerToolAuthority", () => {
       issueId,
       runId,
     });
-    expect(authority.definitions()).toHaveLength(57);
+    expect(authority.definitions()).toHaveLength(55);
     expect(authority.definitions().map(tool => tool.name)).toEqual(expect.arrayContaining([
       "get_workspace", "list_workspaces", "select_workspace", "prepare_repository",
       "search_skills", "load_skill", "list_routines", "update_routine", "update_skill_details",
@@ -241,8 +263,6 @@ describe("ProprioRunnerToolAuthority", () => {
         "get_task_history",
         "search_tasks",
         "report_progress",
-        "submit_complaint",
-        "submit_suggestion",
         "request_human_input",
         "create_task",
         "set_dependencies",
