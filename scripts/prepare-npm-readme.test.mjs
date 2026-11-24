@@ -35,7 +35,7 @@ test("prepares the repository README with versioned brand artwork and guide link
   const npmReadme = prepareNpmReadme(readme, "abc123");
 
   assert.ok(
-    npmReadme.includes('src="https://raw.githubusercontent.com/groktopus/proprio/abc123/docs/brand/proprio-app-icon.png"'),
+    npmReadme.includes('src="https://raw.githubusercontent.com/groktopus/proprio/abc123/docs/brand/proprio-nautilus.png"'),
   );
   assert.ok(
     npmReadme.includes("[Proprio brand kit](https://github.com/groktopus/proprio/blob/abc123/docs/brand/README.md)"),
