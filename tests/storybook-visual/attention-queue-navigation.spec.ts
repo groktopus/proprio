@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const navigationStory = "product-navigation-layout--board-chrome-matrix";
 const queueStory = "pages-decisions-desk--todays-desk";
 
 async function openStory(page: Page, story: string, width: number, coordinator: boolean) {
@@ -16,13 +15,13 @@ async function openStory(page: Page, story: string, width: number, coordinator: 
 }
 
 for (const scenario of [
-  { name: "Classic desktop", width: 1440, coordinator: false },
-  { name: "Coordinator desktop", width: 1440, coordinator: true },
-  { name: "Classic phone", width: 390, coordinator: false },
-  { name: "Coordinator phone", width: 390, coordinator: true },
+  { name: "Classic desktop", story: "attention-queue-shells--classic-desktop", width: 1440, coordinator: false },
+  { name: "Coordinator desktop", story: "attention-queue-shells--coordinator-desktop", width: 1440, coordinator: true },
+  { name: "Classic phone", story: "attention-queue-shells--classic-phone", width: 390, coordinator: false },
+  { name: "Coordinator phone", story: "attention-queue-shells--coordinator-phone", width: 390, coordinator: true },
 ] as const) {
   test(`${scenario.name} exposes the Needs You request entry`, async ({ page }) => {
-    await openStory(page, navigationStory, scenario.width, scenario.coordinator);
+    await openStory(page, scenario.story, scenario.width, scenario.coordinator);
     const needsYou = page.getByRole("link", { name: /Needs You/ }).first();
     await expect(needsYou).toBeVisible();
     await expect(needsYou).toHaveAttribute("href", "/decisions");
