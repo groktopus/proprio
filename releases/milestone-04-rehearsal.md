@@ -48,8 +48,10 @@ The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
 passed 4,429 selected tests with one skip, 13 additional Runner contract
 tests, layered server and UI typechecks, and OpenAPI verification. The next
 composition `b57a8c358f9a83a8c0802d2535a73487cabd0eef` passed 17 catalog and
-native Case tests after the catalog repair. The browser test passed on
-that composition with its exact draft file.
+native Case tests after the catalog repair. The 40-draft rehearsal passed
+both history scenarios in Chromium with embedded PostgreSQL. It also
+passed OpenAPI verification and all 17 tests of the source publication
+script with local fixtures.
 [Catalog repair #350](https://github.com/groktopus/proprio/pull/350) · [Browser evidence #355](https://github.com/groktopus/proprio/pull/355)
 
 ## Recovery and remaining gates
