@@ -23,8 +23,8 @@ export default defineConfig({
   use: { baseURL, browserName: "chromium", headless: true },
   webServer: {
     cwd: path.resolve(import.meta.dirname, "../../.."),
-    command: "pnpm --filter @groktopus/ui build --outDir ../server/ui-dist --emptyOutDir && node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts onboard --yes --run",
-    url: `${baseURL}/api/health`,
+    command: "NODE_ENV=production pnpm --filter @groktopus/ui build --outDir ../server/ui-dist --emptyOutDir && NODE_ENV=production node cli/node_modules/tsx/dist/cli.mjs cli/src/index.ts onboard --yes --run",
+    url: `${baseURL}/api/ready`,
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",
