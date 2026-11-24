@@ -67,6 +67,7 @@ import {
   summarizeToolValue,
 } from "../services/tool-content-guards.js";
 import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool-gateway.js";
+import { commitToolActionReview } from "../services/tool-action-review.js";
 import { resolveConnectionGrantSecret } from "../services/connection-credentials.js";
 import { secretService } from "../services/secrets.js";
 import * as cogneeBridge from "../services/cognee-connection.js";
@@ -707,6 +708,64 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         eq(managedAuditEvents.invocationId, failedInvocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
       ))).toEqual([expect.objectContaining({ status: "failed", reasonCode: "tool_error" })]);
       expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(3);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("captures the authenticated approvedActionRequestId retry with its review actor", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id,
+      result: { content: [{ type: "text", text: "approved tool call completed" }] },
+    } }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Review connected write",
+        policyType: "require_approval", selectors: { connectionId: connection.id }, priority: 10 });
+      const reviewer = "managed-audit-approved-retry-reviewer";
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: reviewer, status: "active", membershipRole: "owner" });
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const parameters = { key: "approved-retry-private-key", value: "approved-retry-private-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [actionRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
+      await commitToolActionReview(db, { companyId: company.id, issueId: issue.id,
+        interactionId: actionRequest.interactionId!, actionRequestId: actionRequest.id,
+        decision: "approved", actor: { userId: reviewer } });
+
+      const result = await gateway.executeTool({ sessionToken: session.token, tool, parameters,
+        approvedActionRequestId: actionRequest.id });
+      expect(result).toMatchObject({ status: "completed", tool });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, actionRequest.invocationId));
+      expect(events).toHaveLength(4);
+      expect(events.find(event => event.phase === "policy_decision")).toMatchObject({
+        decision: "require_approval", requestId: actionRequest.id, runId: run.id, taskId: issue.id,
+        connectionId: connection.id,
+      });
+      expect(events.find(event => event.phase === "approval_resolution")).toMatchObject({
+        decision: "approved", status: "approved", actorType: "user", actorId: reviewer, requestId: actionRequest.id,
+      });
+      expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
+        decision: "approved", status: "dispatch_intended", actorType: "user", actorId: reviewer,
+        requestId: actionRequest.id, invocationId: actionRequest.invocationId,
+      });
+      expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
+        decision: "approved", status: "succeeded", actorType: "user", actorId: reviewer,
+        requestId: actionRequest.id, invocationId: actionRequest.invocationId,
+      });
+      expect(JSON.stringify(events)).not.toContain("approved-retry-private-key");
+      expect(JSON.stringify(events)).not.toContain("approved-retry-private-value");
     } finally {
       await remote.close();
     }
