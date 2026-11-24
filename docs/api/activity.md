@@ -51,6 +51,14 @@ The activity log is append-only and immutable.
 half-open interval given by `from` and `to`. `GET
 /api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page; pass
 the preceding page's `nextCursor` as `cursor` to resume.
+half-open interval given by the `from` and `to` timestamps.
+
+`GET /api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page.
+Use the preceding page's `nextCursor` as the `cursor` query parameter to resume.
+Every page verifies access to all events in the snapshot. If any event is
+missing or no longer visible, the API returns HTTP `409` with
+`details.reasonCode` set to `snapshot_incomplete`. The response contains no
+events, event count, or watermark.
 
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
