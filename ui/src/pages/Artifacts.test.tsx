@@ -356,6 +356,52 @@ describe("Artifacts page", () => {
     });
   });
 
+  it("hides cached artifact cards after a pagination access denial", async () => {
+    artifactsApiMock.list
+      .mockResolvedValueOnce({
+        artifacts: [sampleArtifact({ title: "Private Artifact" })],
+        nextCursor: "cursor-2",
+      })
+      .mockRejectedValueOnce(Object.assign(new Error("Forbidden"), { status: 403 }));
+
+    const { root } = renderArtifacts(container, ["/artifacts?groupBy=none"]);
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Private Artifact");
+      expect(latestObserverCallback).not.toBeNull();
+    });
+    latestObserverCallback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+
+    await waitForAssertion(() => {
+      expect(container.querySelectorAll('[data-testid="artifact-card"]')).toHaveLength(0);
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    });
+    expect(container.textContent).not.toContain("Private Artifact");
+    expect(container.textContent).not.toContain("Retry loading more artifacts");
+    flushSync(() => root.unmount());
+  });
+
+  it("retains a recoverable pagination boundary through a background refetch", async () => {
+    const page = { artifacts: [sampleArtifact({ title: "First Artifact" })], nextCursor: "cursor-2" };
+    artifactsApiMock.list
+      .mockResolvedValueOnce(page)
+      .mockRejectedValueOnce(Object.assign(new Error("Server unavailable"), { status: 500 }))
+      .mockResolvedValueOnce(page)
+      .mockRejectedValueOnce(Object.assign(new Error("Server unavailable"), { status: 500 }));
+
+    const { root, queryClient } = renderArtifacts(container, ["/artifacts?groupBy=none"]);
+    await waitForAssertion(() => expect(latestObserverCallback).not.toBeNull());
+    latestObserverCallback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    await waitForAssertion(() => expect(container.textContent).toContain("Retry loading more artifacts"));
+
+    const query = queryClient.getQueryCache().findAll()[0];
+    if (query) await queryClient.refetchQueries({ queryKey: query.queryKey, type: "active" });
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("First Artifact");
+      expect(container.textContent).toContain("Retry loading more artifacts");
+    });
+    flushSync(() => root.unmount());
+  });
+
   it("switches grouping via the group control and refetches stacks", async () => {
     artifactsApiMock.list.mockImplementation((_companyId: string, params?: { groupBy?: string }) => {
       if (params?.groupBy === "none") {
