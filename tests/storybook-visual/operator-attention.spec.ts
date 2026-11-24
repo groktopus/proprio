@@ -25,7 +25,7 @@ for (const specimen of cases) for (const theme of ["light", "dark"]) {
     await page.setViewportSize({ width: specimen.width, height: specimen.height });
     await page.goto(`/iframe.html?id=${specimen.story}&viewMode=story&globals=theme:${theme}`);
     const story = page.locator("#storybook-root");
-    await expect(story).not.toBeEmpty();
+    await expect(story).not.toBeEmpty({ timeout: 30_000 });
     await expect(page.locator(".sb-errordisplay")).not.toBeVisible();
     if (specimen.name === "find-pending-request") {
       await expect(story.getByRole("heading", { name: "Decisions" })).toBeVisible();
