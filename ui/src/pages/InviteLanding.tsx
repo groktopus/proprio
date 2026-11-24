@@ -7,7 +7,7 @@ import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
 import { useCompany } from "@/context/CompanyContext";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { accessApi } from "../api/access";
-import { describeError } from "../api/errors";
+import { describeError, isTransientError } from "../api/errors";
 import { AuthApiError, authApi, authErrorServerMessage } from "../api/auth";
 import { fetchCompanyListForCurrentAccount, useCompanyListQuery } from "../api/companies-query";
 import { healthApi } from "../api/health";
@@ -320,6 +320,7 @@ export function InviteLandingPage() {
   const showsAgentForm = invite?.inviteType !== "bootstrap_ceo" && invite?.allowedJoinTypes === "agent";
   const shouldAutoAcceptHumanInvite =
     Boolean(sessionQuery.data) &&
+    inviteQuery.isSuccess &&
     !showsAgentForm &&
     invite?.inviteType !== "bootstrap_ceo" &&
     (!inviteJoinRequestStatus || canCompleteAcceptedHumanInvite) &&
@@ -458,13 +459,28 @@ export function InviteLandingPage() {
   }
 
   if (inviteQuery.error || !invite) {
+    const inviteIsTemporarilyUnavailable = isTransientError(inviteQuery.error);
     return (
       <div className="mx-auto max-w-xl py-10">
         <div className="border border-border bg-card p-6" data-testid="invite-error">
-          <h1 className="text-lg font-semibold">Invite not available</h1>
+          <h1 className="text-lg font-semibold">
+            {inviteIsTemporarilyUnavailable ? "Invite temporarily unavailable" : "Invite not available"}
+          </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            This invite may be expired, revoked, or already used.
+            {inviteIsTemporarilyUnavailable
+              ? "Proprio couldn’t load this invite right now. Your link is still safe to use; try again in a moment."
+              : "This invite may be expired, revoked, or already used."}
           </p>
+          {inviteIsTemporarilyUnavailable ? (
+            <Button
+              type="button"
+              className="mt-4 rounded-none"
+              disabled={inviteQuery.isFetching}
+              onClick={() => void inviteQuery.refetch()}
+            >
+              {inviteQuery.isFetching ? "Retrying…" : "Retry"}
+            </Button>
+          ) : null}
         </div>
       </div>
     );

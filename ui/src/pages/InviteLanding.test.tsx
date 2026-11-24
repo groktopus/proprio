@@ -1180,4 +1180,123 @@ describe("InviteLandingPage", () => {
       root.unmount();
     });
   });
+
+  it.each(["session-first", "invite-first"] as const)(
+    "accepts once after both invite and membership data arrive (%s)",
+    async (arrivalOrder) => {
+      let resolveInvite: ((value: unknown) => void) | null = null;
+      let resolveCompanies: ((value: Array<{ id: string; name: string }>) => void) | null = null;
+      let resolveSession: ((value: unknown) => void) | null = null;
+      const session = {
+        session: { id: "session-1", userId: "user-1" },
+        user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+      };
+      getSessionMock.mockImplementation(
+        () => arrivalOrder === "session-first"
+          ? Promise.resolve(session)
+          : new Promise((resolve) => {
+            resolveSession = resolve;
+          }),
+      );
+      getInviteMock.mockImplementation(
+        () => new Promise((resolve) => {
+          resolveInvite = resolve;
+        }),
+      );
+      listCompaniesMock.mockImplementation(
+        () => new Promise((resolve) => {
+          resolveCompanies = resolve;
+        }),
+      );
+      acceptInviteMock.mockResolvedValue({
+        id: "join-1",
+        companyId: "company-1",
+        requestType: "human",
+        status: "pending_approval",
+      });
+
+      const root = createRoot(container);
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      await act(async () => renderInviteLanding(root, queryClient));
+      await flushReact();
+
+      const invite = {
+        id: "invite-1",
+        companyId: "company-1",
+        companyName: "Acme Robotics",
+        inviteType: "company_join",
+        allowedJoinTypes: "both",
+      };
+      if (arrivalOrder === "session-first") {
+        await act(async () => resolveInvite?.(invite));
+        await flushReact();
+        expect(acceptInviteMock).not.toHaveBeenCalled();
+        await act(async () => resolveCompanies?.([]));
+      } else {
+        await act(async () => resolveInvite?.(invite));
+        await flushReact();
+        expect(acceptInviteMock).not.toHaveBeenCalled();
+        await act(async () => resolveSession?.(session));
+        await flushReact();
+        await act(async () => resolveCompanies?.([]));
+      }
+      await flushReact();
+      await flushReact();
+
+      expect(acceptInviteMock).toHaveBeenCalledTimes(1);
+      expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
+
+      await act(async () => root.unmount());
+    },
+  );
+
+  it("offers an in-place retry for a temporary invite outage and preserves the link", async () => {
+    const temporaryFailure = Object.assign(new Error("Proprio is temporarily unavailable."), {
+      name: "ApiUnavailableError",
+      status: 503,
+    });
+    getInviteMock.mockRejectedValueOnce(temporaryFailure).mockResolvedValueOnce({
+      id: "invite-1",
+      companyId: "company-1",
+      companyName: "Acme Robotics",
+      inviteType: "company_join",
+      allowedJoinTypes: "both",
+    });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => renderInviteLanding(root, queryClient));
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Invite temporarily unavailable");
+    expect(container.textContent).toContain("Your link is still safe to use");
+    const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === "Retry");
+    expect(retry).toBeTruthy();
+    expect(getInviteMock).toHaveBeenCalledWith("pcp_invite_test");
+
+    await act(async () => retry?.click());
+    await flushReact();
+    await flushReact();
+
+    expect(getInviteMock).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Join Acme Robotics");
+    expect(container.textContent).not.toContain("Invite temporarily unavailable");
+    await act(async () => root.unmount());
+  });
+
+  it("keeps a confirmed missing invite neutral without offering outage retry", async () => {
+    getInviteMock.mockRejectedValue({ status: 404 });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => renderInviteLanding(root, queryClient));
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Invite not available");
+    expect(container.textContent).toContain("expired, revoked, or already used");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Retry")).toBe(false);
+    await act(async () => root.unmount());
+  });
 });
