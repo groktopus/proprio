@@ -297,34 +297,80 @@ const issueId = process.argv[3];
 const origin = process.argv[4];
 const output = process.argv[5];
 const mode = process.argv[6];
+const startupCwd = process.cwd();
+const apiHeaders = { Origin: origin, Authorization: `Bearer ${process.env.PROPRIO_API_KEY ?? ""}` };
+const issueResponse = await fetch(`${origin}/api/issues/${issueId}`, { headers: apiHeaders });
+if (!issueResponse.ok) throw new Error(`Could not read task workspace binding: ${issueResponse.status}`);
+const issue = await issueResponse.json();
+if (!issue.executionWorkspaceId) throw new Error("Task has no bound execution workspace");
+const workspace = issue.currentExecutionWorkspace;
+if (!workspace || workspace.id !== issue.executionWorkspaceId) throw new Error("Task workspace binding is not readable");
+if (typeof workspace.cwd !== "string" || !workspace.cwd.startsWith("/")) throw new Error("Task workspace has no absolute path");
+process.chdir(workspace.cwd);
 const checkpoint = join(process.cwd(), "qualification-checkpoint.txt");
 const processIdentity = join(process.cwd(), "qualification-process.json");
 mkdirSync(process.cwd(), { recursive: true });
-if (!existsSync(checkpoint)) writeFileSync(checkpoint, `checkpoint for ${issueId}\n`, { flag: "wx" });
-const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
-const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
-if (!processStartTicks) throw new Error("Could not record the qualification process start identity");
-writeFileSync(processIdentity, `${JSON.stringify({ pid: process.pid, startTicks: processStartTicks })}\n`);
+const expectedCheckpoint = `checkpoint for ${issueId}\n`;
+const validateCheckpoint = () => {
+  if (!existsSync(checkpoint) || readFileSync(checkpoint, "utf8") !== expectedCheckpoint) {
+    throw new Error("The original task workspace checkpoint is missing or changed");
+  }
+};
+const validateProcessIdentity = () => {
+  if (!existsSync(processIdentity)) throw new Error("The original task workspace process identity is missing");
+  const saved = JSON.parse(readFileSync(processIdentity, "utf8"));
+  if (!Number.isInteger(saved.pid) || saved.pid <= 1 || typeof saved.startTicks !== "string" || !saved.startTicks || saved.cwd !== process.cwd() || saved.workspaceId !== workspace.id) {
+    throw new Error("The original task workspace process identity is invalid");
+  }
+};
+const effectAlreadyExists = existsSync(marker);
+if (effectAlreadyExists) {
+  if (readFileSync(marker, "utf8") !== "effect\n") throw new Error("The saved task effect marker is incomplete or changed");
+  validateCheckpoint();
+  validateProcessIdentity();
+} else {
+  try {
+    writeFileSync(checkpoint, expectedCheckpoint, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    validateCheckpoint();
+  }
+  const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+  if (!processStartTicks) throw new Error("Could not record the qualification process start identity");
+  try {
+    writeFileSync(processIdentity, `${JSON.stringify({ pid: process.pid, startTicks: processStartTicks, startupCwd, cwd: process.cwd(), workspaceId: workspace.id })}\n`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    validateProcessIdentity();
+  }
+}
 let created = false;
 try {
   const fd = openSync(marker, "wx");
-  writeFileSync(fd, "effect\n");
-  closeSync(fd);
+  try {
+    writeFileSync(fd, "effect\n");
+  } finally {
+    closeSync(fd);
+  }
   created = true;
 } catch (error) {
   if (error.code !== "EEXIST") throw error;
+  if (readFileSync(marker, "utf8") !== "effect\n") throw new Error("The saved task effect marker is incomplete or changed");
+  validateCheckpoint();
+  validateProcessIdentity();
 }
 if (created) process.stdout.write("qualification checkpoint saved; effect count 1\n");
 if (created && mode === "hold") {
   setTimeout(() => process.exit(0), 600_000);
 } else {
   const commentsUrl = `${origin}/api/issues/${issueId}/comments`;
-  const headers = { Origin: origin, "Content-Type": "application/json" };
-  const existing = await fetch(commentsUrl, { headers });
+  const commentHeaders = { ...apiHeaders, "Content-Type": "application/json" };
+  const existing = await fetch(commentsUrl, { headers: commentHeaders });
   if (!existing.ok) throw new Error(`Could not read task comments: ${existing.status}`);
   const comments = await existing.json();
   if (!comments.some(comment => comment.body === output)) {
-    const saved = await fetch(commentsUrl, { method: "POST", headers, body: JSON.stringify({ body: output }) });
+    const saved = await fetch(commentsUrl, { method: "POST", headers: commentHeaders, body: JSON.stringify({ body: output }) });
     if (!saved.ok) throw new Error(`Could not save recovered task output: ${saved.status} ${await saved.text()}`);
   }
   process.stdout.write("qualification output delivered from the retained workspace checkpoint\n");
@@ -437,14 +483,24 @@ NODE
   ACTIVE_CHECKPOINT="$ACTIVE_WORKSPACE_CWD/qualification-checkpoint.txt"
   ACTIVE_PROCESS_IDENTITY="$ACTIVE_WORKSPACE_CWD/qualification-process.json"
   [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
-    && [ -f "$ACTIVE_PROCESS_IDENTITY" ] \
-    && jq -e '(.pid | type) == "number" and .pid > 1 and (.startTicks | type) == "string" and (.startTicks | length) > 0' "$ACTIVE_PROCESS_IDENTITY" >/dev/null \
-    && [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
-    && pass "4g task run saved one effect, its process identity, and a workspace checkpoint" \
-    || { fail_ "4g task run checkpoint, process identity, and effect"; exit 1; }
+    || { fail_ "4g provider checkpoint is present in the bound execution workspace"; exit 1; }
+  pass "4g provider checkpoint is present in the bound execution workspace"
+  [ -f "$ACTIVE_PROCESS_IDENTITY" ] \
+    || { fail_ "4g provider process identity is present in the bound execution workspace"; exit 1; }
+  jq -e --arg cwd "$ACTIVE_WORKSPACE_CWD" --arg workspace "$ACTIVE_WORKSPACE_ID" \
+    '(.pid | type) == "number" and .pid > 1 and (.startTicks | type) == "string" and (.startTicks | length) > 0 and .cwd == $cwd and .workspaceId == $workspace' \
+    "$ACTIVE_PROCESS_IDENTITY" >/dev/null \
+    || { fail_ "4g provider process cwd and identity match the bound workspace"; exit 1; }
+  pass "4g provider process cwd and identity match the bound workspace"
+  effect_deadline=$(( $(date +%s) + 15 ))
+  while [ "$(date +%s)" -lt "$effect_deadline" ] && { [ ! -f "$ACTIVE_EFFECT" ] || [ "$(cat "$ACTIVE_EFFECT")" != "effect" ]; }; do sleep 1; done
+  [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+    || { fail_ "4g completed effect marker contains exactly one effect"; exit 1; }
+  pass "4g completed effect marker contains exactly one effect"
   ACTIVE_PROCESS_PID="$(jq -er '.pid' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process PID"; exit 1; }
   ACTIVE_PROCESS_START="$(jq -er '.startTicks' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process start identity"; exit 1; }
-  pass "4g task run checkpoint identifies provider PID $ACTIVE_PROCESS_PID with start identity $ACTIVE_PROCESS_START before migration"
+  ACTIVE_PROCESS_STARTUP_CWD="$(jq -er '.startupCwd' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded provider startup cwd"; exit 1; }
+  pass "4g task run checkpoint identifies provider PID $ACTIVE_PROCESS_PID with start identity $ACTIVE_PROCESS_START; startup cwd $ACTIVE_PROCESS_STARTUP_CWD, workspace cwd $ACTIVE_WORKSPACE_CWD"
   if [ "$active_run_required" = 1 ]; then
     RECOVERY_STARTED_MS="$(( $(date +%s%3N) ))"
     pass "4h schema-upgrade run is active before candidate migration ($ACTIVE_RUN_ID)"

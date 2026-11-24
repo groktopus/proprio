@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +64,16 @@ test("active process recovery binds durable workspace and delivers one reconcile
   assert.match(source, /enableIsolatedWorkspaces":true/);
   assert.match(source, /executionWorkspacePreference:"isolated_workspace"/);
   assert.match(source, /executionWorkspaceSettings:\{mode:"isolated_workspace",workspaceStrategy:\{type:"project_primary"\}\}/);
+  assert.match(source, /const startupCwd = process\.cwd\(\)/);
+  assert.match(source, /const workspace = issue\.currentExecutionWorkspace/);
+  assert.match(source, /workspace\.id !== issue\.executionWorkspaceId/);
+  assert.match(source, /process\.chdir\(workspace\.cwd\)/);
+  assert.match(source, /startupCwd, cwd: process\.cwd\(\), workspaceId: workspace\.id/);
+  assert.match(source, /if \(effectAlreadyExists\)[\s\S]*?validateCheckpoint\(\);\s+validateProcessIdentity\(\);/);
+  assert.match(source, /writeFileSync\(processIdentity,[\s\S]*?\{ flag: "wx" \}\)/);
+  assert.match(source, /while \[ "\$\(date \+%s\)" -lt "\$effect_deadline" \].*\[ "\$\(cat "\$ACTIVE_EFFECT"\)" != "effect" \]/);
+  assert.match(source, /provider process cwd and identity match the bound workspace/);
+  assert.match(source, /completed effect marker contains exactly one effect/);
   assert.match(source, /\.executionWorkspaceId \/\/ empty/);
   assert.match(source, /executionWorkspaceId from the task binding/);
   assert.match(source, /legacy_execution_requires_reconciliation/);
@@ -70,12 +81,96 @@ test("active process recovery binds durable workspace and delivers one reconcile
   assert.match(source, /qualification-process\.json/);
   assert.match(source, /ACTIVE_PROCESS_CURRENT_START/);
   assert.match(source, /ACTIVE_PROCESS_STATE.*!= Z/);
-  assert.match(source, /provider PID \$ACTIVE_PROCESS_PID with start identity \$ACTIVE_PROCESS_START before migration/);
+  assert.match(source, /provider PID \$ACTIVE_PROCESS_PID with start identity \$ACTIVE_PROCESS_START; startup cwd/);
   assert.match(source, /7d non-migration task run remains succeeded and readable/);
   assert.match(source, /if \[ "\$active_run_required" = 1 \]; then\s+jq -e --arg id "\$ACTIVE_RUN_ID"/);
   assert.match(source, /recovery-actions\/resolve/);
   assert.match(source, /continuationDelivery == "pending"/);
   assert.doesNotMatch(source, /api\/issues\/\$ACTIVE_ISSUE_ID\/retry/);
+});
+
+test("fixture worker changes into the task workspace and completes the effect marker before delivery", async () => {
+  const source = readFileSync(script, "utf8");
+  const worker = source.match(/cat > "\$ACTIVE_SCRIPT" <<'NODE'\n(?<body>[\s\S]*?)\nNODE/)?.groups?.body;
+  assert.ok(worker, "expected the generated recovery worker script");
+
+  const home = mkdtempSync(path.join(os.tmpdir(), "proprio-update-worker-"));
+  const workspace = path.join(home, "execution-workspace");
+  const marker = path.join(home, "effect.txt");
+  mkdirSync(workspace);
+  const comments = [];
+  const server = createServer(async (request, response) => {
+    if (request.url === "/api/issues/issue-1" && request.method === "GET") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ executionWorkspaceId: "workspace-1", currentExecutionWorkspace: { id: "workspace-1", cwd: workspace } }));
+      return;
+    }
+    if (request.url === "/api/issues/issue-1/comments" && request.method === "GET") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(comments));
+      return;
+    }
+    if (request.url === "/api/issues/issue-1/comments" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      comments.push(JSON.parse(body));
+      response.statusCode = 201;
+      response.end("{}");
+      return;
+    }
+    response.statusCode = 404;
+    response.end("not found");
+  });
+
+  try {
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const workerFile = path.join(home, "worker.mjs");
+    await import("node:fs/promises").then(fs => fs.writeFile(workerFile, worker));
+    const output = "Recovered task output: qualification effect completed exactly once.";
+    const runWorker = async () => {
+      const child = spawn(process.execPath, [workerFile, marker, "issue-1", `http://127.0.0.1:${address.port}`, output, "complete"], {
+        cwd: repoRoot,
+        env: { ...cleanEnv, PROPRIO_API_KEY: "fixture-token" },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+      child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+      const exitCode = await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      return { exitCode, stdout, stderr };
+    };
+    const first = await runWorker();
+    assert.equal(first.exitCode, 0, first.stderr || first.stdout);
+    assert.equal(readFileSync(marker, "utf8"), "effect\n");
+    assert.equal(readFileSync(path.join(workspace, "qualification-checkpoint.txt"), "utf8"), "checkpoint for issue-1\n");
+    const identityPath = path.join(workspace, "qualification-process.json");
+    const firstIdentityContents = readFileSync(identityPath, "utf8");
+    const identity = JSON.parse(firstIdentityContents);
+    assert.equal(identity.startupCwd, repoRoot);
+    assert.equal(identity.cwd, workspace);
+    assert.equal(identity.workspaceId, "workspace-1");
+    assert.deepEqual(comments, [{ body: output }]);
+
+    const continuation = await runWorker();
+    assert.equal(continuation.exitCode, 0, continuation.stderr || continuation.stdout);
+    assert.equal(readFileSync(identityPath, "utf8"), firstIdentityContents, "continuation keeps the original provider process identity");
+    assert.deepEqual(comments, [{ body: output }], "continuation delivers the task output once");
+
+    rmSync(path.join(workspace, "qualification-checkpoint.txt"));
+    const missingCheckpoint = await runWorker();
+    assert.notEqual(missingCheckpoint.exitCode, 0);
+    assert.match(missingCheckpoint.stderr, /original task workspace checkpoint is missing or changed/);
+    assert.deepEqual(comments, [{ body: output }], "missing checkpoint does not trigger a second delivery");
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagnostics", () => {
