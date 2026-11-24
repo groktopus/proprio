@@ -5,8 +5,8 @@ import { gzipSync } from "node:zlib";
 const dist = process.argv[2] ?? "ui/dist";
 const manifest = JSON.parse(readFileSync(path.join(dist, ".vite/manifest.json"), "utf8"));
 
-// Hard ceilings rounded up from the b1873b02-era baseline remeasured at
-// 98914d7c. Count every static dependency once per journey.
+// Hard ceilings rounded up from the fd37ee361ea4 production baseline.
+// Count every static dependency once per journey.
 const budgets = {
   board: { raw: 3_860_000, gzip: 1_180_000 },
   task: { raw: 7_190_000, gzip: 2_120_000 },
@@ -35,7 +35,9 @@ function measure(entryKeys) {
 }
 
 const entry = "index.html";
-const detail = "src/pages/IssueDetail.tsx";
+const details = Object.keys(manifest).filter((key) => manifest[key].name === "issue-detail");
+if (details.length !== 1) throw new Error("Expected one Vite issue-detail chunk");
+const [detail] = details;
 for (const [journey, roots] of [[ "board", [entry] ], [ "task", [entry, detail] ]]) {
   const measured = measure(roots);
   const budget = budgets[journey];

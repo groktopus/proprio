@@ -81,9 +81,25 @@ latest value at readiness.
 The required build check runs `node scripts/ci/board-asset-budget.mjs`.
 It counts each JavaScript file once across static imports of the HTML entry,
 then across the entry plus the direct Task Detail chunk. The ceilings are
-rounded up from a production build at `98914d7c` with the Agent Detail
-typecheck fix applied. The browser measurements include any additional dynamic
-requests. The byte ceilings apply to build assets and are independent of timing.
+rounded up from a production build at `fd37ee361ea4` with the Agent Detail
+typecheck fix applied to both builds. The browser measurements include
+additional dynamic requests. The byte ceilings apply to build assets.
+
+The first paired run used macOS arm64 and the pinned Chromium. The candidate
+was `168157585212` with the same Agent Detail prerequisite. All five samples
+per route and build reached readiness.
+
+| Route | Median FCP, before → after | Median ready time, before → after | Transferred bytes, before → after | Transferred JavaScript bytes, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Task List | 1,664 → 1,644 ms | 2,659 → 2,638 ms | 1,737,828 → 1,733,975 | 1,214,116 → 1,209,448 |
+| Direct Task Detail | 2,428 → 2,408 ms | 3,510 → 3,464 ms | 2,616,149 → 2,594,274 | 2,071,779 → 2,048,521 |
+
+React DOM, CodeMirror, and Lexical were the largest startup dependencies.
+The largest direct-task modules were Task Detail, the chat thread, and the
+interaction card. The changes defer less frequently used controls. The
+static Task Detail chain went from 7,181,527 to 7,091,529 raw JavaScript
+bytes and from 2,113,834 to 2,088,382 gzip bytes. The small timing differences
+describe this fixture and runner.
 
 ## Cold direct task load (chat bootstrap)
 
