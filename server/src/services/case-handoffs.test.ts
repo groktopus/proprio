@@ -128,11 +128,14 @@ describe("durable same-task case handoffs", () => {
     await db.update(heartbeatRuns).set({ runtimeMode: "native", completionContractId: contract!.id }).where(eq(heartbeatRuns.id, runId));
     const [taskBefore] = await db.select().from(issues).where(eq(issues.id, first.taskId));
     const offer = { expectedDeliverable: "Implementation with passing tests", prerequisites: ["Review the saved brief"] };
-    const receipt = await f.service.handoff(f.companyId, { type: "agent", agentId: f.triage, companyId: f.companyId, runId, source: "agent_jwt" }, {
-      case: { id: first.caseId }, idempotencyKey: randomUUID(), expectedHandoffVersion: 1,
+    const idempotencyKey = randomUUID();
+    const actor = { type: "agent" as const, agentId: f.triage, companyId: f.companyId, runId, source: "agent_jwt" as const };
+    const input = { case: { id: first.caseId }, idempotencyKey, expectedHandoffVersion: 1,
       expectedIssueStatusVersion: taskBefore!.statusVersion, toAgentId: f.engineer, phase: "implementation",
-      instructions: "Implement the agreed scope", offer,
-    });
+      instructions: "Implement the agreed scope", offer };
+    const receipt = await f.service.handoff(f.companyId, actor, input);
+    const replay = await f.service.handoff(f.companyId, actor, input);
+    expect(replay).toMatchObject({ handoffId: receipt.handoffId, state: "offered", replayed: true });
     const [saved] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
     const [taskAfter] = await db.select().from(issues).where(eq(issues.id, first.taskId));
     const [caseAfter] = await db.select().from(cases).where(eq(cases.id, first.caseId));
@@ -170,6 +173,24 @@ describe("durable same-task case handoffs", () => {
     })).rejects.toThrow("Versioned offers require an active native source task with a completion contract");
     expect((await db.select().from(issues).where(eq(issues.id, first.taskId)))[0]).toMatchObject({ assigneeAgentId: f.triage });
     expect(await db.select().from(caseHandoffs).where(eq(caseHandoffs.idempotencyKey, idempotencyKey))).toEqual([]);
+  });
+
+  it("rejects an offer from an agent who does not own the source task", async () => {
+    const f = await fixture();
+    const first = await f.service.handoff(f.companyId, board, f.input);
+    await db.update(caseHandoffs).set({ state: "delivered" }).where(eq(caseHandoffs.id, first.handoffId));
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId: f.verifier,
+      status: "running", runtimeMode: "native", invocationSource: "assignment", triggerDetail: "system",
+      contextSnapshot: { issueId: first.taskId } });
+    const [task] = await db.select().from(issues).where(eq(issues.id, first.taskId));
+    await expect(f.service.handoff(f.companyId, { type: "agent", agentId: f.verifier, companyId: f.companyId,
+      runId, source: "agent_jwt" }, {
+      case: { id: first.caseId }, idempotencyKey: randomUUID(), expectedHandoffVersion: 1,
+      expectedIssueStatusVersion: task!.statusVersion, toAgentId: f.engineer, phase: "implementation",
+      instructions: "Implement the agreed scope", offer: { expectedDeliverable: "Patch" },
+    })).rejects.toThrow("Source run no longer owns its task");
+    expect((await db.select().from(issues).where(eq(issues.id, first.taskId)))[0]).toMatchObject({ assigneeAgentId: f.triage });
   });
 
   async function cloudTransfer() {

@@ -136400,6 +136400,28 @@
                         "type": "string",
                         "format": "uuid",
                         "nullable": true
+                      },
+                      "offer": {
+                        "type": "object",
+                        "properties": {
+                          "expectedDeliverable": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 8000
+                          },
+                          "prerequisites": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            }
+                          }
+                        },
+                        "required": [
+                          "expectedDeliverable"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -136521,6 +136543,28 @@
                       "workflowId": {
                         "type": "string",
                         "format": "uuid"
+                      },
+                      "offer": {
+                        "type": "object",
+                        "properties": {
+                          "expectedDeliverable": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 8000
+                          },
+                          "prerequisites": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            }
+                          }
+                        },
+                        "required": [
+                          "expectedDeliverable"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -136614,6 +136658,28 @@
                         "type": "string",
                         "format": "uuid",
                         "nullable": true
+                      },
+                      "offer": {
+                        "type": "object",
+                        "properties": {
+                          "expectedDeliverable": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 8000
+                          },
+                          "prerequisites": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            }
+                          }
+                        },
+                        "required": [
+                          "expectedDeliverable"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [
