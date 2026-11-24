@@ -4431,8 +4431,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
     onSuccess: async (result) => {
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(selectedSkillId!),
-        skillsCache.invalidateFile(selectedSkillId!, selectedPath),
       ]);
       setDraft(result.markdown ? splitFrontmatter(result.content).body : result.content);
       setEditMode(false);
@@ -4462,7 +4460,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
       if (!activeDetail) return;
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(activeDetail.id),
       ]);
     },
     onError: (error) => {
@@ -4488,7 +4485,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
       );
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(skill.id),
       ]);
       pushToast({ tone: "success", title: "Skill settings updated", body: skillSettingsToastBody(skill) });
     },
@@ -4506,9 +4502,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
     onSuccess: async (skill) => {
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(selectedSkillId!),
-        skillsCache.invalidateUpdateStatus(selectedSkillId!),
-        skillsCache.invalidateFile(selectedSkillId!, selectedPath),
       ]);
       navigate(routeForSkill(skill, selectedPath));
       pushToast({
@@ -4671,7 +4664,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
       }
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(result.skill.id),
       ]);
       setInstallDialogState((current) => ({ ...current, open: false, error: null }));
       pushToast({
@@ -4924,9 +4916,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
       await Promise.all([
         skillsCache.invalidateList(),
         skillsCache.invalidateFolders(),
-        ...ids.map((itemId) =>
-          skillsCache.invalidateDetail(itemId),
-        ),
       ]);
       setMoveDialog(null);
       setSelectedSkillIds([]);
@@ -4975,8 +4964,6 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
     onSuccess: async () => {
       await Promise.all([
         skillsCache.invalidateList(),
-        skillsCache.invalidateDetail(selectedSkillId ?? ""),
-        skillsCache.invalidateVersions(selectedSkillId ?? ""),
       ]);
     },
   });
@@ -5044,15 +5031,7 @@ export function CompanySkills({ collectionView }: { collectionView?: "authored" 
       setDisplayedFile(null);
       await Promise.all([
         skillsCache.invalidateList(),
-        ...(deleteTargetSkillId ? [
-          skillsCache.invalidateDetail(deleteTargetSkillId),
-          skillsCache.invalidateUpdateStatus(deleteTargetSkillId),
-        ] : []),
-        ...(deleteTargetSkillId ? [
-          skillsCache.invalidateFile(deleteTargetSkillId, selectedPath),
-        ] : []),
       ]);
-      await skillsCache.refetchList();
       navigate("/skills", { replace: true });
       pushToast({
         tone: "success",

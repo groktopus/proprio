@@ -14,13 +14,5 @@ export function createCompanySkillsCache(queryClient: QueryClient, companyId: st
     invalidateList: () => queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(companyId) }),
     refetchList: () => queryClient.refetchQueries({ queryKey: queryKeys.companySkills.list(companyId), type: "active" }),
     invalidateFolders: () => queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(companyId, "skill") }),
-    invalidateDetail: (skillId: string) =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(companyId, skillId) }),
-    invalidateFile: (skillId: string, path: string) =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.file(companyId, skillId, path) }),
-    invalidateUpdateStatus: (skillId: string) =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.updateStatus(companyId, skillId) }),
-    invalidateVersions: (skillId: string) =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.versions(companyId, skillId) }),
   };
 }
