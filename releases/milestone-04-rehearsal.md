@@ -9,7 +9,7 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 On November 24, 2026, all 44 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `abb3e78962b7236089ff42c59a4e53cffb879615`. The pull
+rehearsal revision is `a817cd45746a1a4fa399b381234ebbcc9ee8e2ca`. The pull
 requests record the exact heads and test scope for the individual results
 below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
@@ -27,8 +27,10 @@ below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
   denial, and authorized acceptance. Native finalization tests exercised
   corrected scope and withdrawal. Chromium displayed completion evidence and
   retained an earlier accepted recovery revision after a newer acceptance.
-  A controller restart test compared the full accept, clarification, and
-  decline receipts and checked the task's Case audit events after restart.
+  Two runs of the controller restart test compared the full accept,
+  clarification, and decline receipts and checked the task's Case audit
+  events after restart. The fixture uses a static loader and seeded agents
+  to keep the receipt checks independent of model calls and onboarding.
   [Native handoff #342](https://github.com/groktopus/proprio/pull/342) · [Completion history #335](https://github.com/groktopus/proprio/pull/335) · [Scope correction #345](https://github.com/groktopus/proprio/pull/345) · [Recovery history #355](https://github.com/groktopus/proprio/pull/355) · [Decision restart #364](https://github.com/groktopus/proprio/pull/364)
 - **Bound signoff and shared spend.** PostgreSQL tests exercised an edit racing
   with signoff, concurrent sibling reservations, reparenting, overlapping
