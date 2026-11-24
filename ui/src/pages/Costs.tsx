@@ -29,6 +29,7 @@ import { agentsApi } from "../api/agents";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { TaskTreeBudgetCreate } from "../components/TaskTreeBudgetCreate";
 import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
@@ -294,6 +295,12 @@ export function Costs({
       metric: summary.metric,
       windowKind: summary.windowKind,
       ...changes,
+    }),
+    onSuccess: invalidateBudgetViews,
+  });
+  const createTaskTreeBudgetMutation = useMutation({
+    mutationFn: ({ rootTaskId, amount }: { rootTaskId: string; amount: number }) => budgetsApi.upsertPolicy(companyId, {
+      scopeType: "task_tree", scopeId: rootTaskId, metric: "billed_cents", windowKind: "lifetime", amount,
     }),
     onSuccess: invalidateBudgetViews,
   });
@@ -935,7 +942,7 @@ export function Costs({
         </TabsContent>
 
         <TabsContent value="budgets" className="mt-4 space-y-4">
-          {policyMutation.error && <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>}
+                {(policyMutation.error || createTaskTreeBudgetMutation.error) && <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>}
           {budgetLoading ? (
             <PageSkeleton variant="costs" />
           ) : budgetError && !budgetData ? null : (
@@ -1036,12 +1043,19 @@ export function Costs({
                   );
                 })}
 
-                {budgetPoliciesByScope.task_tree.length > 0 ? (
-                  <section className="space-y-3">
+                <section className="space-y-3">
                     <div>
                       <h2 className="text-lg font-semibold">Task budgets</h2>
-                      <p className="text-sm text-muted-foreground">Each limit is shared by the root task and its descendants. Board operators who can view the root task can update its limit or resolve its budget stop.</p>
+                      <p className="text-sm text-muted-foreground">Each lifetime limit is shared by the root task and its descendants. Board operators who can view the root task can set or update its limit and resolve its budget stop.</p>
                     </div>
+                    <TaskTreeBudgetCreate
+                      companyId={companyId}
+                      existingRootIds={budgetPoliciesByScope.task_tree.map(policy => policy.scopeId)}
+                      disabled={!canManageTaskTreeBudgets}
+                      isSaving={createTaskTreeBudgetMutation.isPending}
+                      onCreate={(rootTask, amount) => createTaskTreeBudgetMutation.mutate({ rootTaskId: rootTask.id, amount })}
+                    />
+                    {budgetPoliciesByScope.task_tree.length > 0 ? (
                     <div className="grid gap-4 xl:grid-cols-2">
                       {budgetPoliciesByScope.task_tree.map((summary) => (
                         <div key={summary.policyId}>
@@ -1058,13 +1072,13 @@ export function Costs({
                         </div>
                       ))}
                     </div>
-                  </section>
-                ) : null}
+                    ) : null}
+                </section>
 
                 {budgetPolicies.length === 0 ? (
                   <Card>
                     <CardContent className="px-5 py-8 text-sm text-muted-foreground">
-                      No budget policies yet. Set agent and project budgets from their detail pages, or use the existing organization monthly budget control.
+                      No budget policies yet. Set an agent or project budget from its detail page, set a task-tree budget above, or use the organization monthly budget control.
                     </CardContent>
                   </Card>
                 ) : null}

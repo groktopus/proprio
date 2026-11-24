@@ -15,6 +15,7 @@ const resolveIncidentMock = vi.hoisted(() => vi.fn());
 const upsertPolicyMock = vi.hoisted(() => vi.fn());
 const boardAccessMock = vi.hoisted(() => vi.fn());
 const budgetOverviewMock = vi.hoisted(() => vi.fn());
+const issueListMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
 const decisionHistoryMock = vi.hoisted(() => vi.fn());
 const costsApiMocks = vi.hoisted(() => ({
@@ -44,6 +45,7 @@ vi.mock("../api/budgets", () => ({
     resolveIncident: resolveIncidentMock,
   },
 }));
+vi.mock("../api/issues", () => ({ issuesApi: { list: (...args: unknown[]) => issueListMock(...args) } }));
 vi.mock("../api/access", () => ({ accessApi: { getCurrentBoardAccess: (...args: unknown[]) => boardAccessMock(...args) } }));
 
 vi.mock("../api/costs", () => ({ costsApi: costsApiMocks }));
@@ -75,6 +77,7 @@ describe("Shared Costs surfaces", () => {
 
   beforeEach(() => {
     scopedAgentMock.mockReset();
+    issueListMock.mockReset();
     boardAccessMock.mockResolvedValue({ userId: "operator", companyIds: ["company-1"], memberships: [{ companyId: "company-1", status: "active", membershipRole: "operator" }], source: "session", isInstanceAdmin: false });
     const usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costCents: "0", eventCount: 0, estimatedEventCount: 0, unpricedEventCount: 0 };
     subscriptionsMocks.report.mockResolvedValue({ canRefresh: false, asOf: "2026-10-08T00:00:00Z", accounts: [], monthlyTotals: [], activeCount: 0, unknownPriceCount: 0, unidentifiedAccountCount: 0, api: usage, subscription: usage, unknown: usage, unattributedSubscription: usage });
@@ -115,7 +118,35 @@ describe("Shared Costs surfaces", () => {
     await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
     expect(container.textContent).toContain("Board operators who can view the root task");
     expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent?.trim() === "Update budget")).toBe(false);
+    expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent?.trim() === "Set task budget")?.disabled).toBe(true);
     viewerClient.clear();
+  });
+
+  it("creates a lifetime policy for the explicitly selected root and amount", async () => {
+    issueListMock.mockResolvedValue([{ id: "root-id", identifier: "PRO-10", title: "Prepare release" }]);
+    upsertPolicyMock.mockResolvedValue({});
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
+    const search = container.querySelector<HTMLInputElement>('[aria-label="Root task"]')
+      ?? container.querySelector<HTMLInputElement>("#task-tree-budget-root-search")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Prepare");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("PRO-10 · Prepare release")); });
+    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("PRO-10 · Prepare release"))!.click());
+    const amount = container.querySelector<HTMLInputElement>('[aria-label="Lifetime limit (USD)"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(amount, "25.50");
+      amount.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Set task budget")!.click());
+    await act(async () => { await vi.waitFor(() => expect(upsertPolicyMock).toHaveBeenCalledWith("company-1", {
+      scopeType: "task_tree", scopeId: "root-id", metric: "billed_cents", windowKind: "lifetime", amount: 2550,
+    })); });
+    queryClient.clear();
   });
 
   afterEach(() => {
