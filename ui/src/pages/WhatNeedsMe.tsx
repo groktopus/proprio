@@ -4,7 +4,7 @@ import { useCoordinatorWorkspaceEnabled } from "../hooks/useCoordinatorWorkspace
 import { CoordinatorNeedsYou } from "../components/coordinator/CoordinatorNeedsYou";
 import { CheckCircle2, History, Inbox } from "lucide-react";
 import type { Agent, AttentionItem, AttentionPersonalView, AttentionSubject } from "@groktopus/shared";
-import { Link, useNavigate, useSearchParams } from "@/lib/router";
+import { useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
@@ -15,6 +15,7 @@ import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, 
 import { ATTENTION_VIEW_PARAM, parseAttentionView } from "../lib/attention-views";
 import { buildCompanyUserLabelMap } from "../lib/company-members";
 import { AttentionReceiptList, AttentionUnassignedBanner, AttentionViewSwitch } from "../components/AttentionViews";
+import { AttentionTasksHint } from "../components/AttentionTasksHint";
 import { AttentionSnoozedGroup, AttentionStaleGroup } from "../components/AttentionCloseMenu";
 import { DecisionHistoryPanel } from "../components/DecisionHistoryPanel";
 import { Button } from "../components/ui/button";
@@ -621,7 +622,7 @@ function ClassicWhatNeedsMe() {
           </Button>
         </div>
         <p className="text-sm text-muted-foreground">
-          Pending decisions live here. Use <Link to="/issues">Tasks</Link> for filtered work views such as Mine, Unread, and Blocked.
+          <AttentionTasksHint />
         </p>
         <AttentionViewSwitch value={view} counts={viewCounts} onChange={setView} everyone={everyone} />
         {view === "mine" ? <AttentionUnassignedBanner count={viewCounts.unassigned} onOpen={() => setView("unassigned")} /> : null}

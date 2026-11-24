@@ -13,7 +13,7 @@ import { usePanel } from "@/context/PanelContext";
 import { useSidebar } from "@/context/SidebarContext";
 import { useCoordinatorWorkspaceEnabled } from "@/hooks/useCoordinatorWorkspaceEnabled";
 import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, useAttentionViewFeed, useClaimAttentionItem, useDismissAttentionReceipt } from "@/hooks/useAttentionViews";
-import { Link, useNavigate, useSearchParams } from "@/lib/router";
+import { useNavigate, useSearchParams } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { COORDINATOR_ASSIGNEE_PARAM, COORDINATOR_RECENT_DECISION_MS, DEFAULT_DECISION_HISTORY_SCOPE, coordinatorAssignee, coordinatorAssigneeTarget, coordinatorAudienceKey, coordinatorCardDetail, coordinatorCardTitle, recentDecisionReceipts, type CoordinatorAssignee } from "@/lib/coordinator-attention";
 import { attentionDetailLine, isInlineResolvable } from "@/lib/attention";
@@ -27,6 +27,7 @@ import { AttentionInteractionResolver } from "@/components/AttentionInteractionR
 import { ApprovalResolver, JoinRequestResolver } from "@/components/AttentionQueueRow";
 import { AttentionObligationEvidence } from "@/components/AttentionObligationEvidence";
 import { DecisionHistoryPanel } from "@/components/DecisionHistoryPanel";
+import { AttentionTasksHint } from "@/components/AttentionTasksHint";
 import { DecisionResolver } from "@/components/DecisionResolver";
 import { DecisionCardFooter } from "@/components/DecisionCardFooter";
 import { useSidePanelTabs } from "@/components/side-panel";
@@ -388,7 +389,7 @@ export function CoordinatorNeedsYou() {
   </h2>;
   return <LayoutGroup id="coordinator-decisions"><section className="coordinator-needs-you mx-auto w-full max-w-4xl space-y-6" aria-label="Needs You">
     {archivedView ? <div className="flex items-center gap-2"><Button variant="ghost" size="icon-sm" aria-label="Back to Needs You" onClick={() => setView("mine")}><ArrowLeft className="size-4" /></Button><h1 className="text-2xl font-medium">Archived</h1></div> : null}
-    {!archivedView ? <p className="text-sm text-muted-foreground">Pending decisions live here. Use <Link to="/issues">Tasks</Link> for filtered work views such as Mine, Unread, and Blocked.</p> : null}
+    {!archivedView ? <p className="text-sm text-muted-foreground"><AttentionTasksHint /></p> : null}
     {/* Assigned to you by default (PAP-775); the assignee filter widens to all
         assignees, one person, no owner yet or company alerts. Archived and
         Decision history sit in View. */}

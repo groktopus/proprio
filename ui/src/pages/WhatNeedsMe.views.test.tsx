@@ -23,6 +23,7 @@ const fixture = vi.hoisted(() => ({
   receipts: [] as AttentionReceipt[],
 }));
 vi.mock("../hooks/useCoordinatorWorkspaceEnabled", () => ({ useCoordinatorWorkspaceEnabled: () => ({ enabled: false, userId: fixture.userId }) }));
+vi.mock("../hooks/useCombinedInboxTasksEnabled", () => ({ useCombinedInboxTasksEnabled: () => ({ enabled: false, loaded: true }) }));
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company" }) }));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }), useOptionalToastActions: () => ({ pushToast: vi.fn() }) }));
@@ -138,7 +139,7 @@ describe("classic Decisions views", () => {
   it("opens For you by default with the shared badge count and the Unassigned banner", async () => {
     await render();
     expect(container.textContent).toContain("Pending decisions live here");
-    expect(container.querySelector('a[href="/issues"]')?.textContent).toBe("Tasks");
+    expect(container.querySelector('a[href="/inbox"]')?.textContent).toBe("Tasks");
     expect(fixture.calls).toContainEqual(expect.objectContaining({ all: true, view: "mine" }));
     // The views never ask for hidden cards; those live in the Archived view (PAP-749 plan §3).
     expect(fixture.calls.some((call) => "includeDismissed" in call)).toBe(false);
