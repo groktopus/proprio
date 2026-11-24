@@ -11,6 +11,7 @@ import { AgentConnectionInstructions } from "@/features/connections/ConnectionIn
 import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@groktopus/shared";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
+import { ProprioMark } from "../components/ProprioLockup";
 import { characterStateForAgent, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT } from "@groktopus/shared";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, useLocation, Link, Navigate, useBeforeUnload, type NavigateFunction } from "@/lib/router";
@@ -904,6 +905,7 @@ export function AgentDetail() {
           agent={currentAgent}
           companyId={resolvedCompanyId}
           assignLabel="New task"
+          assignIcon={<ProprioMark decorative className="size-4" />}
           size="default"
           showChat
           showStatus={false}

@@ -59,5 +59,7 @@ it("renders the New task action on the loaded agent overview", () => {
   const container = document.createElement("div");
   container.innerHTML = markup;
   const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("header button"));
-  expect(buttons.some((button) => button.textContent?.trim() === "New task" && !button.disabled)).toBe(true);
+  const newTaskButton = buttons.find((button) => button.textContent?.trim() === "New task");
+  expect(newTaskButton?.disabled).toBe(false);
+  expect(newTaskButton?.querySelector('svg[aria-hidden="true"] rect')?.getAttribute("fill")).toBe("var(--proprio-mark-background)");
 });
