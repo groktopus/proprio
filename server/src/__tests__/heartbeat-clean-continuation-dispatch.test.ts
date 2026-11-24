@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues,
+  agentWakeupRequests, agents, approvals, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueApprovals, issues,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
+
+const providerStarted = vi.hoisted(() => vi.fn());
 
 const held = vi.hoisted(() => {
   const state = {
@@ -26,6 +28,7 @@ vi.mock("../adapters/index.ts", async () => {
     getServerAdapter: vi.fn(() => ({
       supportsLocalAgentJwt: false,
       execute: async () => {
+        providerStarted();
         await held.released;
         return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "done", provider: "test", model: "test" };
       },
@@ -49,6 +52,7 @@ suite("queued-run dispatch of a continuation after the tool-call loop limit", ()
 
   afterEach(async () => {
     held.release();
+    providerStarted.mockClear();
     runningProcesses.clear();
     await db.execute(sql`truncate table ${companies} cascade`);
   });
@@ -118,6 +122,29 @@ suite("queued-run dispatch of a continuation after the tool-call loop limit", ()
         and ${heartbeatRuns.startedAt} is not null`);
     return rows.map(row => row.id);
   }
+
+  it("cancels an automatic continuation when an approval opens after queue admission", async () => {
+    const agentId = await seedAgent();
+    const continuation = await queuedContinuation(agentId, false);
+    const openApproval = vi.fn(async ({ runId, issueId }: { runId: string; issueId: string }) => {
+      if (runId !== continuation.id) return;
+      const [approval] = await db.insert(approvals).values({
+        companyId, type: "approve_ceo_strategy", status: "pending", payload: {},
+      }).returning();
+      await db.insert(issueApprovals).values({ companyId, issueId, approvalId: approval!.id });
+    });
+    const heartbeat = heartbeatService(db, { beforeResolvedInteractionContinuationDispatchCheck: openApproval });
+    try {
+      await heartbeat.resumeQueuedRunsForAgent(companyId, agentId);
+      await heartbeat.drainActiveRunExecutions();
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, continuation.id));
+      expect(run).toMatchObject({ status: "cancelled", errorCode: "issue_waiting_for_response" });
+      expect(openApproval).toHaveBeenCalledOnce();
+      expect(providerStarted).not.toHaveBeenCalled();
+    } finally {
+      held.release();
+    }
+  }, 60_000);
 
   it.each([
     { name: "starts a clean loop-limit continuation of a person's task before a newer person assignment", failureRetry: false },

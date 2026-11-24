@@ -35,6 +35,7 @@ export {
   deriveCommentId,
   allowsIssueInteractionWake,
   allowsDependencyBlockedWake,
+  isAutomaticIssueContinuationWake,
   isResolvedInteractionContinuationWakeContext,
 } from "./domain/wake-context.js";
 export type {

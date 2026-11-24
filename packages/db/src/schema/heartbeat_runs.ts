@@ -180,6 +180,9 @@ export const heartbeatRuns = pgTable(
     // Runs woken by one chat comment. Not partial: the planner ignores the
     // expression statistics of a partial index and would then walk the run
     // history by creation time to satisfy `order by created_at limit 1`.
+    companyIdUq: uniqueIndex("heartbeat_runs_company_id_uq")
+      .on(table.companyId, table.id)
+      .concurrently(),
     companyWakeCommentIdx: index("heartbeat_runs_company_wake_comment_idx")
       .on(table.companyId, sql`(${table.contextSnapshot}->>'wakeCommentId')`)
       .concurrently(),

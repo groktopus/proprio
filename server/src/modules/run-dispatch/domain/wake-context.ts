@@ -148,6 +148,17 @@ export function deriveCommentId(
   );
 }
 
+export function isAutomaticIssueContinuationWake(
+  context: Record<string, unknown>,
+  scheduledRetryReason?: string | null,
+): boolean {
+  const retryReason = readNonEmptyString(context.retryReason) ?? scheduledRetryReason;
+  const interactionResolvedAt = readNonEmptyString(context.interactionResolvedAt);
+  return (context.wakeReason === "issue_continuation_needed" || retryReason === "issue_continuation_needed")
+    && !deriveCommentId(context)
+    && (interactionResolvedAt === null || Number.isNaN(Date.parse(interactionResolvedAt)));
+}
+
 /**
  * The external chat conversation a wake answers. Several conversations can
  * share one issue (for example GitHub review finding threads), but a reviewed

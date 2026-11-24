@@ -26,25 +26,9 @@ The Docker quickstart also uses embedded PostgreSQL by default.
 
 ## 2. Local PostgreSQL (Docker)
 
-For a full PostgreSQL server locally:
-
-```sh
-docker compose up -d
-```
-
-This starts PostgreSQL 17 on `localhost:5432`. Set the connection string:
-
-```sh
-cp .env.example .env
-# DATABASE_URL=postgres://proprio:proprio@localhost:5432/proprio
-```
-
-Push the schema:
-
-```sh
-DATABASE_URL=postgres://proprio:proprio@localhost:5432/proprio \
-  npx drizzle-kit push
-```
+Use the [local PostgreSQL instructions](https://github.com/groktopus/proprio/blob/main/doc/DATABASE.md#2-local-postgresql-docker).
+They set the required password, start only the database service with a
+loopback-only port, and run the Proprio migration command against that database.
 
 ## 3. Hosted PostgreSQL (Supabase)
 

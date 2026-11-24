@@ -1,0 +1,5 @@
+# Optional override for host-side development tools. Keep the DB on loopback.
+services:
+  db:
+    ports:
+      - "127.0.0.1:${PROPRIO_POSTGRES_PORT:-5432}:5432"

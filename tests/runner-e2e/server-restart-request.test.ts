@@ -48,6 +48,19 @@ it.each(cells)("accepts the real supervisor request file for $id", async executi
   await expect(readRestartRequest(requestPath, [execution.id])).resolves.toMatchObject({
     requestId: "actual-restart-request", discardControllerCache: true, controllerOutage: outage,
   });
+  await expect(readRestartRequest(requestPath, [execution.id])).resolves.not.toHaveProperty("preserveDurableRunnerSessions");
+});
+
+it("preserves provider durable session state only for the structured goal recovery outage", async () => {
+  const execution = runnerMatrix.find(row => row.suite.id === "session-goal-recovery" && row.task.id === "structured-goal-recovery"
+    && row.environment.id === "local" && row.profile.id === "runner-codex-subscription");
+  expect(execution).toBeDefined();
+  const outage = controllerOutageForExecution(execution!, {});
+  await writeFile(requestPath, JSON.stringify({ requestId: "goal-recovery-outage", discardControllerCache: true,
+    controllerOutage: outage, recoveryBinding: { companyId: "11111111-1111-4111-8111-111111111111",
+      issueId: "22222222-2222-4222-8222-222222222222", runId: "33333333-3333-4333-8333-333333333333" } }));
+  await expect(readRestartRequest(requestPath, [execution!.id])).resolves.toMatchObject({ preserveDurableRunnerSessions: true });
+  await expect(readRestartRequest(requestPath, [execution!.id, cells[0].id])).resolves.not.toHaveProperty("preserveDurableRunnerSessions");
 });
 
 it("rejects cache replacement for unselected, local and legacy cells", async () => {

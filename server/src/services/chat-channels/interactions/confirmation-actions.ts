@@ -131,6 +131,11 @@ export function createChatConfirmationActions(db: Db, options: ChatConfirmationO
         companyId: issues.companyId,
         projectId: issues.projectId,
         goalId: issues.goalId,
+        goalOrigin: sql<"explicit" | "inherited" | "unknown">`CASE
+          WHEN ${issues.goalOriginGoalId} IS NOT DISTINCT FROM ${issues.goalId}
+            THEN ${issues.goalOrigin}
+          ELSE 'unknown'
+        END`,
         status: issues.status,
         assigneeAgentId: issues.assigneeAgentId,
       })

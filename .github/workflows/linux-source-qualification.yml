@@ -1,33 +1,52 @@
 name: Linux source qualification
+run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inputs.pr_number, inputs.test_head) || (inputs.test_head && inputs.base_sha && format('Source qualification {0} from {1}', inputs.test_head, inputs.base_sha)) || format('Linux source qualification {0}', github.sha) }}
 
 on:
+  schedule:
+    - cron: "43 7 * * *"
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/linux-source-qualification.yml
-      - scripts/ci/linux-source-qualification.mjs
-      - tests/runner-recovery/README.md
-      - packages/proprio-runner/protocol/manifest.json
-    types: [opened, synchronize, reopened, ready_for_review]
+    inputs:
+      pr_number:
+        description: Pull request number for a default-branch acceptance run
+        type: string
+      test_head:
+        description: Exact source SHA to qualify (defaults to the selected main revision)
+        type: string
+      base_sha:
+        description: Exact baseline SHA (required with test_head, or omit both to use v0.0.1)
+        type: string
+  workflow_call:
 
 permissions:
   contents: read
 
-concurrency:
-  group: linux-source-qualification-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   source-and-runner:
-    if: github.repository == 'groktopus/proprio' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
     steps:
+      - name: Validate manual qualification subject
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TEST_HEAD: ${{ inputs.test_head }}
+          BASE_SHA: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          if [[ -n "$PR_NUMBER" ]]; then
+            [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ && "$TEST_HEAD" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          elif [[ -n "$TEST_HEAD" || -n "$BASE_SHA" ]]; then
+            [[ "$TEST_HEAD" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          fi
       - name: Check out the exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ env.EXPECTED_HEAD }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -35,8 +54,7 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
       - name: Verify head and install locked dependencies
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        id: install
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git rev-parse HEAD
@@ -47,7 +65,53 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+      - name: Install Chromium for recovered-task readback
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Execute managed update and rollback on Linux
+        id: lifecycle
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          NEXT_SHA: ${{ env.EXPECTED_HEAD }}
+          E2E_UPDATE_NEXT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          E2E_UPDATE_BROWSER_READBACK: '1'
+          E2E_UPDATE_BROWSER_REPORT: ${{ runner.temp }}/durable-work-browser.json
+        run: |
+          runner_uid="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$runner_uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$runner_uid.service"
+          systemctl --user import-environment PATH
+          if [[ -n "$BASE_SHA" ]]; then
+            export E2E_UPDATE_BASE_REF="$BASE_SHA"
+          else
+            git fetch --depth=1 https://github.com/groktopus/proprio.git refs/tags/v0.0.1:refs/tags/v0.0.1
+            export E2E_UPDATE_BASE_REF="$(git rev-parse 'v0.0.1^{commit}')"
+          fi
+          echo "E2E_UPDATE_BASE_REF=$E2E_UPDATE_BASE_REF" >> "$GITHUB_ENV"
+          git fetch --depth=1 https://github.com/groktopus/proprio.git "$E2E_UPDATE_BASE_REF"
+          if git diff --quiet --no-renames "$E2E_UPDATE_BASE_REF" "$NEXT_SHA" -- 'packages/db/src/migrations/*.sql'; then
+            export E2E_UPDATE_REQUIRE_ACTIVE_RUN=0
+          else
+            export E2E_UPDATE_REQUIRE_ACTIVE_RUN=1
+          fi
+          export E2E_UPDATE_NEXT_REF="$NEXT_SHA"
+          export E2E_UPDATE_REQUIRE_PROBE=0
+          export E2E_UPDATE_USE_BOOTSTRAP_CLI=1
+          export E2E_UPDATE_RESULT_FILE="$RUNNER_TEMP/durable-work-lifecycle.json"
+          export E2E_BOOTSTRAP_CLI="$PWD/cli/src/index.ts"
+          export E2E_BOOTSTRAP_NODE_LOADER="$PWD/cli/node_modules/tsx/dist/loader.mjs"
+          export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
+          bash scripts/e2e-update-migrations.sh
       - name: Build the source checkout
+        id: build
         run: |
           rustc --version
           cargo --version
@@ -61,6 +125,7 @@ jobs:
           node --check cli/dist/index.js
           pnpm --dir cli exec tsx src/index.ts --version
       - name: Run a synthetic agent in a fresh source instance
+        id: first-task
         run: |
           command -v strace
           temp_home="$(mktemp -d "$RUNNER_TEMP/proprio-source.XXXXXX")"
@@ -68,16 +133,81 @@ jobs:
             ip link set lo up
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
+      - name: Check native fresh-target restore
+        id: restore
+        env:
+          PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
+          PROPRIO_PSQL_PATH: /usr/lib/postgresql/18/bin/psql
+        run: |
+          restore_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" restore)"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$restore_report" \
+            packages/db/src/backup-lib.test.ts
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" restore
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
+        id: recovery
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
-          pnpm test:runner-recovery
-          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 \
+          controller_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" controller)"
+          pnpm test:runner-recovery --maxWorkers 1 --reporter=default --reporter=json --outputFile="$controller_report"
+          report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" runner)"
+          pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
-          pnpm exec vitest run --maxWorkers 1 \
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" runner controller
+          integration_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" integration)"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$integration_report" \
             server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
             server/src/services/native-runtime/native-codex-runner.integration.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" integration
+      - name: Write durable-work acceptance evidence
+        id: write-evidence
+        if: success()
+        run: node scripts/ci/write-durable-work-acceptance.mjs
+      - name: Retain downloadable durable-work acceptance evidence
+        id: retain-evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: durable-work-acceptance
+          path: ${{ runner.temp }}/durable-work-acceptance/durable-work-acceptance.json
+          if-no-files-found: error
+      - name: Summarize qualification for the tested revision
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          LIFECYCLE: ${{ steps.lifecycle.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          FIRST_TASK: ${{ steps.first-task.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
+          RECOVERY: ${{ steps.recovery.outcome }}
+          WRITE_EVIDENCE: ${{ steps.write-evidence.outcome }}
+          RETAIN_EVIDENCE: ${{ steps.retain-evidence.outcome }}
+          EVIDENCE_URL: ${{ steps.retain-evidence.outputs.artifact-url }}
+        run: |
+          {
+            printf '## Linux source qualification\n\n'
+            printf 'Source: `%s` · trigger: `%s` · [run attempt](%s/%s/actions/runs/%s/attempts/%s)\n\n' \
+              "$EXPECTED_HEAD" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf '| Required stage | Outcome |\n| --- | --- |\n'
+            printf '| %s | %s |\n' \
+              'Locked dependency install' "${INSTALL:-incomplete}" \
+              'Managed update, rollback and browser readback' "${LIFECYCLE:-incomplete}" \
+              'Source and Runner build' "${BUILD:-incomplete}" \
+              'First synthetic task and persisted receipt' "${FIRST_TASK:-incomplete}" \
+              'Fresh-target PostgreSQL restore' "${RESTORE:-incomplete}" \
+              'Interruption, restart, cancel and disk pressure' "${RECOVERY:-incomplete}" \
+              'Write acceptance report' "${WRITE_EVIDENCE:-incomplete}" \
+              'Retain downloadable report' "${RETAIN_EVIDENCE:-incomplete}"
+            printf '\n### Recorded test cases\n\n'
+            if [[ -n "$EVIDENCE_URL" ]]; then
+              printf '[Download qualification evidence](%s)\n\n' "$EVIDENCE_URL"
+            fi
+            if [[ -f scripts/ci/linux-source-qualification-cases.mjs ]]; then
+              node scripts/ci/linux-source-qualification-cases.mjs summary "$RUNNER_TEMP"
+            else
+              printf 'Required case results are incomplete because the checkout is unavailable.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

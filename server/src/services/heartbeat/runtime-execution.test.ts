@@ -128,6 +128,7 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
       services: { ...state, executionWorkspacesSvc: executionWorkspaceService(db), instanceSettings: instanceSettingsService(db),
         envOrchestrator: { releaseForRun: vi.fn() }, cancelRunInternal: vi.fn(), enqueueWakeup: vi.fn(),
         persistRunProcessMetadata: vi.fn(), recordCurrentHeartbeatRunRuntimeProgress: vi.fn(), dispatchPendingNativeStatusWakeups: vi.fn(),
+        recoverPendingSessionGoalActions: vi.fn(async () => ({ scanned: 1, enqueued: 1, alreadyQueued: 0, invalid: 0 })),
       },
       effects: { onUsageCaptureReady: vi.fn(), onNativeDispatchStarted: vi.fn(), onLegacyAdapterEntered: vi.fn(), onWorkspaceRestoreFailure: vi.fn(), onProviderResourceDisposition: vi.fn(), onNativeWorkspaceFinalizeScheduled: vi.fn(), onNativeSessionResumeScheduled: vi.fn(), onNativeOwnershipHeld: vi.fn() },
     };

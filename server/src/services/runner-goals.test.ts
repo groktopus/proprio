@@ -20,6 +20,7 @@ import {
   isRunnerGoalActionCompleted,
   blockRunnerGoalRecovery,
   failRunnerGoalAction,
+  RunnerGoalActionError,
   RunnerGoalConflictError,
   runnerGoalService,
 } from "./runner-goals.js";
@@ -119,13 +120,251 @@ describeEmbeddedPostgres("runner goal service", () => {
     });
     const failed = await failRunnerGoalAction(db, {
       ...binding, adapterType: "proprio_runner",
-    }, requestId, "provider_start_failed");
+    }, requestId, "provider_start_failed", "confirmed_rejection");
     expect(failed?.pendingAction).toBeNull();
     expect(failed?.revision).toBe(accepted.projection.revision + 1);
     expect(await failRunnerGoalAction(db, {
       ...binding, adapterType: "proprio_runner",
     }, requestId, "duplicate_failure")).toBeNull();
     expect((await service.projection(binding.companyId, binding.issueId))?.revision).toBe(failed?.revision);
+    await expect(service.act(binding.companyId, binding.issueId, {
+      requestId,
+      agentId: binding.agentId,
+      expectedRevision: 0,
+      action: "create",
+      objective: "Observe a failed start",
+    })).resolves.toMatchObject({ status: "failed", projection: { pendingAction: null, actionFailure: true } });
+  });
+
+  it("starts a targeted readback as soon as a live control delivery is ambiguous", async () => {
+    const binding = await seed();
+    await db.insert(heartbeatRuns).values({
+      companyId: binding.companyId,
+      agentId: binding.agentId,
+      nativeIssueId: binding.issueId,
+      status: "running",
+      runtimeMode: "native",
+    });
+    const enqueueGoalReadback = vi.fn(async () => {});
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<never>((_resolve, reject) => { rejectCompletion = reject; });
+    const service = runnerGoalService(db, {
+      dispatchLiveControl: () => ({ runId: "run-live", completion }),
+      enqueueGoalReadback,
+    });
+    const requestId = randomUUID();
+    const accepted = await service.act(binding.companyId, binding.issueId, {
+      requestId, agentId: binding.agentId, expectedRevision: 0,
+      action: "create", objective: "Read back after the lost provider response",
+    });
+    expect(accepted.status).toBe("accepted");
+    rejectCompletion(new Error("provider response timed out"));
+    await vi.waitFor(() => expect(enqueueGoalReadback).toHaveBeenCalledWith({
+      companyId: binding.companyId, issueId: binding.issueId, agentId: binding.agentId, requestId,
+    }));
+    await expect(db.select({ status: agentSessionGoalActions.status }).from(agentSessionGoalActions))
+      .resolves.toEqual([{ status: "reconciling" }]);
+  });
+
+  it.each(["pause", "clear"] as const)("restores the confirmed goal after offline %s admission rejection", async action => {
+    const binding = await seed();
+    await applyRunnerGoalPrpEvent(db, { ...binding, adapterType: "proprio_runner" }, {
+      eventType: "session.goal.updated", sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const service = runnerGoalService(db, {
+      enqueueOfflineControl: async () => {
+        throw new RunnerGoalActionError("goal_control_wake_skipped", "execution is disabled");
+      },
+    });
+    const requestId = randomUUID();
+    await expect(service.act(binding.companyId, binding.issueId, {
+      requestId, agentId: binding.agentId, expectedRevision: 1, action,
+    })).rejects.toMatchObject({ code: "goal_control_wake_skipped" });
+    const [session] = await db.select({ goal: agentTaskSessions.goalJson, desired: agentTaskSessions.goalDesiredState })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "active", goal: { status: "active", objective: "Keep this goal" } });
+    await expect(db.select({ status: agentSessionGoalActions.status }).from(agentSessionGoalActions))
+      .resolves.toEqual([{ status: "failed" }]);
+    await expect(service.projection(binding.companyId, binding.issueId)).resolves.toMatchObject({ pendingAction: null });
+  });
+
+  it("restores the confirmed goal after a live provider rejection", async () => {
+    const binding = await seed();
+    await applyRunnerGoalPrpEvent(db, { ...binding, adapterType: "proprio_runner" }, {
+      eventType: "session.goal.updated", sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: binding.companyId, agentId: binding.agentId, nativeIssueId: binding.issueId, status: "running",
+    }).returning();
+    let rejectCompletion!: (error: Error) => void;
+    const service = runnerGoalService(db, {
+      dispatchLiveControl: () => ({
+        runId: run!.id,
+        completion: new Promise((_resolve, reject) => { rejectCompletion = reject; }),
+      }),
+      queueLiveCommand: () => null,
+    });
+    const requestId = randomUUID();
+    await service.act(binding.companyId, binding.issueId, {
+      requestId, agentId: binding.agentId, expectedRevision: 1, action: "pause",
+    });
+    rejectCompletion(new Error("runner_prp_command_rejected:provider refused pause"));
+    await vi.waitFor(async () => {
+      const [action] = await db.select({ status: agentSessionGoalActions.status }).from(agentSessionGoalActions);
+      expect(action?.status).toBe("failed");
+    });
+    const [session] = await db.select({ goal: agentTaskSessions.goalJson, desired: agentTaskSessions.goalDesiredState })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "active", goal: { status: "active" } });
+  });
+
+  it("does not restore an older clear after a newer action wins", async () => {
+    const binding = await seed();
+    await applyRunnerGoalPrpEvent(db, { ...binding, adapterType: "proprio_runner" }, {
+      eventType: "session.goal.updated", sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const service = runnerGoalService(db, { enqueueOfflineControl: async () => {} });
+    const olderRequestId = randomUUID();
+    const older = await service.act(binding.companyId, binding.issueId, {
+      requestId: olderRequestId, agentId: binding.agentId, expectedRevision: 1, action: "clear",
+    });
+    await service.act(binding.companyId, binding.issueId, {
+      requestId: randomUUID(), agentId: binding.agentId, expectedRevision: older.projection.revision, action: "pause",
+    });
+    await failRunnerGoalAction(db, { ...binding, adapterType: "proprio_runner" }, olderRequestId,
+      "provider_rejected_clear", "confirmed_rejection");
+    const [session] = await db.select({ goal: agentTaskSessions.goalJson, desired: agentTaskSessions.goalDesiredState })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "paused", goal: { status: "active" } });
+  });
+
+  it("does not restore an older clear over a newer authoritative provider event", async () => {
+    const binding = await seed();
+    const eventBinding = { ...binding, adapterType: "proprio_runner" };
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.updated", sourceInstanceId: "runner", sourceRunId: randomUUID(), sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const service = runnerGoalService(db, { enqueueOfflineControl: async () => {} });
+    const olderRequestId = randomUUID();
+    await service.act(binding.companyId, binding.issueId, {
+      requestId: olderRequestId, agentId: binding.agentId, expectedRevision: 1, action: "clear",
+    });
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.updated", sourceInstanceId: "runner",
+      sourceRunId: (await db.select({ sourceId: agentTaskSessions.goalSourceId }).from(agentTaskSessions))[0]!.sourceId!.split(":").at(-1),
+      sourceSeq: 2, payload: { goal: { objective: "Keep this goal", status: "paused" } },
+    });
+    await failRunnerGoalAction(db, { ...binding, adapterType: "proprio_runner" }, olderRequestId,
+      "provider_rejected_clear", "confirmed_rejection");
+    const [session] = await db.select({ goal: agentTaskSessions.goalJson, desired: agentTaskSessions.goalDesiredState })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "paused", goal: { status: "paused" } });
+  });
+
+  it("keeps ambiguous controls reconciling until a correlated provider readback", async () => {
+    const binding = await seed();
+    const eventBinding = { ...binding, adapterType: "proprio_runner" };
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.updated", sourceInstanceId: "runner", sourceRunId: randomUUID(), sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const requestId = randomUUID();
+    const accepted = await runnerGoalService(db, { enqueueOfflineControl: async () => {} }).act(
+      binding.companyId, binding.issueId,
+      { requestId, agentId: binding.agentId, expectedRevision: 1, action: "pause" },
+    );
+    const reconciling = await failRunnerGoalAction(db, { ...binding, adapterType: "proprio_runner" }, requestId,
+      "delivery_lost_after_send");
+    expect(reconciling).toMatchObject({ pendingAction: "pausing", pendingActionStatus: "reconciling" });
+    expect(reconciling?.revision).toBe(accepted.projection.revision + 1);
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.snapshot", sourceInstanceId: "runner",
+      sourceRunId: (await db.select({ sourceId: agentTaskSessions.goalSourceId }).from(agentTaskSessions))[0]!.sourceId!.split(":").at(-1),
+      sourceSeq: 2,
+      payload: { requestId, goal: { objective: "Keep this goal", status: "paused" } },
+    });
+    const [action] = await db.select({ status: agentSessionGoalActions.status }).from(agentSessionGoalActions);
+    expect(action?.status).toBe("completed");
+    await expect(runnerGoalService(db).projection(binding.companyId, binding.issueId))
+      .resolves.toMatchObject({ pendingAction: null, goal: { status: "paused" } });
+  });
+
+  it("leaves a visible terminal failure when bounded readback cannot resolve ambiguity", async () => {
+    const binding = await seed();
+    const eventBinding = { ...binding, adapterType: "proprio_runner" };
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.updated", sourceInstanceId: "runner", sourceRunId: randomUUID(), sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const requestId = randomUUID();
+    await runnerGoalService(db, { enqueueOfflineControl: async () => {} }).act(
+      binding.companyId, binding.issueId,
+      { requestId, agentId: binding.agentId, expectedRevision: 1, action: "pause" },
+    );
+    await failRunnerGoalAction(db, eventBinding, requestId, "delivery_lost_after_send");
+    await failRunnerGoalAction(db, eventBinding, requestId, "session_goal_readback_unresolved");
+    const [action] = await db.select({ status: agentSessionGoalActions.status, error: agentSessionGoalActions.error })
+      .from(agentSessionGoalActions);
+    expect(action).toEqual({ status: "failed", error: "session_goal_readback_unresolved" });
+    await expect(runnerGoalService(db).projection(binding.companyId, binding.issueId))
+      .resolves.toMatchObject({ pendingAction: null, actionFailure: true });
+  });
+
+  it("restores the confirmed goal when a late rejection resolves ambiguity before any newer observation", async () => {
+    const binding = await seed();
+    await applyRunnerGoalPrpEvent(db, { ...binding, adapterType: "proprio_runner" }, {
+      eventType: "session.goal.updated", sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const requestId = randomUUID();
+    await runnerGoalService(db, { enqueueOfflineControl: async () => {} }).act(
+      binding.companyId, binding.issueId,
+      { requestId, agentId: binding.agentId, expectedRevision: 1, action: "pause" },
+    );
+    await failRunnerGoalAction(db, { ...binding, adapterType: "proprio_runner" }, requestId, "delivery_lost_after_send");
+    await failRunnerGoalAction(db, { ...binding, adapterType: "proprio_runner" }, requestId,
+      "provider_rejected_pause", "confirmed_rejection");
+    const [session] = await db.select({ goal: agentTaskSessions.goalJson, desired: agentTaskSessions.goalDesiredState })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "active", goal: { status: "active" } });
+    await expect(runnerGoalService(db).projection(binding.companyId, binding.issueId))
+      .resolves.toMatchObject({ pendingAction: null, actionFailure: true });
+  });
+
+  it("does not let capability or turn events strand a confirmed rejection rollback", async () => {
+    const binding = await seed();
+    const eventBinding = { ...binding, adapterType: "proprio_runner" };
+    const sourceRunId = randomUUID();
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.goal.updated", sourceInstanceId: "runner", sourceRunId, sourceSeq: 1,
+      payload: { goal: { objective: "Keep this goal", status: "active" } },
+    });
+    const requestId = randomUUID();
+    await runnerGoalService(db, { enqueueOfflineControl: async () => {} }).act(
+      binding.companyId, binding.issueId,
+      { requestId, agentId: binding.agentId, expectedRevision: 1, action: "pause" },
+    );
+    await failRunnerGoalAction(db, eventBinding, requestId, "delivery_lost_after_send");
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "session.capabilities.updated", sourceInstanceId: "runner", sourceRunId, sourceSeq: 2,
+      payload: { sessionGoals: { availability: "available", actions: ["set", "pause", "resume", "clear"] } },
+    });
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "turn.started", sourceInstanceId: "runner", sourceRunId, sourceSeq: 3,
+      payload: { goal: { objective: "Keep this goal", status: "active" }, workingNow: true },
+    });
+    await applyRunnerGoalPrpEvent(db, eventBinding, {
+      eventType: "turn.completed", sourceInstanceId: "runner", sourceRunId, sourceSeq: 4,
+      payload: { goal: { objective: "Keep this goal", status: "active" }, workingNow: false },
+    });
+    await failRunnerGoalAction(db, eventBinding, requestId, "provider_rejected_pause", "confirmed_rejection");
+    const [session] = await db.select({ desired: agentTaskSessions.goalDesiredState, goal: agentTaskSessions.goalJson })
+      .from(agentTaskSessions);
+    expect(session).toMatchObject({ desired: "active", goal: { objective: "Keep this goal", status: "active" } });
   });
 
   it("enforces revisions, correlates acknowledgements, and fences cleared goals", async () => {

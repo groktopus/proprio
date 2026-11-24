@@ -1967,6 +1967,37 @@ impl CodexProviderState {
         };
     }
 
+    fn prepare_provider_started_turn(
+        &mut self,
+        provider_turn_id: &str,
+    ) -> Result<(), DurableRunnerError> {
+        if self.active_provider_turn_id.as_deref() == Some(provider_turn_id) {
+            return Ok(());
+        }
+        if settled_provider_turn_contains(
+            &self.settled_provider_turn_ids,
+            &self.settled_provider_turn_filter,
+            provider_turn_id,
+        ) {
+            return Err(DurableRunnerError::invalid(
+                "Codex turn-start notification reused a settled provider turn identity",
+            ));
+        }
+        if self.active_provider_turn_id.is_some() {
+            return Err(DurableRunnerError::invalid(
+                "Codex turn-start notification arrived while another provider turn is active",
+            ));
+        }
+        if self.tool_bridge.turn_closed() {
+            self.tool_bridge.prepare_turn().map_err(|error| {
+                DurableRunnerError::invalid(format!(
+                    "Codex semantic tool receipts could not prepare a recovered provider turn: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     fn settle_active_provider_turn_identity(&mut self) -> Result<(), DurableRunnerError> {
         let provider_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
             DurableRunnerError::invalid("Codex terminal omitted its active provider turn identity")
@@ -5658,6 +5689,7 @@ impl CodexCommandExecutor {
                                 "Codex turn start notification omitted active turn authority",
                             )
                         })?;
+                        state.prepare_provider_started_turn(&provider_turn_id)?;
                         state.reconcile_active_provider_turn(Some(provider_turn_id));
                         if let Some(goal) = state.goal.as_mut() {
                             goal.working_now = true;
@@ -8474,6 +8506,260 @@ done
         assert!(state.completed_provider_turn_id.is_none());
         assert!(state.last_agent_message.is_none());
         assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn recovered_provider_turn_reopens_tools_once_and_preserves_old_identity_fences() {
+        let operation = crate::provider_bridge::AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Test operation.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            response_schema: json!({ "type": "object" }),
+        };
+        let tool_set = AuthorizedToolSet {
+            schema: TOOL_SET_SCHEMA.to_owned(),
+            schema_version: 1,
+            catalog_digest: authorized_tool_catalog_digest(std::slice::from_ref(&operation))
+                .unwrap(),
+            operations: vec![operation],
+        };
+        let mut bridge = ProviderToolBridge::default();
+        bridge.prepare(tool_set).unwrap();
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+                externally_sandboxed: false,
+                read_only: false,
+                include_skill_instructions: None,
+                conversation_mode: None,
+            },
+            None,
+            bridge,
+        );
+
+        state
+            .tool_bridge
+            .begin_call(
+                "old-call".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .unwrap();
+        state
+            .tool_bridge
+            .apply_result(ToolResult {
+                call_id: "old-call".to_owned(),
+                operation_id: "get_task_context".to_owned(),
+                result: json!({}),
+                is_error: false,
+            })
+            .unwrap();
+        state.active_provider_turn_id = Some("turn-old".to_owned());
+        state.settle_active_provider_turn_identity().unwrap();
+        state
+            .tool_bridge
+            .settle_turn("provider_turn_terminated")
+            .unwrap();
+        state.active_provider_turn_id = None;
+
+        assert!(state.prepare_provider_started_turn("turn-old").is_err());
+        assert!(state.tool_bridge.turn_closed());
+        state.prepare_provider_started_turn("turn-new").unwrap();
+        assert!(!state.tool_bridge.turn_closed());
+        assert!(state
+            .tool_bridge
+            .begin_call(
+                "old-call".to_owned(),
+                "get_task_context".to_owned(),
+                json!({})
+            )
+            .is_err());
+        state
+            .tool_bridge
+            .begin_call(
+                "new-call".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .unwrap();
+        state.reconcile_active_provider_turn(Some("turn-new".to_owned()));
+        state.prepare_provider_started_turn("turn-new").unwrap();
+        assert!(state
+            .tool_bridge
+            .begin_call(
+                "another-call".to_owned(),
+                "get_task_context".to_owned(),
+                json!({})
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn recovered_provider_turn_does_not_reopen_while_an_old_tool_receipt_is_pending() {
+        let operation = crate::provider_bridge::AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Test operation.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            response_schema: json!({ "type": "object" }),
+        };
+        let mut bridge = ProviderToolBridge::default();
+        bridge
+            .prepare(AuthorizedToolSet {
+                schema: TOOL_SET_SCHEMA.to_owned(),
+                schema_version: 1,
+                catalog_digest: authorized_tool_catalog_digest(std::slice::from_ref(&operation))
+                    .unwrap(),
+                operations: vec![operation],
+            })
+            .unwrap();
+        bridge
+            .begin_call(
+                "pending-call".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .unwrap();
+        bridge.settle_turn("provider_turn_terminated").unwrap();
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+                externally_sandboxed: false,
+                read_only: false,
+                include_skill_instructions: None,
+                conversation_mode: None,
+            },
+            None,
+            bridge,
+        );
+        state.active_provider_turn_id = None;
+        assert!(state.prepare_provider_started_turn("turn-new").is_err());
+        assert!(state.tool_bridge.turn_closed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_codex_turn_notification_reopens_semantic_admission() {
+        let directory = std::env::temp_dir().join(format!(
+            "proprio-autonomous-turn-reopen-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+    *'"method":"thread/start"'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}' ;;
+    *'"method":"thread/goal/set"'*)
+      printf '%s\n' '{"method":"thread/goal/updated","params":{"threadId":"thread-1","goal":{"objective":"continue","status":"active"}}}'
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-recovered","status":"inProgress"}}}'
+      printf '%s\n' '{"id":3,"result":{"goal":{"objective":"continue","status":"active","tokensUsed":0,"timeUsedSeconds":0,"iterations":0}}}' ;;
+  esac
+done
+"#;
+        let operation = crate::provider_bridge::AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Test operation.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            response_schema: json!({ "type": "object" }),
+        };
+        let mut bridge = ProviderToolBridge::default();
+        bridge
+            .prepare(AuthorizedToolSet {
+                schema: TOOL_SET_SCHEMA.to_owned(),
+                schema_version: 1,
+                catalog_digest: authorized_tool_catalog_digest(std::slice::from_ref(&operation))
+                    .unwrap(),
+                operations: vec![operation],
+            })
+            .unwrap();
+        bridge.settle_turn("provider_turn_terminated").unwrap();
+
+        let mut state = opencode_result_state();
+        state.config.provider = "codex".to_owned();
+        state.config.driver = "codex_app_server".to_owned();
+        state.config.command = PathBuf::from("/bin/sh");
+        state.config.args = vec!["-c".to_owned(), script.to_owned()];
+        state.config.model = None;
+        state.active_provider_turn_id = None;
+        state.lifecycle = "session_open".to_owned();
+        state.tool_bridge = bridge;
+        state.goal_capability = Some(SessionGoalCapability::codex_available());
+        let mut provider = CodexProvider::start(&state.config, None).unwrap();
+        provider
+            .set_goal(Some("continue"), Some("active"), None)
+            .unwrap();
+
+        let mut executor = CodexCommandExecutor::new(&directory);
+        executor.state = Some(state);
+        executor.provider = Some(provider);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_started = false;
+        loop {
+            assert!(std::time::Instant::now() < deadline);
+            let events = executor.poll_events().unwrap();
+            saw_started |= events
+                .iter()
+                .any(|event| event.event_type == "turn.started");
+            if saw_started {
+                break;
+            }
+        }
+
+        let state = executor.state.as_mut().unwrap();
+        assert_eq!(
+            state.active_provider_turn_id.as_deref(),
+            Some("turn-recovered")
+        );
+        assert!(!state.tool_bridge.turn_closed());
+        state
+            .tool_bridge
+            .begin_call(
+                "call-after-recovery".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .unwrap();
+        executor.provider.as_mut().unwrap().shutdown().unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

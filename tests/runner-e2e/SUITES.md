@@ -1106,6 +1106,20 @@ checks and independent downloaded-code checks remain mandatory.
 
 Revision delivery checks exclude preserved originals by their content hash, even when the agent republishes an original after the revised ZIP. The browser downloads the exact selected attachment ID; its bytes still pass through the independent artifact checker.
 
+## Structured session-goal recovery
+
+The explicit-only `session-goal-recovery` suite contains one local native Codex
+subscription cell. It sets a structured goal through the public goal-action API,
+captures exact first-milestone bytes, replaces the controller, and checks
+objective/budget continuity, exactly-once milestones, provider-event chronology,
+public projection, and terminal task/run agreement. The persisted controller
+fault receipt must follow the checkpoint before resumed execution earns credit.
+The downloaded four-file ZIP and its verifier are checked in the pinned Python
+container with networking disabled. The suite has one attempt, no automatic
+retries, a 35-second provider wait boundary, one-second controller downtime,
+and a 1,000-cent company/agent hard stop. Passing its deterministic grader does
+not qualify a live model/provider run.
+
 ## First-task onboarding
 
 The explicit-only `onboarding-approval-history` suite extends the interview path

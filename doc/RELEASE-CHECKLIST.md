@@ -1,14 +1,24 @@
 # Release readiness
 
-No upstream release workflow is enabled. Release readiness will require a supported source build, controlled dependency artifacts and isolation/recovery tests.
-
-See the [bootstrap status](../README.md) for what is available in this repository.
+Follow the [source release runbook](RELEASING.md) for Linux prereleases.
 
 ## Evidence before a supported Linux release
 
-- Record the release source SHA and its successful Linux source qualification
-  run. Record which runner, adapters, installation methods, and host
-  architectures the release supports.
+- Record the candidate SHA and preceding source tag before dispatch. Confirm
+  that the candidate is on `main` and that the source diff is reviewed.
+- Dispatch Linux source qualification with the candidate as `test_head`
+  and the predecessor SHA as `base_sha`. Require an executed passing
+  `source-and-runner` job and its unexpired report for that attempt.
+- Check managed update and rollback, fresh-target restore, interruption and
+  cancellation, disk-pressure diagnostics, and browser task readback. When
+  tracked migration SQL changes, check the active-run migration case against
+  those same SHAs, elapsed recovery time, and zero observed data loss.
+- In the release notes, record the exact SHA and evidence links, installation
+  and upgrade steps, supported architecture and storage topology, skipped
+  or failed lanes, and any limits on the support claim.
+- Run the publication dry run, then publish after the required evidence and
+  authorization are in place. Verify the GitHub tag, prerelease, and catalog.
+
 - Inventory the root pnpm workspace, the sandbox-provider typecheck workspace,
   the Daytona pnpm workspace, the Rust runner lockfile, the image base digests,
   and downloaded runtime artifacts. Record the versions, digests, and advisory

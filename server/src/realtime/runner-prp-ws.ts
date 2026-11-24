@@ -200,7 +200,9 @@ export function queueLiveRunnerPrpCommand(input: {
             outcome.result && typeof outcome.result.message === "string"
               ? outcome.result.message
               : `runner_prp_command_${outcome.status}:${command.commandId}`;
-          throw new Error(message);
+          throw new Error(outcome.status === "rejected"
+            ? `runner_prp_command_rejected:${message}`
+            : message);
         }
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 10);

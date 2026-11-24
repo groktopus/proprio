@@ -7,7 +7,12 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_QUERY = "\"Co-Authored-By: Proprio <proprio@users.noreply.github.com>\"";
+const PROPRIO_EMAILS = [
+  "noreply@groktop.us",
+  "proprio@users.noreply.github.com",
+  "noreply@paperclip.ing",
+];
+const DEFAULT_QUERIES = PROPRIO_EMAILS.map((email) => `"Co-Authored-By: Proprio <${email}>"`);
 const DEFAULT_CACHE_FILE = path.resolve("data/proprio-commit-metrics-cache.json");
 const DEFAULT_SEARCH_START = "2008-01-01T00:00:00Z";
 const SEARCH_WINDOW_LIMIT = 900;
@@ -15,7 +20,6 @@ const MIN_WINDOW_MS = 60_000;
 const DEFAULT_STATS_FETCH_LIMIT = 250;
 const DEFAULT_STATS_CONCURRENCY = 4;
 const DEFAULT_SEARCH_FIELD = "committer-date";
-const PROPRIO_EMAIL = "proprio@users.noreply.github.com";
 const PROPRIO_NAME = "proprio";
 
 interface CliOptions {
@@ -26,7 +30,7 @@ interface CliOptions {
   includePrivate: boolean;
   json: boolean;
   output: string | null;
-  query: string;
+  queries: string[];
   refreshSearch: boolean;
   refreshStats: boolean;
   searchField: "author-date" | "committer-date";
@@ -154,7 +158,11 @@ async function main() {
   const cache = await loadCache(options.cacheFile, options);
   const client = new GitHubClient(await resolveGitHubToken());
 
-  const { shas } = await searchWindow(client, cache, options, options.start, options.end);
+  const shas = new Set<string>();
+  for (const query of options.queries) {
+    const result = await searchWindow(client, cache, options, query, options.start, options.end);
+    for (const sha of result.shas) shas.add(sha);
+  }
   const sortedShas = [...shas].sort();
 
   let fetchedThisRun = 0;
@@ -189,7 +197,7 @@ function parseArgs(argv: string[]): CliOptions {
     includePrivate: false,
     json: false,
     output: null,
-    query: DEFAULT_QUERY,
+    queries: DEFAULT_QUERIES,
     refreshSearch: false,
     refreshStats: false,
     searchField: DEFAULT_SEARCH_FIELD,
@@ -229,7 +237,7 @@ function parseArgs(argv: string[]): CliOptions {
         options.output = requireValue(argv, ++index, arg);
         break;
       case "--query":
-        options.query = requireValue(argv, ++index, arg);
+        options.queries = [requireValue(argv, ++index, arg)];
         break;
       case "--refresh-search":
         options.refreshSearch = true;
@@ -314,7 +322,7 @@ function printHelp() {
 Options:
   --start <date>             ISO date/time lower bound (default: ${DEFAULT_SEARCH_START})
   --end <date>               ISO date/time upper bound (default: now)
-  --query <search>           Commit search string (default: ${DEFAULT_QUERY})
+  --query <search>           Replace the default searches for current and historical Proprio trailers
   --search-field <field>     author-date | committer-date (default: ${DEFAULT_SEARCH_FIELD})
   --include-private          Include repos visible to the current token
   --exclude-owner <owner>    Exclude repositories owned by this GitHub owner/org (repeatable)
@@ -349,8 +357,17 @@ async function loadCache(cacheFile: string, options: CliOptions): Promise<CacheF
   try {
     const raw = await fs.readFile(cacheFile, "utf8");
     const parsed = JSON.parse(raw) as CacheFile;
-    if (parsed.version !== 1 || parsed.queryKey !== buildQueryKey(options) || parsed.searchField !== options.searchField) {
-      return createEmptyCache(options);
+    if (parsed.version !== 1 || parsed.searchField !== options.searchField) return createEmptyCache(options);
+    if (parsed.queryKey !== buildQueryKey(options)) {
+      const cache = createEmptyCache(options);
+      const legacyQueries = [DEFAULT_QUERIES[1]];
+      if (options.queries === DEFAULT_QUERIES && parsed.queryKey === buildQueryKey(options, legacyQueries)) {
+        cache.stats = parsed.stats;
+      }
+      return cache;
+    }
+    for (const commit of Object.values(parsed.commits)) {
+      commit.contributors = commit.contributors.filter(({ email, displayName }) => !isProprioContributor(email, displayName));
     }
     return parsed;
   } catch (error) {
@@ -373,10 +390,10 @@ function createEmptyCache(options: CliOptions): CacheFile {
   };
 }
 
-function buildQueryKey(options: CliOptions): string {
+function buildQueryKey(options: CliOptions, queries = options.queries): string {
   const visibility = options.includePrivate ? "all" : "public";
   return JSON.stringify({
-    query: options.query,
+    query: queries.length === 1 ? queries[0] : queries,
     searchField: options.searchField,
     visibility,
   });
@@ -391,10 +408,12 @@ async function searchWindow(
   client: GitHubClient,
   cache: CacheFile,
   options: CliOptions,
+  query: string,
   start: Date,
   end: Date,
 ): Promise<SearchWindowResult> {
-  const windowKey = makeWindowKey(start, end);
+  const dateRange = makeWindowKey(start, end);
+  const windowKey = options.queries.length === 1 ? dateRange : JSON.stringify([query, dateRange]);
   if (!options.refreshSearch) {
     const cached = cache.windows[windowKey];
     if (cached) {
@@ -402,7 +421,7 @@ async function searchWindow(
     }
   }
 
-  const firstPage = await searchPage(client, options, start, end, 1, 100);
+  const firstPage = await searchPage(client, options, query, start, end, 1, 100);
   if (firstPage.incomplete_results) {
     throw new Error(`GitHub returned incomplete search results for window ${windowKey}`);
   }
@@ -416,8 +435,8 @@ async function searchWindow(
     }
 
     const midpoint = new Date(start.getTime() + Math.floor(durationMs / 2));
-    const left = await searchWindow(client, cache, options, start, midpoint);
-    const right = await searchWindow(client, cache, options, new Date(midpoint.getTime() + 1), end);
+    const left = await searchWindow(client, cache, options, query, start, midpoint);
+    const right = await searchWindow(client, cache, options, query, new Date(midpoint.getTime() + 1), end);
     const shas = new Set([...left.shas, ...right.shas]);
 
     cache.windows[windowKey] = {
@@ -432,11 +451,11 @@ async function searchWindow(
 
   const pageCount = Math.ceil(firstPage.total_count / 100);
   const shas = new Set<string>();
-  ingestSearchItems(cache, firstPage.items, shas);
+  ingestSearchItems(cache, firstPage.items, shas, options.queries === DEFAULT_QUERIES);
 
   for (let page = 2; page <= pageCount; page += 1) {
-    const response = await searchPage(client, options, start, end, page, 100);
-    ingestSearchItems(cache, response.items, shas);
+    const response = await searchPage(client, options, query, start, end, page, 100);
+    ingestSearchItems(cache, response.items, shas, options.queries === DEFAULT_QUERIES);
   }
 
   cache.windows[windowKey] = {
@@ -452,12 +471,13 @@ async function searchWindow(
 async function searchPage(
   client: GitHubClient,
   options: CliOptions,
+  query: string,
   start: Date,
   end: Date,
   page: number,
   perPage: number,
 ): Promise<SearchResponse> {
-  const searchQuery = buildSearchQuery(options, start, end);
+  const searchQuery = buildSearchQuery(options, query, start, end);
   const params = new URLSearchParams({
     page: String(page),
     per_page: String(perPage),
@@ -467,12 +487,12 @@ async function searchPage(
   return client.getJson<SearchResponse>(`/search/commits?${params.toString()}`);
 }
 
-function buildSearchQuery(options: CliOptions, start: Date, end: Date): string {
+function buildSearchQuery(options: CliOptions, query: string, start: Date, end: Date): string {
   const qualifiers = [`${options.searchField}:${formatQueryDate(start)}..${formatQueryDate(end)}`];
   if (!options.includePrivate) {
     qualifiers.push("is:public");
   }
-  return `${options.query} ${qualifiers.join(" ")}`.trim();
+  return `${query} ${qualifiers.join(" ")}`.trim();
 }
 
 function filterShas(cache: CacheFile, shas: string[], options: CliOptions): string[] {
@@ -512,8 +532,21 @@ function formatQueryDate(value: Date): string {
   return value.toISOString().replace(".000Z", "Z");
 }
 
-function ingestSearchItems(cache: CacheFile, items: SearchCommitItem[], shas: Set<string>) {
+function hasProprioTrailer(message: string): boolean {
+  const block = message.trimEnd().split(/\r?\n[\t ]*\r?\n/).at(-1) ?? "";
+  const lines = block.split(/\r?\n/);
+  // Commit search matches the body too. Accept conventional terminal trailer
+  // blocks, including continuation lines, and reject quoted examples.
+  if (!/^[\w-]+:\s/.test(lines[0]) || !lines.every((line) => /^[\w-]+:\s|^[ \t]/.test(line))) return false;
+  return lines.some((line) => {
+    const email = line.match(/^co-authored-by:[ \t]+proprio[ \t]+<([^>]+)>[ \t]*$/i)?.[1];
+    return !!email && PROPRIO_EMAILS.includes(email.toLowerCase());
+  });
+}
+
+function ingestSearchItems(cache: CacheFile, items: SearchCommitItem[], shas: Set<string>, requireProprioTrailer: boolean) {
   for (const item of items) {
+    if (requireProprioTrailer && !hasProprioTrailer(item.commit.message)) continue;
     shas.add(item.sha);
     cache.commits[item.sha] = {
       authorEmail: item.commit.author?.email ?? null,
@@ -568,7 +601,7 @@ function normalizeContributor(input: {
   if (!displayName && !email && !login) {
     return null;
   }
-  if ((email && email === PROPRIO_EMAIL) || (displayName && displayName.toLowerCase() === PROPRIO_NAME)) {
+  if (isProprioContributor(email, displayName)) {
     return null;
   }
 
@@ -579,6 +612,10 @@ function normalizeContributor(input: {
     key,
     login,
   };
+}
+
+function isProprioContributor(email: string | null, name: string | null): boolean {
+  return PROPRIO_EMAILS.some((alias) => alias === email?.toLowerCase()) || name?.toLowerCase() === PROPRIO_NAME;
 }
 
 function normalizeOptional(value: string | null | undefined): string | null {
@@ -672,7 +709,7 @@ function buildSummary(cache: CacheFile, options: CliOptions, shas: string[], fet
       count: contributors.size,
       sample: contributorSample,
     },
-    detectedQuery: buildSearchQuery(options, options.start, options.end),
+    detectedQuery: options.queries.map((query) => buildSearchQuery(options, query, options.start, options.end)).join("\n"),
     lineStats: {
       additions,
       complete: coveredCommits === shas.length,

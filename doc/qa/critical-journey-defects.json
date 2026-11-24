@@ -1,0 +1,23 @@
+[
+  {
+    "issue": 107,
+    "journey": "Install and update",
+    "baseline": "v0.0.1",
+    "coverage": "Assert that an older managed Git update cannot reclaim an activation already owned by a newer update.",
+    "regressionPr": 228
+  },
+  {
+    "issue": 109,
+    "journey": "Backup and restore",
+    "baseline": "v0.0.1",
+    "coverage": "Restore a backup with unvalidated foreign keys and assert that their validation state survives.",
+    "regressionPr": 229
+  },
+  {
+    "issue": 122,
+    "journey": "Execution recovery",
+    "baseline": "v0.0.1",
+    "coverage": "Exercise ambiguous Pause and Clear outcomes against the persisted goal and confirmed runner state.",
+    "regressionPr": 253
+  }
+]
