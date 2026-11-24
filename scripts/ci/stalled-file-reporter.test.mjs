@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -73,7 +73,7 @@ test("finished files and hooks count as progress", () => {
 test("a file that never finishes loading is named from the moment it is queued", () => {
   let now = 0;
   const lines = [];
-  const reporter = new StalledFileReporter({ limitMs: 1000, now: () => now, write: line => lines.push(line), exit: () => {}, root: "/repo" });
+  const reporter = new StalledFileReporter({ limitMs: 1000, now: () => now, write: line => lines.push(line), exit: () => {}, root: "/repo", graceMs: 0 });
   reporter.onTestModuleQueued({ moduleId: "/repo/server/src/top-level-await.test.ts" });
   now = 1000; reporter.check();
   assert.match(lines[0] ?? "", /^::error file=server\/src\/top-level-await\.test\.ts,.*while in: loading the file\./);
@@ -84,8 +84,21 @@ test("a file that never finishes loading is named from the moment it is queued",
 // a test timeout longer than the CI job, holds Vitest until the job is
 // cancelled and never prints the file's name.
 for (const [label, body, steps] of [
-  ["a test that never settles", 'import { test } from "vitest";\nimport { writeFileSync } from "node:fs";\ntest("waits forever", () => { writeFileSync(process.env.PROPRIO_WATCHDOG_TEST_STARTED, "started"); return new Promise(() => {}); }, 600_000);\n', ['test "waits forever"']],
-  ["a top-level await that never settles", 'import { test } from "vitest";\nawait new Promise(() => {});\ntest("never collected", () => {});\n', ["loading the file"]],
+  ["a test that never settles", `
+import { test } from "vitest";
+import { writeFileSync } from "node:fs";
+test("waits forever", () => {
+  writeFileSync(process.env.PROPRIO_WATCHDOG_TEST_STARTED, "started");
+  return new Promise(() => {});
+}, 600_000);
+`, ['test "waits forever"', "starting the file's tests", "loading the file"]],
+  ["a top-level await that never settles", `
+import { test } from "vitest";
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.PROPRIO_WATCHDOG_TEST_STARTED, "started");
+await new Promise(() => {});
+test("never collected", () => {});
+`, ["loading the file"]],
 ]) test(`a real Vitest run with ${label} fails fast and names the file`, () => {
   const directory = realpathSync(mkdtempSync(path.join(tmpdir(), "stalled-file-reporter-")));
   try {
@@ -94,31 +107,18 @@ for (const [label, body, steps] of [
 test("passes", () => {});
 `);
     const startedMarker = path.join(directory, "started");
-    let fixtureReporter = reporterPath;
-    if (label === "a test that never settles") {
-      fixtureReporter = path.join(directory, "after-test-start.mjs");
-      writeFileSync(fixtureReporter, `
+    const fixtureReporter = path.join(directory, "after-stall-start.mjs");
+    // Wait for the worker to reach the actual hang. A stalled worker can stop
+    // before Vitest delivers its most recent event to the reporter.
+    writeFileSync(fixtureReporter, `
 import Base from ${JSON.stringify(pathToFileURL(reporterPath).href)};
 import { existsSync } from "node:fs";
 export default class extends Base {
-  ready = false;
-  onTestCaseReady(testCase) {
-    if (testCase.module.moduleId !== ${JSON.stringify(path.join(directory, "stuck.test.mjs"))}) {
-      super.onTestCaseReady(testCase);
-      return;
-    }
-    setTimeout(() => {
-      super.onTestCaseReady(testCase);
-      this.ready = true;
-    }, this.limitMs + 500);
-  }
   check() {
-    if (!this.ready || !existsSync(${JSON.stringify(startedMarker)})) return;
-    super.check();
+    if (existsSync(${JSON.stringify(startedMarker)})) super.check();
   }
 }
 `);
-    }
     const configFile = path.join(directory, "vitest.config.mjs");
     writeFileSync(configFile, `export default ${JSON.stringify({ test: { include: ["*.test.mjs"],
       reporters: ["default", [fixtureReporter, { limitMs: 1500, graceMs: 5000, root: directory }]] } })};`);
@@ -129,9 +129,11 @@ export default class extends Base {
       env: { ...process.env, GITHUB_ACTIONS: "", PROPRIO_VITEST_FILE_STALL_MS: "", PROPRIO_WATCHDOG_TEST_STARTED: startedMarker },
     });
     const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.error, undefined, `Vitest child failed to finish:\n${output}`);
     assert.equal(result.signal, null, `Vitest was still running after 60 s:\n${output}`);
     assert.notEqual(result.status, 0, output);
     assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started} ms:\n${output}`);
+    assert.ok(existsSync(startedMarker), "the worker reached the intentional hang");
     assert.match(output, /::error file=stuck\.test\.mjs,title=Test file stopped making progress::stuck\.test\.mjs made no progress/);
     assert.ok(steps.some(step => output.includes(`while in: ${step}.`)), output);
   } finally {
