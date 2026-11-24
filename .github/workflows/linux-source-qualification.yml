@@ -4,8 +4,6 @@ run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inpu
 on:
   schedule:
     - cron: "43 7 * * *"
-    # Retry the first deployment's scheduled verification on November 24, 2026.
-    - cron: "17 10 24 11 *"
   workflow_dispatch:
     inputs:
       pr_number:
