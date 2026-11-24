@@ -2844,6 +2844,12 @@ describe("ProprioControlPlanePort conformance", () => {
       decision: { recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "prior_status_preserved_no_live_path" },
       assessment: { resultId: expect.any(String), assessedContractId: acceptedContract!.id },
     });
+    expect(completionRecovery).toMatchObject({ attemptCount: 1,
+      evidence: { caseHandoffCompletion: { attempts: [{ runId: followUpId, decisionId: completionRecovery!.evidence.decisionId,
+        assessedContractId: acceptedContract.id, reasonCode: "prior_status_preserved_no_live_path" }] } } });
+    await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
+    const [replayed] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, completionRecovery!.id));
+    expect(replayed).toMatchObject({ attemptCount: 1, evidence: completionRecovery!.evidence });
     expect(JSON.stringify(completionRecovery?.evidence)).not.toContain("provider:opencode:agent-message");
     expect((await db.select().from(nativeRunResults).where(eq(nativeRunResults.runId, runId)))[0]!.resultJson)
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });

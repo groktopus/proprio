@@ -965,6 +965,41 @@ async function materializeDecisionEffect(input: {
         reasonCode: effect.cause,
       })
       : null;
+    const acceptedHandoff = handoffCompletionEvidence?.caseHandoff;
+    const fingerprint = acceptedHandoff
+      ? nativeSha256({ cause: effect.cause, handoffId: acceptedHandoff.id, version: acceptedHandoff.version,
+        requirementsDigest: acceptedHandoff.requirementsDigest })
+      : nativeSha256({ runId: input.runId, decisionId: input.decisionId, cause: effect.cause });
+    const [priorRecovery] = handoffCompletionEvidence ? await input.tx.select({
+      evidence: issueRecoveryActions.evidence,
+      attemptCount: issueRecoveryActions.attemptCount,
+    }).from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, input.companyId),
+      eq(issueRecoveryActions.sourceIssueId, input.issue.id),
+      eq(issueRecoveryActions.cause, effect.cause),
+      inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    )).limit(1) : [];
+    const priorReceipt = record(priorRecovery?.evidence.caseHandoffCompletion);
+    const priorHandoff = record(priorReceipt.caseHandoff);
+    const sameRevision = Boolean(acceptedHandoff && priorHandoff.id === acceptedHandoff.id
+      && priorHandoff.version === acceptedHandoff.version && priorHandoff.requirementsDigest === acceptedHandoff.requirementsDigest);
+    const priorAssessment = record(priorReceipt.assessment);
+    const priorAttempts = sameRevision && Array.isArray(priorReceipt.attempts)
+      ? priorReceipt.attempts.map(record)
+      : sameRevision && priorRecovery ? [{
+        runId: priorRecovery.evidence.runId, decisionId: priorRecovery.evidence.decisionId,
+        assessmentId: priorAssessment.id, assessedContractId: priorAssessment.assessedContractId,
+        reasonCode: record(priorReceipt.decision).statusDecisionReasonCode,
+      }] : [];
+    const repeatedAttempt = priorAttempts.some(attempt => attempt.decisionId === input.decisionId);
+    const attempt = handoffCompletionEvidence ? {
+      runId: input.runId,
+      decisionId: input.decisionId,
+      assessmentId: handoffCompletionEvidence.assessment.id,
+      assessedContractId: handoffCompletionEvidence.assessment.assessedContractId,
+      reasonCode: handoffCompletionEvidence.decision.statusDecisionReasonCode,
+    } : null;
+    const attempts = attempt && !repeatedAttempt ? [...priorAttempts, attempt].slice(-3) : priorAttempts;
     const recovery = await issueRecoveryActionService(
       input.tx,
     ).upsertSourceScoped({
@@ -974,15 +1009,13 @@ async function materializeDecisionEffect(input: {
       ownerType: "agent",
       ownerAgentId: effect.agentId,
       cause: effect.cause,
-      fingerprint: nativeSha256({
-        runId: input.runId,
-        decisionId: input.decisionId,
-        cause: effect.cause,
-      }),
+      fingerprint,
+      supersedeOnIdentityChange: Boolean(priorRecovery && handoffCompletionEvidence && !sameRevision),
+      ...(repeatedAttempt && priorRecovery ? { attemptCount: priorRecovery.attemptCount } : {}),
       evidence: {
         runId: input.runId,
         decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? { caseHandoffCompletion: handoffCompletionEvidence } : {}),
+        ...(handoffCompletionEvidence ? { caseHandoffCompletion: { ...handoffCompletionEvidence, attempts } } : {}),
       },
       nextAction: effect.nextAction,
       wakePolicy: null,
