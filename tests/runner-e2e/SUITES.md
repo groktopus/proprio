@@ -1005,9 +1005,9 @@ next ordinary turn. The other follows the same work turns. The case allows
 six work turns and one compaction operation with a 1,000-cent company and agent
 budget hard stop. The oracle records source and fixture digests, run IDs, hashed
 session and runner identities, and the generation stamps exposed by bound Runner
-events and provider startup diagnostics. It attributes the Codex compaction notification to the run that carries
-the accepted manual request, grades the result revision, and checks for writes
-before the prerequisite answer.
+events and provider startup diagnostics. It attributes the Codex compaction
+notification to the run that carries the accepted manual request, grades the
+result revision, and checks for writes before the prerequisite answer.
 
 ```sh
 pnpm test:e2e:runner -- --list --suite context-compaction

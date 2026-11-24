@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { expect, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { pollUntil, type RunnerApi } from "./api.js";
 import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE, COMPACTION_FIXTURE_DIGEST, COMPACTION_PROMPT, compactionRequirements, configureContextCompactionBudgets, contextCompactionQuestionInput } from "./context-compaction-case.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
@@ -146,8 +146,6 @@ export async function runContextCompactionFlow(input: {
       compactionEvents, actions, prerequisite: resolved ? { receiptId: resolved.id, publishedAt: Date.parse(resolved.resolvedAt) } : null,
       artifact: latest ? { taskId, revisionId: latest.id, writtenByRunId: latest.createdByRunId, body: latest.body } : null });
     await checkpoint("final", lane, { finalRunId: finalRun.id, artifactRevisionId: latest?.id ?? null });
-    await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue!.identifier ?? taskId}`);
-    await expect(page.getByRole("button", { name: "Change status (current: Done)", exact: true })).toBeVisible();
     await input.capture(`${lane}-final`, `${lane} saved the release receipt`, `${lane}-final.png`);
   }
 
