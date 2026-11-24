@@ -438,7 +438,6 @@ for (const journey of [
           reopen: true,
           comment: "Now summarize my Gmail emails about launch decisions, with the source link.",
         });
-        await page.reload();
       } else {
         await page
           .getByRole("textbox")
@@ -520,7 +519,6 @@ for (const journey of [
         expect(gmailReadCount).toBe(journey === "ceo_lineage" ? 1 : 2);
       } else {
         await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 100_000 }).toBe("blocked");
-        await page.reload();
         await expect(page.getByRole("button", { name: "Change status (current: Blocked)", exact: true })).toBeVisible({ timeout: 30_000 });
         await expect(page.getByText(/Deterministic failed provider session after Gmail access/)).toBeVisible();
         expect(gmailReadCount).toBe(1);
