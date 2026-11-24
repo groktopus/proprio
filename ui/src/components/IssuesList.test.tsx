@@ -631,7 +631,8 @@ describe("IssuesList", () => {
     act(() => root.unmount());
   });
 
-  it("names the compact disclosure and exposes both subtask states", async () => {
+  it.each([true, false])("names compact disclosures in both UI modes and exposes both subtask states (streamlined=%s)", async (streamlined) => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: streamlined });
     const parent = createIssue({ id: "parent", title: "Parent task" });
     const child = createIssue({ id: "child", parentId: parent.id, title: "Child task" });
     const { root } = renderWithQueryClient(
