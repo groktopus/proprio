@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       applicable: ${{ steps.route.outputs.applicable }}
+      board-accessibility: ${{ steps.board-accessibility.outputs.applicable }}
     steps:
       - name: Check out the trusted target policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +46,20 @@ jobs:
             node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
           else
             echo "Target branch predates routing. Require the full Linux lane."
+            echo 'applicable=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Route board accessibility tests
+        id: board-accessibility
+        working-directory: pr-comparison
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          policy=../target-policy/scripts/ci/board-accessibility-routing.mjs
+          if [[ -f "$policy" ]]; then
+            node "$policy" "$GITHUB_SHA" "$PR_HEAD"
+          else
+            echo "Target branch predates the accessibility routing policy. Run the browser suite."
             echo 'applicable=true' >> "$GITHUB_OUTPUT"
           fi
 
@@ -508,9 +523,55 @@ jobs:
       - name: Typecheck the board UI
         run: pnpm --filter @groktopus/ui typecheck
 
+  board-accessibility:
+    needs: route-durable-work
+    if: needs.route-durable-work.outputs.board-accessibility == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked workspace dependencies and Chromium
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          if [[ ! -f tests/board-accessibility/playwright.config.ts || ! -f scripts/ci/board-accessibility-routing.test.mjs ]]; then
+            echo 'Update the PR branch from main to include the required board accessibility suite.' >&2
+            exit 1
+          fi
+          printf 'Board a11y fixtures at `%s` (Ubuntu 24.04; locked Chromium).\n' "$EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          npm install --global --ignore-scripts "$(node -p 'require("./package.json").packageManager')"
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Build the locked Storybook fixtures
+        run: pnpm build-storybook
+      - name: Verify accessibility routing and run the board browser suite
+        env:
+          BOARD_A11Y_STORYBOOK_DIR: ${{ github.workspace }}/ui/storybook-static
+        run: |
+          node --test scripts/ci/board-accessibility-routing.test.mjs
+          pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
+      - name: Upload board accessibility report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: board-accessibility-${{ github.run_attempt }}
+          path: test-results/board-accessibility/
+          if-no-files-found: ignore
+
   smoke:
     if: ${{ always() && github.repository == 'groktopus/proprio' }}
-    needs: [stability-checks, route-durable-work, durable-work]
+    needs: [stability-checks, route-durable-work, durable-work, board-accessibility]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -520,10 +581,17 @@ jobs:
           ROUTING_RESULT: ${{ needs.route-durable-work.result }}
           APPLICABLE: ${{ needs.route-durable-work.outputs.applicable }}
           DURABLE_WORK_RESULT: ${{ needs.durable-work.result }}
+          BOARD_ACCESSIBILITY_APPLICABLE: ${{ needs.route-durable-work.outputs.board-accessibility }}
+          BOARD_ACCESSIBILITY_RESULT: ${{ needs.board-accessibility.result }}
         run: |
           test "$STABILITY_RESULT" = success
           test "$ROUTING_RESULT" = success
           case "$APPLICABLE:$DURABLE_WORK_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Durable-work gate failed ($APPLICABLE:$DURABLE_WORK_RESULT)" >&2; exit 1 ;;
+          esac
+          case "$BOARD_ACCESSIBILITY_APPLICABLE:$BOARD_ACCESSIBILITY_RESULT" in
+            true:success) echo 'Board accessibility passed.' ;;
+            false:skipped) echo 'Board accessibility not applicable to the changed paths.' ;;
+            *) echo "Board accessibility gate failed ($BOARD_ACCESSIBILITY_APPLICABLE:$BOARD_ACCESSIBILITY_RESULT)" >&2; exit 1 ;;
           esac

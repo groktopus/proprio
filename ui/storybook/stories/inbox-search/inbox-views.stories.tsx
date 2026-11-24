@@ -27,6 +27,9 @@ const meta = {
     },
   },
   beforeEach: ({ parameters }) => {
+    let recovered = false;
+    const recover = () => { recovered = true; };
+    if (parameters.recoveryFixture) window.addEventListener("storybook:restore-inbox-read", recover);
     const api = prepareFixtureApi(
       [
         {
@@ -41,8 +44,12 @@ const meta = {
         },
         {
           path: "/api/companies/company-storybook/issues",
-          read: () =>
-            parameters.fixtureState === "empty" ? [] : storybookIssues,
+          read: () => {
+            if (parameters.recoveryFixture && !recovered) {
+              return Response.json({ error: "Fixture read unavailable" }, { status: 500 });
+            }
+            return parameters.fixtureState === "empty" ? [] : storybookIssues;
+          },
         },
         {
           path: /^\/api\/companies\/company-storybook\/(approvals|join-requests|heartbeat-runs)$/,
@@ -62,6 +69,7 @@ const meta = {
       },
     ]);
     return () => {
+      window.removeEventListener("storybook:restore-inbox-read", recover);
       flags.cleanup();
       api.cleanup();
     };
@@ -78,6 +86,9 @@ export const Empty: Story = {
 };
 export const Loading: Story = { parameters: { fixtureState: "loading" } };
 export const Failed: Story = { parameters: { fixtureState: "failure" } };
+export const Recoverable: Story = {
+  parameters: { initialEntries: ["/PAP/inbox/unread"], recoveryFixture: true },
+};
 export const PermissionDenied: Story = {
   parameters: { fixtureState: "permission" },
 };
