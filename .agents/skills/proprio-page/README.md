@@ -72,7 +72,7 @@ Required for live publishes:
 ```bash
 export AWS_REGION=us-east-1
 export PROPRIO_PAGE_BUCKET=proprio-pages-prod
-export PROPRIO_PAGE_BASE_URL=https://pages.paperclip.ing
+export PROPRIO_PAGE_BASE_URL=https://pages.example.com
 export PROPRIO_PAGE_AWS_ACCESS_KEY_ID=...
 export PROPRIO_PAGE_AWS_SECRET_ACCESS_KEY=...
 ```
@@ -122,7 +122,7 @@ create buckets, mutate IAM, change DNS, or manage CloudFront.
 export AWS_PROFILE=proprio-admin
 export AWS_REGION=us-east-1
 export BUCKET=proprio-pages-prod
-export DOMAIN=pages.paperclip.ing
+export DOMAIN=pages.example.com
 export UPLOADER_USER=proprio-page-uploader
 export CLOUDFRONT_COMMENT="Proprio pages"
 
@@ -457,7 +457,7 @@ endpoint.
 
 Cloudflare UI:
 
-- Open the `paperclip.ing` zone.
+- Open the `example.com` zone.
 - Add `CNAME`:
   - Name: `pages`
   - Target: the CloudFront domain, for example `d111111abcdef8.cloudfront.net`
@@ -522,7 +522,7 @@ host `AWS_PROFILE` identity for the entire agent run:
   },
   "AWS_REGION": { "type": "plain", "value": "us-east-1" },
   "PROPRIO_PAGE_BUCKET": { "type": "plain", "value": "proprio-pages-prod" },
-  "PROPRIO_PAGE_BASE_URL": { "type": "plain", "value": "https://pages.paperclip.ing" },
+  "PROPRIO_PAGE_BASE_URL": { "type": "plain", "value": "https://pages.example.com" },
   "PROPRIO_PAGE_DEFAULT_PREFIX": { "type": "plain", "value": "" }
 }
 ```
