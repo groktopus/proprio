@@ -432,6 +432,7 @@ import { taskStatusIconProps } from "@/lib/task-status-presentation";
 // (loading/idle), which destabilizes downstream memos and panel keys that
 // depend on it. Reusing one shared reference keeps those values stable.
 const EMPTY_ISSUES: Issue[] = [];
+const EMPTY_INTERACTIONS: IssueThreadInteraction[] = [];
 const EMPTY_PROJECTS: Project[] = [];
 
 type StopAndFinalizeRunError = Error & {
@@ -3631,7 +3632,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     ],
   );
   const {
-    data: interactions = [],
+    data: interactions = EMPTY_INTERACTIONS,
     isLoading: interactionsLoading,
     isError: interactionsError,
     refetch: refetchInteractions,
