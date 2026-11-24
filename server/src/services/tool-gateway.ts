@@ -14170,8 +14170,7 @@ export function createToolGatewayService(
                   caller: input.signal,
                   attachToTaskRecordId: retryingMcpTaskRecordId,
                 },
-                !input.approvedActionRequestId && tool.providerType === "mcp_remote_http" &&
-                  true,
+                !input.approvedActionRequestId && tool.providerType === "mcp_remote_http",
               )
             : tool.providerType === "mcp_local_stdio"
               ? await executeLocalStdioTool(
