@@ -132,6 +132,112 @@ authenticated access enabled and restrict access at the network or proxy.
 PostgreSQL stays on the Compose network. See [Local PostgreSQL](DATABASE.md#2-local-postgresql-docker)
 to opt in to a loopback-only port for development tools.
 
+### Back up and restore Compose data
+
+Keep the exact source SHA or image digest, project name, Compose files and
+overrides, and a protected copy of `docker/.env` with each backup. Retain
+the local secrets master key in `/proprio`, or save the external key using
+your deployment's secret store. Back up any workspace bind mounts, object
+storage, or other external artifact directories separately. The commands
+below cover the default storage layout.
+
+Run from the repository root. Use the same Compose project name and overrides
+you used when launching. Set `backup_dir` to a private destination outside
+the checkout and application volumes:
+
+```bash
+umask 077
+backup_dir="$(mktemp -d)"
+install -m 600 docker/.env "$backup_dir/compose.env"
+```
+
+#### Embedded PostgreSQL quickstart
+
+Stop Proprio before copying embedded PostgreSQL files. The archive includes
+the database, instance configuration, local keys, storage, and workspaces
+under the bind mount.
+
+```bash
+quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
+"${quick[@]}" stop proprio
+"${quick[@]}" run --rm --no-deps -T --entrypoint tar proprio \
+  -C /proprio -czf - . > "$backup_dir/proprio.tar.gz"
+"${quick[@]}" up -d --wait
+```
+
+Check the archive and keep it off the host. To restore, use a clean checkout
+of the recorded revision, restore the environment values, and set
+`PROPRIO_DATA_DIR` to a new, empty path and `PROPRIO_PORT` to a free port.
+Use a new Compose project, for example `proprio-restore`. Supply a public
+URL that matches the restore port, or remove an explicit URL override to
+use the default for that port. Build the image if it is unavailable.
+
+```bash
+quick_restore=(docker compose -p proprio-restore --env-file docker/.env -f docker/docker-compose.quickstart.yml)
+"${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
+  -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+  < "$backup_dir/proprio.tar.gz"
+"${quick_restore[@]}" up -d --wait
+```
+
+#### Separate PostgreSQL full stack
+
+Stop the app and any other database writers. Leave PostgreSQL running and
+use its native logical backup, then save the Proprio volume separately.
+Do not copy a live PostgreSQL data directory.
+
+```bash
+full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
+"${full[@]}" stop server
+"${full[@]}" exec -T db pg_dump -U proprio -d proprio -Fc > "$backup_dir/postgres.dump"
+"${full[@]}" run --rm --no-deps -T --entrypoint tar server \
+  -C /proprio -czf - . > "$backup_dir/proprio.tar.gz"
+"${full[@]}" up -d --wait
+```
+
+Restore with a fresh Compose project and fresh named volumes on the recorded
+version. Configure a free port and the corresponding public URL. Keep the
+signing values and master key from the backup.
+
+```bash
+full_restore=(docker compose -p proprio-restore --env-file docker/.env -f docker/docker-compose.yml)
+"${full_restore[@]}" up -d --wait db
+"${full_restore[@]}" exec -T db pg_restore --exit-on-error --no-owner -U proprio -d proprio \
+  < "$backup_dir/postgres.dump"
+"${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
+  -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+  < "$backup_dir/proprio.tar.gz"
+"${full_restore[@]}" up -d --wait
+```
+
+After either restore, check `/api/health` for `"status":"ok"`, sign in, and
+verify a known board record and any required files. Rehearse in isolation
+before pointing production traffic at the restored deployment. Linux
+host-loss recovery is tracked separately in
+[#134](https://github.com/groktopus/proprio/issues/134).
+
+### Upgrade the Compose application
+
+1. Record the running revision or digest and back up the topology using the
+   commands above. Keep the original keys, configuration, and backup.
+2. Check out the selected candidate. Use the same Compose project name, data
+   path or volumes, and signing values. Review its release notes for database
+   and credential changes.
+3. Run the normal `up --build -d --wait` command against the candidate.
+   Check readiness, sign in, and verify a known board record and file.
+4. If the new revision fails after a database migration, follow the release's
+   recovery path. Restore into a fresh project on the known-good revision
+   unless the documented change supports a payload rollback on the new
+   schema. Never use `down --volumes` on an existing installation to upgrade.
+
+Run `scripts/compose-state-smoke.sh` on a disposable Docker host to rehearse
+application recreation and fresh restore for both default topologies. The
+script creates isolated projects, signs in through the normal board API,
+and checks the same company record and file after recreation and restore.
+Pass a locally available image or immutable image reference as its argument
+to check that image without rebuilding. The smoke uses synthetic credentials
+and requires Docker Compose, Bash, Python 3, OpenSSL, curl, and jq.
+
 ### Untrusted PR review
 
 Isolated container for reviewing untrusted pull requests with Codex or Claude, without exposing your host machine. See `doc/UNTRUSTED-PR-REVIEW.md` for the full workflow.
