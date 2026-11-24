@@ -22,11 +22,12 @@ bypass agent opt-in or the legacy runtime skill policy. Replaying an existing
 idempotency receipt remains available after opt-in is removed.
 
 Earlier releases mounted both feedback skills for skill-capable legacy agents
-by default. After upgrading, agents need an explicit selection to receive them;
-the next legacy execution removes Proprio-managed feedback links or copies that
-are no longer selected. This does not delete saved commentary records, which
-remain available through the same company-scoped inspection API and Audit →
-Commentary page. The app continues to ship the skills and helper.
+by default. After upgrading, operators choose which agents can submit new
+feedback. Some legacy providers share a skill home across runs, so an agent may
+still see feedback instructions from an earlier installation. The service checks
+the saved agent selection and the run's pinned skills before it accepts a new
+submission. Saved comments and suggestions remain available through the
+company-scoped inspection API and Audit → Commentary page.
 
 Native runs expose `submit_complaint({body, idempotencyKey})` in standard, ask,
 and planning modes when `complain` is selected, and expose
