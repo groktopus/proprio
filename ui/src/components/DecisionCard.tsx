@@ -124,10 +124,10 @@ function effectSummary(
 }
 
 const FAILURE_CAUSE: Record<string, string> = {
-  deny_decision_intersection: "blocked by the permission boundary (fail-closed)",
-  invalid_effect_reference: "a referenced issue no longer exists",
-  target_changed: "the target changed since this was proposed",
-  effect_execution_failed: "the effect errored while running",
+  deny_decision_intersection: "this action was not authorized",
+  invalid_effect_reference: "the referenced task no longer exists",
+  target_changed: "the task changed since this was proposed",
+  effect_execution_failed: "the action could not run",
 };
 
 interface ResultRow {
@@ -149,7 +149,8 @@ function executionRow(
   }
   if (execution.status === "failed") {
     const cause = FAILURE_CAUSE[execution.error ?? ""] ?? execution.error ?? "the effect could not run";
-    return { key: execution.id, status: "failed", summary: `Failed on ${target} — ${cause}`, link: targetRef };
+    const code = execution.error && FAILURE_CAUSE[execution.error] ? ` (code: ${execution.error})` : "";
+    return { key: execution.id, status: "failed", summary: `Could not complete the action on ${target} — ${cause}${code}`, link: targetRef };
   }
   if (execution.status === "claimed") {
     return { key: execution.id, status: "claimed", summary: `Running on ${target}…`, link: targetRef };
@@ -609,7 +610,9 @@ export function DecisionCard({
               </ul>
               {decision.executionStatus !== "succeeded" && (
                 <p className="text-xs text-muted-foreground">
-                  Some effects may already have been applied. Review the results before asking the proposer to re-propose.
+                  {decision.executionStatus === "partial"
+                    ? "Some actions completed and others did not. Review the results, then ask the proposer to revise only the actions that did not run."
+                    : "No actions completed. Review the failure before asking the proposer to try again."}
                 </p>
               )}
             </>
