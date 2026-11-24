@@ -1,12 +1,12 @@
 // Resolves the browser performance tracing settings that the authenticated
 // session hands to the board UI. See doc/browser-performance-tracing.md.
 //
-// Browser tracing is for hosted Proprio Cloud instances only. It stays off
-// (`null`) unless both hold:
-//   1. the instance is cloud managed (`isCloudManagedInstance`), and
-//   2. an operator set `PROPRIO_BROWSER_TRACES_ENDPOINT`.
-// Self-hosted installs, local development, and tests never match (1), so the
-// browser never downloads the tracing SDK there.
+// Browser tracing stays off unless an operator explicitly opts in. Managed
+// instances use their configured endpoint; self-hosted instances additionally
+// require `PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED=1`.
+//
+// The self-hosted path reuses the same endpoint, sampling, and redaction
+// boundaries. It does not change managed deployment behavior or defaults.
 //
 // Every invalid setting fails closed: the browser receives `null` and the
 // server logs one warning naming the variable, never its value.
@@ -16,6 +16,7 @@ import { isCloudManagedInstance, type CloudInstanceEnv } from "./services/cloud-
 
 export const BROWSER_TRACES_DEFAULT_SERVICE_NAME = "proprio-web";
 export const BROWSER_TRACES_DEFAULT_SAMPLE_RATE = 1;
+export const BROWSER_TRACES_SELF_HOSTED_ENABLED = "1";
 
 /** Honeycomb ingest keys carry this prefix; configuration keys never do. */
 const HONEYCOMB_INGEST_KEY_PREFIX = "hcaik_";
@@ -50,7 +51,8 @@ export function resolveBrowserTracingConfig(
   env: CloudInstanceEnv = process.env,
   warn: BrowserTracingWarning = () => {},
 ): BrowserTracingConfig | null {
-  if (!isCloudManagedInstance(env)) return null;
+  const isSelfHostedOptIn = env.PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED === BROWSER_TRACES_SELF_HOSTED_ENABLED;
+  if (!isCloudManagedInstance(env) && !isSelfHostedOptIn) return null;
 
   const rawEndpoint = normalize(env.PROPRIO_BROWSER_TRACES_ENDPOINT);
   if (!rawEndpoint) return null;
