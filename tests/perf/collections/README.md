@@ -198,8 +198,9 @@ locked by Playwright. It runs on applicable pull requests and by manual
 dispatch. It boots a disposable loopback instance with embedded PostgreSQL and
 a fresh production UI build. The checks cover project-list and editor-only
 reads from Mine, along with task preloading, first-frame reads, and composer
-and layout stability. The report retains all selected outcomes and timing
-samples. Timings are diagnostic and do not determine the result.
+and layout stability. The workflow records deterministic checks and timing
+samples in separate result directories. Timing outcomes are diagnostic and
+do not determine the deterministic check.
 
 After a frozen dependency install and installation of Playwright Chromium, run
 this command inside a disposable checkout:

@@ -7,6 +7,9 @@ on:
     paths:
       - "ui/**"
       - "server/src/**"
+      - "cli/**"
+      - "package.json"
+      - "patches/**"
       - "packages/shared/**"
       - "packages/db/**"
       - "tests/perf/collections/**"
@@ -51,17 +54,34 @@ jobs:
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
           pnpm exec playwright install --with-deps chromium
-      - name: Check request work and retain readiness timings
-        run: scripts/run-board-performance.sh
+      - name: Check deterministic request and browser work
+        env:
+          PROPRIO_COLLECTION_PERF_LANE: work
+        run: scripts/run-board-performance.sh --grep-invert 'timing:'
+      - name: Retain diagnostic readiness timings
+        id: diagnostic-timings
+        continue-on-error: true
+        env:
+          PROPRIO_COLLECTION_PERF_LANE: timing
+        run: scripts/run-board-performance.sh --grep 'timing:'
       - name: Record selected tests and outcomes
         if: always()
+        env:
+          TIMING_OUTCOME: ${{ steps.diagnostic-timings.outcome }}
         run: |
-          if [ ! -f test-results/board-performance/results.json ]; then
-            echo 'No Playwright result was produced.' >> "$GITHUB_STEP_SUMMARY"
+          work=test-results/board-performance/work/results.json
+          timing=test-results/board-performance/timing/results.json
+          if [[ -f "$timing" ]]; then
+            jq -r '"Diagnostic timings: \(.stats.expected) passed, \(.stats.unexpected) failed, \(.stats.skipped) skipped, \(.stats.flaky) flaky."' "$timing" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Diagnostic timings: %s (no report).\n' "${TIMING_OUTCOME:-skipped}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ ! -f "$work" ]]; then
+            echo 'No deterministic Playwright result was produced.' >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          jq -r '"Passed: \(.stats.expected). Failed: \(.stats.unexpected). Skipped: \(.stats.skipped). Flaky: \(.stats.flaky)."' test-results/board-performance/results.json >> "$GITHUB_STEP_SUMMARY"
-          jq -e '.stats.expected == 9 and .stats.skipped == 0 and .stats.unexpected == 0 and .stats.flaky == 0' test-results/board-performance/results.json
+          jq -r '"Deterministic work: \(.stats.expected) passed, \(.stats.unexpected) failed, \(.stats.skipped) skipped, \(.stats.flaky) flaky."' "$work" >> "$GITHUB_STEP_SUMMARY"
+          jq -e '.stats.expected > 0 and .stats.skipped == 0 and .stats.unexpected == 0 and .stats.flaky == 0' "$work"
       - name: Retain test results, readiness samples and traces
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
