@@ -357,8 +357,17 @@ async function loadCache(cacheFile: string, options: CliOptions): Promise<CacheF
   try {
     const raw = await fs.readFile(cacheFile, "utf8");
     const parsed = JSON.parse(raw) as CacheFile;
-    if (parsed.version !== 1 || parsed.queryKey !== buildQueryKey(options) || parsed.searchField !== options.searchField) {
-      return createEmptyCache(options);
+    if (parsed.version !== 1 || parsed.searchField !== options.searchField) return createEmptyCache(options);
+    if (parsed.queryKey !== buildQueryKey(options)) {
+      const cache = createEmptyCache(options);
+      const legacyQueries = [DEFAULT_QUERIES[1]];
+      if (options.queries === DEFAULT_QUERIES && parsed.queryKey === buildQueryKey(options, legacyQueries)) {
+        cache.stats = parsed.stats;
+      }
+      return cache;
+    }
+    for (const commit of Object.values(parsed.commits)) {
+      commit.contributors = commit.contributors.filter(({ email, displayName }) => !isProprioContributor(email, displayName));
     }
     return parsed;
   } catch (error) {
@@ -381,10 +390,10 @@ function createEmptyCache(options: CliOptions): CacheFile {
   };
 }
 
-function buildQueryKey(options: CliOptions): string {
+function buildQueryKey(options: CliOptions, queries = options.queries): string {
   const visibility = options.includePrivate ? "all" : "public";
   return JSON.stringify({
-    query: options.queries.length === 1 ? options.queries[0] : options.queries,
+    query: queries.length === 1 ? queries[0] : queries,
     searchField: options.searchField,
     visibility,
   });
@@ -442,11 +451,11 @@ async function searchWindow(
 
   const pageCount = Math.ceil(firstPage.total_count / 100);
   const shas = new Set<string>();
-  ingestSearchItems(cache, firstPage.items, shas);
+  ingestSearchItems(cache, firstPage.items, shas, options.queries === DEFAULT_QUERIES);
 
   for (let page = 2; page <= pageCount; page += 1) {
     const response = await searchPage(client, options, query, start, end, page, 100);
-    ingestSearchItems(cache, response.items, shas);
+    ingestSearchItems(cache, response.items, shas, options.queries === DEFAULT_QUERIES);
   }
 
   cache.windows[windowKey] = {
@@ -523,8 +532,21 @@ function formatQueryDate(value: Date): string {
   return value.toISOString().replace(".000Z", "Z");
 }
 
-function ingestSearchItems(cache: CacheFile, items: SearchCommitItem[], shas: Set<string>) {
+function hasProprioTrailer(message: string): boolean {
+  const block = message.trimEnd().split(/\r?\n[\t ]*\r?\n/).at(-1) ?? "";
+  const lines = block.split(/\r?\n/);
+  // Commit search matches the body too. Accept conventional terminal trailer
+  // blocks, including continuation lines, and reject quoted examples.
+  if (!/^[\w-]+:\s/.test(lines[0]) || !lines.every((line) => /^[\w-]+:\s|^[ \t]/.test(line))) return false;
+  return lines.some((line) => {
+    const email = line.match(/^co-authored-by:[ \t]+proprio[ \t]+<([^>]+)>[ \t]*$/i)?.[1];
+    return !!email && PROPRIO_EMAILS.includes(email.toLowerCase());
+  });
+}
+
+function ingestSearchItems(cache: CacheFile, items: SearchCommitItem[], shas: Set<string>, requireProprioTrailer: boolean) {
   for (const item of items) {
+    if (requireProprioTrailer && !hasProprioTrailer(item.commit.message)) continue;
     shas.add(item.sha);
     cache.commits[item.sha] = {
       authorEmail: item.commit.author?.email ?? null,
@@ -579,7 +601,7 @@ function normalizeContributor(input: {
   if (!displayName && !email && !login) {
     return null;
   }
-  if ((email && PROPRIO_EMAILS.includes(email.toLowerCase())) || (displayName && displayName.toLowerCase() === PROPRIO_NAME)) {
+  if (isProprioContributor(email, displayName)) {
     return null;
   }
 
@@ -590,6 +612,10 @@ function normalizeContributor(input: {
     key,
     login,
   };
+}
+
+function isProprioContributor(email: string | null, name: string | null): boolean {
+  return PROPRIO_EMAILS.some((alias) => alias === email?.toLowerCase()) || name?.toLowerCase() === PROPRIO_NAME;
 }
 
 function normalizeOptional(value: string | null | undefined): string | null {
