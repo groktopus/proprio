@@ -25,6 +25,7 @@ import { useIssueExternalObjectSummaries } from "../hooks/useIssueExternalObject
 import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
+  isKeyboardShortcutActivationTarget,
 } from "../lib/keyboardShortcuts";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
@@ -1497,6 +1498,7 @@ export function IssuesList({
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           const entry = st.flatNavEntries[currentIndex];
           if (!entry || entry.type !== "issue") return;
           e.preventDefault();
