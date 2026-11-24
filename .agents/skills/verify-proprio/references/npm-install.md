@@ -5,12 +5,13 @@ workspace links, `pnpm build`, and local tarballs do not answer that question.
 
 ## Resolve the exact artifact
 
-Read [.github/workflows/release.yml](../../../../.github/workflows/release.yml)
-for publication behavior. Canary publication follows verified pushes to `master`;
-an arbitrary feature-branch SHA need not have a published canary. Publication can
-fail or still be running, so prove registry availability before claiming coverage.
+Read the [source release policy](../../../../doc/RELEASE-AUTOMATION-SETUP.md).
+Use this route when an authorized publisher provides a registry, package name,
+and source provenance. Confirm those details against the registry before
+installing. An unrelated package can use the same name in a public registry.
 
-Resolve the requested channel once against the public registry:
+Resolve the requested channel once against the registry authorized for the
+release. For a verified publisher using the public registry, for example:
 
 ```sh
 npm view proprio@canary version --registry=https://registry.npmjs.org
@@ -61,7 +62,7 @@ and [launcher](../../../../tests/canary-onboarding/start-published-canary.mjs)
 before running. It installs the published package into isolated temporary state,
 uses a fresh npm cache and loopback server, and retains failure diagnostics.
 It uses checkout Playwright tooling to drive a published runtime; record both
-revisions. Its name and automated release wiring target canaries. For stable
+revisions. The suite targets published canaries. For stable
 verification, inspect compatibility with the selected version or use the manual
 pinned-package path above; do not relabel a canary result as stable proof.
 
