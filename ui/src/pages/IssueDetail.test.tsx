@@ -2425,10 +2425,6 @@ describe("IssueDetail", () => {
     const activity = createDeferred<unknown[]>();
     const runs = createDeferred<unknown[]>();
     const cost = createDeferred<unknown>();
-    queryClient.setQueryData(queryKeys.instance.experimentalSettings, {
-      enableClassicTaskInterface: true,
-      enableStreamlinedUi: false,
-    });
     mockIssuesApi.get.mockResolvedValue(createIssue());
     mockActivityApi.forIssue.mockReturnValue(activity.promise);
     mockActivityApi.runsForIssue.mockReturnValue(runs.promise);
