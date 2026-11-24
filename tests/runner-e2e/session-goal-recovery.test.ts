@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { runnerMatrix, runnerSuites, suiteDefinitionHash } from "./catalog.js";
 import { controllerOutageForExecution, validControllerOutageReceipt } from "./controller-outage.js";
 import { initialGoalCheckpointRejection, isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
+import { setupGitStreamingWorkspace } from "./daytona-git-streaming.js";
+import { readWorkspaceGitSourceRoots } from "../../server/src/services/workspace-git-source-roots.js";
 import { SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import type { SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 
@@ -35,6 +40,19 @@ describe("structured session-goal recovery Product E2E", () => {
         minimumExpectedRunCount: 1 } });
     expect(controllerOutageForExecution(cell, {})).toEqual({ signal: "SIGKILL", holdMs: 1_000 });
     expect(suiteDefinitionHash(suite)).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("seeds the local project workspace as a self-contained Git source", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "session-goal-workspace-"));
+    try {
+      await setupGitStreamingWorkspace(cwd);
+      const source = await readWorkspaceGitSourceRoots(cwd);
+      expect(source?.root).toBe(await fs.realpath(cwd));
+      expect(source?.objectDirectories).toHaveLength(1);
+      expect(source?.metadata.some(row => row.path.endsWith(path.join("objects", "info", "alternates")))).toBe(false);
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("accepts a recovered, executable, exactly-once result with a persisted fault receipt", () => {
