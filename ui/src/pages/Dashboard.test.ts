@@ -82,6 +82,7 @@ describe("dashboard recent tasks from the task index", () => {
     }));
     expect(markup).toContain("Retry");
     expect(markup).toContain("task index unavailable");
+    expect(markup).toContain("load recent tasks");
   });
 
   it("keeps indexed rows visible when the summary batch fails", () => {

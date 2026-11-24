@@ -209,6 +209,8 @@
 }
 
 :root {
+  --proprio-mark-background: #093a34;
+  --proprio-mark-foreground: #e7faf4;
   --breadcrumb-parent-max-width: 40%;
   color-scheme: light;
   --font-paper-mono: "Paper Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -4988,7 +4990,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   line-height: var(--design-page-type-leading);
   font-weight: var(--font-weight-normal);
   background: var(--design-page-control-surface);
-  color: var(--muted-foreground);
+  color: var(--foreground);
 }
 [data-canonical-toolbar] button:not([data-toolbar-clear]):is([data-size="icon"], [data-size="icon-sm"], [data-size="icon-xs"], .design-toolbar-icon) {
   width: var(--collection-toolbar-height);
@@ -5039,7 +5041,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
 }
 
 /* Canonical pill tabs: Compact (12px) and Standard (14px).
-   Shared geometry applies to Radix content tabs and exclusive collection filters. */
+   Shared geometry applies to content tabs, collection filters, and section links. */
 :root {
   --canonical-tab-compact-height: calc(var(--spacing) * 6);
   --canonical-tab-standard-height: calc(var(--spacing) * 8);
@@ -5090,7 +5092,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   line-height: calc(var(--text-xs) * var(--text-xs--line-height));
 }
 [data-canonical-tabs] .canonical-tab::after { display: none; }
-[data-canonical-tabs] .canonical-tab:is([data-state="active"], [aria-checked="true"]) {
+[data-canonical-tabs] .canonical-tab:is([data-state="active"], [aria-checked="true"], [aria-current="page"]) {
   background: var(--muted-highlight);
   color: var(--foreground);
   box-shadow: none;
@@ -5103,6 +5105,9 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   outline: var(--focus-ring-stroke-width) solid var(--ring);
   outline-offset: var(--focus-ring-stroke-width);
   box-shadow: var(--focus-ring-shadow);
+}
+[data-canonical-tabs] a.canonical-tab:focus-visible {
+  outline-color: var(--foreground);
 }
 [data-canonical-tabs] .canonical-tab:disabled { opacity: var(--canonical-tab-disabled-opacity); pointer-events: none; }
 [data-canonical-toolbar] .collection-toolbar-tabs select {
