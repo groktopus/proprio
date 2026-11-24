@@ -16,7 +16,7 @@ import { isCloudManagedInstance, type CloudInstanceEnv } from "./services/cloud-
 
 export const BROWSER_TRACES_DEFAULT_SERVICE_NAME = "proprio-web";
 export const BROWSER_TRACES_DEFAULT_SAMPLE_RATE = 1;
-export const BROWSER_TRACES_SELF_HOSTED_ENABLED = "1";
+const BROWSER_TRACES_SELF_HOSTED_ENABLED = "1";
 
 /** Honeycomb ingest keys carry this prefix; configuration keys never do. */
 const HONEYCOMB_INGEST_KEY_PREFIX = "hcaik_";
@@ -64,6 +64,10 @@ export function resolveBrowserTracingConfig(
     warn("PROPRIO_BROWSER_TRACES_ENDPOINT is not a valid URL; browser tracing is off");
     return null;
   }
+  if (endpoint.username || endpoint.password) {
+    warn("PROPRIO_BROWSER_TRACES_ENDPOINT must not contain URL credentials; browser tracing is off");
+    return null;
+  }
   // A browser on an https page cannot post to plain http (mixed content).
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && isLoopbackHost(endpoint.hostname))) {
     warn("PROPRIO_BROWSER_TRACES_ENDPOINT must use https; browser tracing is off");
@@ -93,7 +97,12 @@ export function resolveBrowserTracingConfig(
     if (parsed === 0) return null;
     // Honeycomb weights events by an integer `SampleRate` (1 in N). Sample at
     // exactly 1/N so weighted counts stay correct: 0.3 becomes 1/3.
-    sampleRate = 1 / Math.max(1, Math.round(1 / parsed));
+    const reciprocal = 1 / parsed;
+    if (!Number.isFinite(reciprocal)) {
+      warn("PROPRIO_BROWSER_TRACES_SAMPLE_RATE is too small to represent safely; browser tracing is off");
+      return null;
+    }
+    sampleRate = 1 / Math.max(1, Math.round(reciprocal));
   }
 
   return {

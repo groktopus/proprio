@@ -79,6 +79,7 @@ describe("resolveBrowserTracingConfig", () => {
     ["a configuration key", { PROPRIO_BROWSER_TRACES_INGEST_KEY: "51GYc2configkey00000000" }, "INGEST_KEY is not a Honeycomb ingest key"],
     ["Honeycomb with no key", { PROPRIO_BROWSER_TRACES_INGEST_KEY: undefined }, "INGEST_KEY is required"],
     ["plain http", { PROPRIO_BROWSER_TRACES_ENDPOINT: "http://api.honeycomb.io" }, "must use https"],
+    ["URL credentials", { PROPRIO_BROWSER_TRACES_ENDPOINT: "https://user:secret@collector.example.com" }, "must not contain URL credentials"],
     ["a malformed endpoint", { PROPRIO_BROWSER_TRACES_ENDPOINT: "not a url" }, "not a valid URL"],
     ["a malformed sample rate", { PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "10%" }, "SAMPLE_RATE must be a number"],
     ["an out-of-range sample rate", { PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "2" }, "SAMPLE_RATE must be a number"],
@@ -116,6 +117,16 @@ describe("resolveBrowserTracingConfig", () => {
       PROPRIO_BROWSER_TRACES_INGEST_KEY: ingestKey,
       PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "0",
     })).toBeNull();
+  });
+
+  it("fails closed for a positive sample rate too small to represent", () => {
+    const warn = vi.fn();
+    expect(resolveBrowserTracingConfig({
+      ...cloud,
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com",
+      PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "1e-310",
+    }, warn)).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("too small"));
   });
 });
 

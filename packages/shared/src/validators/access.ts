@@ -200,9 +200,9 @@ export const currentUserProfileSchema = z.object({
 export type CurrentUserProfile = z.infer<typeof currentUserProfileSchema>;
 
 /**
- * Browser performance tracing settings for an explicitly opted-in instance.
- * Managed instances or self-hosted instances with the documented opt-in may
- * receive this value; see `doc/browser-performance-tracing.md`.
+ * Browser performance tracing settings for a hosted Proprio Cloud instance.
+ * The server sends a value only when the instance is cloud managed and an
+ * operator configured an endpoint; see `doc/browser-performance-tracing.md`.
  * `ingestKey` is a Honeycomb ingest-only key (or null for a collector that
  * needs no key); it is never a configuration key.
  */

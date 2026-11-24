@@ -1,0 +1,64 @@
+name: Browser tracing self-hosted acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit or tag to qualify
+        required: true
+        type: string
+      modes:
+        description: Comma-separated modes (enabled,disabled,unsampled,sink-failure)
+        default: enabled,disabled,unsampled,sink-failure
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [enabled, disabled, unsampled, sink-failure]
+    steps:
+      - name: Select requested mode
+        if: ${{ !contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        run: echo "Skipping ${{ matrix.mode }}"
+      - name: Check out exact build
+        if: ${{ contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Set up Node
+        if: ${{ contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked dependencies and Chromium
+        if: ${{ contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        run: |
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm exec playwright install --with-deps chromium
+      - name: Run exact-build browser tracing acceptance
+        if: ${{ contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        env:
+          PROPRIO_BROWSER_TRACING_MODE: ${{ matrix.mode }}
+          PROPRIO_BROWSER_TRACING_BUILD_ID: ${{ inputs.ref }}
+        run: >-
+          pnpm exec playwright test
+          tests/perf/browser-tracing/self-hosted-acceptance.spec.ts
+          --config tests/perf/browser-tracing/playwright.config.ts
+      - name: Upload acceptance artifacts
+        if: ${{ always() && contains(format(',{0},', inputs.modes), format(',{0},', matrix.mode)) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-tracing-${{ inputs.ref }}-${{ matrix.mode }}
+          path: test-results/browser-tracing
+          if-no-files-found: warn

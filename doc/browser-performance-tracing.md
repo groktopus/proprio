@@ -69,6 +69,33 @@ To disable the path, remove the self-hosted flag (or set the sample rate to
 tracing SDK chunk. Sink outages are contained to tracing export and do not
 change page or API behavior.
 
+### Linux acceptance probe
+
+The opt-in path has a targeted Chromium probe at
+`tests/perf/browser-tracing/self-hosted-acceptance.spec.ts`. It uses a
+throwaway local-trusted Linux instance and a loopback collector route, then
+records an artifact containing the exact build, sample count, task-list and
+task-detail routes, and sink outcome. It also checks that the serialized OTLP
+payload contains neither the task title nor raw task/company identifiers.
+
+Run it against an already-built checkout with the same environment that starts
+the server:
+
+```sh
+PROPRIO_BROWSER_TRACING_MODE=enabled \
+PROPRIO_BROWSER_TRACING_BUILD_ID="$(git rev-parse HEAD)" \
+pnpm exec playwright test \
+  tests/perf/browser-tracing/self-hosted-acceptance.spec.ts \
+  --config tests/perf/browser-tracing/playwright.config.ts
+```
+
+Repeat with `PROPRIO_BROWSER_TRACING_MODE=disabled`, `unsampled`, and
+`sink-failure`. Disabled and unsampled modes assert no tracing SDK chunk and
+no collector POST; sink-failure asserts that the task-list/detail journeys
+remain usable and produce no page error. For a release comparison, run the
+same four modes on the published v0.0.3 checkout and the candidate checkout,
+retaining each `browser-tracing-acceptance` artifact by exact build SHA.
+
 ### Key handling
 
 Every signed-in browser can read the key, the same way it can read the
