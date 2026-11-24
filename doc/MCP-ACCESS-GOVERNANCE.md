@@ -387,7 +387,8 @@ Cloud reminder: in `authenticated/public`, local stdio slots fail closed unless 
 
 ## Audit and the call event log
 
-Every tool invocation lands in the **call event log** (`tool_call_events`). Each event records:
+The managed gateway records decisions and execution evidence in the **call event log**
+(`tool_call_events`). Depending on the event type, a record can include:
 
 - decision (`allow`, `deny`, `require_approval`, `rate_limited`),
 - matched policy IDs,
@@ -401,15 +402,16 @@ To pull recent audit:
 ```sh
 curl -fsS -H "Authorization: Bearer $BOARD_API_KEY" \
   "$PROPRIO_URL/api/tool-gateway/audit?companyId=$COMPANY_ID&limit=100" \
-  | jq '[.[] | {createdAt, action: .action, decision: .details.decision, tool: .details.tool, outcome: .details.outcome, reasonCode: .details.reasonCode}]'
+  | jq '{nextCursor, events: [.events[] | {id, createdAt, action, runId, decision: .details.decision, outcome: .normalizedOutcome, reasonCode: .details.reasonCode}]}'
 ```
 
 Two practical patterns:
 
-- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` returns every policy decision attached to a single agent run. Use this in QA to prove an agent never touched a denied tool.
-- **Approval audit:** the audit log itself is the approval-request ledger — filter the gateway audit response for `action == "tool_gateway.approval_requested"` to get the queue, and pair each row with the matching `tool_gateway.call_allowed` / `tool_gateway.call_denied` entry to see how the approval resolved. Approver identity lands on the action request itself; once approved, the action request body shows `resolvedByUserId` and `resolvedAt`.
+- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` joins invocations for a run to their action requests and call events. Use the gateway audit query to look for events without a linked invocation.
+- **Approval audit:** Follow the linked action request to check its resolution and deciding principal. Use the invocation and call events to review execution.
 
-Audit is the source of truth for the security memo. It is intentionally append-only — there is no edit or delete route.
+See [governance evidence for authenticated self-hosted deployments](governance-evidence.md)
+for access, retention, missing evidence and independent verification of target effects.
 
 ## Local trusted deployment
 
