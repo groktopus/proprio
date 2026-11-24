@@ -91,7 +91,7 @@ const budgetIncidents: BudgetIncident[] = [
     windowEnd,
     thresholdType: "soft",
     amountLimit: 40_000,
-    amountObserved: 42_450,
+    amountObserved: 35_000,
     status: "open",
     approvalId: null,
     approvalStatus: null,
