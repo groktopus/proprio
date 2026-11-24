@@ -7,7 +7,7 @@ All commands below assume you are in the **project root** (the directory contain
 ## Building the image
 
 ```sh
-docker build -t proprio-local .
+docker build --target production -t proprio-local .
 ```
 
 The Dockerfile installs common agent tools (`git`, `gh`, `curl`, `wget`, `ripgrep`, `python3`) and the Claude, Codex, and OpenCode CLIs.
@@ -29,7 +29,7 @@ or earlier build inputs change. Local builds can set a new epoch explicitly
 to refresh tools without clearing the entire build cache.
 
 ```sh
-docker build -t proprio-local \
+docker build --target production -t proprio-local \
   --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
 ```
 
@@ -46,90 +46,91 @@ PR CI runs the same check after `pnpm build`.
 Proprio does not publish or promote images for this bootstrap. Build from this
 checkout, and do not substitute a container image from a different project.
 
-## One-liner (build + run)
-
-```sh
-docker build -t proprio-local . && \
-docker run --name proprio \
-  -p 3100:3100 \
-  -e HOST=0.0.0.0 \
-  -e PROPRIO_HOME=/proprio \
-  -e BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
-  -e PROPRIO_TOOL_ACTION_SIGNING_SECRET=$(openssl rand -hex 32) \
-  -v "$(pwd)/data/docker-proprio:/proprio" \
-  proprio-local
-```
-
-Open: `http://localhost:3100`
-
-Data persistence:
-
-- Embedded PostgreSQL data
-- uploaded assets
-- local secrets key
-- local agent workspace data
-
-All persisted under your bind mount (`./data/docker-proprio` in the example above).
-
 ## Docker Compose
 
-### Persistent signing secrets
+Run these commands from the repository root with Docker Engine 28.0.0 or later,
+Docker Compose, and OpenSSL. For a new instance, copy the example once:
 
-Before the first launch, generate two independent values with `openssl rand -hex 32`
-and save them in `docker/.env`. Keep any existing deployment's values unchanged:
+```sh
+test ! -e docker/.env && install -m 600 docker/.env.compose.example docker/.env
+```
+
+Generate separate values with `openssl rand -hex 32` for `BETTER_AUTH_SECRET`
+and `PROPRIO_TOOL_ACTION_SIGNING_SECRET`. Set them in `docker/.env`, keep that
+file private, and reuse the same values across restarts and upgrades. For the
+full stack, generate a third hex value for `PROPRIO_POSTGRES_PASSWORD`. A hex
+password can be used directly in the PostgreSQL connection URL.
+
+Existing deployments should keep their signing values. If you previously left
+the tool-action secret unset, keep that setting to retain signatures derived
+from the persisted secrets master key. Resolve outstanding approvals before
+rotating signing values. Keep the signing values and master key with backups.
+
+### Quickstart with embedded PostgreSQL
+
+```sh
+docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml up --build -d --wait
+curl -fsS http://localhost:3100/api/health
+```
+
+Look for `"status":"ok"` and open <http://localhost:3100>. The application
+health check waits for readiness, including startup recovery. The quickstart
+persists database files, uploads, keys and workspaces under the bind mount
+`./data/docker-proprio`. A relative `PROPRIO_DATA_DIR` is relative to the
+Compose file, so `../data/pc` maps to `data/pc` in the repository root.
+
+For a custom port and data directory, put these values in `docker/.env`
+before running the same launch command:
 
 ```dotenv
-BETTER_AUTH_SECRET=<session-signing-secret>
-PROPRIO_TOOL_ACTION_SIGNING_SECRET=<tool-action-signing-secret>
+PROPRIO_PORT=3200
+PROPRIO_DATA_DIR=../data/pc
 ```
 
-Restrict this file to its owner (`chmod 600 docker/.env`) and keep it out of version
-control. Compose reads it for both commands below. Reuse the values on every
-restart. Rotate the tool-action secret only after outstanding approvals are
-resolved, because pending signatures use the previous value.
+Open <http://localhost:3200>. The default public URL follows the configured
+port. If you already set `PROPRIO_PUBLIC_URL`, update it to match. Supply
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` when you want to exercise those
+adapters.
 
-### Quickstart (embedded SQLite)
-
-Single container, no external database. Data persists via a bind mount.
+### Full stack with PostgreSQL 17
 
 ```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d --wait
+curl -fsS http://localhost:3100/api/health
 ```
 
-Defaults:
+PostgreSQL uses the `pgdata` volume. The server uses the `proprio-data` volume
+for instance configuration, keys, uploads and workspaces. Keep the same
+Compose project name and both volumes when upgrading.
 
-- host port: `3100`
-- persistent data dir: `./data/docker-proprio`
-
-Optional overrides:
+If your existing full stack used the old built-in database password, back up
+the database and the Proprio volume before switching files. Set the new hex
+password in `docker/.env`. With the original Compose project name, stop the
+server and start only the database from the new configuration:
 
 ```sh
-PROPRIO_PORT=3200 PROPRIO_DATA_DIR=../data/pc \
-  docker compose -f docker/docker-compose.quickstart.yml up --build
+docker compose --env-file docker/.env -f docker/docker-compose.yml stop server
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --wait db
+docker compose --env-file docker/.env -f docker/docker-compose.yml exec db psql -U proprio -d proprio
 ```
 
-**Note:** `PROPRIO_DATA_DIR` is resolved relative to the compose file (`docker/`), so `../data/pc` maps to `data/pc` in the project root.
+At the `psql` prompt, run `\password proprio` and enter the same new password
+twice. Then run `\q`, start the full stack, and verify readiness and your
+existing records. Changing the initialization variable alone does not change a
+role password in an existing volume.
 
-If you change host port or use a non-local domain, set `PROPRIO_PUBLIC_URL` to the external URL you will use in browser/auth flows.
+### Network access
 
-Pass `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` to enable local adapter runs.
+Both stacks publish the web port on `127.0.0.1` by default. Use Docker Engine
+28.0.0 or later for host-only publication. See [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/). Keep it there for
+a reverse proxy on the same host and set `PROPRIO_PUBLIC_URL` to the external
+HTTPS origin. To bind directly to a LAN or tailnet IP, set `PROPRIO_BIND_IP`
+to that interface's address and `PROPRIO_PUBLIC_URL` to the URL clients use.
+List any extra trusted hostnames in `PROPRIO_ALLOWED_HOSTNAMES`. Keep
+authenticated access enabled and restrict access at the network or proxy.
 
-### Full stack (with PostgreSQL)
-
-Proprio server + PostgreSQL 17. The database is health-checked before the server starts.
-
-```sh
-docker compose -f docker/docker-compose.yml up --build
-```
-
-PostgreSQL data persists in a named Docker volume (`pgdata`). Proprio data persists in `proprio-data`.
-
-Both Compose files pass `PROPRIO_TOOL_ACTION_SIGNING_SECRET` to the server.
-When configured, keep it independent from `BETTER_AUTH_SECRET`. When unset,
-the server derives a separate signing key from its persisted secrets master key.
-Keep that key with database backups, and share the signing key or master key
-across processes serving the same instance. Approvals fail closed if valid key
-material cannot be loaded; rotating it can invalidate approvals and retry matching.
+PostgreSQL stays on the Compose network. See [Local PostgreSQL](DATABASE.md#2-local-postgresql-docker)
+to opt in to a loopback-only port for development tools.
 
 ### Untrusted PR review
 

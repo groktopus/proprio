@@ -132,6 +132,7 @@ const {
   }) => ({ ready: task.run(new AbortController().signal).catch(error => { deliveryWorkErrors.push({ queue, error }); }), wake: vi.fn(), stop: vi.fn(async () => {}),
     reconciliationSnapshot: () => ({ revision: "startup-coordinator:1", reconciled: true }) }));
   const createAppMock = vi.fn(async (_db: unknown, _options: unknown) => Object.assign((_: unknown, __: unknown) => {}, {
+    get: vi.fn(() => undefined),
     locals: {
       fastResponses: { hasPending: vi.fn(async () => false), sweepPending: vi.fn(async () => undefined) },
       deliveryWork: {
@@ -2307,6 +2308,24 @@ describe("startServer PROPRIO_API_URL handling", () => {
     expect(process.env.PROPRIO_API_URL).toBe("http://127.0.0.1:3210");
     expect(JSON.parse(process.env.PROPRIO_RUNTIME_API_CANDIDATES_JSON ?? "[]")).toEqual(
       expect.arrayContaining(["http://127.0.0.1:3210", "http://192.168.1.50:3210"]),
+    );
+  });
+
+  it("preserves a published loopback port when it differs from the server port", async () => {
+    loadConfigMock.mockReturnValueOnce(buildTestConfig({
+      port: 3100,
+      authBaseUrlMode: "explicit",
+      authPublicBaseUrl: "http://localhost:3200",
+    }));
+    detectPortMock.mockResolvedValueOnce(3100);
+
+    const started = await startServer();
+
+    expect(started.listenPort).toBe(3100);
+    expect(started.apiUrl).toBe("http://localhost:3200");
+    expect(deriveAuthTrustedOriginsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ authPublicBaseUrl: "http://localhost:3200" }),
+      { listenPort: 3100 },
     );
   });
 
