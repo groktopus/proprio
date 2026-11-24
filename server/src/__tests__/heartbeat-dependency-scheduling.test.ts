@@ -1093,6 +1093,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     const agentId = randomUUID();
     const parentId = randomUUID();
     const childId = randomUUID();
+    const optionalSiblingId = randomUUID();
+    const siblingAgentId = randomUUID();
     const earlier = new Date(Date.now() - 10 * 60_000);
     await db.insert(companies).values({
       id: companyId, name: "Proprio", issuePrefix: "WAKE", defaultResponsibleUserId: "responsible-user",
@@ -1100,15 +1102,21 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.insert(companyMemberships).values({
       companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
     });
-    await db.insert(agents).values({
-      id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
-      adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {},
-    });
+    await db.insert(agents).values([
+      { id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+        adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {} },
+      { id: siblingAgentId, companyId, name: "Sibling owner", role: "engineer", status: "active", adapterType: "codex_local" },
+    ]);
     await db.insert(issues).values([
       { id: parentId, companyId, title: "Waiting parent", status: "in_progress", assigneeAgentId: agentId,
         responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
       { id: childId, companyId, title: "Stalled child", status: "blocked", parentId, createdAt: earlier, updatedAt: earlier },
+      { id: optionalSiblingId, companyId, title: "Independent child", status: "in_progress", parentId, assigneeAgentId: siblingAgentId },
     ]);
+    const [siblingRun] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: siblingAgentId, status: "running", invocationSource: "assignment",
+      contextSnapshot: { issueId: optionalSiblingId },
+    }).returning();
     await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
     const probe = recoveryService(db, { enqueueWakeup: heartbeat.wakeup }).assignedWork;
 
@@ -1126,6 +1134,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(continued?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true, dependencyDiagnosis: true });
     const [child] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, childId));
     expect(child?.status).toBe("blocked");
+    const [sibling] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, siblingRun!.id));
+    expect(sibling?.status).toBe("running");
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, siblingRun!.id));
   });
 
   it("cancels a queued diagnosis and its retry after the dependency resolves", async () => {
