@@ -1085,6 +1085,7 @@ function SelectStep({
                       const isSelected = selection.has(key);
                       const selectedValue = selection.get(key);
                       return (
+                        // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The checkbox is the keyboard control. Row clicks delegate to the same handler.
                         <li
                           key={`${candidate.workspaceId} ${candidate.relativePath}`}
                           className={cn(

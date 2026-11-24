@@ -136,6 +136,10 @@ export type ArchiveCompanyMemberResponse = {
   reassignedIssueCount: number;
 };
 
+export type ArchiveCompanyMemberPreview = {
+  reassignmentIssueCount: number;
+};
+
 export type CompanyMembersResponse = {
   members: CompanyMember[];
   access: {
@@ -367,6 +371,11 @@ export const accessApi = {
       } | null;
     } = {},
   ) => api.post<ArchiveCompanyMemberResponse>(`/companies/${companyId}/members/${memberId}/archive`, input),
+
+  archiveMemberPreview: (companyId: string, memberId: string) =>
+    api.get<ArchiveCompanyMemberPreview>(
+      `/companies/${companyId}/members/${memberId}/archive-preview`,
+    ),
 
   approveJoinRequest: (companyId: string, requestId: string) =>
     api.post<JoinRequest>(`/companies/${companyId}/join-requests/${requestId}/approve`, {}),

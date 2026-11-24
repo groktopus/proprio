@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -80,9 +81,9 @@ function usage() {
   console.log(`Usage: node scripts/storybook-visual-baseline.mjs <command>
 
 Commands:
-  download  Fetch, checksum, and unpack the manifest archive into the snapshot dir.
+  download  Checksum and unpack the manifest archive. Use --archive PATH for a retained local test artifact.
   verify    Check the unpacked snapshot count and cached archive checksum.
-  pack      Create a deterministic snapshots.tgz from the snapshot dir.
+  pack      Create a deterministic snapshots.tgz. Use --test-artifact for checksum and count metadata alone.
   upload    Upload a packed archive to S3 with immutable overwrite checks.
 
 Environment:
@@ -119,7 +120,15 @@ async function download() {
   mkdirSync(dirname(archivePathFor(manifest)), { recursive: true });
   const archivePath = archivePathFor(manifest);
 
-  if (!existsSync(archivePath) || sha256File(archivePath) !== manifest.archive.sha256) {
+  const localArchive = flags.get("archive");
+  if (localArchive) {
+    const localPath = resolvePath(localArchive);
+    verifyArchiveFile(manifest, localPath);
+    if (localPath !== archivePath) copyFileSync(localPath, archivePath);
+  } else if (!existsSync(archivePath) || sha256File(archivePath) !== manifest.archive.sha256) {
+    if (!manifest.archive.url) {
+      throw new Error("No baseline URL configured. Retrieve the reviewed test artifact and pass --archive PATH.");
+    }
     await fetchArchive(manifest.archive.url, archivePath);
   }
   verifyArchiveFile(manifest, archivePath);
@@ -127,7 +136,7 @@ async function download() {
   mkdirSync(snapshotDir, { recursive: true });
   run("tar", ["-xzf", archivePath, "-C", snapshotDir], "unpack baseline archive");
   verifySnapshotCount(manifest, snapshotDir);
-  console.log(`Downloaded ${manifest.baselineId} to ${relative(repoRoot, snapshotDir)}`);
+  console.log(`Unpacked ${manifest.baselineId} to ${relative(repoRoot, snapshotDir)}`);
 }
 
 async function verify() {
@@ -189,6 +198,10 @@ async function pack() {
   }
   const sha256 = sha256File(out);
   const byteSize = statSync(out).size;
+  if (flags.has("test-artifact")) {
+    console.log(JSON.stringify({ snapshotCount: count, archive: { sha256, byteSize } }, null, 2));
+    return;
+  }
   const publicUrl = flags.get("public-url") ?? process.env.STORYBOOK_VISUAL_PUBLIC_URL ?? "";
   const objectKey = `baselines/storybook-visual/${sha256}/snapshots.tgz`;
   console.log(`Packed ${count} PNG snapshots into ${relative(repoRoot, out)}`);
@@ -259,12 +272,9 @@ async function upload() {
 
 function assertConfiguredArchive(manifest) {
   const archive = manifest.archive ?? {};
-  if (!archive.url || !archive.sha256 || !archive.byteSize) {
+  if (!/^[a-f0-9]{64}$/.test(archive.sha256 ?? "") || !Number.isSafeInteger(archive.byteSize) || archive.byteSize < 1 || manifest.snapshotCount < 1) {
     throw new Error(
-      `Baseline manifest ${relative(
-        repoRoot,
-        manifestPath,
-      )} does not point at a published archive yet. Run \`pnpm storybook-visual:baseline pack\`, upload the immutable archive, then update the manifest archive url/sha256/byteSize/snapshotCount.`,
+      `Baseline manifest ${relative(repoRoot, manifestPath)} needs the reviewed archive SHA-256, positive byte size, and nonzero snapshot count.`,
     );
   }
 }

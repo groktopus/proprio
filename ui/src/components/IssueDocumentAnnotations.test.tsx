@@ -484,6 +484,34 @@ describe("IssueDocumentAnnotations", () => {
     });
   });
 
+  it("opens a different thread from its focused native excerpt button", async () => {
+    mockAnnotationsApi.list.mockResolvedValue([
+      makeThread({ id: "first-thread" }),
+      makeThread({ id: "next-thread" }),
+    ]);
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+
+    await act(() => root.render(
+      <QueryClientProvider client={queryClient}>
+        <Harness doc={makeDoc()} locationHash="#document-plan&thread=first-thread" />
+      </QueryClientProvider>,
+    ));
+    const excerpt = () => container.querySelector<HTMLButtonElement>(
+      '[data-thread-id="next-thread"] button[aria-label^="Open annotation thread:"]',
+    );
+    await waitFor(() => expect(excerpt()?.getAttribute("aria-expanded")).toBe("false"));
+    await act(() => {
+      excerpt()!.focus();
+      excerpt()!.click();
+    });
+    await waitFor(() => {
+      expect(excerpt()?.getAttribute("aria-expanded")).toBe("true");
+      expect(document.activeElement).toBe(excerpt());
+      expect(container.querySelector('[data-thread-id="first-thread"] button[aria-expanded="false"]')).not.toBeNull();
+    });
+  });
+
   it("opens a resolved orphaned deep-link target after revision and fresh reload without changing history", async () => {
     const originalBody = "Original review detail that must remain readable after its selection was removed. ".repeat(5)
       + "The complete first comment ends here.";

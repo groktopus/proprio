@@ -4526,6 +4526,24 @@ export function accessRoutes(
     }
   );
 
+  router.get(
+    "/companies/:companyId/members/:memberId/archive-preview",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const memberId = req.params.memberId as string;
+      await assertCompanyPermission(req, companyId, "users:manage_permissions");
+      const member = await access.getMemberById(companyId, memberId);
+      if (!member) throw notFound("Member not found");
+      await assertCanManageCompanyMember(req, access, companyId, member, "archive");
+      res.json({
+        reassignmentIssueCount:
+          member.principalType === "user"
+            ? await access.countOpenIssuesAssignedToUser(companyId, member.principalId)
+            : 0,
+      });
+    },
+  );
+
   router.patch(
     "/companies/:companyId/members/:memberId/permissions",
     validate(updateMemberPermissionsSchema),
