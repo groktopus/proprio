@@ -45,6 +45,7 @@ import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapte
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
 import * as workspacePreparation from "../services/heartbeat/workspace-preparation.js";
 import { WorkspaceBusyDeferral } from "../services/heartbeat/retries.js";
+import { recoveryService } from "../services/recovery/service.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -1085,6 +1086,46 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.update(issueRecoveryActions).set({ outcome: "restored" }).where(eq(issueRecoveryActions.id, action.id));
     expect(await retryGate(replacement)).toMatchObject({ allowed: false, errorCode: "issue_dependencies_blocked" });
 
+  });
+
+  it("dispatches one diagnostic turn through the normal assigned-work check", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    const earlier = new Date(Date.now() - 10 * 60_000);
+    await db.insert(companies).values({
+      id: companyId, name: "Proprio", issuePrefix: "WAKE", defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+      adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: parentId, companyId, title: "Waiting parent", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
+      { id: childId, companyId, title: "Stalled child", status: "blocked", parentId, createdAt: earlier, updatedAt: earlier },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
+    const probe = recoveryService(db, { enqueueWakeup: heartbeat.wakeup }).assignedWork;
+
+    await probe.checkIssue({ companyId, issueId: parentId });
+    await heartbeat.drainActiveRunExecutions();
+    await probe.checkIssue({ companyId, issueId: parentId });
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      sql`${agentWakeupRequests.idempotencyKey} like 'issue_blocker_stalled:diagnosis:%'`,
+    ));
+    expect(wakes).toHaveLength(1);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const [continued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id));
+    expect(continued?.status).toBe("succeeded");
+    expect(continued?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true, dependencyDiagnosis: true });
+    const [child] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, childId));
+    expect(child?.status).toBe("blocked");
   });
 
   it("cancels a queued diagnosis and its retry after the dependency resolves", async () => {
