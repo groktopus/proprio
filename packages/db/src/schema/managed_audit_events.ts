@@ -1,4 +1,5 @@
 import { index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 
 /** Minimized, immutable delivery events captured with their owning gateway write. */
@@ -29,4 +30,7 @@ export const managedAuditEvents = pgTable("managed_audit_events", {
     .on(table.companyId, table.occurredAt, table.id),
   invocationPhaseUnique: uniqueIndex("managed_audit_events_invocation_phase_uq")
     .on(table.companyId, table.source, table.phase, table.invocationId),
+  pendingOperationIdx: index("managed_audit_events_pending_operation_idx")
+    .on(table.companyId, table.operationFingerprint)
+    .where(sql`${table.source} = 'tool_gateway' and ${table.phase} = 'dispatch_intent' and ${table.operationFingerprint} is not null`),
 }));

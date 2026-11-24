@@ -729,6 +729,53 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("does not apply the unresolved write fingerprint fence to read-only MCP calls", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const first = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id, result: { content: [{ type: "text", text: "read result" }] },
+    } }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_get", riskLevel: "read",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_mcp_read_receipt_failure_${suffix}`;
+      const triggerName = `managed_mcp_read_receipt_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed read receipt fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'terminal_outcome') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        const firstSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: first.run.id, issueId: first.issue.id });
+        const input = { tool, parameters: { message: "same-key" }, idempotencyKey: "managed-read-1" };
+        await expect(gateway.executeTool({ ...input, sessionToken: firstSession.token })).rejects.toThrow(/terminal receipt could not be persisted/);
+        const second = await createIssueAndRun(db, company.id, agent.id);
+        const secondSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: second.run.id, issueId: second.issue.id });
+        await expect(gateway.executeTool({ ...input, sessionToken: secondSession.token,
+          idempotencyKey: "managed-read-2" })).rejects.toThrow(/terminal receipt could not be persisted/);
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+        const intents = await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+        ));
+        expect(intents).toHaveLength(2);
+        expect(intents.map(event => event.operationFingerprint)).toEqual([null, null]);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("preserves provider tool errors in MCP responses and failed invocation audits", async () => {
     const company = await createCompany(db);
     const remote = await startFakeRemoteMcpServer(({ body }) => ({

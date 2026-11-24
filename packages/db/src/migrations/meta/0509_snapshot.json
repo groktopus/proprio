@@ -1,5 +1,5 @@
 {
-  "id": "0e1c537e-4204-435c-a2d8-63e8cb73520a",
+  "id": "36fe2d33-0d5d-4111-8bcd-81e7ef5f1884",
   "prevId": "9ed5d98d-791a-4b0c-add0-b00bdf3e13c3",
   "version": "7",
   "dialect": "postgresql",
@@ -45868,6 +45868,28 @@
             }
           ],
           "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "managed_audit_events_pending_operation_idx": {
+          "name": "managed_audit_events_pending_operation_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "operation_fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"managed_audit_events\".\"source\" = 'tool_gateway' and \"managed_audit_events\".\"phase\" = 'dispatch_intent' and \"managed_audit_events\".\"operation_fingerprint\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
