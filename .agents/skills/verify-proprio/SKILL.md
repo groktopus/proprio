@@ -54,13 +54,17 @@ npm install. Report only the combinations actually exercised.
 
 ## Deployment handoff
 
-For hosted testing accounts, read [QA accounts and credentials](references/hosted-qa-accounts.md).
-The testing environment has an AgentMail inbox on the allowed `propriobots.com`
-domain and a persistent QA workspace at `https://qa.test.paperclip.app`. Use the
-dedicated QA identity and normal email-code login. The expected 1Password service
-account needs read and item-creation/update access; verify those capabilities
-before promising that new credentials have been saved. Keep concrete secret
-bindings and account receipts in the private eval configuration.
+Hosted verification requires an explicitly authorized Proprio target. Use the
+URL and workspace supplied for this task, or load them from the selected
+deployment's approved QA profile. Confirm the intended environment and account
+before signing in or writing state. If these inputs are missing, report hosted
+coverage as blocked. Local source and published-package verification can run
+with their own isolated state without hosted credentials.
+
+Use the deployment's documented sign-in method and QA identity. See
+[Hosted QA accounts and credentials](references/hosted-qa-accounts.md) for the
+target and credential record. Keep deployment-specific account setup and
+secret bindings with the deployment owner.
 
 When a requested revision must first be built or deployed, use the skills in the
 private `proprio-cloud` repo:

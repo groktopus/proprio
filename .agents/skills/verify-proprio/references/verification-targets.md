@@ -57,10 +57,11 @@ server platforms distinct when testing a remote Linux box from a Mac.
 
 ## Staging and production
 
-Use the supplied tenant URL and intended identity. Determine whether the target
-is the Proprio tenant application or the Cloud control plane. Confirm the
-environment from the operator's deployment record and authenticated routing;
-a page title or local Git checkout is not evidence of the serving revision.
+Use the target URL, intended company or workspace, and QA identity authorized
+for the task or resolved from the named deployment QA profile. Confirm the
+environment and tenant through the operator's deployment record and
+authenticated routing. Include the served revision in the evidence. If there
+is no approved target, stop the hosted portion and report the missing input.
 
 If a build/deploy is needed, follow the private skill handoff in `SKILL.md` first.
 Record the exact serving SHA and release/image identity after deployment, not
