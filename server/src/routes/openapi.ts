@@ -271,6 +271,7 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   retryWorkspaceExportSchema,
   reconstructWorkspaceSchema,
@@ -11680,6 +11681,23 @@ registerCurrentRoute({
   path: "/api/issues/{id}/recovery-actions",
   tags: ["issues"],
   summary: "List issue recovery actions",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Get required dependency diagnosis and parent wake state",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Ask the current assignee to investigate a stalled dependency",
+  body: dependencyInvestigationSchema,
+  responses: { 200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registerCurrentRoute({

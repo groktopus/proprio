@@ -636,6 +636,29 @@ export interface IssueUnblockDescriptor {
 }
 
 /** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
+export interface DependencyDiagnosis {
+  state: "no_execution_path" | "active" | "external_wait";
+  dependencyPath: Array<{
+    issueId: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+  }>;
+  cause: {
+    kind: string;
+    issueId: string | null;
+    recoveryActionId?: string;
+  };
+  nextOwner: { type: "agent" | "user" | "board"; id?: string; name?: string };
+  nextAction: string;
+  wake: {
+    idempotencyKey: string;
+    status: "not_requested" | "queued" | "running" | "deferred" | "refused" | "exhausted" | "completed";
+    wakeupRequestId?: string;
+  };
+  canInvestigate: boolean;
+}
+
 export interface IssueBlockerStalledWakeContext {
   stalledIssueId: string;
   stalledIssueIdentifier: string | null;

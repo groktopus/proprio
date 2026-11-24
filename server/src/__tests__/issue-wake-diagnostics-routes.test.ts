@@ -335,6 +335,42 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
     expect(res.body.diagnosis).toContain("issue_blockers_resolved has not fired");
   });
 
+  it("reveals the current dependency diagnosis only through readable task edges", async () => {
+    const company = await seedCompany(db);
+    const agent = await seedAgent(db, company.id);
+    const allowedProject = await seedProject(db, company.id, "Allowed");
+    const restrictedProject = await seedProject(db, company.id, "Restricted");
+    const parent = await seedIssue(db, {
+      companyId: company.id, projectId: allowedProject.id, title: "Parent", status: "blocked",
+    });
+    const child = await seedIssue(db, {
+      companyId: company.id, projectId: allowedProject.id, title: "Waiting child", status: "blocked", parentId: parent.id,
+    });
+    const grandchild = await seedIssue(db, {
+      companyId: company.id, projectId: restrictedProject.id, title: "Restricted prerequisite", status: "blocked",
+    });
+    await blockIssue(db, company.id, child.id, parent.id);
+    await blockIssue(db, company.id, grandchild.id, child.id);
+    const run = await attachLowTrustRun(db, { company, agent, allowedProject, root: parent, visibleBlocker: child });
+    const path = `/api/issues/${parent.id}/dependency-investigation`;
+
+    const operator = createApp(db, boardActor(company));
+    const visible = await request(operator).get(path).expect(200);
+    expect(visible.body.dependencyPath.map(({ issueId }: { issueId: string }) => issueId)).toEqual([child.id, grandchild.id]);
+    expect(visible.body.cause.issueId).toBe(grandchild.id);
+
+    const scopedApp = createApp(db, agentActor(company, agent, run.id));
+    await request(scopedApp).get(`/api/issues/${grandchild.id}`).expect(404);
+    const scoped = await request(scopedApp).get(path).expect(200);
+    expect(scoped.body).toMatchObject({ cause: { kind: "restricted_dependency", issueId: null }, canInvestigate: false });
+    expect(scoped.body.dependencyPath.map(({ issueId }: { issueId: string }) => issueId)).toEqual([child.id]);
+    expect(JSON.stringify(scoped.body)).not.toContain(grandchild.id);
+    expect(JSON.stringify(scoped.body)).not.toContain(grandchild.title);
+
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, child.id));
+    expect((await request(operator).get(path).expect(200)).body).toBeNull();
+  });
+
   it("omits hidden blocker state from Case-B diagnosis for boundary-scoped agents", async () => {
     const company = await seedCompany(db);
     const agent = await seedAgent(db, company.id);

@@ -245,6 +245,28 @@ Saves a Retry request for the task's latest stopped run. The same `idempotencyKe
 
 Every answer includes `presentation`, the task's current interruption state.
 
+## Investigate a Stalled Dependency
+
+```http
+GET /api/issues/{issueId}/dependency-investigation
+```
+
+Reads the required dependency's state, its next owner and action, and the
+parent's wake state. The response is `null` when there is no current
+diagnosis. Dependency details follow the viewer's task access.
+
+```http
+POST /api/issues/{issueId}/dependency-investigation
+```
+
+A board member with permission to change the task can ask its current agent
+assignee to investigate. Send the `wake.idempotencyKey` from the diagnosis
+as `idempotencyKey`. Repeat the same request if the response is lost.
+
+The response includes `accepted` and `message`. Read the diagnosis again to
+see the current wake state. An accepted request leaves the dependency open.
+Approval, budget, workspace and stop controls still apply.
+
 ## Comments
 
 ### List Comments

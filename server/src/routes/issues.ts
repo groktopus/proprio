@@ -1,6 +1,7 @@
 import { assertAgentInteraction } from "../services/agent-interaction-policy.js";
 import { isAppQuestionCardKey } from "../services/mcp-elicitation.js";
 import { listStalledDependencies } from "../services/recovery/blocker-stall-wakeups.js";
+import { dependencyDiagnosisForViewer } from "./issue-dependency-diagnosis-view.js";
 import { confirmMcpAttachmentCleanup, recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "../services/public-mcp/upload-cleanup.js";
 import { notifyDeferredExecutionWork } from "../services/deferred-execution-notifications.js";
 import { notifyNativeRecoveryNotices } from "../services/native-recovery-notice-notifications.js";
@@ -130,6 +131,7 @@ import {
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   resumeWorkspaceFinalizationSchema,
   confirmNativeControllerStoppedSchema,
@@ -10094,6 +10096,45 @@ export function issueRoutes(
       actions: [...(active ? [active] : []), ...retainedHolds
         .filter(action => action.id !== active?.id).map(issueRecoveryActionReadModel)],
     });
+  });
+
+  router.get("/issues/:id/dependency-investigation", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found", issueNotFoundBody(req));
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue, { finalForAgents: true }))) return;
+    const { readParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");
+    const diagnosis = await readParentDependencyDiagnosis(db, { companyId: issue.companyId, issueId: issue.id });
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!diagnosis) {
+      res.json(null);
+      return;
+    }
+    const referencedIds = diagnosis.dependencyPath.map(({ issueId }) => issueId);
+    if (diagnosis.cause.issueId) referencedIds.push(diagnosis.cause.issueId);
+    const [readable, mayInvestigate] = await Promise.all([
+      readableIssueEdgeIds(req, issue.companyId, referencedIds),
+      diagnosis.canInvestigate && req.actor.type === "board"
+        ? decideIssueAccess(req, issue, "issue:mutate").then(({ allowed }) => allowed)
+        : false,
+    ]);
+    res.json(dependencyDiagnosisForViewer(diagnosis, readable, mayInvestigate));
+  });
+
+  router.post("/issues/:id/dependency-investigation", validate(dependencyInvestigationSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const { requestParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");
+    const actor = getActorInfo(req);
+    const receipt = await requestParentDependencyDiagnosis(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      idempotencyKey: req.body.idempotencyKey,
+      actorId: actor.actorId,
+      enqueueWakeup: heartbeat.wakeup,
+    });
+    res.status(receipt.accepted ? 202 : 200).json({ accepted: receipt.accepted, message: receipt.message });
   });
 
   router.post("/issues/:id/retry", validate(taskRetrySchema), async (req, res) => {
