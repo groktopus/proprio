@@ -74,6 +74,7 @@ type PathFacts = {
   waits: Map<string, { kind: string; action: string; actionId?: string; owner: ParentDependencyDiagnosis["nextOwner"] }>;
   agentNames: Map<string, string>;
   agents: Array<Pick<typeof agents.$inferSelect, "id" | "companyId" | "name" | "status" | "reportsTo" | "lifecycleState" | "lifecycleHolds" | "pauseReason">>;
+  revisions: Map<string, string>;
 };
 
 function stableJson(value: unknown): string {
@@ -86,6 +87,7 @@ function stableJson(value: unknown): string {
 }
 
 function keyFor(input: { parent: IssueRow; path: IssueRow[]; edges: GraphEdge[]; state: ParentDependencyDiagnosis["state"];
+  pathRevisions: Map<string, string>;
   cause: ParentDependencyDiagnosis["cause"] }) {
   const digest = createHash("sha256").update(stableJson({
     version: 1,
@@ -93,6 +95,7 @@ function keyFor(input: { parent: IssueRow; path: IssueRow[]; edges: GraphEdge[];
     assigneeAgentId: input.parent.assigneeAgentId,
     state: input.state,
     path: input.path.map((issue) => ({ id: issue.id, status: issue.status, statusVersion: issue.statusVersion })),
+    pathRevisions: input.path.map(issue => [issue.id, input.pathRevisions.get(issue.id) ?? "none"]),
     edges: input.edges.filter(edge => input.path.some(issue => issue.id === edge.blocker)
       && input.path.some(issue => issue.id === edge.parent) || edge.parent === input.parent.id && input.path.some(issue => issue.id === edge.blocker))
       .sort((a, b) => a.parent.localeCompare(b.parent) || a.blocker.localeCompare(b.blocker)),
@@ -152,6 +155,7 @@ async function readGraph(db: Db, companyId: string, parentId: string) {
   const nodes = new Map<string, IssueRow>([[parent.id, parent]]);
   const edges: GraphEdge[] = [];
   let frontier = [parent.id];
+  let truncated = false;
   for (let depth = 0; depth < MAX_DEPENDENCY_DEPTH && frontier.length && nodes.size < MAX_DEPENDENCY_NODES; depth += 1) {
     const rows = await db.select({ parent: issueRelations.relatedIssueId, blocker: issues.id,
       id: issues.id, companyId: issues.companyId, identifier: issues.identifier, title: issues.title,
@@ -168,14 +172,17 @@ async function readGraph(db: Db, companyId: string, parentId: string) {
     const next: string[] = [];
     for (const row of rows) {
       edges.push({ parent: row.parent, blocker: row.blocker });
-      if (!nodes.has(row.id) && nodes.size < MAX_DEPENDENCY_NODES) {
-        nodes.set(row.id, row as IssueRow);
-        next.push(row.id);
+      if (!nodes.has(row.id)) {
+        if (nodes.size < MAX_DEPENDENCY_NODES) {
+          nodes.set(row.id, row as IssueRow);
+          next.push(row.id);
+        } else truncated = true;
       }
     }
     frontier = next;
   }
-  return { parent, nodes, edges };
+  if (frontier.length) truncated = true;
+  return { parent, nodes, edges, truncated };
 }
 
 function dependencyPaths(parentId: string, nodes: Map<string, IssueRow>, edges: GraphEdge[]) {
@@ -192,7 +199,7 @@ function dependencyPaths(parentId: string, nodes: Map<string, IssueRow>, edges: 
     if (paths.length >= MAX_DEPENDENCY_PATHS) { truncated = true; return; }
     for (const blockerId of blockersByIssue.get(current) ?? []) {
       if (paths.length >= MAX_DEPENDENCY_PATHS) { truncated = true; return; }
-      if (path.includes(blockerId)) continue;
+      if (path.includes(blockerId)) { truncated = true; paths.push(path.map(id => nodes.get(id)!).filter(Boolean)); continue; }
       const next = [...path, blockerId];
       const blockers = blockersByIssue.get(blockerId) ?? [];
       if (!blockers.length) paths.push(next.map(id => nodes.get(id)!).filter(Boolean));
@@ -204,12 +211,12 @@ function dependencyPaths(parentId: string, nodes: Map<string, IssueRow>, edges: 
 }
 
 async function readPathFacts(db: Db, companyId: string, issueIds: string[]): Promise<PathFacts> {
-  if (!issueIds.length) return { active: new Set<string>(), waits: new Map(), agentNames: new Map(), agents: [] };
+  if (!issueIds.length) return { active: new Set<string>(), waits: new Map(), agentNames: new Map(), agents: [], revisions: new Map() };
   const [runs, wakes, actions, interactions, approvalRows, agentsRows] = await Promise.all([
-    db.select({ issueId: sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, id: heartbeatRuns.id })
+    db.select({ issueId: sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, id: heartbeatRuns.id, status: heartbeatRuns.status })
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ACTIVE_RUN_STATUSES),
         inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, issueIds))),
-    db.select({ issueId: sql<string>`${agentWakeupRequests.payload}->>'issueId'`, id: agentWakeupRequests.id })
+    db.select({ issueId: sql<string>`${agentWakeupRequests.payload}->>'issueId'`, id: agentWakeupRequests.id, status: agentWakeupRequests.status })
       .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), inArray(agentWakeupRequests.status, PENDING_WAKE_STATUSES),
         inArray(sql<string>`${agentWakeupRequests.payload}->>'issueId'`, issueIds))),
     db.select({ issueId: issueRecoveryActions.sourceIssueId, id: issueRecoveryActions.id, kind: issueRecoveryActions.kind,
@@ -245,7 +252,13 @@ async function readPathFacts(db: Db, companyId: string, issueIds: string[]): Pro
   for (const row of [...interactions, ...approvalRows]) if (!waits.has(row.issueId)) {
     waits.set(row.issueId, { kind: "human_action", action: "Respond to the open question or approval before this dependency can continue.", owner: { type: "board" } });
   }
-  return { active, waits, agentNames: new Map(agentsRows.map(row => [row.id, row.name])), agents: agentsRows };
+  const revisions = new Map<string, string[]>();
+  const addRevision = (issueId: string, revision: string) => revisions.set(issueId, [...(revisions.get(issueId) ?? []), revision]);
+  for (const run of runs) addRevision(run.issueId, `run:${run.id}:${run.status}`);
+  for (const wake of wakes) addRevision(wake.issueId, `wake:${wake.id}:${wake.status}`);
+  for (const action of actions) addRevision(action.issueId, `action:${action.id}:${action.status}:${action.cause}`);
+  return { active, waits, agentNames: new Map(agentsRows.map(row => [row.id, row.name])), agents: agentsRows,
+    revisions: new Map([...revisions].map(([id, values]) => [id, values.sort().join("|")])) };
 }
 
 function classifyPath(path: IssueRow[], facts: Awaited<ReturnType<typeof readPathFacts>>, parent: IssueRow, now: Date,
@@ -345,7 +358,7 @@ async function readWakeReceipt(db: Db, companyId: string, idempotencyKey: string
 export async function readParentDependencyDiagnosis(db: Db, input: { companyId: string; issueId: string; now?: Date }): Promise<ParentDependencyDiagnosis | null> {
   const graph = await readGraph(db, input.companyId, input.issueId);
   if (!graph) return null;
-  const { paths, truncated } = dependencyPaths(graph.parent.id, graph.nodes, graph.edges);
+  const { paths, truncated: pathLimitReached } = dependencyPaths(graph.parent.id, graph.nodes, graph.edges);
   if (!paths.length) return null;
   const ids = [...new Set(paths.flat().map(row => row.id))];
   const facts = await readPathFacts(db, input.companyId, [...ids, graph.parent.id]);
@@ -360,6 +373,7 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
     blockersByIssue.set(edge.parent, list);
   }
   const classified = paths.map(path => classifyPath(path, facts, graph.parent, now, blockersByIssue)).filter(Boolean) as NonNullable<ReturnType<typeof classifyPath>>[];
+  const truncated = graph.truncated || pathLimitReached;
   const result = truncated
     ? { state: "external_wait" as const, path: paths[0]!, cause: { kind: "dependency_graph_bound", issueId: null },
       nextOwner: { type: "board" as const }, nextAction: "The required dependency graph exceeds the automatic diagnosis bound. Review the dependency chain and choose the next action." }
@@ -367,7 +381,8 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
       ?? classified.find(row => row.state === "external_wait")
       ?? classified[0];
   if (!result) return null;
-  const key = keyFor({ parent: graph.parent, path: result.path, edges: graph.edges, state: result.state, cause: result.cause });
+  const key = keyFor({ parent: graph.parent, path: result.path, edges: graph.edges, state: result.state,
+    cause: result.cause, pathRevisions: facts.revisions });
   const [wake, claim] = await Promise.all([
     readWakeReceipt(db, input.companyId, key), readDiagnosisClaim(db, input.companyId, graph.parent.id, key),
   ]);
@@ -375,7 +390,8 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
     ? claim.details.outcome === "refused" ? "refused"
       : claim.details.outcome === "deferred" ? "deferred"
         : claim.details.outcome === "exhausted" ? "exhausted"
-          : claim.details.outcome === "queued" ? "queued" : "queued"
+          : claim.details.outcome === "queued" ? "queued"
+            : claim.details.outcome === "pending" ? "deferred" : "queued"
     : "not_requested";
   const gate = result.state === "no_execution_path" ? await parentGate(db, input.companyId, graph.parent, facts, now) : null;
   const wakeGateAction = wakeStatus === "refused" || wakeStatus === "exhausted"
@@ -389,7 +405,7 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
     nextOwner: gate?.owner ?? result.nextOwner,
     nextAction: gate?.action ?? wakeGateAction ?? result.nextAction,
     wake: { idempotencyKey: key, status: wakeStatus, ...(wake ? { wakeupRequestId: wake.id } : {}) },
-    canInvestigate: result.state === "no_execution_path" && !gate,
+    canInvestigate: result.state === "no_execution_path" && !gate && wakeStatus === "not_requested",
   };
 }
 
@@ -484,31 +500,41 @@ export async function requestParentDependencyDiagnosis(db: Db, input: {
       { outcome: "refused", nextAttemptAt: new Date(Date.now() + 10 * 60_000).toISOString(), message: "The current execution gates refused the wake." });
     return { accepted: false, message: "The diagnostic continuation was refused by the current execution gates.", auditEvent: claim.event };
   }
+  const persistedWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
+  if (persistedWake) {
+    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
+    return { accepted: !["refused", "exhausted"].includes(mapWakeStatus(persistedWake)),
+      message: "The diagnostic continuation is already recorded.", auditEvent: claim.event };
+  }
   await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
   return { accepted: true, message: "The assignee was asked to investigate the dependency.", auditEvent: claim.event };
 }
 
 export async function reconcileParentDependencyDiagnosis(db: Db, input: {
   companyId: string; issueId: string; enqueueWakeup: EnqueueWakeup; now?: Date;
-}): Promise<{ accepted: boolean; message: string; diagnosis: ParentDependencyDiagnosis | null }> {
+}): Promise<{ accepted: boolean; message: string; diagnosis: ParentDependencyDiagnosis | null; retryAt: Date | null }> {
   const diagnosis = await readParentDependencyDiagnosis(db, input);
-  if (!diagnosis || diagnosis.state !== "no_execution_path" || !diagnosis.canInvestigate) {
-    return { accepted: false, message: "No automatic dependency diagnosis is due.", diagnosis };
+  const pendingClaim = diagnosis?.state === "no_execution_path"
+    ? await readDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey) : null;
+  const pendingDue = pendingClaim?.details.outcome === "pending"
+    && (!pendingClaim.details.nextAttemptAt || Date.parse(String(pendingClaim.details.nextAttemptAt)) <= (input.now ?? new Date()).getTime());
+  if (!diagnosis || diagnosis.state !== "no_execution_path" || (!diagnosis.canInvestigate && !pendingDue)) {
+    return { accepted: false, message: "No automatic dependency diagnosis is due.", diagnosis, retryAt: null };
   }
   const parent = await readIssue(db, input.companyId, input.issueId);
-  if (!parent?.assigneeAgentId) return { accepted: false, message: "The parent assignee is unavailable.", diagnosis };
+  if (!parent?.assigneeAgentId) return { accepted: false, message: "The parent assignee is unavailable.", diagnosis, retryAt: null };
   const [latestRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.companyId, input.companyId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${input.issueId}`))
     .orderBy(desc(heartbeatRuns.createdAt)).limit(1);
   const heldUntil = await automaticRunCreationHeldUntil(db, input.companyId, { issueId: input.issueId, sourceRunId: latestRun?.id ?? null });
-  if (heldUntil && heldUntil.getTime() > (input.now ?? new Date()).getTime()) return { accepted: false, message: "Parent execution is held.", diagnosis };
+  if (heldUntil && heldUntil.getTime() > (input.now ?? new Date()).getTime()) return { accepted: false, message: "Parent execution is held.", diagnosis, retryAt: heldUntil };
   const treeControl = issueTreeControlService(db);
-  if ((await treeControl.listActivePauseHeldIssueIds(input.companyId, [input.issueId])).has(input.issueId)) return { accepted: false, message: "Parent execution is paused.", diagnosis };
+  if ((await treeControl.listActivePauseHeldIssueIds(input.companyId, [input.issueId])).has(input.issueId)) return { accepted: false, message: "Parent execution is paused.", diagnosis, retryAt: null };
   const claim = await claimDiagnosis(db, { companyId: input.companyId, issueId: input.issueId, diagnosis,
     assigneeAgentId: parent.assigneeAgentId, source: "automatic", actorId: null });
-  if (!claim.claimed) return { accepted: false, message: "The parent assignment changed.", diagnosis };
+  if (!claim.claimed) return { accepted: false, message: "The parent assignment changed.", diagnosis, retryAt: null };
   const existingWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (existingWake) return { accepted: true, message: "Diagnostic wake already recorded.", diagnosis };
+  if (existingWake) return { accepted: true, message: "Diagnostic wake already recorded.", diagnosis, retryAt: null };
   crashPoint("issue.dependency_diagnosis.after_claim_before_wake");
   let wake: unknown | null;
   try { wake = await input.enqueueWakeup(parent.assigneeAgentId, {
@@ -524,11 +550,17 @@ export async function reconcileParentDependencyDiagnosis(db: Db, input: {
   }); } catch {
     await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey,
       { outcome: "deferred", nextAttemptAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake admission did not settle; it will be retried." });
-    return { accepted: false, message: "Wake admission did not settle. The request will be retried.", diagnosis };
+    return { accepted: false, message: "Wake admission did not settle. The request will be retried.", diagnosis, retryAt: new Date(Date.now() + 60_000) };
+  }
+  const persistedWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
+  if (persistedWake) {
+    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
+    return { accepted: true, message: "Diagnostic wake already recorded.", diagnosis, retryAt: null };
   }
   await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, wake ? { outcome: "queued" }
     : { outcome: "refused", nextAttemptAt: new Date(Date.now() + 10 * 60_000).toISOString(), message: "The current execution gates refused the wake." });
-  return { accepted: Boolean(wake), message: wake ? "Diagnostic wake queued." : "Diagnostic wake was refused by execution admission.", diagnosis };
+  return { accepted: Boolean(wake), message: wake ? "Diagnostic wake queued." : "Diagnostic wake was refused by execution admission.", diagnosis,
+    retryAt: wake ? null : new Date(Date.now() + 10 * 60_000) };
 }
 
 export async function verifyParentDependencyDiagnosisWake(db: Db, input: {
