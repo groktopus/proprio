@@ -743,9 +743,13 @@ export async function readInstanceAdmin(db: Db | DbTransaction, userId: string):
     .then((rows) => rows.length > 0);
 }
 
-export async function issueReadSqlCondition(db: Db | DbTransaction, actor: AuthorizationActor): Promise<SQL<boolean>> {
+export async function issueReadSqlCondition(
+  db: Db | DbTransaction,
+  actor: AuthorizationActor,
+  { enforcePrivacy = false }: { enforcePrivacy?: boolean } = {},
+): Promise<SQL<boolean>> {
   const personal = dashboardConversationCondition(actor);
-  if (actor.authorizingUserId) return sql<boolean>`(${personal} and ${issuePrivacyCondition(actor)})`;
+  if (enforcePrivacy || actor.authorizingUserId) return sql<boolean>`(${personal} and ${issuePrivacyCondition(actor)})`;
   if (issuePrivacyMode() !== "enforce") return personal;
   if (actor.source === "local_implicit" || actor.isInstanceAdmin) return personal;
   if (actor.type === "board" && !actor.ignoreInstanceAdmin && actor.source !== "cloud_tenant"

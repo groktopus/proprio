@@ -7,13 +7,14 @@ import { activityService, normalizeActivityLimit } from "../services/activity.js
 import { assertAuthenticated, assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { accessService, heartbeatService, issueService } from "../services/index.js";
 import { sanitizeRecord } from "../redaction.js";
-import { badRequest, forbidden } from "../errors.js";
+import { badRequest, conflict, forbidden } from "../errors.js";
 import { agentActionAuditService } from "../services/agent-action-audit.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueContextUsage } from "../services/issue-context-usage.js";
 import { contextCompactionService } from "../services/context-compaction.js";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
 import { issueReadSqlCondition } from "../services/authorization.js";
+import { createManagedAuditExport, readManagedAuditExportPage } from "../services/managed-audit-export.js";
 import { caseActivityReadSqlCondition } from "../services/case-activity-access.js";
 
 /** Max rows a single CSV export will stream (guards against runaway exports). */
@@ -143,6 +144,17 @@ export function activityRoutes(db: Db) {
     assertCompanyAccess(req, companyId);
     if (await hasAgentAuditPermission(req, companyId)) return;
     throw forbidden("Missing permission: audit:view_agent_actions");
+  }
+
+  async function managedAuditScope(req: import("express").Request, companyId: string) {
+    await assertAgentAuditPermission(req, companyId);
+    if (req.actor.source === "local_implicit" || !req.actor.userId) {
+      throw forbidden("Managed audit exports require authenticated board access");
+    }
+    const epoch = z.guid().safeParse(process.env.PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH);
+    const captureFrom = z.iso.datetime({ offset: true }).safeParse(process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM);
+    if (!epoch.success || !captureFrom.success) throw forbidden("Managed audit export is unavailable");
+    return { companyId, userId: req.actor.userId, sourceEpoch: epoch.data, actor: req.actor, captureFrom: new Date(captureFrom.data) };
   }
 
   function hasAttributionFilters(query: z.infer<typeof agentActionAuditQuerySchema>) {
@@ -285,6 +297,35 @@ export function activityRoutes(db: Db) {
       ...(canViewAttribution ? result : stripAuditAttribution(result)),
       accessTier: canViewAttribution ? "full" : "basic",
     });
+  });
+
+  router.post("/companies/:companyId/audit/managed-exports", async (req, res) => {
+    const companyId = z.guid().safeParse(req.params.companyId);
+    if (!companyId.success) throw badRequest("Company ID must be a UUID");
+    const scope = await managedAuditScope(req, companyId.data);
+    const window = z.object({
+      from: z.iso.datetime({ offset: true }),
+      to: z.iso.datetime({ offset: true }),
+    }).safeParse(req.body);
+    if (!window.success) throw badRequest("An audit export requires from and to timestamps", window.error.issues);
+    const from = new Date(window.data.from);
+    const to = new Date(window.data.to);
+    if (from >= to || to > new Date()) throw badRequest("Invalid managed audit export window");
+    if (from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
+    res.set("Cache-Control", "no-store");
+    res.status(201).json(await createManagedAuditExport(db, scope, { from, to }));
+  });
+
+  router.get("/companies/:companyId/audit/managed-exports/:exportId", async (req, res) => {
+    const params = z.object({ companyId: z.guid(), exportId: z.guid() }).safeParse(req.params);
+    if (!params.success) throw badRequest("Company and export IDs must be UUIDs");
+    const scope = await managedAuditScope(req, params.data.companyId);
+    const query = z.object({ cursor: z.string().max(75).optional() }).safeParse(req.query);
+    if (!query.success) throw badRequest("Invalid managed audit export cursor");
+    res.set("Cache-Control", "no-store");
+    res.json(await readManagedAuditExportPage(db, scope, params.data.exportId, query.data.cursor));
   });
 
   router.get("/companies/:companyId/audit/agent-actions.csv", async (req, res) => {

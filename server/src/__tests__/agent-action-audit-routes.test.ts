@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -17,6 +17,7 @@ import {
   issueComments,
   issueDocuments,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -35,7 +36,7 @@ async function createApp(db: Db, actor: Express.Request["actor"]) {
   });
   app.use("/api", activityRoutes(db));
   app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(error.status ?? 500).json({ error: error.message ?? "Internal server error" });
+    res.status(error.status ?? 500).json({ error: error.message ?? "Internal server error", ...(error.details ? { details: error.details } : {}) });
   });
   return app;
 }
@@ -120,6 +121,84 @@ describePostgres("agent action audit routes", () => {
     ]);
     return { company, agent, otherAgent, issue, comment, issueDocument, run };
   }
+
+  it("exports a frozen managed audit window beyond the CSV cap and detects lost evidence", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const anon = request(await createApp(db, { type: "none", source: "none" }));
+    const epoch = randomUUID();
+    const at = new Date("2026-07-17T00:00:01.000Z");
+    const baseEvent = {
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
+      decision: "allow", status: "authorized",
+    };
+    const eventRows = Array.from({ length: 10_037 }, () => ({ ...baseEvent, id: randomUUID(), invocationId: randomUUID() }));
+    for (let index = 0; index < eventRows.length; index += 1_000) {
+      await db.insert(managedAuditEvents).values(eventRows.slice(index, index + 1_000));
+    }
+    const [privateTask] = await db.insert(issues).values({
+      companyId: company.id, title: "Private export fixture", visibility: "private", responsibleUserId: randomUUID(),
+    }).returning();
+    const [privateRun] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, issueId: privateTask.id, status: "succeeded",
+    }).returning();
+    const [otherCompany] = await db.insert(companies).values({ name: "Other company", issuePrefix: "AUDITX" }).returning();
+    await db.insert(managedAuditEvents).values([
+      { ...baseEvent, taskId: privateTask.id, invocationId: randomUUID() },
+      { ...baseEvent, runId: privateRun.id, invocationId: randomUUID() },
+      { ...baseEvent, companyId: otherCompany.id, invocationId: randomUUID() },
+    ]);
+
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    try {
+      expect((await anon.post(path).send(window)).status).toBe(403);
+      expect((await board.post(path).send({ ...window, from: "2026-07-16T00:00:00Z" })).body)
+        .toMatchObject({ details: { reasonCode: "unsupported_interval" } });
+      const receipt = await board.post(path).send(window);
+      expect(receipt.status, receipt.text).toBe(201);
+      expect(receipt.body).toMatchObject({ eventCount: eventRows.length, sourceEpoch: epoch });
+      const exportPath = `${path}/${receipt.body.exportId}`;
+      await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
+      const first = await board.get(exportPath);
+      expect(first.status, first.text).toBe(200);
+      expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
+      expect((await board.get(exportPath)).body).toEqual(first.body);
+      expect((await board.get(exportPath).query({ cursor: "10036." + "a".repeat(64) })).status).toBe(409);
+
+      const archived = first.body.events.map((event: { id: string }) => event.id);
+      let page = first.body;
+      while (page.nextCursor) {
+        const resumed = await board.get(exportPath).query({ cursor: page.nextCursor });
+        expect(resumed.status, resumed.text).toBe(200);
+        page = resumed.body;
+        archived.push(...page.events.map((event: { id: string }) => event.id));
+      }
+      const expectedIds = eventRows.map(event => event.id).sort();
+      expect(archived).toEqual(expectedIds);
+      expect(page).toMatchObject({ complete: true, deliveredThrough: expectedIds.length });
+      expect(createHash("sha256").update(JSON.stringify(archived)).digest("hex")).toBe(receipt.body.watermark);
+
+      await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, expectedIds[0]));
+      expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+      expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
+      await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
+      expect((await board.get(exportPath)).status).toBe(403);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 45_000);
 
   async function seedActorOnlyRows(companyId: string) {
     return db.insert(activityLog).values([

@@ -6460,6 +6460,30 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/audit/managed-exports",
+  tags: ["activity"],
+  summary: "Create a minimized managed audit export snapshot",
+  request: {
+    params: z.object({ companyId: z.string().guid() }),
+    body: jsonBody(z.object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) })),
+  },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
+  tags: ["activity"],
+  summary: "Read a managed audit export page",
+  request: {
+    params: z.object({ companyId: z.string().guid(), exportId: z.string().guid() }),
+    query: z.object({ cursor: z.string().max(75).optional() }),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/audit/agent-actions.csv",
   tags: ["activity"],
