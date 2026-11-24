@@ -32,8 +32,12 @@ const meta = {
       [
         {
           path: "/api/companies/company-storybook/issues",
-          read: () =>
-            parameters.fixtureState === "empty" ? [] : storybookIssues,
+          read: () => {
+            if (parameters.recoveryFixture && sessionStorage.getItem("storybook.inbox-fixture-recovered") !== "true") {
+              return Response.json({ error: "Fixture read unavailable" }, { status: 500 });
+            }
+            return parameters.fixtureState === "empty" ? [] : storybookIssues;
+          },
         },
         {
           path: /^\/api\/companies\/company-storybook\/(approvals|join-requests|heartbeat-runs)$/,
@@ -70,6 +74,10 @@ export const Empty: Story = {
 };
 export const Loading: Story = { parameters: { fixtureState: "loading" } };
 export const Failed: Story = { parameters: { fixtureState: "failure" } };
+export const Recoverable: Story = {
+  args: { tab: "unread" },
+  parameters: { recoveryFixture: true },
+};
 export const PermissionDenied: Story = {
   parameters: { fixtureState: "permission" },
 };
