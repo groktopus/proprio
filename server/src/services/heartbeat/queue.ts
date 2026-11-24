@@ -1187,6 +1187,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       {
         issueId: readNonEmptyString(context.issueId),
         projectId: readNonEmptyString(context.projectId),
+        runId: run.id,
       },
     );
     if (budgetBlock) {
@@ -1226,7 +1227,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         // No open incident: a resume may have just closed it and raised the
         // budget. Read the block again; resumed work stays queued.
         const current = await budgets.getInvocationBlock(run.companyId, run.agentId, {
-          issueId: readNonEmptyString(context.issueId), projectId: readNonEmptyString(context.projectId) });
+          issueId: readNonEmptyString(context.issueId), projectId: readNonEmptyString(context.projectId), runId: run.id });
         if (!current) return null;
         if (!run.startedAt && !(await isBoardOwnedBudgetBlock(db, run.companyId, current))) return null;
         await cancelRunInternal(run.id, current.reason);

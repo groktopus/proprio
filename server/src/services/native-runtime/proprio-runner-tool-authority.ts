@@ -1427,9 +1427,9 @@ export class ProprioRunnerToolAuthority {
       const decision = await authorizationService(this.db).decide({ actor: this.#privacyActor(current.run), action: "issue:mutate",
         resource: { type: "issue", companyId: this.binding.companyId, issueId: current.issue.id } });
       if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
-      // #boundContext checks company and agent budgets; spending also needs the task's project.
-      if (current.issue.projectId && await budgetServiceInTransaction(this.db).getInvocationBlock(this.binding.companyId, this.binding.agentId,
-        { issueId: current.issue.id, projectId: current.issue.projectId })) throw forbidden("Company or budget authority unavailable");
+      // #boundContext checks company and agent budgets; this gate also covers project and task-tree scopes.
+      if (await budgetServiceInTransaction(this.db).getInvocationBlock(this.binding.companyId, this.binding.agentId,
+        { issueId: current.issue.id, projectId: current.issue.projectId, runId: current.run.id })) throw forbidden("Company or budget authority unavailable");
       await assertNoCaseHandoffMutation(this.db, this.binding.runId, this.binding.issueId);
       return current;
     };

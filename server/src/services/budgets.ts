@@ -49,6 +49,7 @@ import { listPendingBudgetCancellationScopes } from "./heartbeat/budget-cancella
 import { withBudgetSpan } from "./budget-tracing.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
 import { resolvableApprovalStatuses } from "../lib/approval-records.js";
+import { loadAncestorIssueIds } from "./task-workspace-lineage.js";
 export { computeObservedSpend, computeObservedSpends } from "./budget-exposure.js";
 export type { BudgetExposure } from "./budget-exposure.js";
 
@@ -237,9 +238,35 @@ type AdmissionContext = { issueId?: string | null; projectId?: string | null; ru
    * refuse it. Hard stops and pauses still apply. */
   admittedRecovery?: boolean };
 
+function persistedTaskLineagePath(value: unknown): string[] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const pathIssueIds = (value as { pathIssueIds?: unknown }).pathIssueIds;
+  return Array.isArray(pathIssueIds) && pathIssueIds.length > 0 && pathIssueIds.every(id => typeof id === "string")
+    ? pathIssueIds
+    : null;
+}
+
+async function admissionTaskLineageIssueIds(db: Db, companyId: string, context?: AdmissionContext) {
+  if (context?.taskLineageIssueIds?.length) return context.taskLineageIssueIds;
+  let issueId = context?.issueId ?? null;
+  if (context?.runId) {
+    const [run] = await db.select({ issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId,
+      taskLineageJson: heartbeatRuns.taskLineageJson })
+      .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, context.runId))).limit(1);
+    const persistedPath = persistedTaskLineagePath(run?.taskLineageJson);
+    if (persistedPath) return persistedPath;
+    issueId = run?.issueId ?? run?.nativeIssueId ?? issueId;
+  }
+  if (!issueId) return [];
+  const [task] = await db.select({ id: issues.id, parentId: issues.parentId }).from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))).limit(1);
+  return task ? [task.id, ...await loadAncestorIssueIds(db, companyId, task.parentId)] : [];
+}
+
 async function readAdmissionScopes(db: Db, companyId: string, agentId: string | null, context?: AdmissionContext) {
+  const taskLineageIssueIds = await admissionTaskLineageIssueIds(db, companyId, context);
   const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
-    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null, context?.taskLineageIssueIds)));
+    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null, taskLineageIssueIds)));
   const taskTreeScopeIds = [...new Set(policies.filter(policy => policy.scopeType === "task_tree").map(policy => policy.scopeId))];
   const scopes: Array<{ scopeType: InternalBudgetScopeType; scopeId: string }> = [
     { scopeType: "company", scopeId: companyId }, ...(agentId ? [{ scopeType: "agent" as const, scopeId: agentId }] : []),

@@ -1668,6 +1668,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         ? await budgets.getInvocationBlock(issue.companyId, agent.id, {
             issueId: issue.id,
             projectId: issue.projectId,
+            runId: run.id,
           })
         : null;
 
@@ -2034,6 +2035,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         ? budgets.getInvocationBlock(issue.companyId, run.agentId, {
             issueId: issue.id,
             projectId: issue.projectId,
+            runId: run.id,
           })
         : Promise.resolve(null),
       issue

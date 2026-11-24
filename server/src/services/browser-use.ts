@@ -271,7 +271,7 @@ export function browserUseService(
     const blocked = await budgets.getInvocationBlock(
       binding.companyId,
       binding.agentId,
-      { issueId: issue.id, projectId: issue.projectId },
+      { issueId: issue.id, projectId: issue.projectId, runId: run.id },
     );
     if (blocked) throw forbidden(blocked.reason);
     return issue;
