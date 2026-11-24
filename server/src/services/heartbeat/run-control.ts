@@ -1194,12 +1194,23 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           ),
         )
         .then((rows) => rows.map((row) => row.id));
-    } else {
+    } else if (scope.scopeType === "project") {
       wakeupIds = await listProjectScopedWakeupIds(
         scope.companyId,
         scope.scopeId,
         tx,
       );
+    } else {
+      wakeupIds = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, scope.companyId),
+        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+        sql`${agentWakeupRequests.runId} is null`,
+        sql`${agentWakeupRequests.payload}->>'issueId' in (with recursive task_tree(id) as (
+          select id from ${issues} where id = ${scope.scopeId}::uuid and company_id = ${scope.companyId}::uuid
+          union all select child.id from ${issues} child join task_tree parent on child.parent_id = parent.id
+            where child.company_id = ${scope.companyId}::uuid)
+          select id::text from task_tree)`,
+      )).then(rows => rows.map(row => row.id));
     }
 
     if (wakeupIds.length === 0) return 0;
@@ -1902,6 +1913,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       inArray(browserUseSessions.status, ["starting", "running", "idle", "stopping"]),
       scope.scopeType === "agent" ? eq(browserUseSessions.agentId, scope.scopeId) : undefined,
       scope.scopeType === "project" ? sql`${project} = ${scope.scopeId}` : undefined,
+      scope.scopeType === "task_tree" ? sql`exists (select 1 from ${browserUseRuns} br
+        join ${heartbeatRuns} parent_run on parent_run.id = br.heartbeat_run_id
+        where br.company_id = ${scope.companyId} and br.session_id = ${browserUseSessions.id}
+          and parent_run.task_lineage_json->'pathIssueIds' @> ${JSON.stringify([scope.scopeId])}::jsonb)` : undefined,
       scope.createdBefore ? lt(browserUseSessions.createdAt, scope.createdBefore) : undefined,
     )).for("update");
     if (!sessions.length) return;
@@ -1924,6 +1939,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         : await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
           eq(heartbeatRuns.companyId, scope.companyId),
           scope.scopeType === "agent" ? eq(heartbeatRuns.agentId, scope.scopeId) : undefined,
+          scope.scopeType === "task_tree" ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([scope.scopeId])}::jsonb` : undefined,
           scope.createdBefore ? lt(heartbeatRuns.createdAt, scope.createdBefore) : undefined,
           inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
         )).then((rows) => rows.map((row) => row.id));

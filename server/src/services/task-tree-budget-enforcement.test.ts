@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { reserveRunBudget } from "./budget-reservations.js";
 import { computeObservedSpend } from "./budget-exposure.js";
+import { budgetService, flushBudgetEvaluationWork } from "./budgets.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 
@@ -97,5 +98,25 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     await reserveRunBudget(db, f.companyId, nextRun.id, null);
     const [next] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRun.id));
     expect(next!.taskLineageJson).toEqual({ version: 1, issueId: task.id, pathIssueIds: [task.id, newRoot.id] });
+  });
+
+  it("reevaluates the matching historical tree after queued cost changes", async () => {
+    const f = await fixture();
+    const agent = await f.makeAgent("Worker");
+    const root = await f.makeIssue("Shared outcome"), task = await f.makeIssue("Build", root.id);
+    const run = await f.makeRun(agent.id, task.id, "running");
+    const policy = await f.makePolicy(root.id, { amount: 50, reservationCents: "0" });
+    await reserveRunBudget(db, f.companyId, run.id, null);
+    await db.insert(costEvents).values({ companyId: f.companyId, agentId: agent.id, issueId: task.id,
+      heartbeatRunId: run.id, provider: "test", biller: "test", billingType: "metered_api", costStatus: "priced",
+      model: "test-model", costCents: 60, occurredAt: new Date() });
+
+    await budgetService(db).evaluateAffectedScopes(f.companyId, agent.id, null);
+    await flushBudgetEvaluationWork(db, { companyId: f.companyId });
+
+    const [updatedPolicy] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id));
+    const [company] = await db.select().from(companies).where(eq(companies.id, f.companyId));
+    expect(updatedPolicy!.enforcementVersion).toBeGreaterThan(0);
+    expect(company!.status).toBe("active");
   });
 });

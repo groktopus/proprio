@@ -68,7 +68,7 @@ const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, $
  * still being delivered.
  */
 export async function markBudgetCancelledWorkForResume(db: Db, input: {
-  companyId: string; scopeType: "company" | "agent" | "project"; scopeId: string;
+  companyId: string; scopeType: "company" | "agent" | "project" | "task_tree"; scopeId: string;
   incidentId: string; incidentOpenedAt: Date; actorUserId: string; actorSource?: string | null;
 }): Promise<string[]> {
   return db.transaction(async tx => {
@@ -123,6 +123,9 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
       eq(heartbeatRuns.companyId, input.companyId),
       sql`not ${stoppedByPerson}`,
       sql`${runIssueId} is not null`,
+      input.scopeType === "task_tree"
+        ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`
+        : undefined,
     );
     const stoppedSinceIncident = and(stoppedByThisScope,
       sql`coalesce((${heartbeatRuns.resultJson}->'startupCancellation'->>'requestedAt')::timestamptz,

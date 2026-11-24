@@ -114,6 +114,38 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     expect(await continuations(scope.company.id)).toHaveLength(2);
   });
 
+  it("resumes only runs carrying the stopped task tree's historical lineage", async () => {
+    const [company] = await db.insert(companies).values({ name: "Tree resume",
+      issuePrefix: `B${randomUUID().slice(0, 4).toUpperCase()}` }).returning();
+    const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Worker" }).returning();
+    const [root, child, unrelated] = await db.insert(issues).values([
+      { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null },
+      { companyId: company.id, title: "Unrelated" },
+    ]).returning();
+    const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
+      scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true }).returning();
+    const [incident] = await db.insert(budgetIncidents).values({ companyId: company.id, policyId: policy.id,
+      scopeType: "task_tree", scopeId: root.id, metric: "billed_cents", windowKind: "lifetime",
+      windowStart: new Date(0), windowEnd: new Date("9999-01-01T00:00:00Z"), thresholdType: "hard",
+      amountLimit: 1, amountObserved: 1, createdAt: new Date(Date.now() - 60_000) }).returning();
+    const [inside, outside] = await db.insert(heartbeatRuns).values([
+      { companyId: company.id, agentId: agent.id, issueId: child.id, status: "cancelled", runtimeMode: "legacy",
+        taskLineageJson: { version: 1, issueId: child.id, pathIssueIds: [child.id, root.id] },
+        resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
+          companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
+      { companyId: company.id, agentId: agent.id, issueId: unrelated.id, status: "cancelled", runtimeMode: "legacy",
+        taskLineageJson: { version: 1, issueId: unrelated.id, pathIssueIds: [unrelated.id] },
+        resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
+          companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
+    ]).returning();
+    await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
+
+    const claimed = await markBudgetCancelledWorkForResume(db, { companyId: company.id, scopeType: "task_tree",
+      scopeId: root.id, incidentId: incident.id, incidentOpenedAt: incident.createdAt, actorUserId: "local-board" });
+    expect(claimed).toEqual([inside.id]);
+    expect(await claimOf(outside.id)).toBeUndefined();
+  });
+
   it("continues a run whose stop was still being delivered when the board resumed", async () => {
     const scope = await seedScope("in-flight");
     const task = await seedTask(scope, { runStatus: "running" });
