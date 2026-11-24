@@ -1,7 +1,6 @@
 # Managed audit delivery contract
 
-**Status:** proposed for #206; not implemented or release-qualified. This
-contract defines one managed tool-call path, not a complete company audit feed.
+**Status:** proposal for #206. Qualification covers one managed tool-call path.
 
 ## First covered path
 
@@ -74,8 +73,10 @@ only with a separately reviewed transaction/lock protocol.
 The API requires company access and an explicit audit-delivery permission.
 Private-task and issue visibility predicates apply before materialization and
 before counts/digests are computed. A snapshot is bound to its creator and
-company; authorization is rechecked on every page, and revoked access fails
-closed. Cursor paging cannot reveal hidden row counts or positions.
+company. On every page, recheck the export permission and visibility of the
+events being returned. If a member of the frozen set loses eligibility,
+invalidate the export and require a new snapshot. Cursor paging cannot reveal
+hidden row counts or positions.
 
 The existing `/companies/:companyId/audit/agent-actions` endpoint is not this
 contract: its cursor pages a live newest-first projection, it has no export ID
@@ -117,15 +118,13 @@ the product database restore/deletion boundary.
 
 A serialized append-only outbox with a per-company sequence could prove
 continuity only if every producer writes the event with its authoritative state
-in one transaction. Taking a company counter lock before existing domain locks
-can invert lock order; taking it later can allow commit-order gaps. The bounded
-snapshot design instead adds no producer lock: it freezes event membership,
-count, and digest at one database snapshot, and a full subsequent scan finds
-late-committing events by ID. Append-only retention and transactional capture
+in one transaction. Such a counter needs a consistent lock order across all
+producers and a lock held through commit to preserve sequence order. The bounded
+snapshot design freezes event membership, count, and digest without adding a
+producer lock. A subsequent scan finds late-committing events by ID. Append-only retention and transactional capture
 are required for that claim. A digest proves which set was exported; it does not
-prove that an unsupported producer emitted an event. General formal approvals outside the gateway path and
-`decisionInvocations` therefore remain explicit gaps until their producers are
-adapted and qualified.
+prove that an unsupported producer emitted an event. General formal approvals
+outside the gateway path and `decisionInvocations` remain explicit coverage gaps.
 
 If the source set cannot remain append-only until collection, or if
 transactional capture cannot be established at the covered gateway boundaries,
