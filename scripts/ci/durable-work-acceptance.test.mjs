@@ -13,6 +13,11 @@ test("routes changes that affect update, restore, or run recovery", () => {
     "scripts/build-npm.sh",
     "scripts/e2e-update-migrations.sh",
     "scripts/ci/managed-update-command.mjs",
+    "scripts/ci/durable-work-release-evidence.mjs",
+    "scripts/ci/durable-work-release-evidence.test.mjs",
+    "scripts/ci/write-durable-work-acceptance.mjs",
+    "scripts/ci/write-durable-work-acceptance.test.mjs",
+    "scripts/ci/browser-task-readback.mjs",
     "scripts/prepare-bundled-package.mjs",
     "packages/db/src/backup-lib.ts",
     "packages/db/src/migrate.ts",
@@ -25,6 +30,8 @@ test("routes changes that affect update, restore, or run recovery", () => {
     "server/src/services/runner-goals.ts",
     "packages/proprio-runner/runner/crates/runner-core/src/lib.rs",
     ".github/workflows/linux-source-qualification.yml",
+    "scripts/ci/durable-work-release-evidence.mjs",
+    "scripts/ci/durable-work-release-evidence.test.mjs",
   ]) {
     assert.equal(requiresDurableWorkAcceptance(["doc/GOAL.md", path]), true, path);
   }

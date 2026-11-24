@@ -25,6 +25,9 @@
 #   E2E_BOOTSTRAP_NODE_LOADER optional Node loader for a workspace source entry point
 #   E2E_SERVICE_TIMEOUT_SECS  service active/health wait (default 300)
 #   E2E_UPDATE_REQUIRE_PROBE  0 for an exact-commit lifecycle check without a probe migration
+#   E2E_UPDATE_REQUIRE_ACTIVE_RUN  1 to keep issue work active across update and require durable recovery
+#   E2E_UPDATE_BROWSER_READBACK  1 to reload the same recovered task in Chromium
+#   E2E_UPDATE_BROWSER_REPORT  optional output path for the browser readback report
 #   E2E_UPDATE_USE_BOOTSTRAP_CLI  1 to run update commands with the exact tested CLI source
 #   E2E_UPDATE_NEXT_REPO      GitHub repository containing NEXT (default: E2E_REPO)
 #   E2E_UPDATE_STEP_SUMMARY   optional path to GitHub Actions step summary
@@ -35,10 +38,32 @@ BASE_REF="${E2E_UPDATE_BASE_REF:?E2E_UPDATE_BASE_REF is required}"
 NEXT_REF="${E2E_UPDATE_NEXT_REF:?E2E_UPDATE_NEXT_REF is required}"
 E2E_SERVICE_TIMEOUT_SECS="${E2E_SERVICE_TIMEOUT_SECS:-300}"
 probe="${E2E_UPDATE_REQUIRE_PROBE:-1}"
+active_run_required="${E2E_UPDATE_REQUIRE_ACTIVE_RUN:-0}"
+browser_readback="${E2E_UPDATE_BROWSER_READBACK:-0}"
 use_bootstrap_cli="${E2E_UPDATE_USE_BOOTSTRAP_CLI:-0}"
 NEXT_REPO="${E2E_UPDATE_NEXT_REPO:-$E2E_REPO}"
 if [[ "$probe" != 0 && "$probe" != 1 ]]; then
   echo "E2E_UPDATE_REQUIRE_PROBE must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$active_run_required" != 0 && "$active_run_required" != 1 ]]; then
+  echo "E2E_UPDATE_REQUIRE_ACTIVE_RUN must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$browser_readback" != 0 && "$browser_readback" != 1 ]]; then
+  echo "E2E_UPDATE_BROWSER_READBACK must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$active_run_required" = 1 && "$probe" != 0 ]]; then
+  echo "The active-run fixture requires E2E_UPDATE_REQUIRE_PROBE=0" >&2
+  exit 2
+fi
+if [[ "$browser_readback" = 1 && "$probe" != 0 ]]; then
+  echo "The browser readback fixture requires E2E_UPDATE_REQUIRE_PROBE=0" >&2
+  exit 2
+fi
+if [[ "$browser_readback" = 1 && -z "${E2E_UPDATE_BROWSER_REPORT:-}" ]]; then
+  echo "E2E_UPDATE_BROWSER_READBACK=1 requires E2E_UPDATE_BROWSER_REPORT" >&2
   exit 2
 fi
 if [[ "$use_bootstrap_cli" != 0 && "$use_bootstrap_cli" != 1 ]]; then
@@ -67,6 +92,10 @@ STORE="$PROPRIO_HOME/cli"
 BACKUP_DIR="$PROPRIO_HOME/instances/default/data/backups"
 RESULTS=()
 FAILED=0
+LIFECYCLE_COMPLETED=0
+MIGRATION_OUTCOME="not_applicable"
+MIGRATION_RECOVERY_MS=""
+MIGRATION_DATA_LOSS=""
 
 note()  { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }
 pass()  { RESULTS+=("PASS  $1"); printf '\033[1;32mPASS\033[0m %s\n' "$1"; }
@@ -117,6 +146,23 @@ record_summary() {
       printf '\nManaged service qualification for `%s` → `%s`.\n\n' "$BASE_REF" "$NEXT_REF"
       printf -- '- %s\n' "${RESULTS[@]}"
     } >> "$E2E_UPDATE_STEP_SUMMARY"
+  fi
+  if [ -n "${E2E_UPDATE_RESULT_FILE:-}" ]; then
+    mkdir -p "$(dirname "$E2E_UPDATE_RESULT_FILE")"
+    local complete_outcome="failed"
+    [ "$LIFECYCLE_COMPLETED" = 1 ] && complete_outcome="passed"
+    local migration_elapsed="null" migration_loss="null"
+    [ -n "$MIGRATION_RECOVERY_MS" ] && migration_elapsed="$MIGRATION_RECOVERY_MS"
+    [ -n "$MIGRATION_DATA_LOSS" ] && migration_loss="$MIGRATION_DATA_LOSS"
+    jq -n \
+      --arg sourceSha "$NEXT_REF" \
+      --arg baseSha "$BASE_REF" \
+      --arg managedOutcome "$complete_outcome" \
+      --arg migrationOutcome "$MIGRATION_OUTCOME" \
+      --argjson recoveryMs "$migration_elapsed" \
+      --argjson dataLoss "$migration_loss" \
+      '{sourceSha:$sourceSha,baseSha:$baseSha,cases:{"managed-update-rollback":{outcome:$managedOutcome},"migration-active-run-recovery":{outcome:$migrationOutcome,previousReleaseSha:$baseSha,schemaCandidateSha:$sourceSha,elapsedRecoveryMs:$recoveryMs,observedDataLoss:$dataLoss}}}' \
+      > "$E2E_UPDATE_RESULT_FILE"
   fi
 }
 
@@ -170,11 +216,11 @@ bootstrap() {
   fi
   node "${node_args[@]}" "$BOOTSTRAP_CLI" "$@"
 }
-
 if [ "$use_bootstrap_cli" = 1 ] && [ -z "${E2E_BOOTSTRAP_CLI:-}" ]; then
   echo "E2E_UPDATE_USE_BOOTSTRAP_CLI=1 requires E2E_BOOTSTRAP_CLI" >&2
   exit 2
 fi
+
 
 bootstrap --version >/dev/null || { fail_ "1d bootstrap CLI smoke"; exit 1; }
 pass "1 bootstrap CLI ready"
@@ -226,13 +272,252 @@ else
   port="$(jq -er '.server.port' "$PROPRIO_HOME/instances/default/config.json")" || exit 1
   origin="http://127.0.0.1:$port"
   fixture_name="Managed update acceptance fixture"
-  company_id="$(curl --fail --silent --show-error --max-time 5 "$origin/api/companies"     -H "Origin: $origin" -H 'Content-Type: application/json' \
-    --data '{"name":"Managed update acceptance fixture"}' | jq -er '.id')" || exit 1
+  company_json="$(curl --fail --silent --show-error --max-time 5 "$origin/api/companies" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data '{"name":"Managed update acceptance fixture"}')" || exit 1
+  company_id="$(jq -er '.id' <<<"$company_json")" || exit 1
+  company_issue_prefix="$(jq -er '.issuePrefix' <<<"$company_json")" || exit 1
   verify_record() {
     curl --fail --silent --show-error --max-time 5 "$origin/api/companies/$company_id" \
       | jq -e --arg id "$company_id" --arg name "$fixture_name" '.id == $id and .name == $name' >/dev/null
   }
   verify_record && pass "4a record is saved by the base service" || { fail_ "4a base record"; exit 1; }
+
+  ACTIVE_EFFECT="$PROPRIO_HOME/migration-effect.txt"
+  ACTIVE_SCRIPT="$PROPRIO_HOME/migration-active-agent.mjs"
+  ACTIVE_TITLE="Retain active work during schema upgrade"
+  ACTIVE_OUTPUT="Recovered task output: qualification effect completed exactly once."
+  ACTIVE_MODE="complete"
+  [ "$active_run_required" = 1 ] && ACTIVE_MODE="hold"
+  ACTIVE_HOLD_TIMEOUT_MS=5400000
+  cat > "$ACTIVE_SCRIPT" <<'NODE'
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const marker = process.argv[2];
+const issueId = process.argv[3];
+const origin = process.argv[4];
+const output = process.argv[5];
+const mode = process.argv[6];
+const holdTimeoutMs = Number(process.argv[7] ?? 5_400_000);
+const startupCwd = process.cwd();
+const apiHeaders = { Origin: origin, Authorization: `Bearer ${process.env.PROPRIO_API_KEY ?? ""}` };
+const issueResponse = await fetch(`${origin}/api/issues/${issueId}`, { headers: apiHeaders });
+if (!issueResponse.ok) throw new Error(`Could not read task workspace binding: ${issueResponse.status}`);
+const issue = await issueResponse.json();
+if (!issue.executionWorkspaceId) throw new Error("Task has no bound execution workspace");
+const workspace = issue.currentExecutionWorkspace;
+if (!workspace || workspace.id !== issue.executionWorkspaceId) throw new Error("Task workspace binding is not readable");
+if (typeof workspace.cwd !== "string" || !workspace.cwd.startsWith("/")) throw new Error("Task workspace has no absolute path");
+process.chdir(workspace.cwd);
+const checkpoint = join(process.cwd(), "qualification-checkpoint.txt");
+const processIdentity = join(process.cwd(), "qualification-process.json");
+mkdirSync(process.cwd(), { recursive: true });
+const expectedCheckpoint = `checkpoint for ${issueId}\n`;
+const validateCheckpoint = () => {
+  if (!existsSync(checkpoint) || readFileSync(checkpoint, "utf8") !== expectedCheckpoint) {
+    throw new Error("The original task workspace checkpoint is missing or changed");
+  }
+};
+const validateProcessIdentity = () => {
+  if (!existsSync(processIdentity)) throw new Error("The original task workspace process identity is missing");
+  const saved = JSON.parse(readFileSync(processIdentity, "utf8"));
+  if (!Number.isInteger(saved.pid) || saved.pid <= 1 || typeof saved.startTicks !== "string" || !saved.startTicks || saved.cwd !== process.cwd() || saved.workspaceId !== workspace.id) {
+    throw new Error("The original task workspace process identity is invalid");
+  }
+};
+const effectAlreadyExists = existsSync(marker);
+if (effectAlreadyExists) {
+  if (readFileSync(marker, "utf8") !== "effect\n") throw new Error("The saved task effect marker is incomplete or changed");
+  validateCheckpoint();
+  validateProcessIdentity();
+} else {
+  try {
+    writeFileSync(checkpoint, expectedCheckpoint, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    validateCheckpoint();
+  }
+  const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+  if (!processStartTicks) throw new Error("Could not record the qualification process start identity");
+  try {
+    writeFileSync(processIdentity, `${JSON.stringify({ pid: process.pid, startTicks: processStartTicks, startupCwd, cwd: process.cwd(), workspaceId: workspace.id })}\n`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    validateProcessIdentity();
+  }
+}
+let created = false;
+try {
+  const fd = openSync(marker, "wx");
+  try {
+    writeFileSync(fd, "effect\n");
+  } finally {
+    closeSync(fd);
+  }
+  created = true;
+} catch (error) {
+  if (error.code !== "EEXIST") throw error;
+  if (readFileSync(marker, "utf8") !== "effect\n") throw new Error("The saved task effect marker is incomplete or changed");
+  validateCheckpoint();
+  validateProcessIdentity();
+}
+if (created) process.stdout.write("qualification checkpoint saved; effect count 1\n");
+if (created && mode === "hold") {
+  process.stdout.write(`qualification process remains active until service stop; watchdog ${holdTimeoutMs}ms\n`);
+  setTimeout(() => {
+    process.stderr.write("qualification hold watchdog expired before managed service shutdown\n");
+    process.exitCode = 124;
+  }, holdTimeoutMs);
+} else {
+  const commentsUrl = `${origin}/api/issues/${issueId}/comments`;
+  const commentHeaders = { ...apiHeaders, "Content-Type": "application/json" };
+  const existing = await fetch(commentsUrl, { headers: commentHeaders });
+  if (!existing.ok) throw new Error(`Could not read task comments: ${existing.status}`);
+  const comments = await existing.json();
+  if (!comments.some(comment => comment.body === output)) {
+    const saved = await fetch(commentsUrl, { method: "POST", headers: commentHeaders, body: JSON.stringify({ body: output }) });
+    if (!saved.ok) throw new Error(`Could not save recovered task output: ${saved.status} ${await saved.text()}`);
+  }
+  if (!process.env.PROPRIO_RUN_ID) throw new Error("The task completion request has no run-scoped identity");
+  const completed = await fetch(`${origin}/api/issues/${issueId}`, {
+    method: "PATCH",
+    headers: { ...commentHeaders, "X-Proprio-Run-Id": process.env.PROPRIO_RUN_ID },
+    body: JSON.stringify({ status: "done" }),
+  });
+  if (!completed.ok) throw new Error(`Could not complete the task through its run-scoped API: ${completed.status} ${await completed.text()}`);
+  process.stdout.write("qualification output delivered from the retained workspace checkpoint\n");
+}
+NODE
+  EXPERIMENTAL_SETTINGS="$(curl --fail --silent --show-error --max-time 10 --request PATCH "$origin/api/instance/settings/experimental" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data '{"enableIsolatedWorkspaces":true}')" \
+    || { fail_ "4c isolated task workspaces enabled on the disposable instance"; exit 1; }
+  jq -e '.enableIsolatedWorkspaces == true' <<<"$EXPERIMENTAL_SETTINGS" >/dev/null \
+    || { fail_ "4c isolated task workspace setting is active"; exit 1; }
+  ACTIVE_ISSUE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/companies/$company_id/issues" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data "$(jq -n --arg title "$ACTIVE_TITLE" '{title:$title,description:"Qualification fixture for a supported schema upgrade.",status:"todo",executionWorkspacePreference:"isolated_workspace",executionWorkspaceSettings:{mode:"isolated_workspace",workspaceStrategy:{type:"project_primary"}}}')")" \
+    || { fail_ "4c recovered task creation request failed"; exit 1; }
+  ACTIVE_ISSUE_STATUS="${ACTIVE_ISSUE_RESPONSE##*$'\n'}"
+  ACTIVE_ISSUE_BODY="${ACTIVE_ISSUE_RESPONSE%$'\n'*}"
+  if [[ ! "$ACTIVE_ISSUE_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+    SAFE_ISSUE_ERROR="$(jq -cn --arg status "$ACTIVE_ISSUE_STATUS" --arg body "$ACTIVE_ISSUE_BODY" '
+      ($body | try fromjson catch {}) as $response |
+      {status: (try ($status | tonumber) catch 0),
+       error: (if ($response.error | type) == "string" then $response.error[0:200] else null end),
+       details: (if ($response.details | type) == "array" then
+         [$response.details[:5][] | {code: (.code // null), path: (.path // null), message: (if (.message | type) == "string" then .message[0:200] else null end)}]
+         else [] end)}')"
+    fail_ "4c recovered task creation returned HTTP $SAFE_ISSUE_ERROR"
+    exit 1
+  fi
+  ACTIVE_ISSUE_JSON="$ACTIVE_ISSUE_BODY"
+  ACTIVE_ISSUE_ID="$(jq -er '.id' <<<"$ACTIVE_ISSUE_JSON")" || exit 1
+  ACTIVE_ISSUE_IDENTIFIER="$(jq -er '.identifier' <<<"$ACTIVE_ISSUE_JSON")" || exit 1
+  ACTIVE_ISSUE_PREFIX="$company_issue_prefix"
+  ACTIVE_AGENT_JSON="$(curl --fail --silent --show-error --max-time 10 "$origin/api/companies/$company_id/agents" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data "$(jq -n --arg command "$(command -v node)" --arg script "$ACTIVE_SCRIPT" --arg effect "$ACTIVE_EFFECT" --arg issue "$ACTIVE_ISSUE_ID" --arg origin "$origin" --arg output "$ACTIVE_OUTPUT" --arg mode "$ACTIVE_MODE" --arg timeout "$ACTIVE_HOLD_TIMEOUT_MS" '{name:"Schema upgrade worker",role:"engineer",adapterType:"process",adapterConfig:{command:$command,args:[$script,$effect,$issue,$origin,$output,$mode,$timeout],graceSec:1}}')")" \
+    || { fail_ "4d recovery worker creation"; exit 1; }
+  ACTIVE_AGENT_ID="$(jq -er '.id' <<<"$ACTIVE_AGENT_JSON")" || exit 1
+  curl --fail --silent --show-error --max-time 10 --request PATCH "$origin/api/issues/$ACTIVE_ISSUE_ID" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data "$(jq -n --arg agent "$ACTIVE_AGENT_ID" '{assigneeAgentId:$agent}')" >/dev/null \
+    || { fail_ "4e recovery worker assignment"; exit 1; }
+  active_deadline=$(( $(date +%s) + 90 ))
+  ACTIVE_RUN_BEFORE=""
+  ACTIVE_RUN_ID=""
+  while [ "$(date +%s)" -lt "$active_deadline" ]; do
+    ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].runId // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    if [ -n "$ACTIVE_RUN_ID" ]; then
+      ACTIVE_RUN_BEFORE="$(jq -cer --arg run "$ACTIVE_RUN_ID" '.[] | select(.runId == $run)' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+      if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.runId,status:$run.status,errorCode:($run.errorCode // null)}')"
+        fail_ "4f assignment run reached terminal state $SAFE_RUN_FAILURE"
+        exit 1
+      fi
+      if [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then break; fi
+    fi
+    sleep 1
+  done
+  if [ -z "$ACTIVE_RUN_ID" ]; then
+    # Assignment wakeups are best-effort. If there is still no durable run
+    # after the bounded admission window, make exactly one issue-linked wake;
+    # never duplicate an execution already represented in the issue run list.
+    ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].runId // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    if [ -n "$ACTIVE_RUN_ID" ]; then
+      pass "4f assignment admitted run $ACTIVE_RUN_ID at the deadline; reusing it without a duplicate wake"
+    else
+      WAKE_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+      WAKE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/agents/$ACTIVE_AGENT_ID/wakeup" \
+        -H "Origin: $origin" -H 'Content-Type: application/json' \
+        --data "$(jq -n --arg issue "$ACTIVE_ISSUE_ID" --arg key "$WAKE_KEY" '{source:"on_demand",reason:"Qualification assignment wake fallback",payload:{issueId:$issue,mutation:"qualification_assignment_fallback"},idempotencyKey:$key}')")" \
+        || { fail_ "4f issue-linked wake request failed"; exit 1; }
+      WAKE_STATUS="${WAKE_RESPONSE##*$'\n'}"
+      WAKE_BODY="${WAKE_RESPONSE%$'\n'*}"
+      [[ "$WAKE_STATUS" =~ ^2[0-9][0-9]$ ]] \
+        || { fail_ "4f issue-linked wake returned HTTP $(jq -cn --arg status "$WAKE_STATUS" --arg body "$WAKE_BODY" '{status:(try ($status|tonumber) catch 0),error:(try ((($body|fromjson).error // null)|if type=="string" then .[0:200] else null end) catch null),code:(try (($body|fromjson).code // null) catch null)}')"; exit 1; }
+      ACTIVE_RUN_ID="$(jq -er '.id // .executionRunId // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
+      [ -n "$ACTIVE_RUN_ID" ] \
+        || { fail_ "4f issue-linked wake did not return a durable run id"; exit 1; }
+    fi
+    active_deadline=$(( $(date +%s) + 90 ))
+    ACTIVE_RUN_BEFORE=""
+    while [ "$(date +%s)" -lt "$active_deadline" ]; do
+      ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+      ACTIVE_RUN_BEFORE="$(jq -cer --arg run "$ACTIVE_RUN_ID" '.[] | select(.runId == $run)' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+      if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.runId,status:$run.status,errorCode:($run.errorCode // null)}')"
+        fail_ "4f task wake reached terminal state $SAFE_RUN_FAILURE"
+        exit 1
+      fi
+      if [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then break; fi
+      sleep 1
+    done
+    if [ ! -f "$ACTIVE_EFFECT" ] || ! { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then
+      SAFE_RUN_STATE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:($run.id // null),status:($run.status // "unavailable"),errorCode:($run.errorCode // null)}' 2>/dev/null || printf '%s' '{"status":"unavailable"}')"
+      fail_ "4f task wake did not reach its expected state with the effect marker before timeout ($SAFE_RUN_STATE)"
+      exit 1
+    fi
+    pass "4f durable run $ACTIVE_RUN_ID reached its expected state with the effect marker"
+  fi
+  [ -n "$ACTIVE_RUN_ID" ] || { fail_ "4f recovered task assignment starts a durable run"; exit 1; }
+  ACTIVE_ISSUE_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
+    || { fail_ "4g task binding is readable"; exit 1; }
+  ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // empty' <<<"$ACTIVE_ISSUE_BEFORE")" \
+    || { fail_ "4g task run has a persistent workspace"; exit 1; }
+  pass "4g issue executionWorkspaceId from the task binding is $ACTIVE_WORKSPACE_ID"
+  ACTIVE_WORKSPACE_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/execution-workspaces/$ACTIVE_WORKSPACE_ID")" \
+    || { fail_ "4g task workspace is readable"; exit 1; }
+  ACTIVE_WORKSPACE_CWD="$(jq -er '.cwd' <<<"$ACTIVE_WORKSPACE_BEFORE")" || { fail_ "4g workspace path exists"; exit 1; }
+  ACTIVE_CHECKPOINT="$ACTIVE_WORKSPACE_CWD/qualification-checkpoint.txt"
+  ACTIVE_PROCESS_IDENTITY="$ACTIVE_WORKSPACE_CWD/qualification-process.json"
+  [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
+    || { fail_ "4g provider checkpoint is present in the bound execution workspace"; exit 1; }
+  pass "4g provider checkpoint is present in the bound execution workspace"
+  [ -f "$ACTIVE_PROCESS_IDENTITY" ] \
+    || { fail_ "4g provider process identity is present in the bound execution workspace"; exit 1; }
+  jq -e --arg cwd "$ACTIVE_WORKSPACE_CWD" --arg workspace "$ACTIVE_WORKSPACE_ID" \
+    '(.pid | type) == "number" and .pid > 1 and (.startTicks | type) == "string" and (.startTicks | length) > 0 and .cwd == $cwd and .workspaceId == $workspace' \
+    "$ACTIVE_PROCESS_IDENTITY" >/dev/null \
+    || { fail_ "4g provider process cwd and identity match the bound workspace"; exit 1; }
+  pass "4g provider process cwd and identity match the bound workspace"
+  effect_deadline=$(( $(date +%s) + 15 ))
+  while [ "$(date +%s)" -lt "$effect_deadline" ] && { [ ! -f "$ACTIVE_EFFECT" ] || [ "$(cat "$ACTIVE_EFFECT")" != "effect" ]; }; do sleep 1; done
+  [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+    || { fail_ "4g completed effect marker contains exactly one effect"; exit 1; }
+  pass "4g completed effect marker contains exactly one effect"
+  ACTIVE_PROCESS_PID="$(jq -er '.pid' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process PID"; exit 1; }
+  ACTIVE_PROCESS_START="$(jq -er '.startTicks' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process start identity"; exit 1; }
+  ACTIVE_PROCESS_STARTUP_CWD="$(jq -er '.startupCwd' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded provider startup cwd"; exit 1; }
+  pass "4g task run checkpoint identifies provider PID $ACTIVE_PROCESS_PID with start identity $ACTIVE_PROCESS_START; startup cwd $ACTIVE_PROCESS_STARTUP_CWD, workspace cwd $ACTIVE_WORKSPACE_CWD"
+  if [ "$active_run_required" = 1 ]; then
+    RECOVERY_STARTED_MS="$(( $(date +%s%3N) ))"
+    pass "4h schema-upgrade run is active before candidate migration ($ACTIVE_RUN_ID)"
+  fi
 fi
 BACKUPS_BEFORE="$(backup_count)"
 
@@ -311,6 +596,134 @@ else
   [ "$installed_commit" = "$next_commit" ] && pass "7b install manifest matches the running candidate" \
     || { fail_ "7b candidate manifest"; exit 1; }
   verify_record && pass "7c candidate reads the saved base record" || { fail_ "7c candidate record continuity"; exit 1; }
+  if [ "$active_run_required" = 1 ]; then
+    ACTIVE_PROCESS_STAT="$(cat "/proc/$ACTIVE_PROCESS_PID/stat" 2>/dev/null || true)"
+    if [ -n "$ACTIVE_PROCESS_STAT" ]; then
+      ACTIVE_PROCESS_REST="${ACTIVE_PROCESS_STAT##*) }"
+      read -r -a ACTIVE_PROCESS_FIELDS <<<"$ACTIVE_PROCESS_REST"
+      ACTIVE_PROCESS_STATE="${ACTIVE_PROCESS_FIELDS[0]:-}"
+      ACTIVE_PROCESS_CURRENT_START="${ACTIVE_PROCESS_FIELDS[19]:-}"
+      if [ "$ACTIVE_PROCESS_STATE" != Z ] && [ "$ACTIVE_PROCESS_CURRENT_START" = "$ACTIVE_PROCESS_START" ]; then
+        fail_ "7d original process is stopped (pid $ACTIVE_PROCESS_PID still has its recorded start identity)"
+        exit 1
+      fi
+    fi
+    pass "7d original process identity stopped after service replacement (pid $ACTIVE_PROCESS_PID)"
+  fi
+  if [ "$active_run_required" = 1 ]; then
+    reconciliation_deadline=$(( $(date +%s) + 180 ))
+    ACTIVE_RECOVERY_ACTION_ID=""
+    ACTIVE_ORIGINAL_RUN_AFTER=""
+    ACTIVE_RECOVERY_DIAGNOSTICS='{"actions":[]}'
+    while [ "$(date +%s)" -lt "$reconciliation_deadline" ]; do
+      ACTIVE_ORIGINAL_RUN_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_INSPECTION="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions?inspectSourceRunId=$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_DIAGNOSTICS="$(jq -c '{active:(if .active then {id:.active.id,status:.active.status,ownerType:.active.ownerType,cause:.active.cause,fingerprint:.active.fingerprint,sourceIssueId:.active.sourceIssueId,runId:.active.evidence.runId,adapterRecovery:.active.evidence.adapterRecovery} else null end),actions:[.actions[]? | {id,status,ownerType,cause,fingerprint,sourceIssueId,runId:(.evidence.runId // null),adapterRecovery:(.evidence.adapterRecovery // null)}]}' <<<"$ACTIVE_RECOVERY_INSPECTION" 2>/dev/null || printf '%s' '{"inspection":"unavailable"}')"
+      ACTIVE_RECOVERY_ACTION="$(jq -cer --arg issue "$ACTIVE_ISSUE_ID" --arg run "$ACTIVE_RUN_ID" '.active | select(.status == "active" and .ownerType == "board" and .kind == "active_run_watchdog" and .cause == "legacy_execution_requires_reconciliation" and .fingerprint == ("legacy-execution:" + $run) and .sourceIssueId == $issue and .evidence.runId == $run)' <<<"$ACTIVE_RECOVERY_INSPECTION" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_ACTION_ID="$(jq -er '.id' <<<"$ACTIVE_RECOVERY_ACTION" 2>/dev/null || true)"
+      if [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
+        && jq -e '.status == "interrupted" or .status == "failed"' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null 2>&1; then
+        break
+      fi
+      ACTIVE_RECOVERY_ACTION_ID=""
+      sleep 1
+    done
+    [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
+      || { fail_ "7d stopped original run has its source-scoped board recovery action ($ACTIVE_RECOVERY_DIAGNOSTICS)"; exit 1; }
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d original run is terminal before board reconciliation"; exit 1; }
+    ACTIVE_RUNS_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs")" \
+      || { fail_ "7d original run history remains readable before reconciliation"; exit 1; }
+    ACTIVE_LIVE_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/live-runs")" \
+      || { fail_ "7d no live execution remains before reconciliation"; exit 1; }
+    ACTIVE_COMMENTS_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments")" \
+      || { fail_ "7d task output is readable before reconciliation"; exit 1; }
+    jq -e --arg run "$ACTIVE_RUN_ID" 'length == 1 and .[0].runId == $run and (.[0].status == "interrupted" or .[0].status == "failed")' \
+      <<<"$ACTIVE_RUNS_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d exactly one terminal task attempt exists before reconciliation"; exit 1; }
+    jq -e 'length == 0' <<<"$ACTIVE_LIVE_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d no live task execution remains before reconciliation"; exit 1; }
+    jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 0' \
+      <<<"$ACTIVE_COMMENTS_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d completion output is absent before reconciliation"; exit 1; }
+    [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+      || { fail_ "7d exactly one completed provider effect exists before reconciliation"; exit 1; }
+    pass "7d no live attempt or output exists; the original run and single provider effect are retained before reconciliation"
+    RECOVERY_EVIDENCE="I verified that the original process PID and start identity stopped. The process saved one checkpoint and idempotency marker but not the completion comment. The outcome is mixed; the durable continuation reads the marker and delivers the comment once."
+    RESOLUTION_BODY="$(jq -n --arg actionId "$ACTIVE_RECOVERY_ACTION_ID" --arg runId "$ACTIVE_RUN_ID" --arg evidence "$RECOVERY_EVIDENCE" \
+      '{actionId:$actionId,outcome:"restored",sourceIssueStatus:"todo",resolutionNote:"Confirmed the interrupted process stopped after saving its idempotency marker but before delivering task output.",executionReconciliation:{runId:$runId,providerStopped:true,actionOutcome:"mixed",outcomeEvidence:$evidence}}')"
+    RESOLUTION_RESPONSE="$(curl --fail --silent --show-error --max-time 10 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions/resolve" \
+      -H "Origin: $origin" -H 'Content-Type: application/json' --data "$RESOLUTION_BODY")" \
+      || { fail_ "7d board reconciliation of the stopped process"; exit 1; }
+    jq -e --arg action "$ACTIVE_RECOVERY_ACTION_ID" '.issue.status == "todo" and .recoveryAction.id == $action and .recoveryAction.status == "resolved"' \
+      <<<"$RESOLUTION_RESPONSE" >/dev/null \
+      || { fail_ "7d explicit mixed-outcome reconciliation restores the task"; exit 1; }
+    jq -e '.recoveryAction.evidence.continuationDelivery == "pending"' <<<"$RESOLUTION_RESPONSE" >/dev/null \
+      || { fail_ "7d reconciliation queued its durable continuation exactly once"; exit 1; }
+    pass "7d board reconciled the stopped process and queued its durable continuation"
+  fi
+  recovery_deadline=$(( $(date +%s) + 180 ))
+  ACTIVE_RUNS_AFTER=""
+  ACTIVE_LIVE_AFTER=""
+  ACTIVE_COMMENTS_AFTER=""
+  recovered=0
+  while [ "$(date +%s)" -lt "$recovery_deadline" ]; do
+    ACTIVE_RUNS_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+    ACTIVE_LIVE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/live-runs" 2>/dev/null || true)"
+    ACTIVE_COMMENTS_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments" 2>/dev/null || true)"
+    if jq -e 'length == 0' <<<"$ACTIVE_LIVE_AFTER" >/dev/null 2>&1 \
+      && jq -e --argjson active "$active_run_required" 'length == (if $active == 1 then 2 else 1 end) and all(.[]; .status == "succeeded" or .status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted") and ([.[] | select(.status == "succeeded")] | length == 1)' <<<"$ACTIVE_RUNS_AFTER" >/dev/null 2>&1 \
+      && jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 1' <<<"$ACTIVE_COMMENTS_AFTER" >/dev/null 2>&1; then
+      recovered=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$recovered" != 1 ]; then
+    ACTIVE_ISSUE_DIAGNOSTIC="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID" 2>/dev/null || true)"
+    ACTIVE_ACTION_DIAGNOSTIC="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions?inspectSourceRunId=$ACTIVE_RUN_ID" 2>/dev/null || true)"
+    SAFE_RECOVERY_STATE="$(jq -cn --arg body "$ACTIVE_OUTPUT" --argjson runs "$(jq -c '[.[]? | {runId,status,errorCode:(.errorCode // null)}]' <<<"${ACTIVE_RUNS_AFTER:-[]}" 2>/dev/null || printf '[]')" \
+      --argjson live "$(jq -c '[.[]? | {runId:(.runId // null),status:(.status // null),errorCode:(.errorCode // null)}]' <<<"${ACTIVE_LIVE_AFTER:-[]}" 2>/dev/null || printf '[]')" \
+      --argjson comments "$(jq -c --arg body "$ACTIVE_OUTPUT" '[.[]? | select(.body == $body)] | length' <<<"${ACTIVE_COMMENTS_AFTER:-[]}" 2>/dev/null || printf '0')" \
+      --argjson issue "$(jq -c 'if type == "object" then {id,status,assigneeAgentId,executionWorkspaceId} else null end' <<<"${ACTIVE_ISSUE_DIAGNOSTIC:-null}" 2>/dev/null || printf 'null')" \
+      --argjson action "$(jq -c --arg id "$ACTIVE_RECOVERY_ACTION_ID" '([.actions[]? | select(.id == $id)] | first) as $resolved | if $resolved then {id:$resolved.id,status:$resolved.status,continuationDelivery:($resolved.evidence.continuationDelivery // null),continuationDeliveryReason:($resolved.evidence.continuationDeliveryReason // null),reason:($resolved.evidence.reason // null)} elif .active then {id:.active.id,status:.active.status,continuationDelivery:(.active.evidence.continuationDelivery // null),continuationDeliveryReason:(.active.evidence.continuationDeliveryReason // null),reason:(.active.evidence.reason // null)} else null end' <<<"${ACTIVE_ACTION_DIAGNOSTIC:-null}" 2>/dev/null || printf 'null')" \
+      '{runs:$runs,liveRuns:$live,matchingOutputComments:$comments,issue:$issue,activeRecoveryAction:$action}')"
+    fail_ "7d recovered task reaches one successful outcome and one visible output before timeout ($SAFE_RECOVERY_STATE)"
+    exit 1
+  fi
+  ACTIVE_ISSUE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
+    || { fail_ "7d recovered task read after update"; exit 1; }
+  ACTIVE_WORKSPACE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/execution-workspaces/$ACTIVE_WORKSPACE_ID")" \
+    || { fail_ "7d execution workspace read after update"; exit 1; }
+  ACTIVE_ORIGINAL_RUN_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID")" \
+    || { fail_ "7d original run identity remains readable"; exit 1; }
+  jq -e --arg id "$ACTIVE_ISSUE_ID" --arg workspace "$ACTIVE_WORKSPACE_ID" '.id == $id and .executionWorkspaceId == $workspace' <<<"$ACTIVE_ISSUE_AFTER" >/dev/null \
+    || { fail_ "7d task retains its execution workspace"; exit 1; }
+  jq -e --arg id "$ACTIVE_WORKSPACE_ID" --arg cwd "$ACTIVE_WORKSPACE_CWD" '.id == $id and .cwd == $cwd' <<<"$ACTIVE_WORKSPACE_AFTER" >/dev/null \
+    || { fail_ "7d execution workspace identity and path are retained"; exit 1; }
+  if [ "$active_run_required" = 1 ]; then
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d original run reached an allowed terminal recovery state"; exit 1; }
+  else
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and .status == "succeeded"' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d non-migration task run remains succeeded and readable"; exit 1; }
+  fi
+  [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
+    || { fail_ "7e workspace checkpoint survives update"; exit 1; }
+  [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+    || { fail_ "7e durable effect count remains exactly one"; exit 1; }
+  if [ "$browser_readback" = 1 ]; then
+    E2E_UPDATE_BROWSER_REPORT="$E2E_UPDATE_BROWSER_REPORT" node scripts/ci/browser-task-readback.mjs \
+      "$origin" "$ACTIVE_ISSUE_PREFIX" "$ACTIVE_ISSUE_IDENTIFIER" "$ACTIVE_TITLE" "$ACTIVE_OUTPUT" \
+      || { fail_ "7f browser reload reads the recovered task output"; exit 1; }
+    pass "7f browser reload reads the recovered task output"
+  fi
+  if [ "$active_run_required" = 1 ]; then
+    MIGRATION_RECOVERY_MS="$(( $(date +%s%3N) - RECOVERY_STARTED_MS ))"
+    MIGRATION_OUTCOME="passed"
+    MIGRATION_DATA_LOSS=0
+    pass "7g active task recovered through migration with original run and workspace retained (${MIGRATION_RECOVERY_MS}ms; data loss 0)"
+  fi
 fi
 
 note "8. data continuity: same database cluster, not re-initialized"
@@ -347,6 +760,27 @@ if [ "$probe" = 0 ]; then
   [ "$rollback_version" = "$base_version" ] && pass "9d rollback reports the original version and commit" \
     || fail_ "9d rollback version or commit"
   verify_record && pass "9e original service reads the same saved record after rollback"     || fail_ "9e rollback record continuity"
+  if [ "$active_run_required" = 1 ]; then
+    EXPECTED_ORIGINAL_STATUS='interrupted|failed'
+  else
+    EXPECTED_ORIGINAL_STATUS='succeeded'
+  fi
+  ROLLBACK_ISSUE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
+    || { fail_ "9f rolled-back service reads the same qualification task"; exit 1; }
+  ROLLBACK_RUNS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs")" \
+    || { fail_ "9f rolled-back service reads qualification run history"; exit 1; }
+  ROLLBACK_COMMENTS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments")" \
+    || { fail_ "9f rolled-back service reads qualification output"; exit 1; }
+  jq -e --arg id "$ACTIVE_ISSUE_ID" '.id == $id' <<<"$ROLLBACK_ISSUE" >/dev/null \
+    && jq -e --arg id "$ACTIVE_RUN_ID" --arg original "$EXPECTED_ORIGINAL_STATUS" --argjson active "$active_run_required" '
+      ([.[] | select(.runId == $id and (if $original == "succeeded" then .status == "succeeded" else (.status == "interrupted" or .status == "failed") end))] | length == 1)
+      and ([.[] | select(.status == "succeeded")] | length == 1)
+      and (if $active == 1 then length == 2 else length == 1 end)
+    ' <<<"$ROLLBACK_RUNS" >/dev/null \
+    && jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 1' <<<"$ROLLBACK_COMMENTS" >/dev/null \
+    && [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+    && pass "9f rolled-back base API retains the same task, expected run history, one output, and one effect" \
+    || { fail_ "9f rolled-back base API retains the same task, expected run history, one output, and one effect"; exit 1; }
 fi
 
 note "10. cleanup"
@@ -356,10 +790,10 @@ if shim service uninstall && shim uninstall; then
 else
   fail_ "10a service uninstall + uninstall exit 0"
 fi
-record_summary
-trap - EXIT
-
 note "RESULTS ($E2E_REPO $BASE_REF -> $NEXT_REF on $(uname -sm))"
 printf '%s\n' "${RESULTS[@]}"
 if [ "$FAILED" = "1" ]; then echo; echo "OVERALL: FAIL"; exit 1; fi
+LIFECYCLE_COMPLETED=1
+trap - EXIT
+record_summary
 echo; echo "OVERALL: PASS"

@@ -8,8 +8,10 @@ const linuxWorkflow = ".github/workflows/linux-source-qualification.yml";
 const protectedInputs = new Set([
   smokeWorkflow, linuxWorkflow, ".github/workflows/durable-work-policy.yml", ".github/scripts/ci-diff.mjs",
   "scripts/ci/durable-work-acceptance.mjs", "scripts/ci/assert-required-vitest-tests.mjs",
-  "scripts/ci/durable-work-policy.mjs", "scripts/ci/linux-source-qualification.mjs",
-  "scripts/ci/managed-update-command.mjs",
+  "scripts/ci/durable-work-policy.mjs", "scripts/ci/durable-work-release-evidence.mjs",
+  "scripts/ci/durable-work-release-evidence.test.mjs", "scripts/ci/write-durable-work-acceptance.mjs",
+  "scripts/ci/write-durable-work-acceptance.test.mjs", "scripts/ci/browser-task-readback.mjs",
+  "scripts/ci/linux-source-qualification.mjs", "scripts/ci/managed-update-command.mjs",
   "scripts/e2e-update-migrations.sh",
 ]);
 const shaPattern = /^[0-9a-f]{40}$/;

@@ -2028,6 +2028,42 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(list.body.actions).toHaveLength(1);
   });
 
+  it("inspects the source-scoped board recovery action for a stopped legacy run", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "active_run_watchdog",
+      ownerType: "board",
+      returnOwnerAgentId: coderId,
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: `legacy-execution:${runId}`,
+      evidence: { runId, adapterRecovery: "unsupported_or_unknown", attempt: 1 },
+      nextAction: "Inspect the stopped provider and recorded actions before continuing.",
+      wakePolicy: null,
+    });
+    const app = createApp();
+
+    const inspection = await request(app)
+      .get(`/api/issues/${sourceIssueId}/recovery-actions`)
+      .query({ inspectSourceRunId: runId })
+      .expect(200);
+
+    expect(inspection.body.active).toMatchObject({
+      id: action.id,
+      sourceIssueId,
+      kind: "active_run_watchdog",
+      status: "active",
+      ownerType: "board",
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: `legacy-execution:${runId}`,
+      wakePolicy: null,
+      evidence: { runId, adapterRecovery: "unsupported_or_unknown", attempt: 1 },
+    });
+    expect(inspection.body.actions).toEqual([expect.objectContaining({ id: action.id })]);
+  });
+
   it("lists a settled reconciliation hold that still blocks replay", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
