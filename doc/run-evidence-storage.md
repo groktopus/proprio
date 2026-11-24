@@ -301,8 +301,11 @@ PROPRIO_RUN_EVIDENCE_RESTORE_QUALIFICATION=true \
 
 This qualification needs the embedded PostgreSQL test support and a Docker
 daemon with the `postgres:17-alpine` client image available for `psql` restore.
-It uses disposable databases and temporary local files; it does not qualify a
-deployment's external object-version or backup-retention policy.
+Set `PROPRIO_LOG_TEST_S3_ENDPOINT` to a disposable loopback S3 service with
+synthetic credentials to exercise the CLI against both local files and a
+migrated object journal. The test uses a dedicated bucket and checks that
+the restored trace cannot be read or opened. Deployment owners verify their
+provider's historical object versions and backup retention separately.
 
 Reconciliation removes the active payload namespace. It does not purge provider
 object versions or copies retained in older database backups. Deployment owners

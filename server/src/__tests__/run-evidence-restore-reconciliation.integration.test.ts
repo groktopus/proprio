@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { CreateBucketCommand, DeleteBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import {
   agents,
   companies,
@@ -20,6 +21,8 @@ import {
 } from "@groktopus/db";
 import { createProviderTraceObjectStore } from "../services/provider-trace-object-store.js";
 import { providerTraceStore } from "../services/provider-trace-store.js";
+import { createS3StorageProvider } from "../storage/s3-provider.js";
+import type { StorageProvider } from "../storage/types.js";
 
 const qualificationEnabled = process.env.PROPRIO_RUN_EVIDENCE_RESTORE_QUALIFICATION === "true";
 const support = qualificationEnabled ? await getEmbeddedPostgresTestSupport() : { supported: false };
@@ -134,7 +137,7 @@ integrationTest("reapplies a later deletion after restoring an older database an
     }, null, 2));
 
     const loader = path.join(repoRoot, "server/node_modules/tsx/dist/loader.mjs");
-    const reconcile = () => spawnSync(process.execPath, [
+    const reconcile = (storageEnv: NodeJS.ProcessEnv = {}) => spawnSync(process.execPath, [
       "--import", loader,
       "server/scripts/reconcile-run-evidence-deletions.ts",
       manifestPath,
@@ -150,6 +153,7 @@ integrationTest("reapplies a later deletion after restoring an older database an
         PROPRIO_PSQL_PATH: psqlRunner,
         PROVIDER_TRACE_BASE_PATH: restoredStorage,
         PROPRIO_HOME: path.join(root, "proprio-home"),
+        ...storageEnv,
       },
     });
     const restoredPayload = path.join(restoredStorage, deletedTraceRef);
@@ -208,11 +212,18 @@ integrationTest("reapplies a later deletion after restoring an older database an
     // while the restored object store contains its later imported copy.
     const migratedRef = `s3-segments-v1:${companyId}/${unrelatedRunId}/${unrelatedTraceRef}`;
     const migratedPath = path.join(restoredStorage, unrelatedTraceRef);
+    const endpoint = process.env.PROPRIO_LOG_TEST_S3_ENDPOINT;
+    if (endpoint && !["127.0.0.1", "localhost"].includes(new URL(endpoint).hostname)) {
+      throw new Error("Restore evidence qualification requires a disposable loopback S3 service");
+    }
+    const bucket = `proprio-trace-restore-${randomUUID()}`;
+    const s3 = endpoint ? new S3Client({ endpoint, region: "us-east-1", forcePathStyle: true }) : null;
+    let bucketCreated = false;
     const objects = new Map<string, { bytes: Buffer; etag: string }>();
     const previousMasterKey = process.env.PROPRIO_SECRETS_MASTER_KEY;
     process.env.PROPRIO_SECRETS_MASTER_KEY = "e".repeat(64);
     try {
-      const journal = createProviderTraceObjectStore({
+      const memoryProvider: StorageProvider = {
         id: "s3",
         async getObject({ objectKey }) {
           const object = objects.get(objectKey);
@@ -235,22 +246,67 @@ integrationTest("reapplies a later deletion after restoring an older database an
         async headObject({ objectKey }) { return { exists: objects.has(objectKey) }; },
         async deleteObject({ objectKey }) { objects.delete(objectKey); },
         async listObjects({ prefix }) { return { keys: [...objects.keys()].filter(key => key.startsWith(prefix)) }; },
-      });
+      };
+      const provider = endpoint
+        ? createS3StorageProvider({ endpoint, bucket, region: "us-east-1", forcePathStyle: true })
+        : memoryProvider;
+      if (s3) {
+        await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+        bucketCreated = true;
+      }
+      const journal = createProviderTraceObjectStore(provider);
       await journal.open(migratedRef, migratedPath, async () => undefined);
       writeFileSync(migratedPath, unrelatedBytes);
       await journal.finish(migratedRef);
       await expect(journal.read(migratedRef)).resolves.toEqual(unrelatedBytes);
-      const migratedStore = providerTraceStore(restoredDb, { objectStore: journal });
-      await expect(migratedStore.reconcileDeletion({
-        traceId: unrelatedTraceId, runId: unrelatedRunId, companyId, deletedAt: new Date(),
-      })).resolves.toEqual({ status: "cleaned" });
+      const migratedDeletionTime = new Date();
+      if (endpoint) {
+        const migratedDeletedAt = migratedDeletionTime.toISOString();
+        writeFileSync(manifestPath, JSON.stringify({
+          schema: "proprio.run_evidence_deletions.v1",
+          recoveryPoint,
+          coversThrough: migratedDeletedAt,
+          coverageComplete: true,
+          coordinatedPayloadSnapshot: true,
+          source: "isolated restore integration fixture",
+          records: [{ traceId: unrelatedTraceId, runId: unrelatedRunId, companyId, deletedAt: migratedDeletedAt }],
+        }));
+        const command = reconcile({
+          PROPRIO_STORAGE_PROVIDER: "s3",
+          PROPRIO_STORAGE_S3_BUCKET: bucket,
+          PROPRIO_STORAGE_S3_ENDPOINT: endpoint,
+          PROPRIO_STORAGE_S3_REGION: "us-east-1",
+          PROPRIO_STORAGE_S3_PREFIX: "",
+          PROPRIO_STORAGE_S3_FORCE_PATH_STYLE: "true",
+        });
+        expect(command.status, command.stderr).toBe(0);
+        expect(JSON.parse(command.stdout)).toMatchObject({ reconciled: [unrelatedTraceId], reconciliationPending: [] });
+      } else {
+        const migratedStore = providerTraceStore(restoredDb, { objectStore: journal });
+        await expect(migratedStore.reconcileDeletion({
+          traceId: unrelatedTraceId, runId: unrelatedRunId, companyId, deletedAt: migratedDeletionTime,
+        })).resolves.toEqual({ status: "cleaned" });
+      }
       await expect(journal.read(migratedRef)).rejects.toThrow("provider_trace_payload_unavailable");
       await expect(journal.open(migratedRef, migratedPath, async () => undefined)).rejects.toThrow();
-      expect([...objects.keys()].every(key => key.endsWith("/head.json"))).toBe(true);
+      const remaining = await provider.listObjects!({ prefix: "provider-traces/" });
+      expect(remaining.keys).toHaveLength(2);
+      expect(remaining.keys.every(key => key.endsWith("/head.json"))).toBe(true);
+      await expect(afterStore.getByRun(unrelatedRunId, companyId)).resolves.toMatchObject({ status: "deleted" });
       expect(existsSync(migratedPath)).toBe(false);
     } finally {
-      if (previousMasterKey === undefined) delete process.env.PROPRIO_SECRETS_MASTER_KEY;
-      else process.env.PROPRIO_SECRETS_MASTER_KEY = previousMasterKey;
+      try {
+        if (s3 && endpoint && bucketCreated) {
+          const provider = createS3StorageProvider({ endpoint, bucket, region: "us-east-1", forcePathStyle: true });
+          const fixture = await provider.listObjects!({ prefix: "provider-traces/" });
+          await Promise.all(fixture.keys.map(objectKey => provider.deleteObject({ objectKey })));
+          await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
+        }
+      } finally {
+        s3?.destroy();
+        if (previousMasterKey === undefined) delete process.env.PROPRIO_SECRETS_MASTER_KEY;
+        else process.env.PROPRIO_SECRETS_MASTER_KEY = previousMasterKey;
+      }
     }
   } finally {
     try {
