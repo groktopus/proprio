@@ -330,9 +330,15 @@ if (created && mode === "hold") {
   process.stdout.write("qualification output delivered from the retained workspace checkpoint\n");
 }
 NODE
+  EXPERIMENTAL_SETTINGS="$(curl --fail --silent --show-error --max-time 10 --request PATCH "$origin/api/instance/settings/experimental" \
+    -H "Origin: $origin" -H 'Content-Type: application/json' \
+    --data '{"enableIsolatedWorkspaces":true}')" \
+    || { fail_ "4c isolated task workspaces enabled on the disposable instance"; exit 1; }
+  jq -e '.enableIsolatedWorkspaces == true' <<<"$EXPERIMENTAL_SETTINGS" >/dev/null \
+    || { fail_ "4c isolated task workspace setting is active"; exit 1; }
   ACTIVE_ISSUE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/companies/$company_id/issues" \
     -H "Origin: $origin" -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg title "$ACTIVE_TITLE" '{title:$title,description:"Qualification fixture for a supported schema upgrade.",status:"todo"}')")" \
+    --data "$(jq -n --arg title "$ACTIVE_TITLE" '{title:$title,description:"Qualification fixture for a supported schema upgrade.",status:"todo",executionWorkspacePreference:"isolated_workspace",executionWorkspaceSettings:{mode:"isolated_workspace",workspaceStrategy:{type:"project_primary"}}}')")" \
     || { fail_ "4c recovered task creation request failed"; exit 1; }
   ACTIVE_ISSUE_STATUS="${ACTIVE_ISSUE_RESPONSE##*$'\n'}"
   ACTIVE_ISSUE_BODY="${ACTIVE_ISSUE_RESPONSE%$'\n'*}"
@@ -367,9 +373,9 @@ NODE
     ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
     ACTIVE_RUN_ID="$(jq -er '[.[]][0].runId // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
     if [ -n "$ACTIVE_RUN_ID" ]; then
-      ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RUN_BEFORE="$(jq -cer --arg run "$ACTIVE_RUN_ID" '.[] | select(.runId == $run)' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
       if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
-        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.id,status:$run.status,errorCode:($run.errorCode // null)}')"
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.runId,status:$run.status,errorCode:($run.errorCode // null)}')"
         fail_ "4f assignment run reached terminal state $SAFE_RUN_FAILURE"
         exit 1
       fi
@@ -402,9 +408,10 @@ NODE
     active_deadline=$(( $(date +%s) + 90 ))
     ACTIVE_RUN_BEFORE=""
     while [ "$(date +%s)" -lt "$active_deadline" ]; do
-      ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
+      ACTIVE_RUN_BEFORE="$(jq -cer --arg run "$ACTIVE_RUN_ID" '.[] | select(.runId == $run)' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
       if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
-        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.id,status:$run.status,errorCode:($run.errorCode // null)}')"
+        SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.runId,status:$run.status,errorCode:($run.errorCode // null)}')"
         fail_ "4f task wake reached terminal state $SAFE_RUN_FAILURE"
         exit 1
       fi
@@ -419,8 +426,11 @@ NODE
     pass "4f durable run $ACTIVE_RUN_ID reached its expected state with the effect marker"
   fi
   [ -n "$ACTIVE_RUN_ID" ] || { fail_ "4f recovered task assignment starts a durable run"; exit 1; }
-  ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // .execution.executionWorkspaceId' <<<"$ACTIVE_RUN_BEFORE")" \
+  ACTIVE_ISSUE_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
+    || { fail_ "4g task binding is readable"; exit 1; }
+  ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // empty' <<<"$ACTIVE_ISSUE_BEFORE")" \
     || { fail_ "4g task run has a persistent workspace"; exit 1; }
+  pass "4g issue executionWorkspaceId from the task binding is $ACTIVE_WORKSPACE_ID"
   ACTIVE_WORKSPACE_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/execution-workspaces/$ACTIVE_WORKSPACE_ID")" \
     || { fail_ "4g task workspace is readable"; exit 1; }
   ACTIVE_WORKSPACE_CWD="$(jq -er '.cwd' <<<"$ACTIVE_WORKSPACE_BEFORE")" || { fail_ "4g workspace path exists"; exit 1; }
@@ -550,7 +560,7 @@ else
       || { fail_ "7d stopped original run has an explicit no-replay reconciliation action"; exit 1; }
     jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
       || { fail_ "7d original run is terminal before board reconciliation"; exit 1; }
-    RECOVERY_EVIDENCE="I verified that the original process PID and start identity stopped. The process saved one checkpoint and idempotency marker but not the completion comment. The outcome is mixed; Retry reads the marker and delivers the comment once."
+    RECOVERY_EVIDENCE="I verified that the original process PID and start identity stopped. The process saved one checkpoint and idempotency marker but not the completion comment. The outcome is mixed; the durable continuation reads the marker and delivers the comment once."
     RESOLUTION_BODY="$(jq -n --arg actionId "$ACTIVE_RECOVERY_ACTION_ID" --arg runId "$ACTIVE_RUN_ID" --arg evidence "$RECOVERY_EVIDENCE" \
       '{actionId:$actionId,outcome:"restored",sourceIssueStatus:"todo",resolutionNote:"Confirmed the interrupted process stopped after saving its idempotency marker but before delivering task output.",executionReconciliation:{runId:$runId,providerStopped:true,actionOutcome:"mixed",outcomeEvidence:$evidence}}')"
     RESOLUTION_RESPONSE="$(curl --fail --silent --show-error --max-time 10 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions/resolve" \
@@ -559,14 +569,9 @@ else
     jq -e --arg action "$ACTIVE_RECOVERY_ACTION_ID" '.issue.status == "todo" and .recoveryAction.id == $action and .recoveryAction.status == "resolved"' \
       <<<"$RESOLUTION_RESPONSE" >/dev/null \
       || { fail_ "7d explicit mixed-outcome reconciliation restores the task"; exit 1; }
-    RETRY_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
-    RETRY_BODY="$(jq -n --arg key "$RETRY_KEY" --arg runId "$ACTIVE_RUN_ID" '{idempotencyKey:$key,observedRunId:$runId,retryAction:"move_forward"}')"
-    RETRY_RESPONSE="$(curl --fail --silent --show-error --max-time 10 "$origin/api/issues/$ACTIVE_ISSUE_ID/retry" \
-      -H "Origin: $origin" -H 'Content-Type: application/json' --data "$RETRY_BODY")" \
-      || { fail_ "7d ordinary task Retry after reconciliation"; exit 1; }
-    jq -e '.accepted == true' <<<"$RETRY_RESPONSE" >/dev/null \
-      || { fail_ "7d ordinary task Retry was accepted"; exit 1; }
-    pass "7d board reconciled the stopped process and accepted the normal Retry"
+    jq -e '.recoveryAction.evidence.continuationDelivery == "pending"' <<<"$RESOLUTION_RESPONSE" >/dev/null \
+      || { fail_ "7d reconciliation queued its durable continuation exactly once"; exit 1; }
+    pass "7d board reconciled the stopped process and queued its durable continuation"
   fi
   recovery_deadline=$(( $(date +%s) + 180 ))
   ACTIVE_RUNS_AFTER=""
@@ -578,7 +583,7 @@ else
     ACTIVE_LIVE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/live-runs" 2>/dev/null || true)"
     ACTIVE_COMMENTS_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments" 2>/dev/null || true)"
     if jq -e 'length == 0' <<<"$ACTIVE_LIVE_AFTER" >/dev/null 2>&1 \
-      && jq -e 'length > 0 and all(.[]; .status == "succeeded" or .status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted") and ([.[] | select(.status == "succeeded")] | length == 1)' <<<"$ACTIVE_RUNS_AFTER" >/dev/null 2>&1 \
+      && jq -e --argjson active "$active_run_required" 'length == (if $active == 1 then 2 else 1 end) and all(.[]; .status == "succeeded" or .status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted") and ([.[] | select(.status == "succeeded")] | length == 1)' <<<"$ACTIVE_RUNS_AFTER" >/dev/null 2>&1 \
       && jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 1' <<<"$ACTIVE_COMMENTS_AFTER" >/dev/null 2>&1; then
       recovered=1
       break

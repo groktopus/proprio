@@ -44,13 +44,27 @@ test("qualification can run the exact tested CLI against the installed base payl
   assert.match(workflow, /E2E_UPDATE_USE_BOOTSTRAP_CLI=1/);
 });
 
-test("active process recovery requires board reconciliation before normal Retry", () => {
+test("active process recovery binds durable workspace and delivers one reconciled continuation", () => {
   const source = readFileSync(script, "utf8");
   const activity = readFileSync(path.join(repoRoot, "server", "src", "services", "activity.ts"), "utf8");
+  const issues = readFileSync(path.join(repoRoot, "server", "src", "routes", "issues.ts"), "utf8");
+  const issueValidator = readFileSync(path.join(repoRoot, "packages", "shared", "src", "validators", "issue.ts"), "utf8");
+  const instanceRoute = readFileSync(path.join(repoRoot, "server", "src", "routes", "instance-settings.ts"), "utf8");
+  const instanceValidator = readFileSync(path.join(repoRoot, "packages", "shared", "src", "validators", "instance.ts"), "utf8");
   assert.match(activity, /runId: heartbeatRuns\.id/);
+  assert.match(issues, /executionWorkspaceId: issue\.executionWorkspaceId/);
+  assert.match(issueValidator, /executionWorkspacePreference:[\s\S]*?executionWorkspaceSettings/);
+  assert.match(instanceRoute, /"\/instance\/settings\/experimental"[\s\S]*?patchInstanceExperimentalSettingsSchema/);
+  assert.match(instanceValidator, /enableIsolatedWorkspaces: z\.boolean\(\)\.default\(false\)/);
   assert.match(source, /\[\.\[\]\]\[0\]\.runId \/\/ empty/);
   assert.match(source, /select\(\.runId == \$id/);
   assert.doesNotMatch(source, /\[\.\[\]\]\[0\]\.id \/\/ empty/);
+  assert.match(source, /instance\/settings\/experimental/);
+  assert.match(source, /enableIsolatedWorkspaces":true/);
+  assert.match(source, /executionWorkspacePreference:"isolated_workspace"/);
+  assert.match(source, /executionWorkspaceSettings:\{mode:"isolated_workspace",workspaceStrategy:\{type:"project_primary"\}\}/);
+  assert.match(source, /\.executionWorkspaceId \/\/ empty/);
+  assert.match(source, /executionWorkspaceId from the task binding/);
   assert.match(source, /legacy_execution_requires_reconciliation/);
   assert.match(source, /providerStopped:true,actionOutcome:"mixed"/);
   assert.match(source, /qualification-process\.json/);
@@ -60,9 +74,8 @@ test("active process recovery requires board reconciliation before normal Retry"
   assert.match(source, /7d non-migration task run remains succeeded and readable/);
   assert.match(source, /if \[ "\$active_run_required" = 1 \]; then\s+jq -e --arg id "\$ACTIVE_RUN_ID"/);
   assert.match(source, /recovery-actions\/resolve/);
-  assert.match(source, /idempotencyKey:\$key,observedRunId:\$runId,retryAction:"move_forward"/);
-  assert.match(source, /api\/issues\/\$ACTIVE_ISSUE_ID\/retry/);
-  assert.match(source, /\.accepted == true/);
+  assert.match(source, /continuationDelivery == "pending"/);
+  assert.doesNotMatch(source, /api\/issues\/\$ACTIVE_ISSUE_ID\/retry/);
 });
 
 test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagnostics", () => {
