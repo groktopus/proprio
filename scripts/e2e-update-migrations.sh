@@ -601,10 +601,13 @@ else
     reconciliation_deadline=$(( $(date +%s) + 180 ))
     ACTIVE_RECOVERY_ACTION_ID=""
     ACTIVE_ORIGINAL_RUN_AFTER=""
+    ACTIVE_RECOVERY_DIAGNOSTICS='{"actions":[]}'
     while [ "$(date +%s)" -lt "$reconciliation_deadline" ]; do
       ACTIVE_ORIGINAL_RUN_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
-      ACTIVE_RECOVERY_ACTIONS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions" 2>/dev/null || true)"
-      ACTIVE_RECOVERY_ACTION_ID="$(jq -er --arg run "$ACTIVE_RUN_ID" '[.actions[] | select(.cause == "legacy_execution_requires_reconciliation" and .evidence.runId == $run and .evidence.automaticRecovery.replay == "blocked")] | .[0].id // empty' <<<"$ACTIVE_RECOVERY_ACTIONS" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_INSPECTION="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions?inspectSourceRunId=$ACTIVE_RUN_ID" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_DIAGNOSTICS="$(jq -c '{active:(if .active then {id:.active.id,status:.active.status,ownerType:.active.ownerType,cause:.active.cause,fingerprint:.active.fingerprint,sourceIssueId:.active.sourceIssueId,runId:.active.evidence.runId,adapterRecovery:.active.evidence.adapterRecovery} else null end),actions:[.actions[]? | {id,status,ownerType,cause,fingerprint,sourceIssueId,runId:(.evidence.runId // null),adapterRecovery:(.evidence.adapterRecovery // null)}]}' <<<"$ACTIVE_RECOVERY_INSPECTION" 2>/dev/null || printf '%s' '{"inspection":"unavailable"}')"
+      ACTIVE_RECOVERY_ACTION="$(jq -cer --arg issue "$ACTIVE_ISSUE_ID" --arg run "$ACTIVE_RUN_ID" '.active | select(.status == "active" and .ownerType == "board" and .kind == "active_run_watchdog" and .cause == "legacy_execution_requires_reconciliation" and .fingerprint == ("legacy-execution:" + $run) and .sourceIssueId == $issue and .evidence.runId == $run)' <<<"$ACTIVE_RECOVERY_INSPECTION" 2>/dev/null || true)"
+      ACTIVE_RECOVERY_ACTION_ID="$(jq -er '.id' <<<"$ACTIVE_RECOVERY_ACTION" 2>/dev/null || true)"
       if [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
         && jq -e '.status == "interrupted" or .status == "failed"' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null 2>&1; then
         break
@@ -613,9 +616,26 @@ else
       sleep 1
     done
     [ -n "$ACTIVE_RECOVERY_ACTION_ID" ] \
-      || { fail_ "7d stopped original run has an explicit no-replay reconciliation action"; exit 1; }
+      || { fail_ "7d stopped original run has its source-scoped board recovery action ($ACTIVE_RECOVERY_DIAGNOSTICS)"; exit 1; }
     jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
       || { fail_ "7d original run is terminal before board reconciliation"; exit 1; }
+    ACTIVE_RUNS_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs")" \
+      || { fail_ "7d original run history remains readable before reconciliation"; exit 1; }
+    ACTIVE_LIVE_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/live-runs")" \
+      || { fail_ "7d no live execution remains before reconciliation"; exit 1; }
+    ACTIVE_COMMENTS_BEFORE_RESOLVE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments")" \
+      || { fail_ "7d task output is readable before reconciliation"; exit 1; }
+    jq -e --arg run "$ACTIVE_RUN_ID" 'length == 1 and .[0].runId == $run and (.[0].status == "interrupted" or .[0].status == "failed")' \
+      <<<"$ACTIVE_RUNS_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d exactly one terminal task attempt exists before reconciliation"; exit 1; }
+    jq -e 'length == 0' <<<"$ACTIVE_LIVE_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d no live task execution remains before reconciliation"; exit 1; }
+    jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 0' \
+      <<<"$ACTIVE_COMMENTS_BEFORE_RESOLVE" >/dev/null \
+      || { fail_ "7d completion output is absent before reconciliation"; exit 1; }
+    [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+      || { fail_ "7d exactly one completed provider effect exists before reconciliation"; exit 1; }
+    pass "7d no live attempt or output exists; the original run and single provider effect are retained before reconciliation"
     RECOVERY_EVIDENCE="I verified that the original process PID and start identity stopped. The process saved one checkpoint and idempotency marker but not the completion comment. The outcome is mixed; the durable continuation reads the marker and delivers the comment once."
     RESOLUTION_BODY="$(jq -n --arg actionId "$ACTIVE_RECOVERY_ACTION_ID" --arg runId "$ACTIVE_RUN_ID" --arg evidence "$RECOVERY_EVIDENCE" \
       '{actionId:$actionId,outcome:"restored",sourceIssueStatus:"todo",resolutionNote:"Confirmed the interrupted process stopped after saving its idempotency marker but before delivering task output.",executionReconciliation:{runId:$runId,providerStopped:true,actionOutcome:"mixed",outcomeEvidence:$evidence}}')"

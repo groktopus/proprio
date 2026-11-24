@@ -82,6 +82,14 @@ test("active process recovery binds durable workspace and delivers one reconcile
   assert.match(source, /ACTIVE_PROCESS_CURRENT_START/);
   assert.match(source, /ACTIVE_PROCESS_STATE.*!= Z/);
   assert.match(source, /provider PID \$ACTIVE_PROCESS_PID with start identity \$ACTIVE_PROCESS_START; startup cwd/);
+  assert.match(source, /recovery-actions\?inspectSourceRunId=\$ACTIVE_RUN_ID/);
+  assert.match(source, /\.ownerType == "board" and \.kind == "active_run_watchdog" and \.cause == "legacy_execution_requires_reconciliation"/);
+  assert.match(source, /\.fingerprint == \("legacy-execution:" \+ \$run\) and \.sourceIssueId == \$issue and \.evidence\.runId == \$run/);
+  assert.match(source, /exactly one terminal task attempt exists before reconciliation/);
+  assert.match(source, /no live task execution remains before reconciliation/);
+  assert.match(source, /completion output is absent before reconciliation/);
+  assert.match(source, /exactly one completed provider effect exists before reconciliation/);
+  assert.doesNotMatch(source, /evidence\.automaticRecovery\.replay == "blocked"/);
   assert.match(source, /7d non-migration task run remains succeeded and readable/);
   assert.match(source, /if \[ "\$active_run_required" = 1 \]; then\s+jq -e --arg id "\$ACTIVE_RUN_ID"/);
   assert.match(source, /recovery-actions\/resolve/);
