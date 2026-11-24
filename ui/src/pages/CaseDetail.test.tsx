@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CaseDetail as CaseDetailData, CaseHandoffView } from "@/api/cases";
 import { ApiError } from "@/api/client";
 import { queryKeys } from "@/lib/queryKeys";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { CaseDetail } from "./CaseDetail";
 
 const cases = vi.hoisted(() => ({
@@ -50,7 +51,7 @@ function detail(): CaseDetailData {
 }
 
 function handoff(overrides: Partial<CaseHandoffView> = {}): CaseHandoffView {
-  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", offerContract: null, recipientDecision: null, state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
+  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, offerContract: null, recipientDecision: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
 }
 
 async function settle() {
@@ -247,6 +248,8 @@ describe("read-only CaseDetail", () => {
     expect(history.textContent).toContain("Expected deliverable: A tested implementation");
     expect(history.textContent).toContain("Review the requirements");
     expect(history.textContent).toContain("Confirm the test fixture");
+    const masked = Array.from(history.getElementsByClassName(ANALYTICS_MASK_CLASS), element => element.textContent);
+    expect(masked).toEqual(expect.arrayContaining(["A tested implementation", "Review the requirements", "Confirm the test fixture"]));
     expect(history.textContent).toContain("Recipient:");
     expect(history.textContent).toContain("Verifier");
     expect(history.textContent).toContain("Accountable source:");

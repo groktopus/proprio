@@ -73,12 +73,12 @@ const event: CaseEvent = {
 export function installCaseFixtures(state: FixtureState = "ready", workflow?: "waiting" | "blocked") {
   const handoff: CaseHandoffView = {
     id: "handoff-gap", companyId: caseItem.companyId, caseId: caseItem.id, issueId: "task-gap", version: 2,
-    destinationKind: "agent", completedAt: null, workflowTransition: null,
+    destinationKind: "agent", completedAt: null, workflowTransition: null, offerContract: null, recipientDecision: null,
     fromAgentId: "agent-coder", fromAgentName: "Codex Coder", toAgentId: "agent-verifier", toAgentName: "Release Verifier",
     phase: "verification", instructions: "Verify the saved release checklist and report any missing evidence on this task.",
     commentId: null, actorType: "agent", actorId: "agent-coder", sourceRunId: "run-gap", responsibleUserId: "user-storybook",
     expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-gap", idempotencyKey: "storybook-handoff",
-    inputFingerprint: "fixture", offerContract: null, recipientDecision: null, state: "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
+    inputFingerprint: "fixture", state: "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
     leaseExpiresAt: null, lastErrorCode: workflow === "blocked" ? "workspace_settlement" : null,
     lastError: workflow === "blocked" ? "Waiting for the outgoing workspace to finish saving." : null,
     createdAt: caseItem.updatedAt, assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: caseItem.updatedAt,
