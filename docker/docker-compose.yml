@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: "${PROPRIO_POSTGRES_PASSWORD:?Set PROPRIO_POSTGRES_PASSWORD in docker/.env}"
       POSTGRES_DB: proprio
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U proprio -d proprio"]
+      # The first-volume initialization server accepts Unix sockets only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 2s
       timeout: 5s
       retries: 30

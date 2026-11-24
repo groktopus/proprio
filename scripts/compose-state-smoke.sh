@@ -211,7 +211,6 @@ for profile in embedded external; do
   cleanup_projects+=("$target")
   if [[ "$profile" == external ]]; then
     compose "$target" up -d --wait --wait-timeout 180 db
-    compose "$target" exec -T db sh -ec 'for attempt in $(seq 1 30); do pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" && exit 0; sleep 1; done; exit 1'
     compose "$target" exec -T db pg_restore --version
     compose "$target" exec -T db sh -ec 'pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$fixture_dir/postgres.dump"
   else

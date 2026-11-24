@@ -148,7 +148,7 @@ the recovery set as `backup` after all archive commands succeed.
 
 ```bash
 umask 077
-backup_dir="$(mktemp -d)/backup"
+backup_root="$(mktemp -d)" && backup_dir="$backup_root/backup"
 ```
 
 #### Embedded PostgreSQL quickstart
@@ -162,6 +162,7 @@ under the bind mount.
   set -euo pipefail
   quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
   staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
   mkdir -m 700 "$staged"
   install -m 600 docker/.env "$staged/compose.env"
   "${quick[@]}" stop proprio
@@ -220,6 +221,7 @@ Do not copy a live PostgreSQL data directory.
   set -euo pipefail
   full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
   staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
   mkdir -m 700 "$staged"
   install -m 600 docker/.env "$staged/compose.env"
   "${full[@]}" stop server
@@ -245,12 +247,6 @@ described above. Keep the signing values and master key from the backup.
     -f docker/docker-compose.yml -f docker/restore-only.yml)
   "${full_restore[@]}" up -d --wait db
   "${full_restore[@]}" exec -T db sh -ec '
-    for attempt in $(seq 1 30); do
-      pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" && exit 0
-      sleep 1
-    done
-    exit 1'
-  "${full_restore[@]}" exec -T db sh -ec '
     pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
     < "$backup_dir/postgres.dump"
   "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
@@ -260,7 +256,8 @@ described above. Keep the signing values and master key from the backup.
 )
 ```
 
-After either restore, check `/api/health` for `"status":"ok"`, sign in, and
+If a restore fails, use a fresh target for the next attempt. After either
+restore succeeds, check `/api/health` for `"status":"ok"`, sign in, and
 verify a known board record and any required files. Rehearse in isolation
 before pointing production traffic at the restored deployment. Linux
 host-loss recovery is tracked separately in

@@ -77,13 +77,16 @@ for (const [file, service] of [[quickstart, "proprio"], [fullStack, "server"]]) 
   });
 }
 
-test("full-stack database requires its own password and stays private by default", (t) => {
+test("full-stack database requires its own password, stays private, and checks TCP readiness", (t) => {
   const noPassword = renderCompose(t, [fullStack], { ...testValues, PROPRIO_POSTGRES_PASSWORD: "" });
   assert.notEqual(noPassword.status, 0);
   assert.match(noPassword.stderr, /Set PROPRIO_POSTGRES_PASSWORD/);
 
   const defaultModel = services(renderCompose(t, [fullStack], testValues));
   assert.equal(defaultModel.db.ports, undefined);
+  assert.deepEqual(defaultModel.db.healthcheck.test, [
+    "CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"',
+  ]);
   assert.equal(defaultModel.db.environment.POSTGRES_PASSWORD, testValues.PROPRIO_POSTGRES_PASSWORD);
   const databaseUrl = new URL(defaultModel.server.environment.DATABASE_URL);
   assert.equal(databaseUrl.hostname, "db");
