@@ -266,11 +266,13 @@ async function pruneBrokenUnavailableProprioSkillSymlinks(
     const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
     const knownProprioSource = availableEntries.some(candidate => candidate.runtimeName === entry.name
       && path.resolve(candidate.source) === resolvedLinkedPath);
-    const likelyProprioSource = await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
-      requireSkillMarkdown: false,
-    });
-    if (!knownProprioSource && !likelyProprioSource) {
-      continue;
+    if (!knownProprioSource) {
+      // A live link outside this run's inventory can be an operator-managed
+      // skill in another checkout. The heuristic is safe only for broken links.
+      if (await pathExists(resolvedLinkedPath)) continue;
+      if (!(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
+        requireSkillMarkdown: false,
+      }))) continue;
     }
 
     await fs.unlink(target).catch(() => {});
