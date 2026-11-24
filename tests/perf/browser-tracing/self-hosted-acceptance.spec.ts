@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { expect, request as pwRequest, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const mode = process.env.PROPRIO_BROWSER_TRACING_MODE ?? "enabled";
@@ -103,17 +104,20 @@ test.describe("self-hosted browser tracing on Linux", () => {
     if (mode === "sink-failure") {
       expect(pageErrors).toEqual([]);
     }
+    const evidence = {
+      build: process.env.PROPRIO_BROWSER_TRACING_BUILD_ID ?? "unknown",
+      mode,
+      sampleCount: traceSpans(traceBodies).filter((span) => span.name === "page.load").length,
+      tracePosts: tracePosts.length,
+      sdkLoads: sdkLoads.length,
+      pageErrors,
+      routes: traceSpans(traceBodies).filter((span) => span.name === "page.load").map((span) => span.attributes),
+    };
+    const evidencePath = testInfo.outputPath(`browser-tracing-${mode}.json`);
+    await fs.writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
     await testInfo.attach("browser-tracing-acceptance", {
+      path: evidencePath,
       contentType: "application/json",
-      body: Buffer.from(JSON.stringify({
-        build: process.env.PROPRIO_BROWSER_TRACING_BUILD_ID ?? "unknown",
-        mode,
-        sampleCount: traceSpans(traceBodies).filter((span) => span.name === "page.load").length,
-        tracePosts: tracePosts.length,
-        sdkLoads: sdkLoads.length,
-        pageErrors,
-        routes: traceSpans(traceBodies).filter((span) => span.name === "page.load").map((span) => span.attributes),
-      }, null, 2)),
     });
   });
 });
