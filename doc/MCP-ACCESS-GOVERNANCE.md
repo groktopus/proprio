@@ -402,12 +402,17 @@ To pull recent audit:
 ```sh
 curl -fsS -H "Authorization: Bearer $BOARD_API_KEY" \
   "$PROPRIO_URL/api/tool-gateway/audit?companyId=$COMPANY_ID&limit=100" \
-  | jq '{nextCursor, events: [.events[] | {id, createdAt, action, runId, decision: .details.decision, outcome: .normalizedOutcome, reasonCode: .details.reasonCode}]}'
+  | jq '{nextCursor, events: [.events[] | {
+      id, createdAt, action, runId, connectionId,
+      tool: .details.tool, invocationId: .details.invocationId,
+      actionRequestId: .details.actionRequestId, decision: .details.decision,
+      normalizedOutcome, reasonCode: .details.reasonCode
+    }]}'
 ```
 
 Two practical patterns:
 
-- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` joins invocations for a run to their action requests and call events. Use the gateway audit query to look for events without a linked invocation.
+- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` joins invocations for a run to their action requests and call events. The gateway audit query includes some unlinked events. It omits standalone `policy_decision` and `trust_rule_used` events. Use `GET /api/tool-connections/:connectionId/activity` for recent evidence tied to a known connection.
 - **Approval audit:** Follow the linked action request to check its resolution and deciding principal. Use the invocation and call events to review execution.
 
 See [governance evidence for authenticated self-hosted deployments](governance-evidence.md)
