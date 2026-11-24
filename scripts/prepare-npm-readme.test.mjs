@@ -5,9 +5,9 @@ import test from "node:test";
 import { prepareNpmReadme } from "./prepare-npm-readme.mjs";
 
 const assetBase =
-  "https://raw.githubusercontent.com/paperclipai/paperclip/master/doc/assets/";
+  "https://raw.githubusercontent.com/groktopus/proprio/master/doc/assets/";
 const releaseAssetBase =
-  "https://raw.githubusercontent.com/paperclipai/paperclip/abc123/doc/assets/";
+  "https://raw.githubusercontent.com/groktopus/proprio/abc123/doc/assets/";
 
 test("rewrites repository-relative image sources for npm", () => {
   const readme = [
@@ -30,13 +30,15 @@ test("rewrites repository-relative image sources for npm", () => {
   );
 });
 
-test("prepares the repository README without package-relative image sources", () => {
+test("prepares the repository README with versioned brand artwork and guide links", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  const npmReadme = prepareNpmReadme(readme, "master");
+  const npmReadme = prepareNpmReadme(readme, "abc123");
 
-  assert.doesNotMatch(
-    npmReadme,
-    /(?:src|srcset)=["'](?:doc\/assets\/|[^"']*,\s*doc\/assets\/)/,
+  assert.ok(
+    npmReadme.includes('src="https://raw.githubusercontent.com/groktopus/proprio/abc123/docs/brand/proprio-app-icon.png"'),
+  );
+  assert.ok(
+    npmReadme.includes("[Proprio brand kit](https://github.com/groktopus/proprio/blob/abc123/docs/brand/README.md)"),
   );
 });
 

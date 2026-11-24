@@ -1,6 +1,6 @@
 # Proprio
 
-<img src="docs/brand/proprio-nautilus.png" alt="Proprio’s smiling nautilus mascot" width="144">
+<img src="docs/brand/proprio-app-icon.png" alt="Proprio’s smiling nautilus mascot" width="144">
 
 **Your own personal AI agent ~~squid~~ squad**
 
