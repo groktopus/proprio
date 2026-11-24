@@ -1483,11 +1483,12 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
   useEffect(() => {
     if (!newIssueOpen || !dialogBodyRef.current) return;
     const body = dialogBodyRef.current;
+    const dialog = body.closest<HTMLElement>('[role="dialog"]');
     const focusEditor = () => {
       const editor = body.querySelector<HTMLElement>('[contenteditable="true"]');
       if (!editor) return false;
       const active = document.activeElement;
-      if (active && active !== document.body && active !== body && !body.contains(active)) return false;
+      if (active && active !== document.body && active !== body && !body.contains(active) && active !== dialog) return false;
       editor.focus();
       return true;
     };
