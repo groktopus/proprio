@@ -55,11 +55,15 @@ npm install. Report only the combinations actually exercised.
 ## Deployment handoff
 
 Hosted verification requires an explicitly authorized Proprio target. Use the
-URL and workspace supplied for this task, or load them from the selected
-deployment's approved QA profile. Confirm the intended environment and account
-before signing in or writing state. If these inputs are missing, report hosted
-coverage as blocked. Local source and published-package verification can run
-with their own isolated state without hosted credentials.
+URL supplied for the task or the one in the deployment's approved QA profile.
+Confirm the intended environment and account before signing in or writing
+state. For an existing tenant, require the workspace up front. For fresh
+workspace onboarding, confirm the authorized portal and permission to create
+a disposable workspace. Verify and record its identity after creation.
+
+If inputs are missing, report the hosted check as blocked. Local source and
+published-package verification can use isolated state without hosted
+credentials.
 
 Use the deployment's documented sign-in method and QA identity. See
 [Hosted QA accounts and credentials](references/hosted-qa-accounts.md) for the

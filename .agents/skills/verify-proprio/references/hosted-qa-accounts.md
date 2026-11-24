@@ -9,7 +9,9 @@ Use the target supplied in the task or an approved QA profile named by the
 deployment owner. Record:
 
 - The environment and exact Proprio URL. For a tenant check, record the
-  intended workspace or company and its identifier.
+  intended workspace or company and its identifier. For fresh onboarding,
+  record the approved portal and authorized creation scope first, then record
+  the new workspace when it exists.
 - The QA account alias, expected permissions and sign-in method.
 - Private references for any required credentials and the owner who can
   rotate them. Keep credential values and deployment-specific instructions
@@ -25,11 +27,16 @@ before entering credentials or modifying state.
 
 ## Execute and record the journey
 
+Use these steps for manual verification. For automated Product E2E campaigns,
+use the approved deployment target adapter for sign-in, provisioning, target
+verification, and cleanup. See the [Product Journey guide](../../../../tests/runner-e2e/PRODUCT-JOURNEYS.md).
+
 1. Open the approved URL and use the deployment owner's normal login flow.
    Reuse the approved test identity when testing an existing workspace.
 2. If the deployment uses an email code, read only the approved test mailbox
    and match the exact recipient and current login attempt. Keep the code
-   and mailbox credentials out of reports and screenshots.
+   and mailbox credentials out of reports and screenshots. Start browser
+   tracing only after sign-in and pause it during reauthentication.
 3. Verify the authenticated principal, workspace and served revision before
    running the requested checks. A successful portal login does not establish
    access to the intended tenant.
