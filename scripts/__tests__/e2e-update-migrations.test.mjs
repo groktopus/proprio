@@ -46,6 +46,11 @@ test("qualification can run the exact tested CLI against the installed base payl
 
 test("active process recovery requires board reconciliation before normal Retry", () => {
   const source = readFileSync(script, "utf8");
+  const activity = readFileSync(path.join(repoRoot, "server", "src", "services", "activity.ts"), "utf8");
+  assert.match(activity, /runId: heartbeatRuns\.id/);
+  assert.match(source, /\[\.\[\]\]\[0\]\.runId \/\/ empty/);
+  assert.match(source, /select\(\.runId == \$id/);
+  assert.doesNotMatch(source, /\[\.\[\]\]\[0\]\.id \/\/ empty/);
   assert.match(source, /legacy_execution_requires_reconciliation/);
   assert.match(source, /providerStopped:true,actionOutcome:"mixed"/);
   assert.match(source, /qualification-process\.json/);

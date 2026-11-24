@@ -365,7 +365,7 @@ NODE
   ACTIVE_RUN_ID=""
   while [ "$(date +%s)" -lt "$active_deadline" ]; do
     ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
-    ACTIVE_RUN_ID="$(jq -er '[.[]][0].id // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].runId // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
     if [ -n "$ACTIVE_RUN_ID" ]; then
       ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
       if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
@@ -382,7 +382,7 @@ NODE
     # after the bounded admission window, make exactly one issue-linked wake;
     # never duplicate an execution already represented in the issue run list.
     ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
-    ACTIVE_RUN_ID="$(jq -er '[.[]][0].id // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].runId // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
     if [ -n "$ACTIVE_RUN_ID" ]; then
       pass "4f assignment admitted run $ACTIVE_RUN_ID at the deadline; reusing it without a duplicate wake"
     else
@@ -668,7 +668,7 @@ if [ "$probe" = 0 ]; then
     || { fail_ "9f rolled-back service reads qualification output"; exit 1; }
   jq -e --arg id "$ACTIVE_ISSUE_ID" '.id == $id' <<<"$ROLLBACK_ISSUE" >/dev/null \
     && jq -e --arg id "$ACTIVE_RUN_ID" --arg original "$EXPECTED_ORIGINAL_STATUS" --argjson active "$active_run_required" '
-      ([.[] | select(.id == $id and (if $original == "succeeded" then .status == "succeeded" else (.status == "interrupted" or .status == "failed") end))] | length == 1)
+      ([.[] | select(.runId == $id and (if $original == "succeeded" then .status == "succeeded" else (.status == "interrupted" or .status == "failed") end))] | length == 1)
       and ([.[] | select(.status == "succeeded")] | length == 1)
       and (if $active == 1 then length == 2 else length == 1 end)
     ' <<<"$ROLLBACK_RUNS" >/dev/null \
