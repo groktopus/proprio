@@ -1,18 +1,10 @@
-# Quickstart: single-container Proprio with embedded database.
-# Copy this file and set the required env vars before running.
-#
-#   cd docker
-#   Set BETTER_AUTH_SECRET and PROPRIO_TOOL_ACTION_SIGNING_SECRET in .env
-#   once, using a separate `openssl rand -hex 32` value for each. Reuse them
-#   on restarts; do not replace existing deployment secrets.
-#   export ANTHROPIC_API_KEY="sk-ant-..."
-#   docker compose -f docker-compose.quickstart.yml up --build
-#
+# Quickstart with embedded PostgreSQL. See doc/DOCKER.md for setup.
 services:
   proprio:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: production
     # Ceiling on processes. The image makes tini PID 1 so orphaned agent
     # descendants are reaped instead of piling up as zombies; this is the
     # backstop if something leaks anyway — the container hits its own limit and
@@ -20,8 +12,15 @@ services:
     pids_limit: 2048
     # Includes the shared 30s adapter-settlement window and final cleanup.
     stop_grace_period: 90s
+    healthcheck:
+      # A 200 response can still report "starting" while recovery runs.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(async response => { if (!response.ok || (await response.json()).status !== 'ok') process.exitCode = 1; }).catch(() => { process.exitCode = 1; })"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 30s
     ports:
-      - "${PROPRIO_PORT:-3100}:3100"
+      - "${PROPRIO_BIND_IP:-127.0.0.1}:${PROPRIO_PORT:-3100}:3100"
     environment:
       HOST: "0.0.0.0"
       PROPRIO_HOME: "/proprio"
@@ -36,7 +35,7 @@ services:
       # "private" = LAN only, "public" = internet-facing (use with TLS)
       PROPRIO_DEPLOYMENT_EXPOSURE: "private"
       # Base URL users will access the UI at
-      PROPRIO_PUBLIC_URL: "${PROPRIO_PUBLIC_URL:-http://localhost:3100}"
+      PROPRIO_PUBLIC_URL: "${PROPRIO_PUBLIC_URL:-http://localhost:${PROPRIO_PORT:-3100}}"
       # Extra hostnames the instance accepts beyond the public URL host
       # (LAN or Tailscale aliases), comma-separated; empty means none
       PROPRIO_ALLOWED_HOSTNAMES: "${PROPRIO_ALLOWED_HOSTNAMES:-}"

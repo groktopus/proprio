@@ -38,30 +38,22 @@ Docker note: the Docker quickstart image also uses embedded PostgreSQL by defaul
 
 ## 2. Local PostgreSQL (Docker)
 
-For a full PostgreSQL server locally, use the included Docker Compose setup:
+For host-side development against the Compose PostgreSQL service, follow the
+[Docker Compose setup](DOCKER.md#docker-compose) to create `docker/.env` and
+set an independent `PROPRIO_POSTGRES_PASSWORD`. From the repository root,
+include the loopback-only override and start the database service:
 
 ```sh
-docker compose up -d
+docker compose --env-file docker/.env -f docker/docker-compose.yml \
+  -f docker/docker-compose.local-postgres.yml up -d --wait db
 ```
 
-This starts PostgreSQL 17 on `localhost:5432`. Then set the connection string:
+Set `DATABASE_URL` in the root checkout's private `.env` with the same hex
+password. Use `postgres://proprio:<hex-password>@127.0.0.1:5432/proprio`. If
+you set `PROPRIO_POSTGRES_PORT` in `docker/.env`, use that port in the URL.
 
 ```sh
-cp .env.example .env
-# .env already contains:
-# DATABASE_URL=postgres://proprio:proprio@localhost:5432/proprio
-```
-
-Run migrations:
-
-```sh
-DATABASE_URL=postgres://proprio:proprio@localhost:5432/proprio \
-  pnpm db:migrate
-```
-
-Start the server:
-
-```sh
+pnpm db:migrate
 pnpm dev
 ```
 

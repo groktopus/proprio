@@ -3,15 +3,13 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: proprio
-      POSTGRES_PASSWORD: proprio
+      POSTGRES_PASSWORD: "${PROPRIO_POSTGRES_PASSWORD:?Set PROPRIO_POSTGRES_PASSWORD in docker/.env}"
       POSTGRES_DB: proprio
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U proprio -d proprio"]
       interval: 2s
       timeout: 5s
       retries: 30
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -19,6 +17,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: production
     # No `init: true` here on purpose. The image makes tini PID 1 itself
     # (Dockerfile ENTRYPOINT), which covers every launch path -- compose, plain
     # `docker run`, the quadlet units and the ECS task definition -- instead of
@@ -30,15 +29,23 @@ services:
     pids_limit: 2048
     # Includes the shared 30s adapter-settlement window and final cleanup.
     stop_grace_period: 90s
+    healthcheck:
+      # A 200 response can still report "starting" while recovery runs.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/api/health').then(async response => { if (!response.ok || (await response.json()).status !== 'ok') process.exitCode = 1; }).catch(() => { process.exitCode = 1; })"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 30s
     ports:
-      - "3100:3100"
+      - "${PROPRIO_BIND_IP:-127.0.0.1}:${PROPRIO_PORT:-3100}:3100"
     environment:
-      DATABASE_URL: postgres://proprio:proprio@db:5432/proprio
+      DATABASE_URL: "postgres://proprio:${PROPRIO_POSTGRES_PASSWORD:?Set PROPRIO_POSTGRES_PASSWORD in docker/.env}@db:5432/proprio"
       PORT: "3100"
       SERVE_UI: "true"
       PROPRIO_DEPLOYMENT_MODE: "authenticated"
       PROPRIO_DEPLOYMENT_EXPOSURE: "private"
-      PROPRIO_PUBLIC_URL: "${PROPRIO_PUBLIC_URL:-http://localhost:3100}"
+      PROPRIO_PUBLIC_URL: "${PROPRIO_PUBLIC_URL:-http://localhost:${PROPRIO_PORT:-3100}}"
+      PROPRIO_ALLOWED_HOSTNAMES: "${PROPRIO_ALLOWED_HOSTNAMES:-}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
       # Independent secret for signed approval-gated tool actions.
       PROPRIO_TOOL_ACTION_SIGNING_SECRET: "${PROPRIO_TOOL_ACTION_SIGNING_SECRET:-}"
