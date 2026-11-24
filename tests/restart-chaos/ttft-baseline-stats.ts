@@ -240,33 +240,33 @@ export interface BaselineRow { adapter: string; environment: string; warmth: "co
   anchors: Record<string, number> }
 
 export function baselineRows(runs: readonly BaselineRun[]): BaselineRow[] {
-  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; runs: BaselineRun[]; metrics: RunMetrics[] }>();
+  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; records: Array<{ run: BaselineRun; metrics: RunMetrics }> }>();
   for (const run of runs) {
     // Restart, post-restart and new-agent verification samples are reported on their own.
     if (run.phase === "restart" || run.phase === "verify" || run.phase === "postfault") continue;
     const warmth = runWarmth(run);
     const key = `${run.adapter}|${run.environment}|${warmth}`;
-    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, runs: [], metrics: [] };
-    group.runs.push(run);
-    group.metrics.push(runMetrics(run));
+    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, records: [] };
+    group.records.push({ run, metrics: runMetrics(run) });
     groups.set(key, group);
   }
   return [...groups.values()].sort((a, b) => `${a.adapter}${a.warmth}`.localeCompare(`${b.adapter}${b.warmth}`)).map(group => {
     const anchors: Record<string, number> = {};
-    for (const metric of group.metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
+    const metrics = group.records.map(record => record.metrics);
+    for (const metric of metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
     return { adapter: group.adapter, environment: group.environment, warmth: group.warmth,
-      attempts: group.runs.length,
-      failedOrTimedOut: group.runs.filter(run => run.status === "failed" || run.status === "timed_out" || run.status === "interrupted").length,
-      noVisibleActivity: group.metrics.filter(metric => metric.firstActivityAfterRunCreatedMs === null).length,
+      attempts: group.records.length,
+      failedOrTimedOut: group.records.filter(({ run }) => run.status === "failed" || run.status === "timed_out" || run.status === "interrupted").length,
+      noVisibleActivity: metrics.filter(metric => metric.firstActivityAfterRunCreatedMs === null).length,
       anchors,
-      ttft: distribution(group.metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),
-      boot: distribution(group.metrics.flatMap(metric => metric.bootMs === null ? [] : [metric.bootMs])),
-      inputWait: distribution(group.metrics.flatMap(metric => metric.inputWaitMs === null ? [] : [metric.inputWaitMs])),
-      ttftAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.ttftAfterRunCreatedMs === null ? [] : [metric.ttftAfterRunCreatedMs])),
-      firstActivityAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])),
-      submitToFirstActivity: distribution(group.metrics.flatMap(metric => metric.submitToFirstActivityMs === null ? [] : [metric.submitToFirstActivityMs])),
-      submitToFirstText: distribution(group.metrics.flatMap(metric => metric.submitToFirstTextMs === null ? [] : [metric.submitToFirstTextMs])),
-      providerFirstActivity: distribution(group.metrics.flatMap(metric => metric.providerFirstActivityMs === null ? [] : [metric.providerFirstActivityMs])) };
+      ttft: distribution(metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),
+      boot: distribution(metrics.flatMap(metric => metric.bootMs === null ? [] : [metric.bootMs])),
+      inputWait: distribution(metrics.flatMap(metric => metric.inputWaitMs === null ? [] : [metric.inputWaitMs])),
+      ttftAfterRunCreated: distribution(metrics.flatMap(metric => metric.ttftAfterRunCreatedMs === null ? [] : [metric.ttftAfterRunCreatedMs])),
+      firstActivityAfterRunCreated: distribution(metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])),
+      submitToFirstActivity: distribution(metrics.flatMap(metric => metric.submitToFirstActivityMs === null ? [] : [metric.submitToFirstActivityMs])),
+      submitToFirstText: distribution(metrics.flatMap(metric => metric.submitToFirstTextMs === null ? [] : [metric.submitToFirstTextMs])),
+      providerFirstActivity: distribution(metrics.flatMap(metric => metric.providerFirstActivityMs === null ? [] : [metric.providerFirstActivityMs])) };
   });
 }
 

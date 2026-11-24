@@ -44,6 +44,35 @@ time from browser submit to the first new agent conversation message. This is
 a UI visibility proxy, not provider proof. Join it to the run trace by run ID
 and report any mismatch. The spec is not a replacement for the native trace.
 
+For a credential-free disposable check that submits a real second input while
+the first process-adapter turn is active, use the task-readiness server
+launcher (`/tmp/proprio-m03-serve-readiness.sh`) and run:
+
+```sh
+PROPRIO_PERF_BASE_URL=http://127.0.0.1:3293 \
+PROPRIO_AGENT_ACTIVITY_BUILD=$(git rev-parse HEAD) \
+PROPRIO_AGENT_ACTIVITY_OUTPUT=test-results/agent-activity/credential-free-submit.json \
+pnpm exec playwright test \
+  --config tests/perf/agent-activity/credential-free-playwright.config.ts
+```
+
+The fixture follows the disposable process-agent setup in
+`tests/perf/issue-detail/task-open-cohorts.spec.ts`. The process emits a
+synthetic agent comment through its run-scoped bridge after the queued
+follow-up run starts. The test joins that comment by `createdByRunId`, verifies
+the accepted input by its real POST response, and compares the persisted
+comment timestamp with the exact visible synthetic row. It records a hash
+rather than task text, keeps browser and server clocks separate, and explicitly
+scopes the result to the local process fixture rather than provider or release
+performance.
+
+For identical before/after execution, `/tmp/proprio-m03-agent-activity-builds.sh`
+accepts two exact prepared checkouts through `PROPRIO_BASE_CHECKOUT`,
+`PROPRIO_BASE_BUILD`, `PROPRIO_CANDIDATE_CHECKOUT`, and
+`PROPRIO_CANDIDATE_BUILD`; it runs them sequentially on loopback ports 3294
+and 3295 and leaves the JSON reports under each checkout's
+`test-results/agent-activity/` directory.
+
 ## Baseline and follow-up
 
 Run a baseline from an exact build with representative local adapters and a
