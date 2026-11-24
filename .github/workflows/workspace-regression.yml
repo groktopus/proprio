@@ -3,7 +3,7 @@ run-name: Workspace regression ${{ github.sha }}
 
 on:
   schedule:
-    - cron: "23 6 * * *"
+    - cron: "23 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -71,6 +71,9 @@ jobs:
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm preflight:workspace-links
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Build Runner TypeScript exports for server tests
+        if: startsWith(matrix.lane, 'server-')
+        run: pnpm --filter @groktopus/proprio-runner run build:typescript
       - name: Build Runner test binaries
         if: matrix.lane == 'server-runner'
         run: pnpm --filter @groktopus/proprio-runner run build:runner-binaries
@@ -78,6 +81,7 @@ jobs:
         id: tests
         env:
           TEST_ARGS: ${{ matrix.args }}
+          PROPRIO_REQUIRE_RUNNER_API_INTEGRATION: ${{ matrix.lane == 'server-runner' && '1' || '' }}
         run: |
           if [[ "$TEST_ARGS" == baseline ]]; then
             mkdir -p "$PROPRIO_WORKSPACE_REGRESSION_DIR"
