@@ -19,7 +19,8 @@ runs use the callback bridge. The legacy HTTP submission route accepts a new
 record only when the matching skill is selected in the saved agent config and
 was present in the run's pinned skill selection. Direct HTTP calls do not
 bypass agent opt-in or the legacy runtime skill policy. Replaying an existing
-idempotency receipt remains available after opt-in is removed.
+idempotency receipt remains available after opt-in is removed. A legacy run
+without a pinned selection needs a new run to submit new feedback.
 
 Earlier releases mounted both feedback skills for skill-capable legacy agents
 by default. After upgrading, operators choose which agents can submit new
@@ -33,7 +34,9 @@ Native runs expose `submit_complaint({body, idempotencyKey})` in standard, ask,
 and planning modes when `complain` is selected, and expose
 `submit_suggestion({body, idempotencyKey})` when `suggestion-box` is selected.
 The saved agent selection and the pinned runtime context must both include the
-matching skill; task-scoped mentions cannot opt an agent in. Specialized
+matching skill. Removing the saved selection stops new writes from an active
+run. A still-authorized run can replay an existing receipt. Task-scoped skill
+mentions leave the agent's saved selection in place. Specialized
 completion-review runs retain their restricted tool set. Native submission
 uses the bound authority without a shell or API credential. Once enabled,
 agents may submit through the same company-scoped store. Native runs using

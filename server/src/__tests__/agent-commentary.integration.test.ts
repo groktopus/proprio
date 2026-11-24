@@ -84,6 +84,21 @@ describe("internal agent commentary through both transports", () => {
     expect(await rows(f)).toHaveLength(1);
   });
 
+  it("requires pinned delivery for new feedback from an older legacy run", async () => {
+    const f = await legacy();
+    const existing = { ...input, kind: "complaint" };
+    expect((await post(f, existing)).status).toBe(201);
+    await server.db.update(heartbeatRuns).set({
+      contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) - 'skillVersions'`,
+    }).where(eq(heartbeatRuns.id, f.runId));
+
+    const replay = await post(f, existing);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ replayed: true });
+    expect((await post(f, { ...existing, idempotencyKey: "missing-delivery" })).status).toBe(403);
+    expect(await rows(f)).toHaveLength(1);
+  });
+
   it.each(["standard", "ask", "planning"] as const)("exposes native feedback in %s and persists only feedback plus a content-free audit", async (mode) => {
     const f = await server.fixture({ mode, proactiveCommentarySkills: [PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY] });
     const authority = new ProprioRunnerToolAuthority(server.db, { ...f, workMode: mode });
@@ -106,6 +121,22 @@ describe("internal agent commentary through both transports", () => {
     const audit = await server.db.select().from(activityLog).where(and(eq(activityLog.runId, f.runId), eq(activityLog.action, "agent.commentary_submitted")));
     expect(audit).toHaveLength(2);
     expect(audit.every(a => Object.keys(a.details ?? {}).join() === "kind")).toBe(true);
+  });
+
+  it("honors native commentary opt-out during an active run and retains its existing receipt", async () => {
+    const f = await server.fixture({ proactiveCommentarySkills: [PROPRIO_COMPLAIN_SKILL_KEY] });
+    const submit = (args = input) => f.authority.execute({ tool: "submit_complaint", callId: randomUUID(), arguments: args });
+    const original = await submit();
+    expect(original).toMatchObject({ replayed: false });
+
+    const [agent] = await server.db.select().from(agents).where(eq(agents.id, f.agentId));
+    await server.db.update(agents).set({ adapterConfig: { ...agent.adapterConfig, proprioSkillSync: { desiredSkills: [] } } })
+      .where(eq(agents.id, f.agentId));
+
+    await expect(submit()).resolves.toMatchObject({ id: (original as { id: string }).id, replayed: true });
+    await expect(submit({ ...input, idempotencyKey: "disabled-native-write" })).rejects.toThrow(/not enabled/);
+    expect(await rows(f)).toHaveLength(1);
+    expect(await server.db.select().from(activityLog).where(and(eq(activityLog.runId, f.runId), eq(activityLog.action, "agent.commentary_submitted")))).toHaveLength(1);
   });
 
   it("deduplicates concurrent replay, rejects changed content, and imposes no suggestion quota", async () => {

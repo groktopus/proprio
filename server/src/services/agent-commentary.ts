@@ -75,14 +75,14 @@ export async function submitAgentCommentary(
         return { result: { id: prior.id, kind: prior.kind, createdAt: prior.createdAt.toISOString(), replayed: true }, publication: null };
       }
       if (options?.receiptOnly) return { result: null, publication: null };
+      const skillKey = input.kind === "complaint" ? PROPRIO_COMPLAIN_SKILL_KEY : PROPRIO_SUGGESTION_BOX_SKILL_KEY;
+      const configured = readProprioSkillSyncPreference(context.agent.adapterConfig ?? {}).desiredSkills.includes(skillKey);
+      if (!configured) throw forbidden("Proactive commentary is not enabled for this agent run");
       if (context.run.runtimeMode !== "native") {
-        const skillKey = input.kind === "complaint" ? PROPRIO_COMPLAIN_SKILL_KEY : PROPRIO_SUGGESTION_BOX_SKILL_KEY;
-        const configured = readProprioSkillSyncPreference(context.agent.adapterConfig ?? {}).desiredSkills.includes(skillKey);
         const skillVersions = context.run.contextSnapshot?.skillVersions;
-        const hasSkillSnapshot = Object.hasOwn(context.run.contextSnapshot ?? {}, "skillVersions");
         const delivered = Boolean(skillVersions && typeof skillVersions === "object" && !Array.isArray(skillVersions)
           && Object.hasOwn(skillVersions, skillKey));
-        if (!configured || (hasSkillSnapshot && !delivered)) {
+        if (!delivered) {
           throw forbidden("Proactive commentary is not enabled for this agent run");
         }
       }
