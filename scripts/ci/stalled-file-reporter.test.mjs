@@ -102,7 +102,8 @@ test("never collected", () => {});
 ]) test(`a real Vitest run with ${label} fails fast and names the file`, () => {
   const directory = realpathSync(mkdtempSync(path.join(tmpdir(), "stalled-file-reporter-")));
   try {
-    writeFileSync(path.join(directory, "stuck.test.mjs"), body);
+    const stalledFile = path.join(directory, "stuck.test.mjs");
+    writeFileSync(stalledFile, body);
     writeFileSync(path.join(directory, "quick.test.mjs"), `import { test } from "vitest";
 test("passes", () => {});
 `);
@@ -113,9 +114,21 @@ test("passes", () => {});
     writeFileSync(fixtureReporter, `
 import Base from ${JSON.stringify(pathToFileURL(reporterPath).href)};
 import { existsSync } from "node:fs";
+const stalledFile = ${JSON.stringify(stalledFile)};
 export default class extends Base {
+  observedPhase = "loading the file";
+  onTestModuleStart(testModule) {
+    if (testModule.moduleId === stalledFile) this.observedPhase = "starting the file's tests";
+    super.onTestModuleStart(testModule);
+  }
+  onTestCaseReady(testCase) {
+    if (testCase.module.moduleId === stalledFile) this.observedPhase = 'test "' + testCase.fullName + '"';
+    super.onTestCaseReady(testCase);
+  }
   check() {
-    if (existsSync(${JSON.stringify(startedMarker)})) super.check();
+    if (this.stopped || !existsSync(${JSON.stringify(startedMarker)})) return;
+    super.check();
+    if (this.stopped) console.log("Fixture observed phase: " + JSON.stringify(this.observedPhase));
   }
 }
 `);
@@ -134,8 +147,14 @@ export default class extends Base {
     assert.notEqual(result.status, 0, output);
     assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started} ms:\n${output}`);
     assert.ok(existsSync(startedMarker), "the worker reached the intentional hang");
-    assert.match(output, /::error file=stuck\.test\.mjs,title=Test file stopped making progress::stuck\.test\.mjs made no progress/);
-    assert.ok(steps.some(step => output.includes(`while in: ${step}.`)), output);
+    const observed = output.match(/^Fixture observed phase: (.+)$/m);
+    assert.ok(observed, output);
+    const phase = JSON.parse(observed[1]);
+    assert.ok(steps.includes(phase), output);
+    const annotation = output.split(/\r?\n/).find(line => line.startsWith(
+      "::error file=stuck.test.mjs,title=Test file stopped making progress::stuck.test.mjs made no progress",
+    ));
+    assert.ok(annotation?.includes(`while in: ${phase}.`), output);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
