@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, completionContracts, heartbeatRuns, issues, projects } from "@groktopus/db";
 import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type CaseWorkflowTransition, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
@@ -27,6 +27,22 @@ export type CaseHandoffRow = typeof caseHandoffs.$inferSelect;
 type CaseRow = typeof cases.$inferSelect;
 type IssueRow = typeof issues.$inferSelect;
 const PENDING = ["offered", "awaiting_release", "pending_dispatch", "awaiting_completion"] as const;
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function hasAcknowledgedOperatorStop(run: typeof heartbeatRuns.$inferSelect): boolean {
+  const result = record(run.resultJson);
+  if (result.cancelledByActorType !== "user" || record(result.cancellation).source !== "operator") return false;
+  if (record(result.executionCancellation).state === "acknowledged") return true;
+  const native = record(result.nativeCancellation);
+  return native.schema === "proprio.native-cancellation.v1" && native.runId === run.id
+    && native.companyId === run.companyId && native.issueId === run.nativeIssueId
+    && native.scope === "run" && native.reasonCode === "cancellation_run_only"
+    && native.dispatchState === "acknowledged" && native.dispatched === true
+    && typeof native.intentAuditId === "string" && typeof native.acknowledgementAuditId === "string";
+}
 
 function publicHandoff(row: CaseHandoffRow) {
   const { actorContext: _actorContext, workflowPrompt: _prompt, baseWorkflowDocumentRevisionId: _base, ...publicRow } = row;
@@ -802,6 +818,81 @@ export function caseHandoffService(db: Db) {
       await authorizeHandoffControl(db, actor, row, issue, false);
       if (PENDING.includes(row.state as typeof PENDING[number])) await cancelPendingCaseHandoffsForIssue(db, issue.id, "Cancelled by operator", actor, row.id);
       return db.select().from(caseHandoffs).where(eq(caseHandoffs.id, row.id)).then(rows => publicHandoff(rows[0]!));
+    },
+
+    async withdrawDelivered(actor: AuthorizationActor, caseId: string, handoffId: string, input: {
+      expectedHandoffVersion: number;
+      stoppedRunId: string;
+    }) {
+      if (actor.type !== "board") throw forbidden("Only a board operator can withdraw delivered work");
+      if (!isUuidLike(handoffId) || !isUuidLike(input.stoppedRunId)) throw notFound("Handoff not found");
+      const caseSnapshot = await visible(actor, caseId);
+      const publications: ActivityPublication[] = [];
+      const withdrawn = await db.transaction(async transaction => {
+        const tx = transaction as unknown as Db;
+        const scope = and(eq(caseHandoffs.companyId, caseSnapshot.companyId), eq(caseHandoffs.caseId, caseSnapshot.id),
+          eq(caseHandoffs.id, handoffId));
+        const [snapshot] = await tx.select().from(caseHandoffs).where(scope).limit(1);
+        if (!snapshot) throw notFound("Handoff not found");
+        const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, snapshot.companyId),
+          eq(issues.id, snapshot.issueId))).for("update");
+        if (!issue) throw notFound("Task not found");
+        await lockCaseHandoffAuthorityRun(tx, snapshot, issue);
+        const [caseRow] = await tx.select().from(cases).where(and(eq(cases.companyId, snapshot.companyId),
+          eq(cases.id, snapshot.caseId))).for("update");
+        const [row] = await tx.select().from(caseHandoffs).where(scope).for("update");
+        if (!caseRow || !row) throw notFound("Handoff not found");
+        await authorizeHandoffControl(tx, actor, row, issue, false);
+        if (row.state !== "delivered" || row.destinationKind !== "agent" || !row.toAgentId
+            || row.version !== input.expectedHandoffVersion || caseRow.handoffVersion !== row.version
+            || caseRow.workIssueId !== issue.id || issue.assigneeAgentId !== row.toAgentId || issue.assigneeUserId !== null
+            || ["done", "cancelled"].includes(issue.status)) {
+          throw conflict("The delivered handoff or its task owner changed. Read the current Case and task before withdrawing it.",
+            { code: "case_handoff_withdrawal_stale", expectedHandoffVersion: input.expectedHandoffVersion });
+        }
+        const offer = record(row.offerContract);
+        const decision = record(row.recipientDecision);
+        const revision = record(offer.requirementRevision);
+        if (offer.schema !== "proprio.case-handoff-offer.v1" || decision.outcome !== "accepted"
+            || decision.actorType !== "agent" || decision.actorId !== row.toAgentId
+            || decision.handoffVersion !== row.version || decision.requirementsDigest !== offer.requirementsDigest
+            || decision.requirementRevisionId !== revision.id) {
+          throw conflict("Only an accepted versioned handoff can be withdrawn through this control.", { code: "case_handoff_withdrawal_not_versioned" });
+        }
+        const [stoppedRun] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.stoppedRunId),
+          eq(heartbeatRuns.companyId, row.companyId), eq(heartbeatRuns.agentId, row.toAgentId), eq(heartbeatRuns.status, "cancelled"),
+          or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id)))).for("share").limit(1);
+        if (!stoppedRun || record(stoppedRun.contextSnapshot).caseHandoffId !== row.id || !hasAcknowledgedOperatorStop(stoppedRun)) {
+          throw conflict("Stop the recipient run and wait for its acknowledged Stop receipt before withdrawing this handoff.",
+            { code: "case_handoff_withdrawal_stop_required", runId: input.stoppedRunId });
+        }
+        if ((issue.executionRunId && issue.executionRunId !== stoppedRun.id)
+            || (issue.checkoutRunId && issue.checkoutRunId !== stoppedRun.id)) {
+          throw conflict("A different run is now admitted for this task. Stop or reassign it before withdrawing the handoff.",
+            { code: "case_handoff_withdrawal_run_changed", runId: issue.executionRunId ?? issue.checkoutRunId });
+        }
+        const [otherActiveRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, row.companyId), or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id)),
+          inArray(heartbeatRuns.status, ["queued", "running"]), sql`${heartbeatRuns.id} <> ${stoppedRun.id}`)).limit(1);
+        if (otherActiveRun) throw conflict("Another task run is active. Stop it before withdrawing the handoff.",
+          { code: "case_handoff_withdrawal_run_changed", runId: otherActiveRun.id });
+
+        const now = new Date();
+        const [updated] = await tx.update(caseHandoffs).set({ state: "cancelled", cancelledAt: now, leaseExpiresAt: null,
+          lastErrorCode: "operator_withdrawn_after_stop", lastError: "Withdrawn by board after acknowledged Stop", updatedAt: now })
+          .where(and(scope, eq(caseHandoffs.state, "delivered"), eq(caseHandoffs.version, input.expectedHandoffVersion))).returning();
+        if (!updated) throw conflict("The delivered handoff changed while the withdrawal was being recorded.", { code: "case_handoff_withdrawal_stale" });
+        const audit = { disposition: "delivered_proposal_withdrawn", stopProof: "acknowledged_operator_stop",
+          stoppedRunId: stoppedRun.id, nextOwner: "board", nextAction: "Inspect stopped work and any workspace or external effects, then explicitly assign the task or create a replacement handoff." };
+        await event(tx, updated, "handoff_cancelled", publications, actor, audit);
+        const blockedIssue = await issueService(tx).update(issue.id, { status: "blocked",
+          unblockDescriptor: { owner: "board", action: audit.nextAction }, companyGuard: row.companyId,
+          actorUserId: actor.userId ?? null }, tx, publications, []);
+        if (!blockedIssue) throw notFound("Task not found");
+        return updated;
+      });
+      publications.forEach(publishActivity);
+      return publicHandoff(withdrawn);
     },
 
     /** Call only after the runtime's authoritative settlement predicate succeeds. */
