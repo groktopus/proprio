@@ -84,8 +84,8 @@ schema migration and its run and workspace recovery evidence remain tracked in
 GitHub Actions runs Linux source qualification on the default branch daily at
 05:43 UTC. The scheduled run uses the event's exact `main` SHA and the
 `v0.0.1` upgrade baseline. Use **Run workflow** on `main` to repeat the
-current checkout, or provide both `test_head` and `base_sha` as full SHAs to
-test a specific candidate and predecessor.
+current checkout. For a pinned candidate and predecessor, use the
+[paired SHA dispatch above](#durable-work-acceptance).
 
 The job summary identifies the test revision and attempt. It reports the
 locked install, managed update and rollback, source build, first synthetic
@@ -93,7 +93,7 @@ task and persisted receipt, fresh-target restore, and Runner recovery.
 Failed, skipped and incomplete stages remain visible. Successful runs
 retain the linked `durable-work-acceptance` artifact on the run page.
 
-The repository's CI maintainers triage failed and interrupted jobs. Open the
+The [repository owner](../.github/CODEOWNERS) triages failed and interrupted jobs. Open the
 first failed stage and route a source or Runner regression to the owning
 maintainer. Record the revision and run link when filing or updating the
 issue. A passing scheduled run is a regression baseline. For release

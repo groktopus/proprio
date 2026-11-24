@@ -13,7 +13,7 @@ on:
         description: Exact source SHA to qualify (defaults to the selected main revision)
         type: string
       base_sha:
-        description: Exact upgrade baseline SHA (defaults to v0.0.1)
+        description: Exact baseline SHA (required with test_head, or omit both to use v0.0.1)
         type: string
   workflow_call:
 
@@ -25,6 +25,8 @@ jobs:
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
     steps:
       - name: Validate manual qualification subject
         if: github.event_name == 'workflow_dispatch'
@@ -43,7 +45,7 @@ jobs:
       - name: Check out the exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          ref: ${{ env.EXPECTED_HEAD }}
           fetch-depth: 2
           persist-credentials: false
       - name: Set up Node
@@ -53,8 +55,6 @@ jobs:
           package-manager-cache: false
       - name: Verify head and install locked dependencies
         id: install
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git rev-parse HEAD
@@ -78,7 +78,7 @@ jobs:
         id: lifecycle
         env:
           BASE_SHA: ${{ inputs.base_sha }}
-          NEXT_SHA: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          NEXT_SHA: ${{ env.EXPECTED_HEAD }}
           E2E_UPDATE_NEXT_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           E2E_UPDATE_BROWSER_READBACK: '1'
           E2E_UPDATE_BROWSER_REPORT: ${{ runner.temp }}/durable-work-browser.json
@@ -139,76 +139,32 @@ jobs:
           PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
           PROPRIO_PSQL_PATH: /usr/lib/postgresql/18/bin/psql
         run: |
-          restore_report="$RUNNER_TEMP/durable-work-restore.json"
+          restore_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" restore)"
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$restore_report" \
             packages/db/src/backup-lib.test.ts
-          node --input-type=module - "$restore_report" <<'JS'
-          import { readFileSync } from 'node:fs';
-          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
-          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
-            'packages/db/src/backup-lib.test.ts': [
-              'restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with pg_dump',
-            ],
-          });
-          JS
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" restore
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
         id: recovery
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
-          controller_report="$RUNNER_TEMP/durable-work-controller.json"
+          controller_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" controller)"
           pnpm test:runner-recovery --maxWorkers 1 --reporter=default --reporter=json --outputFile="$controller_report"
-          report="$RUNNER_TEMP/durable-work-runner.json"
+          report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" runner)"
           pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" \
             src/live/runnerd-restart-continuation.test.ts \
             src/live/runnerd-codex-transport-settlement.test.ts
-          node --input-type=module - "$report" "$controller_report" <<'JS'
-          import { readFileSync } from 'node:fs';
-          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
-          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
-            'packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts': [
-              'adopts the in-flight turn when a restart lands just after turn.start (t77)',
-              'finalizes the durable proposed result when the runner and provider die before the turn terminal',
-            ],
-          });
-          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[3], 'utf8')), {
-            'server/src/services/native-runtime/native-safe-replacement.test.ts': [
-              'preserves saved work and a queued request at a controlled recovery boundary (verified)',
-              'preserves saved work and a queued request at a controlled recovery boundary (unproven)',
-              'preserves saved work and a queued request at a controlled recovery boundary (unknown_action)',
-              'cancels a durable native retry even when its previous provider is already failed',
-            ],
-          });
-          JS
-          integration_report="$RUNNER_TEMP/durable-work-integration.json"
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" runner controller
+          integration_report="$(node scripts/ci/linux-source-qualification-cases.mjs path "$RUNNER_TEMP" integration)"
           pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$integration_report" \
             server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts \
             server/src/services/native-runtime/native-codex-runner.integration.test.ts \
             server/src/services/native-runtime/native-sandbox-disk-full.test.ts \
             server/src/services/workspace-recovery-disk-full.test.ts
-          node --input-type=module - "$integration_report" <<'JS'
-          import { readFileSync } from 'node:fs';
-          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
-          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[2], 'utf8')), {
-            'server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts': [
-              'runs Rust runnerd through Proprio PRP and reads the real bound task',
-            ],
-            'server/src/services/native-runtime/native-codex-runner.integration.test.ts': [
-              'returns a durable result and resumes the provider session on the next run',
-            ],
-            'server/src/services/native-runtime/native-sandbox-disk-full.test.ts': [
-              'names the full disk and stops instead of retrying the same work',
-            ],
-            'server/src/services/workspace-recovery-disk-full.test.ts': [
-              'ends recovery at the first full-disk save with a named cause and a Retry that saves and applies the accepted result without a new turn',
-            ],
-          });
-          JS
+          node scripts/ci/linux-source-qualification-cases.mjs check "$RUNNER_TEMP" integration
       - name: Write durable-work acceptance evidence
         id: write-evidence
         if: success()
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: node scripts/ci/write-durable-work-acceptance.mjs
       - name: Retain downloadable durable-work acceptance evidence
         id: retain-evidence
@@ -221,7 +177,6 @@ jobs:
       - name: Summarize qualification for the tested revision
         if: always()
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
           INSTALL: ${{ steps.install.outcome }}
           LIFECYCLE: ${{ steps.lifecycle.outcome }}
           BUILD: ${{ steps.build.outcome }}
@@ -230,6 +185,7 @@ jobs:
           RECOVERY: ${{ steps.recovery.outcome }}
           WRITE_EVIDENCE: ${{ steps.write-evidence.outcome }}
           RETAIN_EVIDENCE: ${{ steps.retain-evidence.outcome }}
+          EVIDENCE_URL: ${{ steps.retain-evidence.outputs.artifact-url }}
         run: |
           {
             printf '## Linux source qualification\n\n'
@@ -246,10 +202,12 @@ jobs:
               'Write acceptance report' "${WRITE_EVIDENCE:-incomplete}" \
               'Retain downloadable report' "${RETAIN_EVIDENCE:-incomplete}"
             printf '\n### Recorded test cases\n\n'
-            for report in "$RUNNER_TEMP"/durable-work-{restore,controller,runner,integration}.json; do
-              [[ -f "$report" ]] || continue
-              if ! jq -r '(.testResults // [])[] | .assertionResults[] | "- " + .status + " — " + .fullName' "$report"; then
-                printf -- '- Incomplete result in %s\n' "${report##*/}"
-              fi
-            done
+            if [[ -n "$EVIDENCE_URL" ]]; then
+              printf '[Download qualification evidence](%s)\n\n' "$EVIDENCE_URL"
+            fi
+            if [[ -f scripts/ci/linux-source-qualification-cases.mjs ]]; then
+              node scripts/ci/linux-source-qualification-cases.mjs summary "$RUNNER_TEMP"
+            else
+              printf 'Required case results are incomplete because the checkout is unavailable.\n'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

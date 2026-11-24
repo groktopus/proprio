@@ -4,25 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { qualificationReportPath, requiredCases, summarizeQualificationCases } from "./linux-source-qualification-cases.mjs";
 import { writeDurableWorkAcceptance } from "./write-durable-work-acceptance.mjs";
 
 const browserTitle = "the recovered task output remains visible after browser reload";
-const required = new Map([
-  ["packages/db/src/backup-lib.test.ts", ["restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with pg_dump"]],
-  ["server/src/services/native-runtime/native-safe-replacement.test.ts", [
-    "preserves saved work and a queued request at a controlled recovery boundary (verified)",
-    "cancels a durable native retry even when its previous provider is already failed",
-  ]],
-  ["packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts", [
-    "adopts the in-flight turn when a restart lands just after turn.start (t77)",
-    "finalizes the durable proposed result when the runner and provider die before the turn terminal",
-  ]],
-  ["server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts", ["runs Rust runnerd through Proprio PRP and reads the real bound task"]],
-  ["server/src/services/native-runtime/native-codex-runner.integration.test.ts", ["returns a durable result and resumes the provider session on the next run"]],
-  ["server/src/services/native-runtime/native-sandbox-disk-full.test.ts", ["names the full disk and stops instead of retrying the same work"]],
-  ["server/src/services/workspace-recovery-disk-full.test.ts", ["ends recovery at the first full-disk save with a named cause and a Retry that saves and applies the accepted result without a new turn"]],
-]);
-
 function commit(root, message) {
   execFileSync("git", ["add", "-A"], { cwd: root });
   execFileSync("git", ["-c", "user.name=Qualification Test", "-c", "user.email=qualification@example.invalid", "commit", "-m", message], { cwd: root, stdio: "ignore" });
@@ -77,12 +62,13 @@ function fixture(t, { migration = false, removedMigration = false, skippedTitle 
       } : { outcome: "not_applicable" },
     },
   });
-  const vitest = { testResults: [...required].map(([file, titles]) => ({
-    name: path.join(root, file),
-    assertionResults: titles.map(title => ({ title, fullName: title, status: title === skippedTitle ? "skipped" : "passed" })),
-  })) };
-  for (const name of ["durable-work-restore.json", "durable-work-controller.json", "durable-work-runner.json", "durable-work-integration.json"]) {
-    writeJson({ root: temp, name }, vitest);
+  for (const [name, files] of Object.entries(requiredCases)) {
+    const vitest = { testResults: Object.entries(files).map(([file, titles]) => ({
+      name: path.join(root, file),
+      assertionResults: titles.map(title => ({ title, fullName: title, status: title === skippedTitle ? "skipped" : "passed" })),
+    })) };
+    fsMkdir(temp);
+    writeFileSync(qualificationReportPath(temp, name), JSON.stringify(vitest));
   }
   writeJson({ root: temp, name: "durable-work-browser.json" }, {
     suites: [{ specs: [{ title: browserTitle, tests: [{ results: [{ status: "passed" }] }] }] }],
@@ -133,4 +119,14 @@ test("requires migration recovery evidence when SQL is renamed to a non-SQL path
 test("rejects skipped required evidence instead of publishing a passing case", async t => {
   const f = fixture(t, { skippedTitle: "runs Rust runnerd through Proprio PRP and reads the real bound task" });
   await assert.rejects(writeDurableWorkAcceptance({ env: f.env, root: f.root }), /Required test did not pass exactly once/);
+});
+
+test("summary shows skipped and missing required cases explicitly", t => {
+  const skippedTitle = requiredCases.runner["packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts"][0];
+  const f = fixture(t, { skippedTitle });
+  rmSync(qualificationReportPath(f.temp, "integration"));
+  const summary = summarizeQualificationCases(f.temp);
+  assert.ok(summary.includes(`- skipped · ${skippedTitle}`));
+  assert.match(summary, /- incomplete · runs Rust runnerd/);
+  assert.match(summary, /- passed · restores ordinary-table/);
 });

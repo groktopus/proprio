@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertRequiredVitestTests } from "./assert-required-vitest-tests.mjs";
+import { assertQualificationCases, requiredCases } from "./linux-source-qualification-cases.mjs";
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const browserCase = "the recovered task output remains visible after browser reload";
@@ -52,37 +52,7 @@ export async function writeDurableWorkAcceptance({ env = process.env, root = pro
   assert.equal(lifecycle.baseSha, baseSha);
   assert.equal(lifecycle.cases?.["managed-update-rollback"]?.outcome, "passed");
 
-  assertRequiredVitestTests(report("durable-work-restore.json"), {
-    "packages/db/src/backup-lib.test.ts": [
-      "restores ordinary-table CHECK, exclusion and NULLS NOT DISTINCT constraints with pg_dump",
-    ],
-  });
-  assertRequiredVitestTests(report("durable-work-controller.json"), {
-    "server/src/services/native-runtime/native-safe-replacement.test.ts": [
-      "preserves saved work and a queued request at a controlled recovery boundary (verified)",
-      "cancels a durable native retry even when its previous provider is already failed",
-    ],
-  });
-  assertRequiredVitestTests(report("durable-work-runner.json"), {
-    "packages/proprio-runner/src/live/runnerd-restart-continuation.test.ts": [
-      "adopts the in-flight turn when a restart lands just after turn.start (t77)",
-      "finalizes the durable proposed result when the runner and provider die before the turn terminal",
-    ],
-  });
-  assertRequiredVitestTests(report("durable-work-integration.json"), {
-    "server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts": [
-      "runs Rust runnerd through Proprio PRP and reads the real bound task",
-    ],
-    "server/src/services/native-runtime/native-codex-runner.integration.test.ts": [
-      "returns a durable result and resumes the provider session on the next run",
-    ],
-    "server/src/services/native-runtime/native-sandbox-disk-full.test.ts": [
-      "names the full disk and stops instead of retrying the same work",
-    ],
-    "server/src/services/workspace-recovery-disk-full.test.ts": [
-      "ends recovery at the first full-disk save with a named cause and a Retry that saves and applies the accepted result without a new turn",
-    ],
-  });
+  for (const name of Object.keys(requiredCases)) assertQualificationCases(temp, name);
   assertBrowserCase(report("durable-work-browser.json"), browserCase);
 
   const migrationChanged = hasSqlMigrationDelta(baseSha, sourceSha, root);
