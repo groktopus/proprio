@@ -6,12 +6,19 @@ import { fileURLToPath } from "node:url";
 
 const command = fileURLToPath(new URL("./codex", import.meta.url));
 accessSync(command, constants.X_OK);
+
+export function resolveCodexCommand() {
+  return command;
+}
+
+export const resolvePinnedCodexCommand = resolveCodexCommand;
+
 registerHooks({
-  load(url, context, nextLoad) {
-    if (/\/packages\/proprio-runner\/(src|dist)\/drivers\/codex\/codex-command\.(js|ts)$/.test(url)) {
-      return { format: "module", shortCircuit: true,
-        source: `export const resolveCodexCommand = () => ${JSON.stringify(command)}; export const resolvePinnedCodexCommand = resolveCodexCommand;` };
+  resolve(specifier, context, nextResolve) {
+    const result = nextResolve(specifier, context);
+    if (/\/packages\/proprio-runner\/(src|dist)\/drivers\/codex\/codex-command\.(js|ts)$/.test(result.url)) {
+      return { url: import.meta.url, shortCircuit: true };
     }
-    return nextLoad(url, context);
+    return result;
   },
 });
