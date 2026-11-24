@@ -554,7 +554,7 @@ export function CompanyAccess() {
                   onRetry={archivePreviewView.retry}
                   retrying={archivePreviewView.isFetching || assignmentPreviewRefreshPending}
                 />
-              ) : assignedIssuesView.kind === "error" ? (
+              ) : assignedIssuesView.kind === "error" || (assignedIssuesView.kind === "stale" && assignedIssuesView.error) ? (
                 <QueryErrorState
                   size="inline"
                   error={assignedIssuesView.error}
@@ -624,6 +624,9 @@ export function CompanyAccess() {
                 archiveMemberMutation.isPending ||
                 archivePreviewView.kind !== "ready" ||
                 archivePreviewView.data === undefined ||
+                assignedIssuesView.kind !== "ready" ||
+                assignedIssuesView.data === undefined ||
+                !!assignedIssuesView.error ||
                 assignmentPreviewRefreshPending ||
                 assignedIssuesQuery.isFetching
               }
