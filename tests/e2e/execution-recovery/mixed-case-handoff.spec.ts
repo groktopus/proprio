@@ -113,7 +113,7 @@ for (const restart of [false, true]) test(`a legacy lead hands the same Case to 
       const items = Array.isArray(ledger) ? ledger : ledger.items ?? ledger.handoffs;
       return items.find((handoff: { id: string }) => handoff.id === outgoing.handoffId);
     };
-    let restartEvidence: { stoppedAt: string; readyAt: string; handoffId: string; runId: string } | undefined;
+    let restartEvidence: { stoppedAt: string; readyAt: string; handoffId: string; runId: string; wakeupRequestId: string } | undefined;
     if (restart) {
       await expect.poll(async () => (await outgoingState())?.state, { timeout: 45_000 }).toBe("pending_dispatch");
       expect((await api(runsPath)).map((run: { id: string; status: string }) => ({ id: run.id, status: run.status })))
@@ -125,9 +125,15 @@ for (const restart of [false, true]) test(`a legacy lead hands the same Case to 
       base = await readyUrl(restartLogOffset);
       const readyAt = new Date().toISOString();
       expect((await api("/companies"))[0].id).toBe(company.id);
-      expect(await outgoingState()).toMatchObject({ state: "pending_dispatch", sourceRunId: outgoing.runId });
+      const pending = await outgoingState();
+      expect(pending).toMatchObject({ state: "pending_dispatch", sourceRunId: outgoing.runId, wakeupRequestId: expect.any(String) });
+      const retryPath = `/cases/${caseId}/handoffs/${outgoing.handoffId}/retry`;
+      const retries = await Promise.all([api(retryPath, "POST", {}), api(retryPath, "POST", {})]);
+      for (const receipt of retries) expect(receipt).toMatchObject({ id: pending.id, wakeupRequestId: pending.wakeupRequestId });
       await api(`/agents/${builder.id}/resume`, "POST", {});
-      restartEvidence = { stoppedAt, readyAt, handoffId: outgoing.handoffId, runId: outgoing.runId };
+      restartEvidence = { stoppedAt, readyAt, handoffId: outgoing.handoffId, runId: outgoing.runId,
+        wakeupRequestId: pending.wakeupRequestId };
+
     }
 
     await expect.poll(async () => (await api(`/issues/${taskId}?view=core`)).status, { timeout: 90_000 }).toBe("done");
@@ -137,6 +143,9 @@ for (const restart of [false, true]) test(`a legacy lead hands the same Case to 
     const caseRecord = await api(`/cases/${caseId}`);
     const ledger = await api(`/cases/${caseId}/handoffs?limit=20`);
     const artifact = await api(`/issues/${taskId}/documents/result`);
+    if (restartEvidence) {
+      expect(await outgoingState()).toMatchObject({ state: "delivered", wakeupRequestId: restartEvidence.wakeupRequestId });
+    }
     const runRows = await api(runsPath);
     const runs = await Promise.all(runRows.map(async (entry: { id: string }) => {
       const run = await api(`/heartbeat-runs/${entry.id}`);
