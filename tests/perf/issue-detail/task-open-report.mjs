@@ -1,15 +1,13 @@
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-export const COHORTS = ["cold-direct", "uncached-in-app", "cached-return"];
-export const TASK_KINDS = ["live-run", "saved-history"];
+const COHORTS = ["cold-direct", "uncached-in-app", "cached-return"];
+const TASK_KINDS = ["live-run", "saved-history"];
 
-function finite(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
+const OUTCOMES = ["ready", "error", "timeout", "closed"];
 
 function percentile(values, fraction) {
-  const sorted = values.filter(finite).sort((a, b) => a - b);
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (sorted.length === 0) return null;
   const index = (sorted.length - 1) * fraction;
   const lower = Math.floor(index);
@@ -25,12 +23,7 @@ function round(value) {
 function readinessMs(sample) {
   const composer = sample.marks?.composerVisible;
   const latest = sample.marks?.latestVisible;
-  return finite(composer) && finite(latest) ? Math.max(composer, latest) : null;
-}
-
-function normalizeOutcome(sample) {
-  if (["ready", "error", "timeout", "closed"].includes(sample.outcome)) return sample.outcome;
-  return readinessMs(sample) === null ? "timeout" : "ready";
+  return Number.isFinite(composer) && composer >= 0 && Number.isFinite(latest) && latest >= 0 ? Math.max(composer, latest) : null;
 }
 
 function normalizeSample(sample) {
@@ -38,29 +31,27 @@ function normalizeSample(sample) {
   const taskKind = sample.taskKind;
   if (!COHORTS.includes(cohort)) throw new Error(`Unknown task-open cohort: ${cohort}`);
   if (!TASK_KINDS.includes(taskKind)) throw new Error(`Unknown task kind: ${taskKind}`);
-  return {
-    ...sample,
-    outcome: normalizeOutcome(sample),
-    readinessMs: readinessMs(sample),
-  };
+  if (!OUTCOMES.includes(sample.outcome)) throw new Error(`Invalid sample outcome: ${sample.outcome}`);
+  const ready = readinessMs(sample);
+  if (sample.outcome === "ready" && ready === null) throw new Error("Ready samples need both visible readiness marks");
+  return { ...sample, readinessMs: ready };
 }
 
 function summarize(samples) {
-  const outcomes = Object.fromEntries(["ready", "error", "timeout", "closed"].map((key) => [key, 0]));
+  const outcomes = Object.fromEntries(OUTCOMES.map((key) => [key, 0]));
   for (const sample of samples) outcomes[sample.outcome] += 1;
-  const ready = samples.filter((sample) => sample.outcome === "ready" && finite(sample.readinessMs));
+  const ready = samples.filter((sample) => sample.outcome === "ready");
   const values = ready.map((sample) => sample.readinessMs);
-  const cls = samples.map((sample) => sample.cls).filter(finite);
-  const beforeReady = samples.map((sample) => sample.requests?.beforeReady).filter(finite);
-  const pending = samples.map((sample) => sample.requests?.pending).filter(finite);
-  const serverTiming = samples.map((sample) => (sample.releasedBy ?? sample.requests?.releasedBy)?.[0]?.serverMs).filter(finite);
+  const cls = samples.map((sample) => sample.cls).filter(Number.isFinite);
+  const beforeReady = ready.map((sample) => sample.requests?.beforeReady).filter(Number.isFinite);
+  const pending = samples.map((sample) => sample.requests?.pending).filter(Number.isFinite);
+  const serverTiming = ready.map((sample) => (sample.releasedBy ?? sample.requests?.releasedBy)?.[0]?.serverMs).filter(Number.isFinite);
   return {
     attempts: samples.length,
     outcomes,
-    readyCount: ready.length,
     p50Ms: round(percentile(values, 0.5)),
     p95Ms: round(percentile(values, 0.95)),
-    maxCls: cls.length ? round(Math.max(...cls)) : null,
+    maxCls: cls.length ? Number(Math.max(...cls).toFixed(4)) : null,
     samplesWithLatestMoves: samples.filter((sample) => Array.isArray(sample.latestMoves) && sample.latestMoves.length > 0).length,
     medianRequestsBeforeReady: round(percentile(beforeReady, 0.5)),
     medianPendingRequests: round(percentile(pending, 0.5)),
@@ -75,6 +66,10 @@ export function validateEvidence(evidence) {
     if (typeof build?.[key] !== "string" || build[key].trim() === "") {
       throw new Error(`Evidence build.${key} is required`);
     }
+  }
+  if (!/^[0-9a-f]{40}$/i.test(build.commit)) throw new Error("Evidence build.commit must be a full Git SHA");
+  if (!/^\d{4}-\d{2}-\d{2}T.*Z$/.test(build.capturedAt) || !Number.isFinite(Date.parse(build.capturedAt))) {
+    throw new Error("Evidence build.capturedAt must be a valid UTC timestamp");
   }
   if (!Array.isArray(evidence.samples) || evidence.samples.length === 0) {
     throw new Error("Evidence samples must be a non-empty array");
@@ -92,7 +87,7 @@ export function summarizeEvidence(evidence) {
       groups[key] = summarize(samples.filter((sample) => sample.cohort === cohort && sample.taskKind === taskKind));
     }
   }
-  return { build: evidence.build, sampleCount: samples.length, groups };
+  return { build: evidence.build, groups };
 }
 
 function format(value) {
@@ -102,16 +97,20 @@ function format(value) {
 export function renderReport(evidence, previous = null) {
   const summary = summarizeEvidence(evidence);
   const previousSummary = previous ? summarizeEvidence(previous) : null;
+  const comparable = previousSummary
+    && previousSummary.build.target === summary.build.target
+    && previousSummary.build.browser === summary.build.browser;
   const rows = [];
   for (const cohort of COHORTS) {
     for (const taskKind of TASK_KINDS) {
       const key = `${cohort}:${taskKind}`;
       const group = summary.groups[key];
       const prior = previousSummary?.groups[key];
-      const delta = group.p50Ms !== null && prior?.p50Ms !== null && prior?.p50Ms !== undefined
+      const delta = comparable && group.attempts >= 5 && (prior?.attempts ?? 0) >= 5
+        && group.p50Ms !== null && prior?.p50Ms !== null && prior?.p50Ms !== undefined
         ? round(group.p50Ms - prior.p50Ms)
         : null;
-      rows.push(`| ${cohort} | ${taskKind} | ${group.attempts} | ${group.outcomes.ready} | ${group.outcomes.error} | ${group.outcomes.timeout} | ${group.outcomes.closed} | ${format(group.p50Ms)} | ${format(group.p95Ms)} | ${format(group.maxCls)} | ${format(group.medianRequestsBeforeReady)} | ${format(group.medianReleasedServerMs)} | ${format(delta)} |`);
+      rows.push(`| ${cohort} | ${taskKind} | ${group.attempts} | ${group.outcomes.ready} | ${group.outcomes.error} | ${group.outcomes.timeout} | ${group.outcomes.closed} | ${format(group.p50Ms)} | ${format(group.p95Ms)} | ${format(group.maxCls)} | ${group.samplesWithLatestMoves} | ${format(group.medianPendingRequests)} | ${format(group.medianRequestsBeforeReady)} | ${format(group.medianReleasedServerMs)} | ${format(delta)} |`);
     }
   }
   return [
@@ -126,12 +125,12 @@ export function renderReport(evidence, previous = null) {
     "",
     "Ready means both the composer and latest message were visible. p50/p95 use ready samples only; outcome counts include failures, timeouts, and unobservable tab closes.",
     "",
-    "| Cohort | Task kind | Attempts | Ready | Error | Timeout | Closed | p50 ready (ms) | p95 ready (ms) | Max CLS | Median API requests before ready | Median released server time (ms) | p50 delta (ms) |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Cohort | Task kind | Attempts | Ready | Error | Timeout | Closed | p50 ready (ms) | p95 ready (ms) | Max CLS | Latest message moved | Median pending | Median API requests before ready | Median released server time (ms) | p50 delta (ms) |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ...rows,
     "",
     previousSummary
-      ? `Comparison baseline: \`${previousSummary.build.commit}\` (${previousSummary.build.capturedAt}). A delta is shown only when both builds have ready samples.`
+      ? `Comparison baseline: \`${previousSummary.build.commit}\` (${previousSummary.build.capturedAt}). Deltas require matching targets and browsers, five attempts per build and cohort, and a ready sample on both builds.`
       : "No comparison baseline supplied.",
     "",
     "Scope limits: this report does not establish a release or managed-telemetry result. Record the disposable target, exact build identity, fixture/task provenance, and any staging or managed-population differences with the raw samples.",

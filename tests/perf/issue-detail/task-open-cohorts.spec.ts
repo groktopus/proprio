@@ -55,6 +55,7 @@ test("capture readiness for six release cohorts", async ({ browser, baseURL, req
         const options = { cohort, taskKind, label: `${cohort} ${taskKind} ${index}`, quietMs: 350, timeoutMs: 10_000 };
         const context = await browser.newContext({ baseURL, serviceWorkers: "block" });
         const page = await context.newPage();
+        let measuredPage = page;
         const detail = `/${prefix}/issues/${task.identifier}`;
         const list = `/${prefix}/issues`;
         const row = page.locator(`a[href$="/issues/${task.identifier}"]`).first();
@@ -71,8 +72,11 @@ test("capture readiness for six release cohorts", async ({ browser, baseURL, req
             if (cohort === "cached-return") {
               await page.goto(detail);
               await expect(page.getByText("Latest message in the readiness fixture.", { exact: true }).first()).toBeVisible();
+              await page.waitForFunction((id) => Object.entries(localStorage).some(([key, value]) =>
+                key.startsWith("proprio:query-cache:v1:") && value.includes(id)), task.id);
               await page.close();
               const revisiting = await context.newPage();
+              measuredPage = revisiting;
               await revisiting.goto(list);
               await measure(revisiting);
             } else {
@@ -88,6 +92,9 @@ test("capture readiness for six release cohorts", async ({ browser, baseURL, req
               });
               await page.goto(list, { waitUntil: "domcontentloaded" });
               await expect(row).toBeVisible();
+              const warmTask = await page.evaluate((id) => Object.entries(localStorage).some(([key, value]) =>
+                key.startsWith("proprio:query-cache:v1:") && value.includes(id)), task.id);
+              expect(warmTask).toBe(false);
               await page.evaluate(source);
               clicked = true;
               await execute(page);
@@ -105,6 +112,9 @@ test("capture readiness for six release cohorts", async ({ browser, baseURL, req
             }, { identifier: task.identifier, options });
           }
           samples.push(sample);
+        } catch (error) {
+          if (!measuredPage.isClosed()) throw error;
+          samples.push({ cohort, taskKind, label: options.label, outcome: "closed" });
         } finally {
           await context.close();
         }
@@ -116,7 +126,7 @@ test("capture readiness for six release cohorts", async ({ browser, baseURL, req
   const report = {
     build: {
       commit: start,
-      server: `Linux or macOS source checkout ${start}`,
+      server: `${process.platform} ${process.arch} source checkout ${start}`,
       ui: `Production Vite assets built from ${start}`,
       target: "disposable loopback with embedded PostgreSQL and local process fixture",
       browser: `Playwright Chromium ${browser.version()}`,

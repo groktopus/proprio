@@ -13,13 +13,8 @@ composer and latest comment visible without a layout jump.
 
 ## Required matrix
 
-Run at least five serial attempts for each combination:
-
-| Entry | Task state |
-| --- | --- |
-| Cold direct URL in a new browser context | live run, saved history |
-| Uncached in-app list click | live run, saved history |
-| Cached return with the saved read cache | live run, saved history |
+Run at least five serial attempts for each of the six cohorts in the
+[release readiness runbook](../../tests/perf/issue-detail/README.md#release-report-and-cohort-matrix).
 
 Each attempt records the exact source, server, UI asset, and target build
 identities, composer/latest-message
@@ -31,8 +26,7 @@ plus counts for every outcome.
 ## Repeat and comparison
 
 Store the raw evidence and generated Markdown report under a release evidence
-location outside the committed source tree. Run the report generator with the
-previous report as its comparison baseline. A p50 delta is shown only when both
+location outside the committed source tree. Pass the previous raw evidence JSON to the report generator as its comparison baseline. A p50 delta is shown only when both
 builds have ready samples for the same cohort and task state. Re-run after a
 release or any change to task bootstrap, task chat, caching, list prefetch,
 transcript gating, or layout.

@@ -13,8 +13,11 @@ const sample = (overrides = {}) => ({
   ...overrides,
 });
 
+const head = "a".repeat(40);
+const previousHead = "b".repeat(40);
+
 const evidence = {
-  build: { commit: "abc123", server: "server-abc123", ui: "ui-abc123", target: "disposable-local", browser: "chromium 1", capturedAt: "2026-11-24T12:00:00Z" },
+  build: { commit: head, server: "server-abc123", ui: "ui-abc123", target: "disposable-local", browser: "chromium 1", capturedAt: "2026-11-24T12:00:00Z" },
   samples: [
     sample(),
     sample({ marks: { composerVisible: 140, latestVisible: 220 } }),
@@ -41,10 +44,28 @@ test("rejects evidence without exact build identity", () => {
 });
 
 test("renders a versioned comparison and explicit limits", () => {
-  const previous = { ...evidence, build: { ...evidence.build, commit: "old456", capturedAt: "2026-11-23T12:00:00Z" }, samples: [sample({ marks: { composerVisible: 100, latestVisible: 100 } })] };
+  const previous = { ...evidence, build: { ...evidence.build, commit: previousHead, capturedAt: "2026-11-23T12:00:00Z" }, samples: [sample({ marks: { composerVisible: 100, latestVisible: 100 } })] };
   const report = renderReport(evidence, previous);
-  assert.match(report, /Build commit: `abc123`/);
-  assert.match(report, /Comparison baseline: `old456`/);
+  assert.ok(report.includes(`Build commit: \`${head}\``));
+  assert.ok(report.includes(`Comparison baseline: \`${previousHead}\``));
   assert.match(report, /p50 delta \(ms\)/);
   assert.match(report, /does not establish a release or managed-telemetry result/);
+});
+
+test("keeps fractional layout shift and excludes failed reads from readiness metrics", () => {
+  const sparse = { ...evidence, samples: [
+    sample({ cls: 0.0123 }),
+    sample({ outcome: "timeout", marks: {}, requests: { beforeReady: 100, pending: 3 } }),
+  ] };
+  const cohort = summarizeEvidence(sparse).groups["cold-direct:saved-history"];
+  assert.equal(cohort.maxCls, 0.0123);
+  assert.equal(cohort.medianRequestsBeforeReady, 3);
+  assert.equal(cohort.medianPendingRequests, 1.5);
+});
+
+test("rejects claims that cannot identify valid ready samples and builds", () => {
+  assert.throws(() => summarizeEvidence({ ...evidence, samples: [sample({ outcome: "unknown" })] }), /outcome/);
+  assert.throws(() => summarizeEvidence({ ...evidence, samples: [sample({ marks: {} })] }), /both visible/);
+  assert.throws(() => validateEvidence({ ...evidence, build: { ...evidence.build, commit: "abc" } }), /Git SHA/);
+  assert.throws(() => validateEvidence({ ...evidence, build: { ...evidence.build, capturedAt: "today" } }), /UTC timestamp/);
 });
