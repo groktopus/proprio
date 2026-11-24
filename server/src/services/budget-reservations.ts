@@ -1,5 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
-import { agents, budgetReservations, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@groktopus/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { agents, budgetPolicies, budgetReservations, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@groktopus/db";
 import { centsToUnits, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
@@ -57,7 +57,7 @@ export async function recheckRunBudgetReservationInTransaction(
   if (stopRecovery) return keepRecoveryClaim();
   const { block, policies, observations } = await budgetServiceInTransaction(tx, publications)
     .evaluateAdmission(run.companyId, run.agentId, { projectId: reservation.projectId, runId: run.id,
-      admittedRecovery: Boolean(recoveryLeaseOwner) });
+      taskLineageIssueIds: run.taskLineageJson?.pathIssueIds, admittedRecovery: Boolean(recoveryLeaseOwner) });
   if (block) return block.reason;
   const [agent] = await tx.select({ status: agents.status, lifecycleState: agents.lifecycleState }).from(agents)
     .where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId)));
@@ -92,7 +92,8 @@ export async function recheckRunBudgetReservationInTransaction(
 export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string) {
   const result = await withBudgetSpan("budget.admission.reserve", () => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
     await lockBudgetAdmissionControls(tx, companyId, projectId);
-    const [hint] = await tx.select({ agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId }).from(heartbeatRuns)
+    const [hint] = await tx.select({ agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId,
+      taskLineageJson: heartbeatRuns.taskLineageJson }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)));
     if (!hint) throw notFound("Run not found");
     await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, hint.agentId))).for("share");
@@ -101,6 +102,27 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     // the task path so the persisted ancestry is wholly before or after a move.
     if (hint.issueId ?? hint.nativeIssueId) {
       await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+    }
+    let admissionTaskLineage = hint.taskLineageJson;
+    const taskId = hint.issueId ?? hint.nativeIssueId;
+    if (!admissionTaskLineage && taskId) {
+      const [task] = await tx.select({ id: issues.id, parentId: issues.parentId }).from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, taskId)));
+      if (task) admissionTaskLineage = { version: 1, issueId: task.id,
+        pathIssueIds: [task.id, ...await loadAncestorIssueIds(tx, companyId, task.parentId)] };
+    }
+    if (admissionTaskLineage?.pathIssueIds.length) {
+      const treePolicies = await tx.select({ scopeId: budgetPolicies.scopeId }).from(budgetPolicies).where(and(
+        eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, "task_tree"),
+        eq(budgetPolicies.isActive, true), eq(budgetPolicies.hardStopEnabled, true),
+        inArray(budgetPolicies.scopeId, admissionTaskLineage.pathIssueIds),
+      ));
+      const roots = [...new Set(treePolicies.map(policy => policy.scopeId))].sort();
+      // Serialize reservations to a shared root without taking issue row locks
+      // that the task transition and settlement paths may already hold.
+      for (const rootId of roots) {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`task-tree-budget:${companyId}:${rootId}`}, 0))`);
+      }
     }
     const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId))).for("update");
     if (!run) throw notFound("Run not found");
@@ -130,7 +152,8 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
         // Recovery has already made this run queued/running, so its own pending
         // accounting is excluded. Current overruns, other unfinished runs and
         // scope pauses still apply before any more paid work starts.
-        const block = await budgetServiceInTransaction(tx, publications).getInvocationBlock(companyId, run.agentId, { projectId, runId, admittedRecovery: true });
+        const block = await budgetServiceInTransaction(tx, publications).getInvocationBlock(companyId, run.agentId,
+          { projectId, runId, taskLineageIssueIds: run.taskLineageJson?.pathIssueIds, admittedRecovery: true });
         if (block) return { admissionBlockReason: block.reason };
         const [agent] = await tx.select({ status: agents.status, lifecycleState: agents.lifecycleState }).from(agents)
           .where(and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)));
@@ -142,7 +165,9 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
       throw conflict("Provider dispatch has already reserved this run");
     }
     if (stopRecovery) throw conflict("Native Stop recovery requires the original held reservation");
-    const { block, policies, observations } = await budgetServiceInTransaction(tx, publications).evaluateAdmission(companyId, run.agentId, { projectId, runId });
+    admissionTaskLineage = run.taskLineageJson ?? admissionTaskLineage;
+    const { block, policies, observations } = await budgetServiceInTransaction(tx, publications).evaluateAdmission(companyId, run.agentId,
+      { projectId, runId, taskLineageIssueIds: admissionTaskLineage?.pathIssueIds });
     if (block) return { admissionBlockReason: block.reason };
     // A budget release can start asynchronous resume hooks. Capacity alone
     // does not authorize dispatch before that lifecycle operation is ready.
@@ -162,18 +187,7 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     // A zero-valued row also fences duplicate dispatch when estimates are off.
     const [reservation] = await tx.insert(budgetReservations).values({ companyId, runId, agentId: run.agentId, projectId,
       amountCents: unitsToCents(amount), providerStartedAt: new Date() }).returning();
-    let taskLineageJson = run.taskLineageJson;
-    if (!taskLineageJson) {
-      const taskId = run.issueId ?? run.nativeIssueId;
-      if (taskId) {
-        const [task] = await tx.select({ id: issues.id, parentId: issues.parentId }).from(issues)
-          .where(and(eq(issues.companyId, companyId), eq(issues.id, taskId)));
-        if (task) {
-          taskLineageJson = { version: 1, issueId: task.id,
-            pathIssueIds: [task.id, ...await loadAncestorIssueIds(tx, companyId, task.parentId)] };
-        }
-      }
-    }
+    const taskLineageJson = run.taskLineageJson ?? admissionTaskLineage;
     await tx.update(heartbeatRuns).set({ costAccountingPending: true,
       ...(taskLineageJson ? { taskLineageJson } : {}),
       usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ accountingReceiptReady: false, ledgerScope: { ...(run.usageJson?.ledgerScope as object ?? {}), ...ledgerScope, projectId } })}::jsonb`,

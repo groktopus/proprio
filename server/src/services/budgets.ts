@@ -21,6 +21,7 @@ import {
   companies,
   costEvents,
   heartbeatRuns,
+  issues,
   projects,
 } from "@groktopus/db";
 import type {
@@ -59,6 +60,7 @@ type ScopeRecord = {
 
 type PolicyRow = typeof budgetPolicies.$inferSelect;
 type IncidentRow = typeof budgetIncidents.$inferSelect;
+type InternalBudgetScopeType = BudgetScopeType | "task_tree";
 
 export type BudgetEnforcementScope = {
   companyId: string;
@@ -105,12 +107,12 @@ function budgetStatusFromObserved(
   return "ok";
 }
 
-function normalizeScopeName(scopeType: BudgetScopeType, name: string) {
+function normalizeScopeName(scopeType: InternalBudgetScopeType, name: string) {
   if (scopeType === "company") return name;
   return name.trim().length > 0 ? name : scopeType;
 }
 
-async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: string): Promise<ScopeRecord> {
+async function resolveScopeRecord(db: Db, scopeType: InternalBudgetScopeType, scopeId: string): Promise<ScopeRecord> {
   if (scopeType === "company") {
     const row = await db
       .select({
@@ -155,6 +157,13 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
     };
   }
 
+  if (scopeType === "task_tree") {
+    const row = await db.select({ companyId: issues.companyId, name: issues.title, identifier: issues.identifier })
+      .from(issues).where(eq(issues.id, scopeId)).then(rows => rows[0] ?? null);
+    if (!row) throw notFound("Task tree root not found");
+    return { companyId: row.companyId, name: row.identifier ?? row.name, paused: false, pauseReason: null, budgetHeld: false };
+  }
+
   const row = await db
     .select({
       companyId: projects.companyId,
@@ -175,13 +184,13 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
   };
 }
 
-async function resolveSummaryScopeRecord(db: Db, companyId: string, scopeType: BudgetScopeType, scopeId: string): Promise<ScopeRecord> {
+async function resolveSummaryScopeRecord(db: Db, companyId: string, scopeType: InternalBudgetScopeType, scopeId: string): Promise<ScopeRecord> {
   let scope: ScopeRecord;
   try {
     scope = await resolveScopeRecord(db, scopeType, scopeId);
   } catch (error) {
-    if (!(error instanceof HttpError) || error.status !== 404 || (scopeType !== "agent" && scopeType !== "project")) throw error;
-    return { companyId, name: scopeType === "agent" ? "Deleted agent" : "Deleted project",
+    if (!(error instanceof HttpError) || error.status !== 404 || (scopeType !== "agent" && scopeType !== "project" && scopeType !== "task_tree")) throw error;
+    return { companyId, name: scopeType === "agent" ? "Deleted agent" : scopeType === "project" ? "Deleted project" : "Deleted task tree",
       paused: false, pauseReason: null, budgetHeld: false };
   }
   if (scope.companyId !== companyId) throw notFound("Budget scope not found");
@@ -204,16 +213,17 @@ async function mapBudgetReads<T, R>(rows: T[], read: (row: T) => Promise<R>): Pr
 }
 
 /** Filter in PostgreSQL so one run never loads unrelated agents' policies. */
-export function budgetPoliciesForRun(companyId: string, agentId: string | null, projectId: string | null) {
+export function budgetPoliciesForRun(companyId: string, agentId: string | null, projectId: string | null, taskLineageIssueIds: string[] = []) {
   return or(
     and(eq(budgetPolicies.scopeType, "company"), eq(budgetPolicies.scopeId, companyId)),
     agentId ? and(eq(budgetPolicies.scopeType, "agent"), eq(budgetPolicies.scopeId, agentId)) : undefined,
     projectId ? and(eq(budgetPolicies.scopeType, "project"), eq(budgetPolicies.scopeId, projectId)) : undefined,
+    taskLineageIssueIds.length ? and(eq(budgetPolicies.scopeType, "task_tree"), inArray(budgetPolicies.scopeId, taskLineageIssueIds)) : undefined,
   );
 }
 
 /** `runId` names the run being admitted, so its own pending accounting never holds it. */
-type AdmissionContext = { issueId?: string | null; projectId?: string | null; runId?: string | null;
+type AdmissionContext = { issueId?: string | null; projectId?: string | null; runId?: string | null; taskLineageIssueIds?: string[];
   /** The caller continues work that was already admitted: a validated
    * recovery owner, or a running run's own tool mutations. It reuses its
    * original reservation, so other runs' holds filling the budget never
@@ -221,18 +231,20 @@ type AdmissionContext = { issueId?: string | null; projectId?: string | null; ru
   admittedRecovery?: boolean };
 
 async function readAdmissionScopes(db: Db, companyId: string, agentId: string | null, context?: AdmissionContext) {
-  const scopes: Array<{ scopeType: BudgetScopeType; scopeId: string }> = [
+  const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
+    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null, context?.taskLineageIssueIds)));
+  const taskTreeScopeIds = [...new Set(policies.filter(policy => policy.scopeType === "task_tree").map(policy => policy.scopeId))];
+  const scopes: Array<{ scopeType: InternalBudgetScopeType; scopeId: string }> = [
     { scopeType: "company", scopeId: companyId }, ...(agentId ? [{ scopeType: "agent" as const, scopeId: agentId }] : []),
     ...(context?.projectId ? [{ scopeType: "project" as const, scopeId: context.projectId }] : []),
+    ...taskTreeScopeIds.map(scopeId => ({ scopeType: "task_tree" as const, scopeId })),
   ];
   const records = await Promise.all(scopes.map(scope => resolveScopeRecord(db, scope.scopeType, scope.scopeId)));
   if (records.some(scope => scope.companyId !== companyId)) throw notFound("Budget scope not found");
-  const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
-    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null)));
   return { scopes, records, policies };
 }
 
-function scopePauseBlock(scopeType: BudgetScopeType, scopeId: string, scope: ScopeRecord, hasPolicies: boolean) {
+function scopePauseBlock(scopeType: InternalBudgetScopeType, scopeId: string, scope: ScopeRecord, hasPolicies: boolean) {
   if (scopeType !== "agent" && scope.paused && scope.pauseReason !== "budget") {
     return { scopeType, scopeId, scopeName: scope.name, reason: `${scopeType === "company" ? "Company" : "Project"} is paused and cannot start new work.` };
   }
@@ -868,10 +880,12 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       // budget-owned scope hold with no reached hard stop is stale: the budget
       // worker releases it, admission does not wait for that.
       for (const { policy, observed } of scoped) {
-        const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent" : "Project";
+        const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent"
+          : scopeType === "task_tree" ? "Task tree" : "Project";
         if (hardStopReached(policy, observed)) return admission({ scopeType, scopeId, scopeName: scope.name,
           reason: unpricedUsageBlocks(policy, observed) ? `${title} cannot start work because recorded usage has no reliable price.`
             : scopeType === "project" ? "Project cannot start work because its budget hard-stop is still exceeded."
+              : scopeType === "task_tree" ? "Task tree cannot start work because its shared budget hard-stop was reached."
               : `${title} is paused because its budget hard-stop was reached.` });
       }
     }
