@@ -2432,6 +2432,7 @@ describe("IssueDetail", () => {
     mockIssuesApi.getCostSummary.mockReturnValue(cost.promise);
 
     await act(async () => renderIssueView());
+    await waitForAssertion(() => expect(mockIssueChatThreadRender).toHaveBeenCalled());
     await act(async () => {
       container.querySelector<HTMLButtonElement>('button[aria-label="More task actions"]')!.click();
     });
