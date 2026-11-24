@@ -379,6 +379,45 @@ describe("CompanyAccess", () => {
     });
   });
 
+  it("keeps removal disabled when the assigned-task preview fails", async () => {
+    listIssuesMock.mockRejectedValueOnce(new ApiError("Unavailable", 503, null));
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <CompanyAccess />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const removeButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Remove"),
+    );
+    await act(async () => {
+      removeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Unable to check assigned tasks");
+    expect(document.body.textContent).toContain("Retry");
+    const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Remove member",
+    );
+    expect(confirmButton).toBeTruthy();
+    expect(confirmButton).toHaveProperty("disabled", true);
+    expect(archiveMemberMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("shows protected member removal reasons from the API", async () => {
     listMembersMock.mockResolvedValueOnce({
       members: [

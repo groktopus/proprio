@@ -198,6 +198,7 @@ export function CompanyAccess() {
       }),
     enabled: !!selectedCompanyId && !!removingMember,
   });
+  const assignedIssuesView = useQueryView(assignedIssuesQuery);
 
   const archiveMemberMutation = useMutation({
     mutationFn: async (input: { memberId: string; target: string }) => {
@@ -520,13 +521,23 @@ export function CompanyAccess() {
                 <div className="text-sm font-medium">{memberDisplayName(removingMember)}</div>
                 <div className="text-sm text-muted-foreground">{removingMember.user?.email || removingMember.principalId}</div>
                 <div className="mt-2 text-sm text-muted-foreground">
-                  {assignedIssuesQuery.isLoading
+                  {assignedIssuesView.kind === "loading" || assignedIssuesView.kind === "reconnecting"
                     ? "Checking assigned tasks..."
-                    : `${assignedIssues.length} open assigned task${assignedIssues.length === 1 ? "" : "s"}`}
+                    : assignedIssuesView.kind === "error"
+                      ? "Unable to check assigned tasks. Removal is paused until the preview succeeds."
+                      : `${assignedIssues.length} open assigned task${assignedIssues.length === 1 ? "" : "s"}`}
                 </div>
               </div>
 
-              {assignedIssues.length > 0 ? (
+              {assignedIssuesView.kind === "error" ? (
+                <QueryErrorState
+                  size="inline"
+                  error={assignedIssuesView.error}
+                  action="load assigned tasks"
+                  onRetry={assignedIssuesView.retry}
+                  retrying={assignedIssuesView.isFetching}
+                />
+              ) : assignedIssues.length > 0 ? (
                 <div className="space-y-2">
                   <div className="text-sm font-medium">Task reassignment</div>
                   <select
@@ -584,7 +595,10 @@ export function CompanyAccess() {
                   target: reassignmentTarget,
                 });
               }}
-              disabled={archiveMemberMutation.isPending || assignedIssuesQuery.isLoading}
+              disabled={
+                archiveMemberMutation.isPending ||
+                assignedIssuesView.kind !== "ready"
+              }
             >
               {archiveMemberMutation.isPending ? "Removing..." : "Remove member"}
             </Button>

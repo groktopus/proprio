@@ -19,6 +19,7 @@ import type { ApprovalComment } from "@groktopus/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { cn } from "@/lib/utils";
+import { QueryErrorState, useQueryView } from "../components/QueryView";
 
 export function ApprovalDetail() {
   const { approvalId } = useParams<{ approvalId: string }>();
@@ -31,24 +32,30 @@ export function ApprovalDetail() {
   const [error, setError] = useState<string | null>(null);
   const [showRawPayload, setShowRawPayload] = useState(false);
 
-  const { data: approval, isLoading } = useQuery({
+  const approvalQuery = useQuery({
     queryKey: queryKeys.approvals.detail(approvalId!),
     queryFn: () => approvalsApi.get(approvalId!),
     enabled: !!approvalId,
   });
+  const { data: approval } = approvalQuery;
+  const approvalView = useQueryView(approvalQuery);
   const resolvedCompanyId = approval?.companyId ?? selectedCompanyId;
 
-  const { data: comments } = useQuery({
+  const commentsQuery = useQuery({
     queryKey: queryKeys.approvals.comments(approvalId!),
     queryFn: () => approvalsApi.listComments(approvalId!),
     enabled: !!approvalId,
   });
+  const { data: comments } = commentsQuery;
+  const commentsView = useQueryView(commentsQuery);
 
-  const { data: linkedIssues } = useQuery({
+  const linkedIssuesQuery = useQuery({
     queryKey: queryKeys.approvals.issues(approvalId!),
     queryFn: () => approvalsApi.listIssues(approvalId!),
     enabled: !!approvalId,
   });
+  const { data: linkedIssues } = linkedIssuesQuery;
+  const linkedIssuesView = useQueryView(linkedIssuesQuery);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(resolvedCompanyId ?? ""),
@@ -145,7 +152,20 @@ export function ApprovalDetail() {
     onError: (err) => setError(err instanceof Error ? err.message : "Delete failed"),
   });
 
-  if (isLoading) return <PageSkeleton variant="detail" />;
+  if (approvalView.kind === "loading" || approvalView.kind === "reconnecting") {
+    return <PageSkeleton variant="detail" />;
+  }
+  if (approvalView.kind === "error") {
+    return (
+      <QueryErrorState
+        size="page"
+        error={approvalView.error}
+        action="load approval"
+        onRetry={approvalView.retry}
+        retrying={approvalView.isFetching}
+      />
+    );
+  }
   if (!approval) return <p className="text-sm text-muted-foreground">Approval not found.</p>;
 
   const payload = approval.payload as Record<string, unknown>;
@@ -242,7 +262,17 @@ export function ApprovalDetail() {
           )}
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {linkedIssues && linkedIssues.length > 0 && (
+        {linkedIssuesView.kind === "error" ? (
+          <div className="pt-2 border-t border-border/60">
+            <QueryErrorState
+              size="inline"
+              error={linkedIssuesView.error}
+              action="load linked tasks"
+              onRetry={linkedIssuesView.retry}
+              retrying={linkedIssuesView.isFetching}
+            />
+          </div>
+        ) : linkedIssues && linkedIssues.length > 0 && (
           <div className="pt-2 border-t border-border/60">
             <p className="text-xs text-muted-foreground mb-1.5">Linked Tasks</p>
             <div className="space-y-1.5">
@@ -328,8 +358,16 @@ export function ApprovalDetail() {
       </div>
 
       <div className="border border-border rounded-lg p-4 space-y-3">
-        <h3 className="text-sm font-medium">Comments ({comments?.length ?? 0})</h3>
-        <div className="space-y-2">
+        <h3 className="text-sm font-medium">Comments {commentsView.kind === "error" ? "unavailable" : `(${comments?.length ?? 0})`}</h3>
+        {commentsView.kind === "error" ? (
+          <QueryErrorState
+            size="inline"
+            error={commentsView.error}
+            action="load approval comments"
+            onRetry={commentsView.retry}
+            retrying={commentsView.isFetching}
+          />
+        ) : <div className="space-y-2">
           {(comments ?? []).map((comment: ApprovalComment) => (
             <div key={comment.id} className="border border-border/60 rounded-md p-3">
               <div className="flex items-center justify-between mb-1">
@@ -350,7 +388,7 @@ export function ApprovalDetail() {
               <MarkdownBody className="text-sm">{comment.body}</MarkdownBody>
             </div>
           ))}
-        </div>
+        </div>}
         <Textarea
           value={commentBody}
           onChange={(e) => setCommentBody(e.target.value)}
