@@ -22,13 +22,15 @@ const fixture = vi.hoisted(() => ({
   boardAccess: null as null | Record<string, unknown>,
   receipts: [] as AttentionReceipt[],
 }));
+const decisionListMock = vi.hoisted(() => vi.fn());
 vi.mock("../hooks/useCoordinatorWorkspaceEnabled", () => ({ useCoordinatorWorkspaceEnabled: () => ({ enabled: false, userId: fixture.userId }) }));
+vi.mock("../hooks/useCombinedInboxTasksEnabled", () => ({ useCombinedInboxTasksEnabled: () => ({ enabled: false, loaded: true }) }));
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company" }) }));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }), useOptionalToastActions: () => ({ pushToast: vi.fn() }) }));
 vi.mock("../hooks/useInboxBadge", () => ({ useInboxDismissals: () => ({ dismiss: vi.fn(), snooze: vi.fn(), restore: vi.fn() }) }));
 vi.mock("../api/agents", () => ({ agentsApi: { list: async () => [] } }));
-vi.mock("../api/decisions", () => ({ decisionsApi: { list: async () => [] } }));
+vi.mock("../api/decisions", () => ({ decisionsApi: { list: decisionListMock } }));
 vi.mock("../api/access", () => ({ accessApi: {
   listUserDirectory: async () => ({ users: [] }),
   getCurrentBoardAccess: async () => { if (!fixture.boardAccess) throw new Error("No board access"); return fixture.boardAccess; },
@@ -49,7 +51,7 @@ vi.mock("../api/attention", () => ({ attentionApi: {
 vi.mock("../components/DecisionsToolbar", () => ({ DecisionsToolbar: () => null }));
 vi.mock("../components/DecisionQueueRail", () => ({ DecisionQueueRail: () => null }));
 vi.mock("../components/DecisionDateChips", () => ({ DecisionDateChips: () => null }));
-vi.mock("../components/DecisionResolver", () => ({ DecisionResolver: () => null }));
+vi.mock("../components/DecisionResolver", () => ({ DecisionResolver: ({ decisionId }: { decisionId: string }) => <div data-decision-card={decisionId}>Decision</div> }));
 vi.mock("../components/AttentionQueueRow", () => ({
   AttentionQueueRow: ({ item, onClaim, onDismiss, onRestore, onSnooze, currentUserId }: { item: AttentionItem; onClaim?: (item: AttentionItem) => void; onDismiss?: (item: AttentionItem) => void; onRestore?: (item: AttentionItem) => void; onSnooze?: (item: AttentionItem, until: string) => void; currentUserId?: string | null }) => (
     <div data-row={item.id} data-viewer={currentUserId ?? ""}>
@@ -71,6 +73,8 @@ function card(id: string, audience: AttentionItem["audience"]) {
     severity: "medium", relatedIssue: null, project: null } as unknown as AttentionItem;
 }
 
+const decidedHistoryItem = { id: "decided-1" } as unknown as import("../api/decisions").DecisionOutcome;
+
 function Location() { return <output data-location>{useLocation().search}</output>; }
 
 let root: Root;
@@ -88,6 +92,8 @@ beforeEach(() => {
     mine: [card("mine-1", { kind: "user", userId: "scott", reason: "addressee" })],
     unassigned: [card("pool-1", { kind: "pool", userId: null, reason: "none" })],
   };
+  decisionListMock.mockReset();
+  decisionListMock.mockResolvedValue([]);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -106,6 +112,72 @@ async function render(url = "/decisions") {
 }
 
 describe("classic Decisions views", () => {
+  it("keeps a failed decided-history read distinct from an empty result", async () => {
+    decisionListMock.mockRejectedValueOnce(new Error("history unavailable"));
+    await render();
+    const decided = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Decided"));
+    expect(decided).toBeTruthy();
+    await act(async () => decided?.click());
+    await flush();
+    expect(container.textContent).not.toContain("No decided decisions.");
+    expect(container.textContent).toContain("history unavailable");
+    expect(container.textContent).toContain("Retry");
+  });
+
+  it("keeps a failed expired-history read distinct from an empty result", async () => {
+    decisionListMock.mockRejectedValueOnce(new Error("history unavailable"));
+    await render();
+    const expired = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Expired"));
+    expect(expired).toBeTruthy();
+    await act(async () => expired?.click());
+    await flush();
+    expect(container.textContent).not.toContain("No expired decisions.");
+    expect(container.textContent).toContain("history unavailable");
+    expect(container.textContent).toContain("Retry");
+  });
+
+  it("shows the empty copy after a successful zero-row history read", async () => {
+    await render();
+    const decided = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Decided"));
+    await act(async () => decided?.click());
+    await flush();
+    expect(container.textContent).toContain("No decided decisions.");
+  });
+
+  it("recovers a failed history read, keeps the curtain open, and restores focus", async () => {
+    decisionListMock.mockRejectedValueOnce(new Error("history unavailable")).mockResolvedValueOnce([decidedHistoryItem]);
+    await render();
+    const decided = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Decided"))!;
+    await act(async () => decided.click());
+    await flush();
+    const retry = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Retry")!;
+    await act(async () => retry.click());
+    await flush();
+    await flush();
+    expect(container.querySelector("[data-decision-card='decided-1']")).not.toBeNull();
+    expect(decided.getAttribute("aria-expanded")).toBe("true");
+    const historySection = container.querySelector("[data-decision-card='decided-1']")?.closest("section");
+    expect(historySection).not.toBeNull();
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(null))); });
+    expect(document.activeElement).toBe(historySection);
+  });
+
+  it("does not render cached history after an access denial", async () => {
+    const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+    decisionListMock.mockResolvedValueOnce([decidedHistoryItem]).mockRejectedValueOnce(forbidden);
+    await render();
+    const decided = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Decided"))!;
+    await act(async () => decided.click());
+    await flush();
+    expect(container.querySelector("[data-decision-card='decided-1']")).not.toBeNull();
+    await act(async () => decided.click());
+    await act(async () => decided.click());
+    await flush();
+    expect(container.querySelector("[data-decision-card='decided-1']")).toBeNull();
+    expect(container.textContent).toContain("Forbidden");
+    expect(container.textContent).not.toContain("No decided decisions.");
+  });
+
   it("finds a linked decision outside Mine before consuming its URL", async () => {
     fixture.boardAccess = { userId: "scott", source: "session", memberships: [{ companyId: "company", status: "active", membershipRole: "admin" }] };
     fixture.byView.all = [{ ...card("decision-target", { kind: "pool", userId: null, reason: "none" }), sourceKind: "decision", subject: { id: "target", kind: "decision", title: "Linked decision" } } as AttentionItem];
@@ -137,6 +209,8 @@ describe("classic Decisions views", () => {
 
   it("opens For you by default with the shared badge count and the Unassigned banner", async () => {
     await render();
+    expect(container.textContent).toContain("Pending decisions live here");
+    expect(container.querySelector('a[href="/inbox"]')?.textContent).toBe("Tasks");
     expect(fixture.calls).toContainEqual(expect.objectContaining({ all: true, view: "mine" }));
     // The views never ask for hidden cards; those live in the Archived view (PAP-749 plan §3).
     expect(fixture.calls.some((call) => "includeDismissed" in call)).toBe(false);

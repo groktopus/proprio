@@ -5969,13 +5969,22 @@ export function agentRoutes(
       return;
     }
     await assertCanResumeAgent(req, existing);
+    const expectedPauseReason = req.body?.expectedPauseReason;
+    if (expectedPauseReason !== undefined && expectedPauseReason !== "import") {
+      res.status(400).json({ error: "Unsupported resume precondition" });
+      return;
+    }
+    if (expectedPauseReason && existing.pauseReason !== expectedPauseReason) {
+      res.status(409).json({ error: "Agent pause state changed; reload before retrying" });
+      return;
+    }
     if (existing.orgChainHealth?.status === "invalid_org_chain") {
       res.status(409).json({
         error: existing.orgChainHealth?.repairGuidance ?? "Repair this agent's reporting chain before resuming it",
       });
       return;
     }
-    const agent = await svcLifecycle.resumeAgent(id);
+    const agent = await svcLifecycle.resumeAgent(id, expectedPauseReason ?? "user");
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;

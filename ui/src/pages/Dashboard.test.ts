@@ -81,7 +81,8 @@ describe("dashboard recent tasks from the task index", () => {
       kind: "error", error: new Error("task index unavailable"), retry: () => {}, retrying: false, empty: true, children: "unused",
     }));
     expect(markup).toContain("Retry");
-    expect(markup).toContain("load recent tasks");
+    expect(markup).toContain("task index unavailable");
+    expect(markup).toContain('data-query-view="error"');
   });
 
   it("keeps indexed rows visible when the summary batch fails", () => {
