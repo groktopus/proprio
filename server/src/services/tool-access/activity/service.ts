@@ -7,7 +7,7 @@ import type { ToolConnectionActivityResponse, ToolRunDecision, ToolRunDecisionLo
 import { notFound } from "../../../errors.js";
 import { issueReadSqlCondition, type AuthorizationActor } from "../../authorization.js";
 import { listConnectionLifecycleEvents } from "../../tool-connection-activity.js";
-import { toToolInvocation, toToolActionRequest, toToolCallEvent, userFallbackName, denialReasonForDecision } from "./projection.js";
+import { toToolInvocation, toToolActionRequest, toToolCallEvent, toToolPolicyRunProvenance, userFallbackName, denialReasonForDecision } from "./projection.js";
 type ConnectionLookup = (idOrUid: string, companyId?: string) => Promise<typeof toolConnections.$inferSelect>;
 
 /** A timeline can link evidence to a task other than the run's own task. */
@@ -367,6 +367,7 @@ listConnectionActivity: async (
             : null;
         return {
           invocation: apiInvocation,
+          policyProvenance: toToolPolicyRunProvenance(invocation),
           actionRequest: apiActionRequest,
           auditEvents: apiAuditEvents,
           latestAuditEvent: apiLatestAuditEvent,

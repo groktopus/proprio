@@ -217,6 +217,7 @@ describe("RunTranscriptView", () => {
     const invocationId = "11111111-1111-4111-8111-111111111111";
     const actionRequestId = "22222222-2222-4222-8222-222222222222";
     const decision: ToolRunDecision = {
+      policyProvenance: { captureStatus: "unknown", matchedPolicyIds: [], policies: [] },
       invocation: {
         id: invocationId,
         companyId: "company-1",

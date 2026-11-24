@@ -1536,6 +1536,10 @@ export function createToolGatewayService(
     if (input.consumeRateLimit) await policy.writeAudit(issuerInput, issuer);
     return { ...chosen, matchedPolicyIds: [...new Set([...issuer.matchedPolicyIds, ...target.matchedPolicyIds])], policyExplanation: {
       ...chosen.policyExplanation,
+      explicitMatchedPolicies: [
+        ...(Array.isArray(issuer.policyExplanation?.explicitMatchedPolicies) ? issuer.policyExplanation.explicitMatchedPolicies : []),
+        ...(Array.isArray(target.policyExplanation?.explicitMatchedPolicies) ? target.policyExplanation.explicitMatchedPolicies : []),
+      ],
       consumedRateAdmissions: target.policyExplanation?.consumedRateAdmissions,
       delegatedCallerConsumedRateAdmissions: issuer.policyExplanation?.consumedRateAdmissions,
       delegatedGatewayIssuer: issuerId,
@@ -10312,8 +10316,12 @@ export function createToolGatewayService(
           const chosen = caller && !caller.allowed && caller.decision !== "require_approval" ? caller
             : !target.allowed ? target : caller?.decision === "require_approval" ? caller : target;
           if (callerInput && caller) await policy.writeAudit(callerInput, caller);
-          return { ...chosen, policyExplanation: {
+          return { ...chosen, matchedPolicyIds: [...new Set([...(caller?.matchedPolicyIds ?? []), ...target.matchedPolicyIds])], policyExplanation: {
             ...chosen.policyExplanation,
+            explicitMatchedPolicies: [
+              ...(Array.isArray(caller?.policyExplanation?.explicitMatchedPolicies) ? caller.policyExplanation.explicitMatchedPolicies : []),
+              ...(Array.isArray(target.policyExplanation?.explicitMatchedPolicies) ? target.policyExplanation.explicitMatchedPolicies : []),
+            ],
             consumedRateAdmissions: target.policyExplanation?.consumedRateAdmissions,
             delegatedCallerConsumedRateAdmissions: caller?.policyExplanation?.consumedRateAdmissions,
           } };
@@ -12303,8 +12311,12 @@ export function createToolGatewayService(
       const chosenDecision = callerDecision && !callerDecision.allowed && callerDecision.decision !== "require_approval" ? callerDecision
         : !targetDecision.allowed ? targetDecision
           : callerDecision?.decision === "require_approval" ? callerDecision : targetDecision;
-      const accessDecision = { ...chosenDecision, policyExplanation: {
+      const accessDecision = { ...chosenDecision, matchedPolicyIds: [...new Set([...(callerDecision?.matchedPolicyIds ?? []), ...targetDecision.matchedPolicyIds])], policyExplanation: {
         ...chosenDecision.policyExplanation,
+        explicitMatchedPolicies: [
+          ...(Array.isArray(callerDecision?.policyExplanation?.explicitMatchedPolicies) ? callerDecision.policyExplanation.explicitMatchedPolicies : []),
+          ...(Array.isArray(targetDecision.policyExplanation?.explicitMatchedPolicies) ? targetDecision.policyExplanation.explicitMatchedPolicies : []),
+        ],
         consumedRateAdmissions: targetDecision.policyExplanation?.consumedRateAdmissions,
         delegatedCallerConsumedRateAdmissions: callerDecision?.policyExplanation?.consumedRateAdmissions,
       } };

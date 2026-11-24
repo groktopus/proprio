@@ -1,5 +1,48 @@
 import { toolActionRequests, toolCallEvents, toolInvocations } from "@groktopus/db";
-import type { ToolActionRequest, ToolCallEvent, ToolInvocation } from "@groktopus/shared";
+import type { ToolActionRequest, ToolCallEvent, ToolInvocation, ToolPolicyEvaluationSnapshot, ToolPolicyRunProvenance } from "@groktopus/shared";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function policySnapshot(value: unknown): ToolPolicyEvaluationSnapshot | null {
+  if (!isRecord(value) || typeof value.policyId !== "string" ||
+    !(value.policyType === "allow" || value.policyType === "block" || value.policyType === "require_approval" || value.policyType === "rate_limit" || value.policyType === "trust_rule") ||
+    typeof value.priority !== "number" || !Number.isInteger(value.priority) ||
+    typeof value.revisionUpdatedAt !== "string" ||
+    typeof value.revisionFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.revisionFingerprint) ||
+    typeof value.decisionReason !== "string" || value.decisionReason.length > 100 ||
+    typeof value.evaluatedAt !== "string") return null;
+  return {
+    policyId: value.policyId,
+    policyType: value.policyType,
+    priority: value.priority,
+    revisionUpdatedAt: value.revisionUpdatedAt,
+    revisionFingerprint: value.revisionFingerprint,
+    decisionReason: value.decisionReason,
+    evaluatedAt: value.evaluatedAt,
+  };
+}
+
+export function toToolPolicyRunProvenance(row: typeof toolInvocations.$inferSelect): ToolPolicyRunProvenance {
+  const stored = row.policyExplanation?.explicitMatchedPolicies;
+  const snapshots = Array.isArray(stored) ? stored.map(policySnapshot) : null;
+  const parsedPolicies = snapshots?.filter((snapshot): snapshot is ToolPolicyEvaluationSnapshot => snapshot !== null) ?? [];
+  const storedMatchedIds = Array.isArray(row.matchedPolicyIds)
+    ? row.matchedPolicyIds.filter((id): id is string => typeof id === "string") : [];
+  const snapshotIds = new Set(parsedPolicies.map(policy => policy.policyId));
+  const recorded = snapshots !== null && snapshots.every(snapshot => snapshot !== null)
+    && storedMatchedIds.every(id => snapshotIds.has(id));
+  const policies = recorded ? snapshots as ToolPolicyEvaluationSnapshot[] : [];
+  return {
+    captureStatus: recorded ? "recorded" : "unknown",
+    matchedPolicyIds: [...new Set([
+      ...storedMatchedIds,
+      ...policies.map(policy => policy.policyId),
+    ])],
+    policies,
+  };
+}
 
 export function toToolInvocation(
   row: typeof toolInvocations.$inferSelect,

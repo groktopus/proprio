@@ -861,6 +861,82 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
   });
 
+  it("keeps the original matched-policy snapshot through an admission recheck and run read", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const run = await createRun(db, company.id, agent.id);
+    const { connection, catalogEntry } = await createTool(db, company.id);
+    const policy = await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review email sends",
+      description: "This description must not be copied into policy history.",
+      policyType: "require_approval",
+      priority: 37,
+      selectors: { toolName: "send_email" },
+      conditions: { arguments: { fieldEquals: { body: "SENSITIVE_RAW_ARGUMENT" } } },
+    }).returning().then(rows => rows[0]!);
+    const laterCandidate = await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Later matching candidate",
+      policyType: "allow",
+      priority: 99,
+      selectors: { toolName: "send_email" },
+    }).returning().then(rows => rows[0]!);
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id },
+      request: {
+        connectionId: connection.id,
+        catalogEntryId: catalogEntry.id,
+        toolName: "send_email",
+        arguments: { body: "SENSITIVE_RAW_ARGUMENT" },
+        sideEffecting: true,
+      },
+    };
+    const policyService = toolAccessPolicyService(db);
+    const originalDecision = await policyService.decide(input);
+    const originalSnapshot = originalDecision.policyExplanation?.explicitMatchedPolicies?.[0];
+    const repeatedDecision = await policyService.decide(input);
+    expect(repeatedDecision.policyExplanation?.explicitMatchedPolicies?.[0]?.revisionFingerprint)
+      .toBe(originalSnapshot?.revisionFingerprint);
+    const recorded = await policyService.recordInvocation(input, originalDecision);
+    await db.update(toolInvocations).set({ approvalState: "approved" })
+      .where(eq(toolInvocations.id, recorded.invocation.id));
+    await db.update(toolPolicies).set({ name: "Edited policy", policyType: "allow", updatedAt: new Date(Date.now() + 1_000) })
+      .where(eq(toolPolicies.id, policy.id));
+
+    const recheck = await policyService.admitInvocation(input, recorded.invocation.id);
+    expect(recheck).toMatchObject({ decision: "allow" });
+    expect(recheck.policyExplanation?.explicitMatchedPolicies).toEqual([
+      expect.objectContaining({ policyId: policy.id, policyType: "allow" }),
+    ]);
+    expect(recheck.policyExplanation?.explicitMatchedPolicies?.[0]?.revisionFingerprint)
+      .not.toBe(originalSnapshot?.revisionFingerprint);
+    expect(JSON.stringify(recheck.policyExplanation?.explicitMatchedPolicies)).not.toContain("Edited policy");
+    expect(JSON.stringify(recheck.policyExplanation?.explicitMatchedPolicies)).not.toContain("send_email");
+
+    const runLookup = await toolAccessService(db).getRunDecisionLookup(company.id, run.id);
+    const provenance = runLookup.decisions[0]!.policyProvenance;
+    expect(provenance).toMatchObject({
+      captureStatus: "recorded",
+      matchedPolicyIds: [policy.id],
+      policies: [expect.objectContaining({
+        policyId: policy.id,
+        policyType: "require_approval",
+        priority: 37,
+        revisionUpdatedAt: expect.any(String),
+        revisionFingerprint: expect.any(String),
+        decisionReason: "requires_approval_policy",
+      })],
+    });
+    expect(provenance.policies.map(snapshot => snapshot.policyId)).not.toContain(laterCandidate.id);
+    expect(JSON.stringify(provenance)).not.toContain("SENSITIVE_RAW_ARGUMENT");
+    expect(JSON.stringify(provenance)).not.toContain("must not be copied");
+    expect(JSON.stringify(provenance)).not.toContain("Review email sends");
+    expect(JSON.stringify(provenance)).not.toContain("send_email");
+  });
+
   it("replays side-effecting calls with the same idempotency key instead of creating a new invocation", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);

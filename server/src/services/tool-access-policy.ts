@@ -1,5 +1,5 @@
 import type { ConnectionManagementContext } from "./connection-management.js";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { boundRunIssueIdSql } from "./run-task-binding.js";
 import type { ToolApprovalClaim } from "./tool-approval-execution.js";
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
@@ -48,6 +48,7 @@ import type {
 } from "@groktopus/shared";
 import { toolPolicyConditionsSchema } from "@groktopus/shared";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
+import { resolveDecisionSigningSecret } from "./decision-signing.js";
 import {
   effectiveToolProfileBindings,
   isConnectionAccessProfile,
@@ -332,6 +333,33 @@ function auditOutcome(accessDecision: ToolAccessDecision): "pending" | "success"
   if (accessDecision.decision === "require_approval") return "pending";
   if (accessDecision.decision === "defer_runtime") return "timeout";
   return "denied";
+}
+
+function policyEvaluationSnapshot(
+  policy: typeof toolPolicies.$inferSelect,
+  decisionReason: string,
+) {
+  const revisionUpdatedAt = policy.updatedAt.toISOString();
+  const revision = stableStringify({
+    policyId: policy.id,
+    revisionUpdatedAt,
+    policyType: policy.policyType,
+    priority: policy.priority,
+    enabled: policy.enabled,
+    selectors: policy.selectors,
+    conditions: policy.conditions,
+    config: policy.config,
+  });
+  return {
+    policyId: policy.id,
+    policyType: policy.policyType,
+    priority: policy.priority,
+    revisionUpdatedAt,
+    revisionFingerprint: createHmac("sha256", resolveDecisionSigningSecret())
+      .update("tool-policy-revision-v1:").update(revision).digest("hex"),
+    decisionReason,
+    evaluatedAt: new Date().toISOString(),
+  };
 }
 
 function summarizeAndRedact(value: unknown, normalizeSensitiveKeys = true): RedactionResult {
@@ -1627,13 +1655,33 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     const enabledPolicies = await cachedRead(cache, `enabled-policies:${ctx.companyId}`, async () => indexEnabledToolPolicies(
       await db.select().from(toolPolicies).where(and(eq(toolPolicies.companyId, ctx.companyId), eq(toolPolicies.enabled, true))).orderBy(asc(toolPolicies.priority), asc(toolPolicies.createdAt))));
     const policyMatch = matchEnabledToolPolicies(enabledPolicies, ctx);
+    const ratePoliciesEvaluated = new Set<string>();
+    const policyDecision = (
+      kind: ToolPolicyDecision,
+      reasonCode: ToolAccessReasonCode,
+      explanation: string,
+      matchedPolicyIds: string[],
+      extra: Partial<ToolAccessDecision> = {},
+    ) => {
+      const decisiveIds = new Set(matchedPolicyIds);
+      const explicitMatchedPolicies = ("unsupportedConditions" in policyMatch ? [policyMatch.unsupportedConditions] : policyMatch.matching)
+        .filter(({ policy }) => decisiveIds.has(policy.id) || ratePoliciesEvaluated.has(policy.id))
+        .map(({ policy }) => policyEvaluationSnapshot(policy,
+          decisiveIds.has(policy.id) ? reasonCode : "rate_limit_enforced"));
+      return decision(kind, reasonCode, explanation, effectiveProfileIds, matchedPolicyIds, {
+        ...extra,
+        policyExplanation: {
+          ...(isRecord(extra.policyExplanation) ? extra.policyExplanation : {}),
+          explicitMatchedPolicies,
+        },
+      });
+    };
     if ("unsupportedConditions" in policyMatch) {
       const { policy, issues } = policyMatch.unsupportedConditions;
-      return decision(
+      return policyDecision(
         "deny",
         "deny_policy_block",
         "Tool access denied because a matching policy uses unsupported runtime conditions.",
-        effectiveProfileIds,
         [policy.id],
         {
           redactionPlan: redaction.redactionPlan,
@@ -1656,29 +1704,28 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         conditionsMatched: conditionEvaluation.matchedGroups,
       };
       if (unsupportedRuntimePolicyType(policy.policyType)) {
-        return decision(
+        return policyDecision(
           "deny",
           "deny_policy_block",
           "Tool access denied because a matching policy uses unsupported runtime semantics.",
-          effectiveProfileIds,
           [policy.id],
           { redactionPlan: redaction.redactionPlan, policyExplanation },
         );
       }
       if (policy.policyType === "block") {
-        return decision("deny", "deny_policy_block", policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("deny", "deny_policy_block", policy.description ?? "Tool access is blocked by policy.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "rate_limit") {
         if (!rateLimitRule(policy)) {
-          return decision(
+          return policyDecision(
             "deny",
             "deny_policy_block",
             "Tool access denied because a matching rate-limit policy has invalid runtime config.",
-            effectiveProfileIds,
             [policy.id],
             { redactionPlan: redaction.redactionPlan, policyExplanation },
           );
         }
+        ratePoliciesEvaluated.add(policy.id);
         const versionHash = ratePolicyVersionHash(policy);
         if (admittedRates?.some(admission => admission.policyId === policy.id && admission.versionHash === versionHash)) continue;
         // Paired caller/target checks for one delegated test share a slot only
@@ -1692,7 +1739,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         }
         const state = await enforceRateLimit(policy, ctx, input.consumeRateLimit === true);
         if (state?.limited) {
-          return decision("rate_limited", "rate_limited", "Tool access rate limit exceeded.", effectiveProfileIds, [policy.id], { rateLimitState: state, redactionPlan: redaction.redactionPlan, policyExplanation });
+          return policyDecision("rate_limited", "rate_limited", "Tool access rate limit exceeded.", [policy.id], { rateLimitState: state, redactionPlan: redaction.redactionPlan, policyExplanation });
         }
         if (state && input.consumeRateLimit === true) consumedRateAdmissions.push({ policyId: policy.id, versionHash, bucketKey: state.bucketKey });
         continue;
@@ -1703,14 +1750,13 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         if (!argumentFiltersMatch(rule.argumentFilters, ctx)) continue;
         // Remembered permissions cannot override an explicit block. Preserve
         // priority semantics for ordinary allow/require-approval policies.
-        if (explicitBlock) return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
+        if (explicitBlock) return policyDecision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
 
         if (trustRuleNeedsReview(policy, ctx)) {
-          return decision(
+          return policyDecision(
             "require_approval",
             "requires_review_changed_tool",
             "Tool definition changed or was quarantined after this trust rule was created; review is required.",
-            effectiveProfileIds,
             [policy.id],
             { redactionPlan: redaction.redactionPlan, policyExplanation },
           );
@@ -1718,19 +1764,19 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         if (input.consumeRateLimit === true && !options.admittedInvocationId) {
           await recordTrustRuleHit(policy, ctx, redaction);
         }
-        return decision("allow", "allow_trust_rule", policy.description ?? "Tool access allowed by trust rule.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("allow", "allow_trust_rule", policy.description ?? "Tool access allowed by trust rule.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "require_approval") {
         // The connection's Ask first control restricts an existing action grant;
         // it must never grant access to agents outside that connection's profile.
         if (["app_gallery_finish", "connection_intent"].includes(String(policy.config?.source)) && !permittedByProfile) continue;
         if (policy.config?.source === "connection_intent" && explicitBlock) {
-          return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
+          return policyDecision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
         }
-        return decision("require_approval", "requires_approval_policy", policy.description ?? "Tool access requires approval.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("require_approval", "requires_approval_policy", policy.description ?? "Tool access requires approval.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "allow") {
-        return decision("allow", "allow_policy", "Tool access allowed by policy.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("allow", "allow_policy", "Tool access allowed by policy.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
     }
     // A connection's profile decides which of its actions agents may call. An
@@ -1746,7 +1792,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       || profileState.entries.some((entry) => entry.connectionId === ctx.connectionId || profileEntryMatches(entry, ctx))
     );
     if (await explicitGrant(ctx, cache, { toolTargetedOnly: governedByConnectionProfile })) {
-      return decision("allow", "allow_explicit_grant", "Tool access allowed by explicit grant.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+      return policyDecision("allow", "allow_explicit_grant", "Tool access allowed by explicit grant.", [], { redactionPlan: redaction.redactionPlan });
     }
 
     const entriesByProfile = new Map<string, Array<typeof toolProfileEntries.$inferSelect>>();
@@ -1760,11 +1806,11 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       const matchingEntries = entries.filter((entry) => profileEntryMatches(entry, ctx));
       if (matchingEntries.some((entry) => entry.effect === "exclude")) continue;
       if (profile.defaultAction === "allow" || matchingEntries.some((entry) => entry.effect === "include")) {
-        return decision("allow", "allow_profile", "Tool access allowed by effective profile.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+        return policyDecision("allow", "allow_profile", "Tool access allowed by effective profile.", [], { redactionPlan: redaction.redactionPlan });
       }
     }
 
-    return decision("deny", "deny_default", "No effective tool profile, grant, or allow policy permits this call.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+    return policyDecision("deny", "deny_default", "No effective tool profile, grant, or allow policy permits this call.", [], { redactionPlan: redaction.redactionPlan });
   }
 
   async function writeAudit(
