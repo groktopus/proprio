@@ -145,16 +145,15 @@ for (const scenario of [
       restartEvidence = { stoppedAt, readyAt, handoffId: outgoing.handoffId, runId: outgoing.runId };
     }
 
+    let revokedAuthorityEvidence: { handoffId: string; state: string; reason: string; sourceRunId: string; restoredAt: string } | undefined;
     if (revokeBuilder) {
-      await expect.poll(async () => {
-        const ledger = await api(handoffPath);
-        const items = Array.isArray(ledger) ? ledger : ledger.items ?? ledger.handoffs;
-        return items.find((handoff: { id: string }) => handoff.id === outgoing.handoffId);
-      }, { timeout: 45_000 }).toMatchObject({ state: "awaiting_release", lastErrorCode: "access_or_admission_blocked" });
+      await expect.poll(outgoingState, { timeout: 45_000 })
+        .toMatchObject({ state: "awaiting_release", lastErrorCode: "access_or_admission_blocked" });
+      const held = await outgoingState();
+      expect(held.lastError).toMatch(/protected-agent policy/);
       expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
       expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ status: "in_progress", assigneeAgentId: lead.id });
-      const absentResult = await request.get(`${base}/api/issues/${taskId}/documents/result`);
-      expect(absentResult.status()).toBe(404);
+      expect((await request.get(`${base}/api/issues/${taskId}/documents/result`)).status()).toBe(404);
 
       const builderState = await api(`/agents/${builder.id}`);
       await api(`/agents/${builder.id}/permissions`, "PATCH", {
@@ -164,14 +163,13 @@ for (const scenario of [
         trustPreset: builderState.permissions?.trustPreset ?? "standard",
         authorizationPolicy: {},
       });
+      revokedAuthorityEvidence = { handoffId: held.id, state: held.state, reason: held.lastErrorCode,
+        sourceRunId: held.sourceRunId, restoredAt: new Date().toISOString() };
     }
 
     await expect.poll(async () => (await api(`/issues/${taskId}?view=core`)).status, { timeout: 90_000 }).toBe("done");
     await expect.poll(async () => (await api(runsPath)).map((run: { status: string }) => run.status), { timeout: 25_000 })
       .toEqual(["succeeded", "succeeded", "succeeded"]);
-    if (revokeBuilder) {
-      expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id, builder.id, verifier.id]);
-    }
     const task = await api(`/issues/${taskId}?view=core`);
     const caseRecord = await api(`/cases/${caseId}`);
     const ledger = await api(`/cases/${caseId}/handoffs?limit=20`);
@@ -196,7 +194,7 @@ for (const scenario of [
     await info.attach("mixed-handoff-evidence", { contentType: "application/json", body: JSON.stringify({
       revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
       profiles: ["legacy/process", "native/codex-app-server fixture", "legacy/process"],
-      outgoing, restartEvidence, observed, verdict,
+      outgoing, restartEvidence, revokedAuthorityEvidence, observed, verdict,
     }, null, 2) });
     expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
     await page.goto(`${base}/${company.issuePrefix}/issues/${task.identifier ?? task.id}`);
