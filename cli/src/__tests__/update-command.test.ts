@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeManagedShim, flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, withInstallStoreLock, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
 import type { CommandRunner } from "../commands/install.js";
+import { createGitCheckoutRunCommand } from "./fixtures/managed-git-checkout.js";
 import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManagedInstall, updateCommand } from "../commands/update.js";
 
 let root: string;
@@ -19,6 +20,38 @@ function createPayload(payloadPath: string, version: string): string {
   fs.writeFileSync(entrypoint, version);
   return entrypoint;
 }
+function gitUpdateFixture(targetCached = true) {
+  const paths = resolveInstallStorePaths();
+  initializeInstallStore(paths);
+  const currentSha = "1".repeat(40);
+  const targetSha = "2".repeat(40);
+  const currentPayload = payloadPathFor(paths, "git", currentSha.slice(0, 12));
+  const targetPayload = payloadPathFor(paths, "git", targetSha.slice(0, 12));
+  const executablePath = createPayload(currentPayload, "1.0.0");
+  if (targetCached) {
+    createPayload(targetPayload, "2.0.0");
+    fs.writeFileSync(path.join(targetPayload, "node_modules/proprio/package.json"), JSON.stringify({ version: "2.0.0" }));
+  }
+  flipCurrentAtomic(currentPayload, paths);
+  writeInstallManifestAtomic({
+    schemaVersion: 1, source: "git", channel: "pinned", version: "1.0.0",
+    repo: "groktopus/proprio", ref: "main", sha: currentSha, payloadPath: currentPayload,
+    installedAt: "2026-07-22T00:00:00.000Z", previous: [],
+  }, paths);
+  writeManagedShim(paths);
+
+  const runCommand = vi.fn<CommandRunner>(async (file, args) => {
+    if (file === "curl" && args.at(-1) === "https://api.github.com/repos/groktopus/proprio/commits/main") {
+      return { stdout: JSON.stringify({ sha: targetSha }), stderr: "" };
+    }
+    if (file === process.execPath && args.at(-1) === "--version") {
+      return { stdout: "2.0.0\n", stderr: "" };
+    }
+    throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
+  });
+  return { paths, executablePath, currentSha, targetSha, currentPayload, targetPayload, runCommand };
+}
+
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-update-"));
   previousHome = process.env.HOME;
@@ -65,22 +98,34 @@ describe("update command", () => {
   });
 
   it("keeps update checks, dry runs, and rollback available on unsupported Node", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); createPayload(oldPayload, "1.0.0");
-    const payload = payloadPathFor(paths, "npm", "2.0.0"); const executablePath = createPayload(payload, "2.0.0");
-    flipCurrentAtomic(payload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(payload, "2.0.0"), previous: [record(oldPayload, "1.0.0")] }, paths);
-    const runCommand = vi.fn(async () => ({ stdout: '\"3.0.0\"\n', stderr: "" }));
+    const fixture = gitUpdateFixture();
+    const { paths, currentPayload, currentSha, targetSha, runCommand } = fixture;
     const restartActiveService = vi.fn(async () => false);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const nodeVersion = Object.getOwnPropertyDescriptor(process.versions, "node")!;
     Object.defineProperty(process.versions, "node", { ...nodeVersion, value: "22.22.2" });
     try {
-      await updateCommand({ check: true }, { paths, executablePath, runCommand });
-      await updateCommand({ dryRun: true }, { paths, executablePath, runCommand });
-      expect(readInstallManifest(paths)?.version).toBe("2.0.0");
-      await updateCommand({ rollback: true }, { paths, executablePath, restartActiveService });
-      expect(readInstallManifest(paths)?.version).toBe("1.0.0");
-      expect(restartActiveService).toHaveBeenCalledWith("1.0.0");
+      await updateCommand({ check: true, json: true }, fixture);
+      expect(process.exitCode).toBe(10);
+      await updateCommand({ dryRun: true, json: true }, fixture);
+      expect(JSON.parse(String(log.mock.lastCall?.[0]))).toMatchObject({ currentSha, targetSha, changed: true, dryRun: true });
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(readInstallManifest(paths)?.sha).toBe(currentSha);
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+
+      const { previous: _previous, schemaVersion, ...original } = readInstallManifest(paths)!;
+      const targetPayload = fixture.targetPayload;
+      flipCurrentAtomic(targetPayload, paths);
+      writeInstallManifestAtomic({
+        schemaVersion, ...original, sha: targetSha, version: "2.0.0", payloadPath: targetPayload,
+        previous: [original],
+      }, paths);
+      await updateCommand({ rollback: true }, {
+        ...fixture, executablePath: path.join(targetPayload, "node_modules/proprio/dist/index.js"), restartActiveService,
+      });
+      expect(readInstallManifest(paths)?.sha).toBe(currentSha);
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+      expect(restartActiveService).toHaveBeenCalledWith("1.0.0", { expectedCommit: currentSha });
     } finally {
       Object.defineProperty(process.versions, "node", nodeVersion);
     }
@@ -260,151 +305,120 @@ describe("update command", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
-  it("requires explicit confirmation before downgrading", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const payload = payloadPathFor(paths, "npm", "2.0.0"); const entrypoint = createPayload(payload, "2.0.0"); flipCurrentAtomic(payload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(payload, "2.0.0"), previous: [] }, paths);
-    const runCommand = vi.fn(async () => ({ stdout: '"1.0.0"\n', stderr: "" }));
-    await expect(updateCommand({ version: "1.0.0", dryRun: true }, { paths, executablePath: entrypoint, runCommand, confirm: async () => false })).rejects.toThrow("Downgrade cancelled");
-  });
-
-  it("requires explicit confirmation before a global npm downgrade", async () => {
+  it.each(["managed", "global-npm"] as const)("rejects %s registry updates before running npm", async (mode) => {
     const paths = resolveInstallStorePaths();
-    const executable = path.join(root, "lib", "node_modules", "proprio", "dist", "index.js");
-    const runCommand = vi.fn(async () => ({ stdout: '"0.2.0"\n', stderr: "" }));
-    await expect(updateCommand({ version: "0.2.0" }, { paths, executablePath: executable, runCommand, confirm: async () => false })).rejects.toThrow("Downgrade cancelled");
-    expect(runCommand).toHaveBeenCalledTimes(1);
+    const payload = payloadPathFor(paths, "npm", "1.0.0");
+    const managedEntrypoint = createPayload(payload, "1.0.0");
+    initializeInstallStore(paths);
+    flipCurrentAtomic(payload, paths);
+    const manifest = { schemaVersion: 1 as const, ...record(payload, "1.0.0", "pinned"), previous: [] };
+    writeInstallManifestAtomic(manifest, paths);
+    const executablePath = mode === "managed"
+      ? managedEntrypoint
+      : path.join(root, "lib/node_modules/proprio/dist/index.js");
+    const runCommand = vi.fn<CommandRunner>();
+    const backup = vi.fn();
+
+    await expect(updateCommand({}, { paths, executablePath, runCommand, backup }))
+      .rejects.toThrow("registry installation and updates are disabled");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(backup).not.toHaveBeenCalled();
+    expect(readInstallManifest(paths)).toEqual(manifest);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(payload));
   });
 
-  it("isolates global npm updates from hostile registry configuration", async () => {
-    const paths = resolveInstallStorePaths();
-    const executable = path.join(root, "lib", "node_modules", "proprio", "dist", "index.js");
-    vi.stubEnv("NPM_CONFIG_REGISTRY", "http://attacker-registry.invalid");
-    fs.mkdirSync(process.env.HOME!, { recursive: true });
-    fs.writeFileSync(path.join(process.env.HOME!, ".npmrc"), "registry=http://attacker-registry.invalid\n");
-    const runCommand = vi.fn<CommandRunner>(async (_file, args, commandOptions) => {
-      if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
-      expect(args).toContain("--registry=https://registry.npmjs.org");
-      expect(args).toContain("--@proprio:registry=https://registry.npmjs.org");
-      expect(commandOptions?.env?.NPM_CONFIG_REGISTRY).toBe("https://registry.npmjs.org");
-      expect(commandOptions?.env?.npm_config_registry).toBe("https://registry.npmjs.org");
-      expect(commandOptions?.env?.NPM_CONFIG_USERCONFIG).toBe(commandOptions?.env?.npm_config_userconfig);
-      expect(fs.readFileSync(commandOptions!.env!.NPM_CONFIG_USERCONFIG!, "utf8")).toContain("registry=https://registry.npmjs.org");
-      return { stdout: "", stderr: "" };
-    });
-    await updateCommand({}, { paths, executablePath: executable, runCommand });
-    expect(runCommand).toHaveBeenCalledTimes(2);
+  it("requires explicit confirmation before updating a Git payload", async () => {
+    const fixture = gitUpdateFixture(false);
+    const { paths, currentSha, targetSha, targetPayload } = fixture;
+    const confirm = vi.fn(async () => false);
+    const backup = vi.fn();
+    await expect(updateCommand({}, { ...fixture, confirm, backup, hasInstanceData: () => true })).rejects.toThrow("Git update cancelled");
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(targetSha.slice(0, 12)));
+    expect(backup).not.toHaveBeenCalled();
+    expect(fs.existsSync(targetPayload)).toBe(false);
+    expect(readInstallManifest(paths)?.sha).toBe(currentSha);
   });
 
-  it("backs up, installs side-by-side, flips, and rolls back instantly", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
-    writeManagedShim(paths);
-    // Simulate a launcher generated before child-runtime PATH pinning existed.
-    fs.writeFileSync(paths.shimPath, fs.readFileSync(paths.shimPath, "utf8").replace(/^export PATH=.*\n/m, ""));
-    const backup = vi.fn(async () => undefined);
-    const restartActiveService = vi.fn(async () => true);
-    const runCommand = vi.fn(async (file: string, args: string[]) => {
-      if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
-      if (file === "npm" && args[0] === "install") { const prefix = args[args.indexOf("--prefix") + 1]; createPayload(prefix, "2.0.0"); return { stdout: "", stderr: "" }; }
-      return { stdout: "2.0.0\n", stderr: "" };
+  it("backs up before activation, retains both Git payloads, and permits rollback", async () => {
+    const fixture = gitUpdateFixture(false);
+    const { paths, currentSha, targetSha, currentPayload, targetPayload } = fixture;
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "corepack"), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    vi.stubEnv("PATH", bin);
+
+    const gitCheckout = createGitCheckoutRunCommand(targetSha);
+    const backup = vi.fn(async () => {
+      expect(readInstallManifest(paths)?.sha).toBe(currentSha);
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+      expect(fs.existsSync(targetPayload)).toBe(false);
     });
-    await updateCommand({}, { paths, executablePath: executable, runCommand, backup, restartActiveService, hasInstanceData: () => true, now: () => new Date("2026-07-22T12:00:00Z") });
-    expect(fs.readFileSync(paths.shimPath, "utf8")).toContain(`export PATH='${path.dirname(process.execPath)}'`);
+    const runCommand = vi.fn<CommandRunner>(async (file, args, options) => {
+      if (file === "curl" && args.includes("--output")) {
+        expect(backup).toHaveBeenCalledOnce();
+        expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+      }
+      return gitCheckout(file, args, options);
+    });
+    const restartActiveService = vi.fn(async () => {
+      expect(readInstallManifest(paths)?.sha).toBe(targetSha);
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(targetPayload));
+      return true;
+    });
+    await updateCommand({ yes: true }, { ...fixture, runCommand, backup, restartActiveService, hasInstanceData: () => true });
     expect(backup).toHaveBeenCalledOnce();
-    expect(restartActiveService).toHaveBeenCalledWith("2.0.0");
-    expect(readInstallManifest(paths)?.version).toBe("2.0.0");
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(payloadPathFor(paths, "npm", "2.0.0")));
-    const rolledBack = rollbackManagedInstall(paths);
-    expect(rolledBack.version).toBe("1.0.0");
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
+    expect(runCommand.mock.calls.some(([file, args]) => file === "curl" && args.includes("--output"))).toBe(true);
+    expect(restartActiveService).toHaveBeenCalledWith("0.3.1", { expectedCommit: targetSha });
+    expect(readInstallManifest(paths)?.sha).toBe(targetSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(targetPayload));
+    expect(rollbackManagedInstall(paths).sha).toBe(currentSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+    expect(fs.existsSync(targetPayload)).toBe(true);
   });
 
   it("explains how to recover when the pre-update database is unreachable", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
+    const fixture = gitUpdateFixture(false);
+    const { paths, currentSha, currentPayload, targetPayload, runCommand } = fixture;
     const backupError = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:54329"), { code: "ECONNREFUSED" });
     const backup = vi.fn(async () => { throw backupError; });
-    const runCommand = vi.fn(async () => ({ stdout: '"2.0.0"\n', stderr: "" }));
 
-    await expect(updateCommand({}, { paths, executablePath: executable, runCommand, backup, hasInstanceData: () => true })).rejects.toThrow(
+    await expect(updateCommand({ yes: true }, { ...fixture, backup, hasInstanceData: () => true })).rejects.toThrow(
       "Start the service with `proprio service start` and retry, or skip the backup with `proprio update --no-backup`.",
     );
     expect(backup).toHaveBeenCalledOnce();
-    expect(readInstallManifest(paths)?.version).toBe("1.0.0");
+    expect(runCommand).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(targetPayload)).toBe(false);
+    expect(readInstallManifest(paths)?.sha).toBe(currentSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
   });
 
   it("skips the pre-update backup when there is no onboarded instance data", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
-    const backup = vi.fn(async () => undefined);
+    const fixture = gitUpdateFixture();
+    const backup = vi.fn();
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const runCommand = vi.fn(async (file: string, args: string[]) => {
-      if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
-      if (file === "npm" && args[0] === "install") { createPayload(args[args.indexOf("--prefix") + 1], "2.0.0"); return { stdout: "", stderr: "" }; }
-      return { stdout: "2.0.0\n", stderr: "" };
-    });
 
-    await updateCommand({}, { paths, executablePath: executable, runCommand, backup, restartActiveService: async () => false, hasInstanceData: () => false });
+    await updateCommand({ yes: true }, {
+      ...fixture, backup, restartActiveService: async () => false, hasInstanceData: () => false,
+    });
 
     expect(backup).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining("has not been onboarded and has no data to back up"));
-    expect(readInstallManifest(paths)?.version).toBe("2.0.0");
+    expect(readInstallManifest(fixture.paths)?.sha).toBe(fixture.targetSha);
   });
 
-  it("does not inherit a managed pin for global npm updates", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const managedPayload = payloadPathFor(paths, "npm", "1.2.3"); createPayload(managedPayload, "1.2.3");
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(managedPayload, "1.2.3"), channel: "pinned", previous: [] }, paths);
-    const executable = path.join(root, "lib", "node_modules", "proprio", "dist", "index.js");
-    const runCommand = vi.fn(async (_file: string, args: string[]) => args[0] === "view" ? { stdout: '"2.0.0"\n', stderr: "" } : { stdout: "", stderr: "" });
-    await updateCommand({ dryRun: true }, { paths, executablePath: executable, runCommand });
-    expect(runCommand).toHaveBeenCalledWith("npm", expect.arrayContaining(["view", "proprio@latest"]), expect.anything());
-  });
-
-  it("rolls back the active payload when restart validation fails", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
-    const runCommand = vi.fn(async (file: string, args: string[]) => {
-      if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
-      if (file === "npm" && args[0] === "install") { createPayload(args[args.indexOf("--prefix") + 1], "2.0.0"); return { stdout: "", stderr: "" }; }
-      return { stdout: "2.0.0\n", stderr: "" };
-    });
-    const restartActiveService = vi.fn(async (version: string) => { if (version === "2.0.0") throw new Error("health timeout"); return true; });
-    await expect(updateCommand({}, { paths, executablePath: executable, runCommand, backup: async () => undefined, restartActiveService })).rejects.toThrow("rolled back to 1.0.0");
-    expect(readInstallManifest(paths)?.version).toBe("1.0.0");
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
-    expect(restartActiveService).toHaveBeenLastCalledWith("1.0.0", { startIfInactive: true });
-  });
-
-  it("surfaces a failure to restart the rolled-back payload", async () => {
-    const paths = resolveInstallStorePaths(); initializeInstallStore(paths);
-    const oldPayload = payloadPathFor(paths, "npm", "1.0.0"); const executable = createPayload(oldPayload, "1.0.0"); flipCurrentAtomic(oldPayload, paths);
-    writeInstallManifestAtomic({ schemaVersion: 1, ...record(oldPayload, "1.0.0"), previous: [] }, paths);
-    const runCommand = vi.fn(async (file: string, args: string[]) => {
-      if (args[0] === "view") return { stdout: '"2.0.0"\n', stderr: "" };
-      if (file === "npm" && args[0] === "install") { createPayload(args[args.indexOf("--prefix") + 1], "2.0.0"); return { stdout: "", stderr: "" }; }
-      return { stdout: "2.0.0\n", stderr: "" };
-    });
+  it("surfaces a failure to restart the rolled-back Git payload", async () => {
+    const fixture = gitUpdateFixture();
+    const { paths, currentSha, targetSha, currentPayload } = fixture;
     const restartActiveService = vi.fn(async (version: string) => {
       throw new Error(version === "2.0.0" ? "health timeout" : "rollback restart failed");
     });
 
-    await expect(updateCommand({}, {
-      paths,
-      executablePath: executable,
-      runCommand,
-      backup: async () => undefined,
-      restartActiveService,
+    await expect(updateCommand({ yes: true, backup: false }, {
+      ...fixture, restartActiveService,
     })).rejects.toThrow("rolled-back service also failed to restart");
-    expect(readInstallManifest(paths)?.version).toBe("1.0.0");
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(oldPayload));
-    expect(restartActiveService).toHaveBeenNthCalledWith(1, "2.0.0");
-    expect(restartActiveService).toHaveBeenNthCalledWith(2, "1.0.0", { startIfInactive: true });
+    expect(readInstallManifest(paths)?.sha).toBe(currentSha);
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+    expect(restartActiveService).toHaveBeenNthCalledWith(1, "2.0.0", { expectedCommit: targetSha });
+    expect(restartActiveService).toHaveBeenNthCalledWith(2, "1.0.0", { expectedCommit: currentSha, startIfInactive: true });
   });
-
 });

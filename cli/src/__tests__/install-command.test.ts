@@ -10,7 +10,6 @@ import {
   resolveGitInstallRequest,
   resolveGitInstallWorkspacePackages,
   resolveNpmInstallRequest,
-  resolvePublishedVersion,
   runCommandWithDiagnostics,
 } from "../commands/install.js";
 import { uninstallCommand } from "../commands/uninstall.js";
@@ -26,6 +25,7 @@ import {
   writeInstallManifestAtomic,
 } from "../install-store.js";
 import { resolveCliVersion } from "../version.js";
+import { createGitCheckoutRunCommand } from "./fixtures/managed-git-checkout.js";
 import { systemdServiceName } from "../services/service-manager.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -73,27 +73,24 @@ describe("managed install commands", () => {
     expect(() => resolveNpmInstallRequest({ version: "latest" })).toThrow();
   });
 
-  it("parses npm view version output from npm 11 and npm 12", async () => {
-    for (const stdout of ['"2026.916.1"\n', '[\n  "2026.916.1"\n]\n', "2026.916.1\n"]) {
-      const runCommand = vi.fn(async () => ({ stdout, stderr: "" }));
-      await expect(resolvePublishedVersion("latest", runCommand)).resolves.toBe("2026.916.1");
-    }
-    const multiple = vi.fn(async () => ({ stdout: '["2026.916.0","2026.916.1"]', stderr: "" }));
-    await expect(resolvePublishedVersion("latest", multiple)).rejects.toThrow("unexpected version response");
+  it.each([{}, { canary: true }, { version: "1.2.3" }])("rejects registry installation for %j", async (options) => {
+    const runCommand = vi.fn<CommandRunner>();
+    await expect(installCommand(options, { runCommand })).rejects.toThrow("registry installation and updates are disabled");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fs.existsSync(resolveInstallStorePaths().cliRoot)).toBe(false);
   });
 
   it("resolves branch, tag, full SHA, and short SHA refs through GitHub", async () => {
+    const repo = "example/proprio-fork";
     const sha = "a".repeat(40);
     const runCommand = vi.fn(async (_file: string, _args: string[]) => ({ stdout: JSON.stringify({ sha }), stderr: "" }));
-    for (const ref of ["master", "v1.2.3", sha, sha.slice(0, 12)]) {
-      await expect(resolveGitHubRef("groktopus/proprio", ref, runCommand)).resolves.toBe(sha);
+    const refs = ["main", "v1.2.3", sha, sha.slice(0, 12)];
+    for (const ref of refs) {
+      await expect(resolveGitHubRef(repo, ref, runCommand)).resolves.toBe(sha);
     }
-    expect(runCommand.mock.calls.map((call) => call[1].at(-1))).toEqual([
-      "https://api.github.com/repos/paperclipai/paperclip/commits/master",
-      "https://api.github.com/repos/paperclipai/paperclip/commits/v1.2.3",
-      `https://api.github.com/repos/paperclipai/paperclip/commits/${sha}`,
-      `https://api.github.com/repos/paperclipai/paperclip/commits/${sha.slice(0, 12)}`,
-    ]);
+    expect(runCommand.mock.calls.map((call) => call[1].at(-1))).toEqual(
+      refs.map((ref) => `https://api.github.com/repos/${repo}/commits/${ref}`),
+    );
   });
 
   it("resolves an exact public SHA over isolated Git transport after anonymous API rate limiting", async () => {
@@ -166,103 +163,6 @@ describe("managed install commands", () => {
     expect(runCommand).toHaveBeenCalledOnce();
     expect(runCommand.mock.calls[0]?.[0]).toBe(process.execPath);
   });
-
-  const createGitCheckoutRunCommand = (sha: string, { bundleServerAssets = false } = {}) =>
-    vi.fn(async (file: string, args: string[], _options?: Parameters<CommandRunner>[2]) => {
-      if (file === "curl" && !args.includes("--output")) return { stdout: JSON.stringify({ sha }), stderr: "" };
-      if (file === "curl") { fs.writeFileSync(args[args.indexOf("--output") + 1], "archive"); return { stdout: "", stderr: "" }; }
-      if (file === "tar") {
-        const checkout = args[args.indexOf("-C") + 1];
-        const packages = [
-          { dir: "packages/shared", name: "@groktopus/shared", packageJson: { name: "@groktopus/shared", version: bundleServerAssets ? "1.0.0" : "0.3.1" } },
-          { dir: "packages/db", name: "@groktopus/db", packageJson: { name: "@groktopus/db", version: "0.3.1", dependencies: { "@groktopus/shared": "workspace:*" }, bundleDependencies: ["embedded-postgres"] } },
-          { dir: "server", name: "@groktopus/server", packageJson: {
-            name: "@groktopus/server", version: "0.3.1", dependencies: { "@groktopus/db": "workspace:*", ...(bundleServerAssets ? { "@groktopus/shared": "workspace:^" } : {}) },
-            ...(bundleServerAssets ? { files: ["dist", "ui-dist", "skills"], bundleDependencies: ["a-server-dependency"] } : {}),
-          } },
-        ];
-        fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
-        fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
-        if (bundleServerAssets) {
-          fs.mkdirSync(path.join(checkout, "skills", "proprio"), { recursive: true });
-          fs.writeFileSync(path.join(checkout, "skills", "proprio", "SKILL.md"), "# Proprio skill");
-        }
-        fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
-        fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
-        for (const workspacePackage of packages) {
-          fs.mkdirSync(path.join(checkout, workspacePackage.dir), { recursive: true });
-          fs.writeFileSync(path.join(checkout, workspacePackage.dir, "package.json"), JSON.stringify(workspacePackage.packageJson));
-        }
-        return { stdout: "", stderr: "" };
-      }
-      if (path.basename(file) === "corepack") {
-        if (args.includes("prepare:ui-dist")) {
-          const checkout = _options?.cwd;
-          if (typeof checkout !== "string") throw new Error("A Git checkout directory is required");
-          const uiDist = path.join(checkout, "server", "ui-dist");
-          fs.mkdirSync(uiDist, { recursive: true });
-          fs.writeFileSync(path.join(uiDist, "index.html"), "<!doctype html>");
-        }
-        if (args.includes("pack")) {
-          const destination = args[args.indexOf("--pack-destination") + 1];
-          const packageDir = args[args.indexOf("--dir") + 1];
-          const packageName = packageDir === "server" ? "proprio-server" : "proprio-shared";
-          const version = bundleServerAssets && packageDir === "packages/shared" ? "1.0.0" : "0.3.1";
-          fs.writeFileSync(path.join(destination, `${packageName}-${version}.tgz`), "package");
-        }
-        return { stdout: "", stderr: "" };
-      }
-      if (file === "bash") return { stdout: "", stderr: "" };
-      if (file === "npm" && args[0] === "pack") {
-        const stagedPackage = args[1]?.includes("workspace-package-") ? args[1] : null;
-        if (bundleServerAssets && stagedPackage && !args.includes("--ignore-scripts")) {
-          throw new Error("A staged bundle must not rerun workspace prepack hooks");
-        }
-        const manifest = stagedPackage
-          ? JSON.parse(fs.readFileSync(path.join(stagedPackage, "package.json"), "utf8"))
-          : { name: "proprio" };
-        if (bundleServerAssets && manifest.name === "@groktopus/server") {
-          expect(manifest.dependencies).toEqual({
-            "@groktopus/db": "0.3.1",
-            "@groktopus/shared": "^1.0.0",
-            "a-server-dependency": "2.0.0",
-          });
-        }
-        const packageName = manifest.name.replace("@groktopus/", "proprio-");
-        fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
-        return { stdout: "", stderr: "" };
-      }
-      if (file === "sh" && args[4] === "install") {
-        if (bundleServerAssets) expect([file, ...args.slice(0, 5)]).toEqual(
-          ["sh", "-c", 'umask g-w,o-w && exec "$@"', "proprio-npm-install", "npm", "install"],
-        );
-        const prefix = args[args.indexOf("--prefix") + 1];
-        const packageRoot = path.join(prefix, "node_modules", "proprio");
-        fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
-        fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" }));
-        fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n");
-        return { stdout: "", stderr: "" };
-      }
-      if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
-        const isServer = path.basename(args[1]) === "server";
-        if (isServer && !fs.existsSync(path.join(args[1], "ui-dist", "index.html"))) {
-          throw new Error("Server UI missing at packaging");
-        }
-        if (isServer && !fs.existsSync(path.join(args[1], "skills", "proprio", "SKILL.md"))) {
-          throw new Error("Server skills missing at packaging");
-        }
-        fs.mkdirSync(args[2], { recursive: true });
-        fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify({
-          name: isServer ? "@groktopus/server" : "@groktopus/db", version: "0.3.1",
-          dependencies: isServer
-            ? { "@groktopus/db": "0.3.1", "@groktopus/shared": "^0.3.1", "a-server-dependency": "2.0.0" }
-            : { "@groktopus/shared": "0.3.1" },
-        }));
-        return { stdout: "", stderr: "" };
-      }
-      if (file === process.execPath) return { stdout: "0.3.1\n", stderr: "" };
-      throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
-    });
 
   it.each(["missing", "directory", "non-executable file"])(
     "stops Git-source install before archive fetch or managed-store writes when Corepack is %s",
@@ -471,38 +371,22 @@ describe("managed install commands", () => {
   });
 
   it("installs through the shim, reports provenance, and uninstalls without deleting user data", async () => {
-    const version = "2026.720.0";
-    const runCommand = vi.fn(async (file: string, args: string[], _options?: unknown) => {
-      if (file === "npm" && args[0] === "view") return { stdout: JSON.stringify(version), stderr: "" };
-      if (file === "npm" && args[0] === "install") {
-        const prefix = args[args.indexOf("--prefix") + 1];
-        const entrypoint = path.join(prefix, "node_modules", "proprio", "dist", "index.js");
-        fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
-        fs.writeFileSync(entrypoint, "#!/usr/bin/env node\n");
-        return { stdout: "", stderr: "" };
-      }
-      if (file === process.execPath && args.at(-1) === "--version") {
-        return { stdout: `${version}\n`, stderr: "" };
-      }
-      throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
-    });
-
-    await installCommand({}, { runCommand, now: () => new Date("2026-07-22T18:00:00.000Z") });
+    stageFakeCorepack();
+    const sha = "d".repeat(40);
+    const runCommand = createGitCheckoutRunCommand(sha);
+    await installCommand({ ref: "main", yes: true }, { runCommand });
 
     const paths = resolveInstallStorePaths();
     const manifest = readInstallManifest(paths);
-    expect(manifest?.version).toBe(version);
-    expect(manifest?.channel).toBe("latest");
-    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(manifest!.payloadPath));
+    const payloadPath = payloadPathFor(paths, "git", sha.slice(0, 12));
+    expect(manifest).toMatchObject({
+      source: "git", repo: "groktopus/proprio", ref: "main",
+      sha, version: "0.3.1", channel: "pinned", payloadPath,
+    });
+    expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(payloadPath));
     expect(fs.existsSync(paths.shimPath)).toBe(true);
-    const installCall = runCommand.mock.calls.find(
-      ([file, args]) => file === "npm" && args[0] === "install",
-    );
-    expect(installCall?.[1]).toContain("--@proprio:registry=https://registry.npmjs.org");
-    const installOptions = installCall?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
-    expect(installOptions?.env?.npm_config_userconfig).toContain(".npmrc-");
-    const entrypoint = path.join(manifest!.payloadPath, "node_modules", "proprio", "dist", "index.js");
-    expect(resolveCliVersion(entrypoint)).toContain(`managed npm latest; payload ${manifest!.payloadPath}`);
+    const entrypoint = path.join(payloadPath, "node_modules", "proprio", "dist", "index.js");
+    expect(resolveCliVersion(entrypoint)).toContain(`managed git main; payload ${payloadPath}`);
 
     const userData = path.join(process.env.PROPRIO_HOME!, "instances", "default", "keep.txt");
     fs.mkdirSync(path.dirname(userData), { recursive: true });
@@ -572,15 +456,16 @@ describe("managed install commands", () => {
     expect(fs.existsSync(unitPath)).toBe(true);
   });
 
-  it("rejects a symlinked installs root before npm writes outside the store", async () => {
+  it("rejects a symlinked installs root before Git staging writes outside the store", async () => {
+    stageFakeCorepack();
     const paths = resolveInstallStorePaths();
     const outside = path.join(root, "outside");
     fs.mkdirSync(paths.cliRoot, { recursive: true });
     fs.mkdirSync(outside);
     fs.symlinkSync(outside, paths.installsRoot, "dir");
-    const runCommand = vi.fn(async () => ({ stdout: JSON.stringify("2026.720.0"), stderr: "" }));
+    const runCommand = createGitCheckoutRunCommand("d".repeat(40));
 
-    await expect(installCommand({}, { runCommand })).rejects.toThrow("non-directory install-store path");
+    await expect(installCommand({ ref: "main", yes: true }, { runCommand })).rejects.toThrow("non-directory install-store path");
     expect(runCommand).toHaveBeenCalledTimes(1);
     expect(fs.readdirSync(outside)).toEqual([]);
   });
