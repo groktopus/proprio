@@ -155,7 +155,7 @@ export function ApprovalDetail() {
   if (approvalView.kind === "loading" || approvalView.kind === "reconnecting") {
     return <PageSkeleton variant="detail" />;
   }
-  if (approvalView.kind === "error") {
+  if (approvalView.kind === "error" && !approval) {
     return (
       <QueryErrorState
         size="page"
@@ -196,6 +196,15 @@ export function ApprovalDetail() {
 
   return (
     <div className="space-y-6 max-w-3xl">
+      {approvalView.kind === "error" && approval ? (
+        <QueryErrorState
+          size="inline"
+          error={approvalView.error}
+          action="refresh approval"
+          onRetry={approvalView.retry}
+          retrying={approvalView.isFetching}
+        />
+      ) : null}
       {showApprovedBanner && (
         <div className="border border-green-300 dark:border-green-700/40 bg-green-50 dark:bg-green-900/20 rounded-lg px-4 py-3 animate-in fade-in zoom-in-95 duration-300">
           <div className="flex items-start justify-between gap-3">
@@ -262,8 +271,9 @@ export function ApprovalDetail() {
           )}
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
-        {linkedIssuesView.kind === "error" ? (
+        {linkedIssuesView.kind === "error" && !linkedIssues ? (
           <div className="pt-2 border-t border-border/60">
+            <p className="text-xs text-muted-foreground mb-1.5">Linked Tasks</p>
             <QueryErrorState
               size="inline"
               error={linkedIssuesView.error}
@@ -271,6 +281,11 @@ export function ApprovalDetail() {
               onRetry={linkedIssuesView.retry}
               retrying={linkedIssuesView.isFetching}
             />
+          </div>
+        ) : linkedIssuesView.kind === "loading" || linkedIssuesView.kind === "reconnecting" ? (
+          <div className="pt-2 border-t border-border/60">
+            <p className="text-xs text-muted-foreground mb-1.5">Linked Tasks</p>
+            <p className="text-xs text-muted-foreground">Loading linked tasks…</p>
           </div>
         ) : linkedIssues && linkedIssues.length > 0 && (
           <div className="pt-2 border-t border-border/60">
@@ -358,8 +373,8 @@ export function ApprovalDetail() {
       </div>
 
       <div className="border border-border rounded-lg p-4 space-y-3">
-        <h3 className="text-sm font-medium">Comments {commentsView.kind === "error" ? "unavailable" : `(${comments?.length ?? 0})`}</h3>
-        {commentsView.kind === "error" ? (
+        <h3 className="text-sm font-medium">Comments {commentsView.kind === "error" ? "unavailable" : commentsView.kind === "loading" || commentsView.kind === "reconnecting" ? "(loading…)" : `(${comments?.length ?? 0})`}</h3>
+        {commentsView.kind === "error" && !comments ? (
           <QueryErrorState
             size="inline"
             error={commentsView.error}
@@ -367,6 +382,8 @@ export function ApprovalDetail() {
             onRetry={commentsView.retry}
             retrying={commentsView.isFetching}
           />
+        ) : commentsView.kind === "loading" || commentsView.kind === "reconnecting" ? (
+          <p className="text-xs text-muted-foreground">Loading comments…</p>
         ) : <div className="space-y-2">
           {(comments ?? []).map((comment: ApprovalComment) => (
             <div key={comment.id} className="border border-border/60 rounded-md p-3">

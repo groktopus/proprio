@@ -34,6 +34,9 @@ vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1", setSelectedCompanyId: vi.fn() }),
 }));
 vi.mock("@/context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
+vi.mock("../components/MarkdownBody", () => ({
+  MarkdownBody: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -100,7 +103,7 @@ describe("ApprovalDetail read states", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.textContent).toContain("load approval");
+    expect(container.textContent).toContain("Connection interrupted");
     expect(container.textContent).toContain("Retry");
     expect(container.textContent).not.toContain("Approval not found.");
     await act(async () => root.unmount());

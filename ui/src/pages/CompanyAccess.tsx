@@ -83,6 +83,7 @@ export function CompanyAccess() {
   const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
   const [reassignmentTarget, setReassignmentTarget] = useState<string>("__unassigned");
+  const [assignmentPreviewRefreshPending, setAssignmentPreviewRefreshPending] = useState(false);
   const [draftRole, setDraftRole] = useState<CompanyMember["membershipRole"]>(null);
   const [draftStatus, setDraftStatus] = useState<EditableMemberStatus>("active");
 
@@ -199,6 +200,22 @@ export function CompanyAccess() {
     enabled: !!selectedCompanyId && !!removingMember,
   });
   const assignedIssuesView = useQueryView(assignedIssuesQuery);
+  const archivePreviewQuery = useQuery({
+    queryKey: ["access", "member-archive-preview", selectedCompanyId ?? "", removingMember?.id ?? ""],
+    queryFn: () => accessApi.archiveMemberPreview(selectedCompanyId!, removingMember!.id),
+    enabled: !!selectedCompanyId && !!removingMember,
+    refetchOnMount: "always",
+  });
+  const archivePreviewView = useQueryView(archivePreviewQuery);
+
+  useEffect(() => {
+    if (!removingMemberId || !selectedCompanyId) {
+      setAssignmentPreviewRefreshPending(false);
+      return;
+    }
+    setAssignmentPreviewRefreshPending(true);
+    void archivePreviewQuery.refetch().finally(() => setAssignmentPreviewRefreshPending(false));
+  }, [archivePreviewQuery.refetch, removingMemberId, selectedCompanyId]);
 
   const archiveMemberMutation = useMutation({
     mutationFn: async (input: { memberId: string; target: string }) => {
@@ -521,19 +538,27 @@ export function CompanyAccess() {
                 <div className="text-sm font-medium">{memberDisplayName(removingMember)}</div>
                 <div className="text-sm text-muted-foreground">{removingMember.user?.email || removingMember.principalId}</div>
                 <div className="mt-2 text-sm text-muted-foreground">
-                  {assignedIssuesView.kind === "loading" || assignedIssuesView.kind === "reconnecting"
+                  {archivePreviewView.kind === "loading" || archivePreviewView.kind === "reconnecting" || assignmentPreviewRefreshPending
                     ? "Checking assigned tasks..."
-                    : assignedIssuesView.kind === "error"
+                    : archivePreviewView.kind === "error"
                       ? "Unable to check assigned tasks. Removal is paused until the preview succeeds."
-                      : `${assignedIssues.length} open assigned task${assignedIssues.length === 1 ? "" : "s"}`}
+                      : `${archivePreviewView.data?.reassignmentIssueCount ?? 0} open assigned task${archivePreviewView.data?.reassignmentIssueCount === 1 ? "" : "s"}`}
                 </div>
               </div>
 
-              {assignedIssuesView.kind === "error" ? (
+              {archivePreviewView.kind === "error" || (archivePreviewView.kind === "stale" && archivePreviewView.error) ? (
+                <QueryErrorState
+                  size="inline"
+                  error={archivePreviewView.error}
+                  action="load assigned tasks"
+                  onRetry={archivePreviewView.retry}
+                  retrying={archivePreviewView.isFetching || assignmentPreviewRefreshPending}
+                />
+              ) : assignedIssuesView.kind === "error" ? (
                 <QueryErrorState
                   size="inline"
                   error={assignedIssuesView.error}
-                  action="load assigned tasks"
+                  action="load task details"
                   onRetry={assignedIssuesView.retry}
                   retrying={assignedIssuesView.isFetching}
                 />
@@ -597,7 +622,10 @@ export function CompanyAccess() {
               }}
               disabled={
                 archiveMemberMutation.isPending ||
-                assignedIssuesView.kind !== "ready"
+                archivePreviewView.kind !== "ready" ||
+                archivePreviewView.data === undefined ||
+                assignmentPreviewRefreshPending ||
+                assignedIssuesQuery.isFetching
               }
             >
               {archiveMemberMutation.isPending ? "Removing..." : "Remove member"}

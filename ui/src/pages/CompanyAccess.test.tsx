@@ -12,6 +12,7 @@ const listMembersMock = vi.hoisted(() => vi.fn());
 const listJoinRequestsMock = vi.hoisted(() => vi.fn());
 const updateMemberMock = vi.hoisted(() => vi.fn());
 const archiveMemberMock = vi.hoisted(() => vi.fn());
+const archiveMemberPreviewMock = vi.hoisted(() => vi.fn());
 const listAgentsMock = vi.hoisted(() => vi.fn());
 const listIssuesMock = vi.hoisted(() => vi.fn());
 const mockUsePluginSlots = vi.hoisted(() => vi.fn());
@@ -34,6 +35,8 @@ vi.mock("@/api/access", () => ({
     updateMemberAccess: vi.fn(),
     archiveMember: (companyId: string, memberId: string, input: unknown) =>
       archiveMemberMock(companyId, memberId, input),
+    archiveMemberPreview: (companyId: string, memberId: string) =>
+      archiveMemberPreviewMock(companyId, memberId),
     approveJoinRequest: vi.fn(),
     rejectJoinRequest: vi.fn(),
     listInvites: (companyId: string, options: unknown) => listInvitesMock(companyId, options),
@@ -195,6 +198,7 @@ describe("CompanyAccess", () => {
     ]);
     updateMemberMock.mockResolvedValue({});
     archiveMemberMock.mockResolvedValue({ reassignedIssueCount: 1 });
+    archiveMemberPreviewMock.mockResolvedValue({ reassignmentIssueCount: 1 });
     listAgentsMock.mockResolvedValue([
       {
         id: "agent-1",
@@ -352,6 +356,7 @@ describe("CompanyAccess", () => {
 
     expect(document.body.textContent).toContain("Remove member");
     expect(document.body.textContent).toContain("Assigned to removed user");
+    expect(archiveMemberPreviewMock).toHaveBeenCalledWith("company-1", "member-1");
 
     const reassignmentSelect = document.body.querySelector("select");
     expect(reassignmentSelect).toBeTruthy();
