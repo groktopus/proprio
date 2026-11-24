@@ -53,7 +53,7 @@ function summarize(samples) {
   const cls = samples.map((sample) => sample.cls).filter(finite);
   const beforeReady = samples.map((sample) => sample.requests?.beforeReady).filter(finite);
   const pending = samples.map((sample) => sample.requests?.pending).filter(finite);
-  const serverTiming = samples.map((sample) => sample.requests?.releasedBy?.[0]?.serverMs).filter(finite);
+  const serverTiming = samples.map((sample) => (sample.releasedBy ?? sample.requests?.releasedBy)?.[0]?.serverMs).filter(finite);
   return {
     attempts: samples.length,
     outcomes,

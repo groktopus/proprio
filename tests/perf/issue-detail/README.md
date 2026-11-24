@@ -130,6 +130,25 @@ not.
 
 ### Release report and cohort matrix
 
+Run the six-cohort matrix with the production board of an exact build on a
+disposable loopback instance. The suite creates a company, two saved
+conversations and a credential-free process adapter. It verifies that the
+live-run task has a running process during its samples and cancels it when
+finished. Run serially, once per build.
+
+```sh
+PROPRIO_ISSUE_PERF_BASE_URL=http://127.0.0.1:3293 \
+PROPRIO_TASK_OPEN_BUILD="$(git rev-parse HEAD)" \
+PROPRIO_TASK_OPEN_OUTPUT=./test-results/task-open-current.json \
+  pnpm exec playwright test --config tests/perf/issue-detail/playwright.config.ts \
+  task-open-cohorts.spec.ts
+```
+
+For a cold direct open the harness starts at navigation time. The uncached
+click fixture intercepts speculative task-data reads until the click starts.
+The cached-return fixture opens the task in the same browser context first
+and closes the warm page to save its read cache before the return.
+
 Use the same harness for each task-open cohort. Add `cohort` and `taskKind` to
 each call:
 

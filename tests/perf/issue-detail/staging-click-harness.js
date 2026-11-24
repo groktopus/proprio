@@ -50,17 +50,18 @@
 
   let sampleCount = 0;
 
-  async function measure(issueRef, { timeoutMs = 20_000, quietMs = 3_000, label, cohort, taskKind, outcome: requestedOutcome } = {}) {
+  async function measure(issueRef, { timeoutMs = 20_000, quietMs = 3_000, label, cohort, taskKind } = {}) {
     performance.setResourceTimingBufferSize(10_000);
-    const link = document.querySelector(`a[href$="/issues/${issueRef}"]`);
-    if (!link) throw new Error(`No visible row link for ${issueRef}`);
+    const direct = cohort === "cold-direct";
+    const link = direct ? null : document.querySelector(`a[href$="/issues/${issueRef}"]`);
+    if (!direct && !link) throw new Error(`No visible row link for ${issueRef}`);
     sampleCount += 1;
     const sample = label ?? `sample ${sampleCount}`;
     const shifts = [];
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) if (!entry.hadRecentInput) shifts.push(entry);
     });
-    observer.observe({ type: "layout-shift", buffered: false });
+    observer.observe({ type: "layout-shift", buffered: direct });
     const marks = {};
     const latestChanges = [];
     const latestMoves = [];
@@ -82,8 +83,8 @@
       result.then(finish, finish);
       return result;
     };
-    const t0 = performance.now();
-    link.click();
+    const t0 = direct ? 0 : performance.now();
+    link?.click();
     await new Promise((resolve) => {
       const tick = () => {
         const t = performance.now() - t0;
@@ -116,8 +117,9 @@
           latestTop = top;
         }
         const lastEvent = Math.max(latestChanges.at(-1) ?? 0, latestMoves.at(-1)?.t ?? 0);
-        const error = document.querySelector('[role="alert"]');
-        if (marks.errorVisible === undefined && visible(error)) marks.errorVisible = t;
+        const error = [...document.querySelectorAll('[role="alert"]')].find((element) =>
+          visible(element) && /failed|could not|unavailable|try again/i.test(element.textContent || ""));
+        if (marks.errorVisible === undefined && error) marks.errorVisible = t;
         if (marks.composerVisible !== undefined && marks.latestVisible !== undefined && t - lastEvent > quietMs) {
           marks.settled = t;
           return resolve();
@@ -132,8 +134,7 @@
     window.fetch = originalFetch;
     const end = performance.now();
     const ready = Math.max(marks.composerVisible ?? Infinity, marks.latestVisible ?? Infinity);
-    const observedOutcome = requestedOutcome
-      ?? (Number.isFinite(ready) ? "ready" : marks.errorVisible !== undefined ? "error" : "timeout");
+    const observedOutcome = Number.isFinite(ready) ? "ready" : marks.errorVisible !== undefined ? "error" : "timeout";
     const completed = performance
       .getEntriesByType("resource")
       .filter((entry) => entry.startTime >= t0 - 5 && isApi(entry.name))
