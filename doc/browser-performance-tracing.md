@@ -96,6 +96,14 @@ remain usable and produce no page error. For a release comparison, run the
 same four modes on the published v0.0.3 checkout and the candidate checkout,
 retaining each `browser-tracing-acceptance` artifact by exact build SHA.
 
+The hosted pull-request qualification is opt-in: add the
+`browser-tracing-acceptance` label to a pull request that changes this probe or
+the tracing path. It checks the exact pull-request head in four current-build
+modes and runs an additional enabled-mode comparison with the production UI
+pinned to the published v0.0.3 commit. The workflow has no manual ref inputs;
+the server and harness always come from the pull-request head, and the
+comparison UI revision is fixed in the workflow.
+
 ### Key handling
 
 Every signed-in browser can read the key, the same way it can read the
