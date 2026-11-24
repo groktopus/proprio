@@ -73,7 +73,7 @@ jobs:
         run: |
           git fetch --depth=1 origin "$UI_REF"
           rm -rf ui
-          git archive "$UI_REF" ui | tar -x
+          git archive FETCH_HEAD ui | tar -x
       - name: Resolve exact server and UI build identities
         if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
         env:
@@ -81,7 +81,7 @@ jobs:
         run: |
           server_sha="$(git rev-parse HEAD)"
           if [[ -n "$UI_REF" ]]; then
-            ui_sha="$(git rev-parse "$UI_REF^{commit}")"
+            ui_sha="$(git rev-parse FETCH_HEAD^{commit})"
           else
             ui_sha="$server_sha"
           fi
