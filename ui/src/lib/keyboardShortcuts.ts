@@ -28,6 +28,10 @@ export function isKeyboardShortcutTextInputTarget(target: EventTarget | null): b
   return !!target.closest(KEYBOARD_SHORTCUT_TEXT_INPUT_SELECTOR);
 }
 
+export function isKeyboardShortcutActivationTarget(target: HTMLElement): boolean {
+  return Boolean(target.closest("a[href], button, summary, [role='button'], [role='link'], [role='tab'], [role^='menuitem']"));
+}
+
 export function hasBlockingShortcutDialog(root: ParentNode = document): boolean {
   return !!root.querySelector("[role='dialog'][aria-modal='true']");
 }
