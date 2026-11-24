@@ -19,13 +19,16 @@ try {
   for (const issueId of issueIds) results.push(await recovery.assignedWork.checkIssue({ companyId, issueId }));
   await heartbeat.resumeQueuedRuns();
   await heartbeat.drainActiveRunExecutions();
-  process.stdout.write(`${JSON.stringify({ results })}\n`);
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(`DIAGNOSIS_RESTART_RESULT ${JSON.stringify({ results })}\n`, error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 } catch (error) {
   console.error(error);
   exitCode = 1;
 } finally {
   await db.$client.end({ timeout: 0 });
 }
-// Queue admission is the effect under test. The runner can deliver the wake
-// in a later process without keeping this recovery worker alive.
 process.exit(exitCode);

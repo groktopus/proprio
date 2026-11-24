@@ -6,7 +6,7 @@ import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, issueDocuments,
+import { activityLog, agentWakeupRequests, agents, approvals, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, issueApprovals, issueDocuments,
   issueRelations, issueTreeHolds, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { describe, expect, it } from "vitest";
@@ -34,7 +34,7 @@ async function runRecoveryProcess(input: { connectionString: string; companyId: 
   child.stderr.setEncoding("utf8").on("data", value => { stderr += value; });
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    child.once("close", (code, signal) => resolve({ code, signal }));
   });
   return { ...exit, stdout, stderr };
 }
@@ -73,6 +73,7 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       const unrelatedId = randomUUID();
       const heldParentId = randomUUID();
       const heldChildId = randomUUID();
+      const approvalParentId = randomUUID();
       const old = new Date(Date.now() - 10 * 60_000);
       await db.insert(issues).values([
         { id: parentId, companyId, identifier: `${prefix}-1`, issueNumber: 1, title: "Resume independent parent work",
@@ -89,6 +90,8 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
           status: "in_progress", assigneeAgentId: agent!.id, responsibleUserId: userId, createdAt: old, updatedAt: old },
         { id: heldChildId, companyId, identifier: `${prefix}-7`, issueNumber: 7, title: "Paused required dependency",
           status: "todo", createdAt: old, updatedAt: old },
+        { id: approvalParentId, companyId, identifier: `${prefix}-8`, issueNumber: 8, title: "Parent waits for plan approval",
+          status: "in_progress", assigneeAgentId: agent!.id, responsibleUserId: userId, createdAt: old, updatedAt: old },
       ]);
       // Blocking relations define the required graph; parentId is only the
       // display hierarchy. The unresolved path reaches an unassigned grandchild.
@@ -97,9 +100,13 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         { companyId, issueId: grandchildId, relatedIssueId: childId, type: "blocks" },
         { companyId, issueId: siblingId, relatedIssueId: parentId, type: "blocks" },
         { companyId, issueId: heldChildId, relatedIssueId: heldParentId, type: "blocks" },
+        { companyId, issueId: heldChildId, relatedIssueId: approvalParentId, type: "blocks" },
       ]);
       await db.insert(issueTreeHolds).values({ companyId, rootIssueId: heldParentId, mode: "pause", status: "active",
         reason: "Fixture stop gate" });
+      const [approval] = await db.insert(approvals).values({ companyId, type: "plan", status: "pending",
+        requestedByAgentId: agent!.id, payload: {} }).returning();
+      await db.insert(issueApprovals).values({ companyId, issueId: approvalParentId, approvalId: approval!.id });
 
       const artifactBody = `# Completed sibling\n\nFixture marker: ${randomUUID()}\n`;
       const artifactHash = createHash("sha256").update(artifactBody).digest("hex");
@@ -132,8 +139,12 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       // A new process uses the same assigned-work recovery entry. Its normal
       // heartbeat queue performs durable admission; no persistence is mocked.
       const restarted = await runRecoveryProcess({ connectionString: database.connectionString, companyId, issueId: parentId,
-        additionalIssueIds: [unrelatedId, heldParentId] });
+        additionalIssueIds: [unrelatedId, heldParentId, approvalParentId] });
       expect(restarted.code, restarted.stderr).toBe(0);
+      const workerResult = restarted.stdout.split("\n").find(line => line.startsWith("DIAGNOSIS_RESTART_RESULT "));
+      expect(workerResult, restarted.stdout).toBeDefined();
+      expect(JSON.parse(workerResult!.slice("DIAGNOSIS_RESTART_RESULT ".length)).results[3])
+        .toMatchObject({ verdict: { reason: "approval" } });
       const effectsAfterRestart = await Promise.all(["diagnosis", "unrelated"].map(async label =>
         JSON.parse(await readFile(`${effectLedger}.${label}`, "utf8")) as { label: string; runId: string }));
       expect(effectsAfterRestart.map(effect => effect.label).sort()).toEqual(["diagnosis", "unrelated"]);
@@ -153,6 +164,11 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         eq(activityLog.action, "issue.dependency_diagnosis.requested")))).toHaveLength(0);
       expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         sql`${agentWakeupRequests.payload}->>'issueId' = ${heldParentId}`))).toHaveLength(0);
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${approvalParentId}`))).toHaveLength(0);
+      expect((await db.select().from(approvals).where(eq(approvals.id, approval!.id)))[0]).toMatchObject({
+        status: "pending", decidedAt: null,
+      });
       const unrelatedWakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         sql`${agentWakeupRequests.payload}->>'issueId' = ${unrelatedId}`));
       const unrelatedAssignments = unrelatedWakes.filter(wake => wake.reason === "issue_assigned");
