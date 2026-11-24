@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
@@ -63,17 +63,7 @@ test("recipient decisions survive a controller restart with their Case audit his
     await mkdir(codexHome);
     await writeFile(codex, "#!/bin/sh\nexit 78\n", { mode: 0o700 });
     await chmod(codex, 0o700);
-    const loaderContents = [
-      'import { registerHooks } from "node:module";',
-      'registerHooks({ load(url, context, nextLoad) {',
-      '  if (/\\/packages\\/proprio-runner\\/(src|dist)\\/drivers\\/codex\\/codex-command\\.(js|ts)$/.test(url)) {',
-      `    const source = ${JSON.stringify(`export const resolveCodexCommand = () => ${JSON.stringify(codex)};\nexport const resolvePinnedCodexCommand = resolveCodexCommand;`)};`,
-      '    return { format: "module", shortCircuit: true, source };',
-      '  }',
-      '  return nextLoad(url, context);',
-      '} });',
-    ].join("\n");
-    await writeFile(codexLoader, loaderContents);
+    await copyFile(resolve(import.meta.dirname, "../fixtures/recipient-decision-codex-loader.mjs"), codexLoader);
     startDrive();
     let base = await readyUrl();
     const api = async (path: string, method = "GET", data?: unknown) => {
@@ -84,12 +74,6 @@ test("recipient decisions survive a controller restart with their Case audit his
     };
     const company = (await api("/companies"))[0];
     await api("/instance/settings/experimental", "PATCH", { enableCases: true, enableNativeRunner: true });
-    const source = await api(`/companies/${company.id}/agents`, "POST", { name: "Offer source", role: "engineer", adapterType: "proprio_runner",
-      adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: root, lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 60, env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "restart-fixture-stub" } },
-      runtimeConfig: { heartbeat: { enabled: false } } });
-    const recipient = await api(`/companies/${company.id}/agents`, "POST", { name: "Decision recipient", role: "engineer", reportsTo: source.id,
-      adapterType: "proprio_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: root, lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 60, env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "restart-fixture-stub" } },
-      runtimeConfig: { heartbeat: { enabled: false } } });
 
     const configPath = resolve(dataDir, "instances/default/config.json");
     const config = JSON.parse(await readFile(configPath, "utf8"));
@@ -97,10 +81,18 @@ test("recipient decisions survive a controller restart with their Case audit his
     const serverPort = (await readFile(resolve(databaseDir, "postmaster.pid"), "utf8")).split("\n")[3];
     databaseUrl = `postgres://proprio:proprio@127.0.0.1:${serverPort}/proprio`;
     db = createDb(databaseUrl);
-    // This fixture seeds an authorized source identity and native run to create
-    // versioned offers. It qualifies receipt persistence and attribution, not
-    // runner readiness or native source tool execution.
-    await db.update(agents).set({ status: "active" }).where(eq(agents.id, source.id));
+    // Seed dormant fixture agents and native runs for receipt persistence and
+    // attribution. Creating agents through onboarding starts background probes.
+    const source = { id: randomUUID() }, recipient = { id: randomUUID() };
+    const dormantNativeAgent = { companyId: company.id, role: "engineer", status: "active", lifecycleState: "ready",
+      adapterType: "proprio_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: root,
+        lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 60,
+        env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "restart-fixture-stub" } },
+      runtimeConfig: { heartbeat: { enabled: false } } };
+    await db.insert(agents).values([
+      { ...dormantNativeAgent, id: source.id, name: "Offer source" },
+      { ...dormantNativeAgent, id: recipient.id, name: "Decision recipient", reportsTo: source.id },
+    ]);
     const [responsibleMembership] = await db.select().from(companyMemberships).where(and(eq(companyMemberships.companyId, company.id), eq(companyMemberships.principalType, "user")));
     expect(responsibleMembership?.principalId, "test-drive creates an active responsible user membership").toBeTruthy();
     const recipientToken = `recipient-restart-${randomUUID()}`;
