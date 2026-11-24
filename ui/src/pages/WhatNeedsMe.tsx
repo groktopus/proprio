@@ -8,7 +8,7 @@ import { useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
-import { decisionsApi } from "../api/decisions";
+import { decisionsApi, type DecisionOutcome } from "../api/decisions";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, useClaimAttentionItem, useDismissAttentionReceipt } from "../hooks/useAttentionViews";
@@ -51,7 +51,8 @@ import {
 } from "../lib/attention";
 import { hasBlockingShortcutDialog, resolveAttentionQueueKeyAction } from "../lib/keyboardShortcuts";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { QueryErrorState, QueryPlaceholder, QueryStaleHint, useQueryView, type QueryViewState } from "../components/QueryView";
+import { errorStatus } from "../api/errors";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
 import { DecisionsToolbar } from "../components/DecisionsToolbar";
 import { Curtain, AgingItemRow } from "../components/DecisionShelf";
@@ -70,6 +71,48 @@ const ATTENTION_ROW_RENDER_BATCH_SIZE = 100;
 const ATTENTION_SCROLL_LOAD_THRESHOLD_PX = 480;
 const DECISION_HISTORY_VISIBLE_LIMIT = 50;
 const DECISION_HISTORY_QUERY_LIMIT = DECISION_HISTORY_VISIBLE_LIMIT + 1;
+
+function DecisionHistoryBody({
+  view,
+  emptyCopy,
+  children,
+}: {
+  view: QueryViewState<DecisionOutcome[] | undefined>;
+  emptyCopy: string;
+  children: ReactNode;
+}) {
+  const focusTarget = useRef<HTMLElement>(null);
+  const restoreFocusAfterRetry = useRef(false);
+  const retry = useCallback(() => {
+    restoreFocusAfterRetry.current = true;
+    view.retry();
+  }, [view.retry]);
+  useEffect(() => {
+    if (!restoreFocusAfterRetry.current || view.kind !== "ready") return;
+    restoreFocusAfterRetry.current = false;
+    requestAnimationFrame(() => focusTarget.current?.focus());
+  }, [view.kind]);
+  const accessDenied = errorStatus(view.error) === 401 || errorStatus(view.error) === 403;
+  const canRenderSavedRows = view.data !== undefined && !accessDenied;
+  if (view.kind === "loading" || view.kind === "reconnecting") {
+    return <section ref={focusTarget} tabIndex={-1}><QueryPlaceholder size="inline" label="Loading decision history" /></section>;
+  }
+  if (view.kind === "error" && !canRenderSavedRows) {
+    return <section ref={focusTarget} tabIndex={-1}><QueryErrorState size="inline" error={view.error} action="load decision history" onRetry={retry} retrying={view.isFetching} /></section>;
+  }
+  return (
+    <section ref={focusTarget} tabIndex={-1}>
+      {view.kind === "stale" || view.kind === "error" ? (
+        <div className="mb-2 space-y-1">
+          <QueryStaleHint />
+          <QueryErrorState size="inline" error={view.error} action="refresh decision history" onRetry={retry} retrying={view.isFetching} />
+        </div>
+      ) : null}
+      {canRenderSavedRows ? children : null}
+      {view.kind === "ready" && view.data?.length === 0 ? <p className="text-xs text-muted-foreground">{emptyCopy}</p> : null}
+    </section>
+  );
+}
 
 export function decisionHistoryQueryEnabled(companyId: string | null | undefined, open: boolean) {
   return Boolean(companyId && open);
@@ -212,16 +255,20 @@ function ClassicWhatNeedsMe() {
 
   // Decision history — decided / expired decisions leave the open attention
   // feed (entryRule = open only), so we fetch them directly for the curtains.
-  const { data: decidedDecisions, isLoading: decidedDecisionsLoading } = useQuery({
+  const decidedDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "decided"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "decided", limit: DECISION_HISTORY_QUERY_LIMIT }),
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, decidedOpen),
   });
-  const { data: expiredDecisions, isLoading: expiredDecisionsLoading } = useQuery({
+  const decidedDecisionsView = useQueryView(decidedDecisionsQuery);
+  const { data: decidedDecisions } = decidedDecisionsQuery;
+  const expiredDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "expired"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "expired", limit: DECISION_HISTORY_QUERY_LIMIT }),
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, expiredOpen),
   });
+  const expiredDecisionsView = useQueryView(expiredDecisionsQuery);
+  const { data: expiredDecisions } = expiredDecisionsQuery;
 
   const { data: userDirectory } = useQuery({
     queryKey: queryKeys.access.companyUserDirectory(selectedCompanyId!),
@@ -849,21 +896,20 @@ function ClassicWhatNeedsMe() {
           open={decidedOpen}
           onToggle={() => setDecidedOpen((prev) => !prev)}
         >
-          {decidedDecisionsLoading ? (
-            <p className="text-xs text-muted-foreground">Loading decided decisions…</p>
-          ) : (decidedDecisions?.length ?? 0) > 0 ? (
-            decidedDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-              <DecisionResolver
-                key={decision.id}
-                companyId={selectedCompanyId}
-                decisionId={decision.id}
-                agentMap={agentMap}
-                initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-              />
-            ))
-          ) : (
-            <p className="text-xs text-muted-foreground">No decided decisions.</p>
-          )}
+          <DecisionHistoryBody view={decidedDecisionsView} emptyCopy="No decided decisions.">
+            {(decidedDecisions ?? []).length > 0 ? (
+                (decidedDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+                  <DecisionResolver
+                    key={decision.id}
+                    companyId={selectedCompanyId}
+                    decisionId={decision.id}
+                    agentMap={agentMap}
+                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                    recordedDecision={decision}
+                  />
+                ))
+              ) : null}
+          </DecisionHistoryBody>
         </Curtain>
 
         <Curtain
@@ -872,21 +918,20 @@ function ClassicWhatNeedsMe() {
           open={expiredOpen}
           onToggle={() => setExpiredOpen((prev) => !prev)}
         >
-          {expiredDecisionsLoading ? (
-            <p className="text-xs text-muted-foreground">Loading expired decisions…</p>
-          ) : (expiredDecisions?.length ?? 0) > 0 ? (
-            expiredDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-              <DecisionResolver
-                key={decision.id}
-                companyId={selectedCompanyId}
-                decisionId={decision.id}
-                agentMap={agentMap}
-                initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-              />
-            ))
-          ) : (
-            <p className="text-xs text-muted-foreground">No expired decisions.</p>
-          )}
+          <DecisionHistoryBody view={expiredDecisionsView} emptyCopy="No expired decisions.">
+            {(expiredDecisions ?? []).length > 0 ? (
+                (expiredDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+                  <DecisionResolver
+                    key={decision.id}
+                    companyId={selectedCompanyId}
+                    decisionId={decision.id}
+                    agentMap={agentMap}
+                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                    recordedDecision={decision}
+                  />
+                ))
+              ) : null}
+          </DecisionHistoryBody>
         </Curtain>
       </div>
     </div>
