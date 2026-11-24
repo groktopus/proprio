@@ -236,8 +236,11 @@ For an isolated restore, convert the external audit export into this manifest:
 Keep the manifest outside the restore target. With the intended storage profile,
 secrets, and isolated restored database configured, run
 `pnpm --filter @groktopus/server exec tsx scripts/reconcile-run-evidence-deletions.ts <manifest.json>`
-from the repository root, setting `DATABASE_URL` to that restored database. The
-manifest must identify the exact database recovery point, the deletion feed
+from the repository root, setting `DATABASE_URL` to that restored database. For
+a self-hosted embedded restore, use `--embedded` before the manifest path with
+the application stopped. The command uses the restored instance configuration
+to start and stop PostgreSQL. See the [Compose procedure](DOCKER.md#back-up-and-restore-compose-data).
+The manifest must identify the exact database recovery point, the deletion feed
 cutoff and the external source. Set `coverageComplete` after verifying the
 retained feed for that interval. Set `coordinatedPayloadSnapshot` only after
 verifying that the restored payload copy cannot reintroduce evidence deleted

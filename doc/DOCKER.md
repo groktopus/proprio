@@ -230,13 +230,22 @@ services:
 ```
 
 Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
-before starting `proprio` if deletions followed the recovery point. Run
-PostgreSQL alone on the restored data in a one-off Compose container
-using the matching embedded PostgreSQL binaries and the restored instance
-configuration. Give that container the restored `/proprio` mount and
-mount the retained manifest read-only. Run the reconciliation command
-there against its loopback database, verify the results, and stop
-PostgreSQL before starting the app.
+before starting `proprio` if deletions followed the recovery point. Use an
+image that contains the reconciliation script and the PostgreSQL version
+that created the restored cluster. The one-off command starts embedded
+PostgreSQL on loopback using the restored configuration, applies the
+manifest, and stops PostgreSQL. A missing cluster fails the command. Set
+`restore_manifest` to the manifest's absolute path.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml \
+  run --rm --no-deps -T -v "$restore_manifest:/run/deletions.json:ro" proprio \
+  node --import ./server/node_modules/tsx/dist/loader.mjs \
+  server/scripts/reconcile-run-evidence-deletions.ts --embedded /run/deletions.json
+```
+
+Start the application after reconciliation and verification succeed.
 
 ```bash
 docker compose -p proprio-restore --env-file docker/restore.env \
@@ -290,7 +299,8 @@ described above. Keep the signing values and master key from the backup.
 
 Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
 before starting `server` if deletions followed the recovery point. Use
-a one-off `server` container so it inherits the restored `/proprio`
+an image that contains the reconciliation script and a one-off `server`
+container so it inherits the restored `/proprio`
 volume, Compose network and database URL. Mount the retained manifest
 read-only and run the reconciliation command with the app entrypoint
 and the CLI command shown below. Only start the service after verification.
