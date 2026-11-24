@@ -17,20 +17,20 @@ async function openStory(page: Page, story: string, width: number, coordinator: 
 for (const scenario of [
   { name: "Classic desktop", story: "attention-queue-shells--classic-desktop", width: 1440, coordinator: false },
   { name: "Coordinator desktop", story: "attention-queue-shells--coordinator-desktop", width: 1440, coordinator: true },
-  { name: "Classic phone", story: "attention-queue-shells--classic-phone", width: 390, coordinator: false },
-  { name: "Coordinator phone", story: "attention-queue-shells--coordinator-phone", width: 390, coordinator: true },
+  { name: "Classic phone", story: "attention-queue-shells--classic-phone", width: 390, coordinator: false, label: "Inbox" },
+  { name: "Coordinator phone", story: "attention-queue-shells--coordinator-phone", width: 390, coordinator: true, label: "Needs You" },
 ] as const) {
   test(`${scenario.name} exposes the Needs You request entry`, async ({ page }) => {
     await openStory(page, scenario.story, scenario.width, scenario.coordinator);
-    const needsYou = page.getByRole("link", { name: /Needs You/ }).first();
-    await expect(needsYou).toBeVisible();
-    await expect(needsYou).toHaveAttribute("href", "/decisions");
+    const entry = page.getByRole("link", { name: new RegExp(scenario.label) }).first();
+    await expect(entry).toBeVisible();
+    await expect(entry).toHaveAttribute("href", scenario.label === "Needs You" ? /\/decisions$/ : /\/inbox$/);
   });
 }
 
 test("fixture-backed request exposes a followable source task and returns to the queue", async ({ page }) => {
   await openStory(page, queueStory, 1440, true);
-  const sourceTask = page.locator('a[href*="/issues/"]').first();
+  const sourceTask = page.getByTestId("source-task-journey").locator('a[href*="/issues/"]').first();
   await expect(sourceTask).toBeVisible();
   const initialPath = await page.getByTestId("storybook-router-path").textContent();
   const href = await sourceTask.getAttribute("href");

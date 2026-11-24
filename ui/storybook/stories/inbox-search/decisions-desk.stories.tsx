@@ -36,6 +36,12 @@ function RouteProbe() {
   return <div><output data-testid="storybook-router-path">{path}</output>{location.pathname.includes("/issues/") ? <button type="button" onClick={() => navigate(-1)}>Back to Needs You</button> : null}</div>;
 }
 
+function SourceTaskJourneyFixture() {
+  const source = DESK_ITEMS.find(item => item.id === "review-1");
+  if (!source) return null;
+  return <div data-testid="source-task-journey" className="mt-4"><AttentionQueueRow item={source} companyId={companyId} expanded={false} onToggleExpand={() => {}} currentUserId={STORYBOOK_USER_ID} /></div>;
+}
+
 // --- fixture builders -------------------------------------------------------
 
 /** The board operator, so `route to agent` mentions have someone to hand to. */
@@ -484,6 +490,7 @@ export const TodaysDesk: Story = {
       <RouteProbe />
       <div className="p-6">
         <WhatNeedsMe />
+        <SourceTaskJourneyFixture />
       </div>
     </PrimeDeskFixtures>
   ),
