@@ -1,5 +1,5 @@
 import type { NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { activityApi } from "@/api/activity";
 import { queryKeys } from "@/lib/queryKeys";
@@ -57,16 +57,20 @@ function Verification({ check }: {
         <Status>Evidence assessment {label(check.outcome)}</Status>
       </div>
       {check.detail ? <p className="text-sm text-muted-foreground">{check.detail}</p> : null}
-      {check.evidence ? <EvidenceReference evidence={check.evidence} /> : <p className="text-sm text-muted-foreground">No verification evidence reference recorded.</p>}
+      {check.evidence ? <ul><EvidenceReference evidence={check.evidence} /></ul> : <p className="text-sm text-muted-foreground">No verification evidence reference recorded.</p>}
     </li>
   );
 }
 
-function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
+function CompletionEntry({ entry, anchor, priorAnchor }: {
+  entry: NativeCompletionHistoryEntry;
+  anchor: string;
+  priorAnchor?: string;
+}) {
   const criteria = entry.contract?.criteria ?? [];
   const assessment = entry.assessment;
   return (
-    <article className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
+    <article id={anchor} tabIndex={-1} className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
       <header className="space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h3 className="font-medium text-foreground">Native completion assessment</h3>
@@ -127,8 +131,12 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
           </p>
           {entry.decision.statusAction ? <p className="text-sm text-muted-foreground">Action {label(entry.decision.statusAction)}</p> : null}
           {entry.decision.appliedAt ? <p className="text-sm text-muted-foreground">Applied {new Date(entry.decision.appliedAt).toLocaleString()}</p> : null}
-          {entry.decision.supersedesDecisionId ? <p className="text-sm text-muted-foreground">Supersedes an earlier status decision.</p> : null}
-          {assessment?.supersedesAssessmentId || assessment?.priorDecisionId ? <p className="text-sm text-muted-foreground">This assessment supersedes an earlier assessment or decision.</p> : null}
+          {priorAnchor ? <a href={`#${priorAnchor}`} className="text-sm text-primary underline underline-offset-2">
+            Open earlier decision and evidence
+          </a> : <>
+            {entry.decision.supersedesDecisionId ? <p className="text-sm text-muted-foreground">Supersedes an earlier status decision.</p> : null}
+            {assessment?.supersedesAssessmentId || assessment?.priorDecisionId ? <p className="text-sm text-muted-foreground">This assessment supersedes an earlier assessment or decision.</p> : null}
+          </>}
         </section>
       ) : <p className="text-sm text-muted-foreground">No status decision is linked to this assessment.</p>}
 
@@ -146,6 +154,7 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry, sh
   onRetry: () => void;
   showHeading?: boolean;
 }) {
+  const historyId = useId();
   return (
     <section aria-label="Native completion history" className="mb-4 space-y-3">
       {showHeading && <h2 className="text-base font-medium text-foreground">Native completion history</h2>}
@@ -157,7 +166,16 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry, sh
         </div>
       ) : null}
       {!isLoading && !error && entries?.length === 0 ? <p className="text-sm text-muted-foreground">No native completion history recorded.</p> : null}
-      {entries?.length ? <div className="space-y-4">{entries.map(entry => <CompletionEntry key={entry.id} entry={entry} />)}</div> : null}
+      {entries?.length ? <div className="space-y-4">{entries.map(entry => {
+        const priorDecisionId = entry.decision?.supersedesDecisionId ?? entry.assessment?.priorDecisionId;
+        const priorAssessmentId = entry.assessment?.supersedesAssessmentId;
+        const prior = entries.find(candidate => candidate.id !== entry.id && (
+          (priorDecisionId && candidate.decision?.id === priorDecisionId)
+          || (priorAssessmentId && candidate.assessment?.id === priorAssessmentId)
+        ));
+        return <CompletionEntry key={entry.id} entry={entry} anchor={`${historyId}-${entry.id}`}
+          priorAnchor={prior && `${historyId}-${prior.id}`} />;
+      })}</div> : null}
     </section>
   );
 }

@@ -77,5 +77,18 @@ describe("NativeCompletionHistory", () => {
     expect(container.textContent).toContain("This policy replaces an earlier requirement set.");
     expect(container.textContent).not.toContain("private-record-id");
     expect(container.textContent).not.toContain("prior-decision");
+
+    const earlier: NativeCompletionHistoryEntry = { ...history[0]!, id: "prior-assessment",
+      assessment: { ...history[0]!.assessment!, id: "prior-assessment",
+        priorDecisionId: null, supersedesAssessmentId: null },
+      decision: { ...history[0]!.decision!, id: "prior-decision", supersedesDecisionId: null },
+      contract: { ...history[0]!.contract!, revision: 1, supersedesContractId: null },
+    };
+    act(() => root.render(<NativeCompletionHistory entries={[...history, earlier]} isLoading={false} error={false} onRetry={vi.fn()} />));
+    const related = container.querySelector("a[href^='#']");
+    expect(related?.textContent).toContain("Open earlier decision and evidence");
+    const linkedEntry = document.getElementById(related?.getAttribute("href")?.slice(1) ?? "");
+    expect(linkedEntry).toBe(container.querySelectorAll("article")[1]);
+
   });
 });
