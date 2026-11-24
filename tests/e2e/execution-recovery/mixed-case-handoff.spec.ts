@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, rename, readFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, rename, readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { makeDirectoryTreeRemovable } from "../../runner-e2e/directory-cleanup";
 import { gradeMixedHandoff } from "./mixed-handoff-evidence";
 
-test("a legacy lead hands the same Case to a native builder and legacy verifier", async ({ page, request }, info) => {
+for (const restart of [false, true]) test(`a legacy lead hands the same Case to a native builder and legacy verifier${restart ? " after controller restart" : ""}`, async ({ page, request }, info) => {
   const repo = resolve(import.meta.dirname, "../../..");
   const fixtureDir = resolve(import.meta.dirname, "../fixtures");
   const scratch = info.outputPath("mixed-handoff-fixture");
@@ -15,6 +17,7 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
   const codexLoader = resolve(scratch, "codex-loader.mjs");
   const codexHome = resolve(scratch, "codex-home");
   const fixtureConfig = resolve(scratch, "fixture.json");
+  const dataDir = await mkdtemp(resolve(tmpdir(), "proprio-mixed-handoff-"));
   const sourceReceipt = resolve(scratch, "outgoing-receipt.json");
   const releaseFile = resolve(scratch, "release");
   const verificationReceipt = resolve(scratch, "verification-receipt.json");
@@ -26,19 +29,40 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     OPENAI_API_KEY: "mixed-handoff-fixture", CODEX_API_KEY: "", DATABASE_URL: undefined, DATABASE_MIGRATION_URL: undefined,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${codexLoader}` };
   let logs = "";
-  const drive = spawn(process.execPath, ["--import", "./cli/node_modules/tsx/dist/loader.mjs", "cli/src/index.ts", "test-drive",
-    "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Mixed Case Handoff Fixture", "--no-browser"],
-  { cwd: repo, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-  drive.stdout.on("data", chunk => { logs += chunk.toString(); });
-  drive.stderr.on("data", chunk => { logs += chunk.toString(); });
-  const exited = once(drive, "exit");
-  const readyUrl = () => logs.match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
-  try {
+  let drive!: ReturnType<typeof spawn>;
+  let exited!: ReturnType<typeof once>;
+  function startDrive() {
+    drive = spawn(process.execPath, ["--import", "./cli/node_modules/tsx/dist/loader.mjs", "cli/src/index.ts", "test-drive",
+      "--data-dir", dataDir, "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Mixed Case Handoff Fixture", "--no-browser"],
+    { cwd: repo, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    drive.stdout!.on("data", chunk => { logs += chunk.toString(); });
+    drive.stderr!.on("data", chunk => { logs += chunk.toString(); });
+    exited = once(drive, "exit");
+  }
+  async function stopDrive() {
+    if (!drive.pid || drive.exitCode !== null || drive.signalCode !== null) return;
+    process.kill(-drive.pid, "SIGTERM");
+    const timeout = new AbortController();
+    try {
+      await Promise.race([exited, setTimeout(10_000, undefined, { signal: timeout.signal }).then(() => {
+        if (drive.exitCode === null && drive.signalCode === null) process.kill(-drive.pid!, "SIGKILL");
+      })]);
+    } finally {
+      timeout.abort();
+      await exited;
+    }
+  }
+  async function readyUrl(offset = 0) {
+    const url = () => logs.slice(offset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
     await Promise.race([
-      expect.poll(readyUrl, { timeout: 100_000 }).toBeTruthy(),
+      expect.poll(url, { timeout: 100_000 }).toBeTruthy(),
       exited.then(([code, signal]) => { throw new Error(`Fixture controller exited during startup (${code ?? signal})\n${logs}`); }),
     ]);
-    const base = readyUrl()!;
+    return url()!;
+  }
+  startDrive();
+  try {
+    let base = await readyUrl();
     const api = async (path: string, method = "GET", data?: unknown) => {
       const response = await request.fetch(`${base}/api${path}`, { method, data });
       const body = await response.text();
@@ -63,6 +87,7 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
       const agent = await api(`/agents/${builder.id}`);
       return { status: agent.status, lifecycleHolds: agent.lifecycleHolds ?? [] };
     }, { timeout: 25_000 }).toEqual({ status: "idle", lifecycleHolds: [] });
+    if (restart) await api(`/agents/${builder.id}/pause`, "POST", {});
     const title = "Verify the mixed-runner arithmetic handoff";
     const brief = { first: 17, second: 29 };
     const started = await api(`${companyPath}/case-handoffs`, "POST", { idempotencyKey: "mixed-handoff-start",
@@ -81,6 +106,29 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
     expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ title, assigneeAgentId: lead.id });
     await writeFile(releaseFile, "release", { flag: "wx" });
+
+    const handoffPath = `/cases/${caseId}/handoffs?limit=20`;
+    const outgoingState = async () => {
+      const ledger = await api(handoffPath);
+      const items = Array.isArray(ledger) ? ledger : ledger.items ?? ledger.handoffs;
+      return items.find((handoff: { id: string }) => handoff.id === outgoing.handoffId);
+    };
+    let restartEvidence: { stoppedAt: string; readyAt: string; handoffId: string; runId: string } | undefined;
+    if (restart) {
+      await expect.poll(async () => (await outgoingState())?.state, { timeout: 45_000 }).toBe("pending_dispatch");
+      expect((await api(runsPath)).map((run: { id: string; status: string }) => ({ id: run.id, status: run.status })))
+        .toEqual([{ id: outgoing.runId, status: "succeeded" }]);
+      const stoppedAt = new Date().toISOString();
+      await stopDrive();
+      const restartLogOffset = logs.length;
+      startDrive();
+      base = await readyUrl(restartLogOffset);
+      const readyAt = new Date().toISOString();
+      expect((await api("/companies"))[0].id).toBe(company.id);
+      expect(await outgoingState()).toMatchObject({ state: "pending_dispatch", sourceRunId: outgoing.runId });
+      await api(`/agents/${builder.id}/resume`, "POST", {});
+      restartEvidence = { stoppedAt, readyAt, handoffId: outgoing.handoffId, runId: outgoing.runId };
+    }
 
     await expect.poll(async () => (await api(`/issues/${taskId}?view=core`)).status, { timeout: 90_000 }).toBe("done");
     await expect.poll(async () => (await api(runsPath)).map((run: { status: string }) => run.status), { timeout: 25_000 })
@@ -109,7 +157,7 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     await info.attach("mixed-handoff-evidence", { contentType: "application/json", body: JSON.stringify({
       revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
       profiles: ["legacy/process", "native/codex-app-server fixture", "legacy/process"],
-      outgoing, observed, verdict,
+      outgoing, restartEvidence, observed, verdict,
     }, null, 2) });
     expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
     await page.goto(`${base}/${company.issuePrefix}/issues/${task.identifier ?? task.id}`);
@@ -118,17 +166,8 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     await info.attach("test-drive-logs", { body: logs, contentType: "text/plain" });
     throw error;
   } finally {
-    if (drive.pid && drive.exitCode === null && drive.signalCode === null) {
-      process.kill(-drive.pid, "SIGTERM");
-      const timeout = new AbortController();
-      try {
-        await Promise.race([exited, setTimeout(10_000, undefined, { signal: timeout.signal }).then(() => {
-          if (drive.exitCode === null && drive.signalCode === null) process.kill(-drive.pid!, "SIGKILL");
-        })]);
-      } finally {
-        timeout.abort();
-        await exited;
-      }
-    }
+    await stopDrive();
+    await makeDirectoryTreeRemovable(dataDir);
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
