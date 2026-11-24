@@ -43,6 +43,8 @@ describe("keyboardShortcuts helpers", () => {
       expect(resolveAttentionQueueKeyAction({ ...baseArgs, key: "j", hasOpenDialog: true })).toBe("ignore");
       expect(resolveAttentionQueueKeyAction({ ...baseArgs, key: "j", metaKey: true })).toBe("ignore");
       expect(resolveAttentionQueueKeyAction({ ...baseArgs, key: "Enter", hasSelection: false })).toBe("ignore");
+      const retry = document.createElement("button");
+      expect(resolveAttentionQueueKeyAction({ ...baseArgs, key: "Enter", target: retry })).toBe("ignore");
     });
   });
 

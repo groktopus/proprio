@@ -472,7 +472,7 @@ describe("Sidebar", () => {
 
     const primaryNavLinks = [...container.querySelectorAll("nav > div:first-child a")];
     const decisionsLink = primaryNavLinks.find(
-      (anchor) => anchor.textContent?.trim() === "Decisions",
+      (anchor) => anchor.textContent?.trim() === "Needs You",
     );
     const statusLink = primaryNavLinks.find((anchor) => anchor.getAttribute("href") === "/status");
 
