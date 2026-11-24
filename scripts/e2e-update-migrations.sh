@@ -289,6 +289,7 @@ else
   ACTIVE_OUTPUT="Recovered task output: qualification effect completed exactly once."
   ACTIVE_MODE="complete"
   [ "$active_run_required" = 1 ] && ACTIVE_MODE="hold"
+  ACTIVE_HOLD_TIMEOUT_MS=5400000
   cat > "$ACTIVE_SCRIPT" <<'NODE'
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -297,6 +298,7 @@ const issueId = process.argv[3];
 const origin = process.argv[4];
 const output = process.argv[5];
 const mode = process.argv[6];
+const holdTimeoutMs = Number(process.argv[7] ?? 5_400_000);
 const startupCwd = process.cwd();
 const apiHeaders = { Origin: origin, Authorization: `Bearer ${process.env.PROPRIO_API_KEY ?? ""}` };
 const issueResponse = await fetch(`${origin}/api/issues/${issueId}`, { headers: apiHeaders });
@@ -362,7 +364,11 @@ try {
 }
 if (created) process.stdout.write("qualification checkpoint saved; effect count 1\n");
 if (created && mode === "hold") {
-  setTimeout(() => process.exit(0), 600_000);
+  process.stdout.write(`qualification process remains active until service stop; watchdog ${holdTimeoutMs}ms\n`);
+  setTimeout(() => {
+    process.stderr.write("qualification hold watchdog expired before managed service shutdown\n");
+    process.exitCode = 124;
+  }, holdTimeoutMs);
 } else {
   const commentsUrl = `${origin}/api/issues/${issueId}/comments`;
   const commentHeaders = { ...apiHeaders, "Content-Type": "application/json" };
@@ -373,6 +379,13 @@ if (created && mode === "hold") {
     const saved = await fetch(commentsUrl, { method: "POST", headers: commentHeaders, body: JSON.stringify({ body: output }) });
     if (!saved.ok) throw new Error(`Could not save recovered task output: ${saved.status} ${await saved.text()}`);
   }
+  if (!process.env.PROPRIO_RUN_ID) throw new Error("The task completion request has no run-scoped identity");
+  const completed = await fetch(`${origin}/api/issues/${issueId}`, {
+    method: "PATCH",
+    headers: { ...commentHeaders, "X-Proprio-Run-Id": process.env.PROPRIO_RUN_ID },
+    body: JSON.stringify({ status: "done" }),
+  });
+  if (!completed.ok) throw new Error(`Could not complete the task through its run-scoped API: ${completed.status} ${await completed.text()}`);
   process.stdout.write("qualification output delivered from the retained workspace checkpoint\n");
 }
 NODE
@@ -405,7 +418,7 @@ NODE
   ACTIVE_ISSUE_PREFIX="$company_issue_prefix"
   ACTIVE_AGENT_JSON="$(curl --fail --silent --show-error --max-time 10 "$origin/api/companies/$company_id/agents" \
     -H "Origin: $origin" -H 'Content-Type: application/json' \
-    --data "$(jq -n --arg command "$(command -v node)" --arg script "$ACTIVE_SCRIPT" --arg effect "$ACTIVE_EFFECT" --arg issue "$ACTIVE_ISSUE_ID" --arg origin "$origin" --arg output "$ACTIVE_OUTPUT" --arg mode "$ACTIVE_MODE" '{name:"Schema upgrade worker",role:"engineer",adapterType:"process",adapterConfig:{command:$command,args:[$script,$effect,$issue,$origin,$output,$mode],graceSec:1}}')")" \
+    --data "$(jq -n --arg command "$(command -v node)" --arg script "$ACTIVE_SCRIPT" --arg effect "$ACTIVE_EFFECT" --arg issue "$ACTIVE_ISSUE_ID" --arg origin "$origin" --arg output "$ACTIVE_OUTPUT" --arg mode "$ACTIVE_MODE" --arg timeout "$ACTIVE_HOLD_TIMEOUT_MS" '{name:"Schema upgrade worker",role:"engineer",adapterType:"process",adapterConfig:{command:$command,args:[$script,$effect,$issue,$origin,$output,$mode,$timeout],graceSec:1}}')")" \
     || { fail_ "4d recovery worker creation"; exit 1; }
   ACTIVE_AGENT_ID="$(jq -er '.id' <<<"$ACTIVE_AGENT_JSON")" || exit 1
   curl --fail --silent --show-error --max-time 10 --request PATCH "$origin/api/issues/$ACTIVE_ISSUE_ID" \
@@ -666,7 +679,18 @@ else
     fi
     sleep 1
   done
-  [ "$recovered" = 1 ] || { fail_ "7d recovered task reaches one successful outcome and one visible output before timeout"; exit 1; }
+  if [ "$recovered" != 1 ]; then
+    ACTIVE_ISSUE_DIAGNOSTIC="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID" 2>/dev/null || true)"
+    ACTIVE_ACTION_DIAGNOSTIC="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/recovery-actions?inspectSourceRunId=$ACTIVE_RUN_ID" 2>/dev/null || true)"
+    SAFE_RECOVERY_STATE="$(jq -cn --arg body "$ACTIVE_OUTPUT" --argjson runs "$(jq -c '[.[]? | {runId,status,errorCode:(.errorCode // null)}]' <<<"${ACTIVE_RUNS_AFTER:-[]}" 2>/dev/null || printf '[]')" \
+      --argjson live "$(jq -c '[.[]? | {runId:(.runId // null),status:(.status // null),errorCode:(.errorCode // null)}]' <<<"${ACTIVE_LIVE_AFTER:-[]}" 2>/dev/null || printf '[]')" \
+      --argjson comments "$(jq -c --arg body "$ACTIVE_OUTPUT" '[.[]? | select(.body == $body)] | length' <<<"${ACTIVE_COMMENTS_AFTER:-[]}" 2>/dev/null || printf '0')" \
+      --argjson issue "$(jq -c 'if type == "object" then {id,status,assigneeAgentId,executionWorkspaceId} else null end' <<<"${ACTIVE_ISSUE_DIAGNOSTIC:-null}" 2>/dev/null || printf 'null')" \
+      --argjson action "$(jq -c --arg id "$ACTIVE_RECOVERY_ACTION_ID" '([.actions[]? | select(.id == $id)] | first) as $resolved | if $resolved then {id:$resolved.id,status:$resolved.status,continuationDelivery:($resolved.evidence.continuationDelivery // null),continuationDeliveryReason:($resolved.evidence.continuationDeliveryReason // null),reason:($resolved.evidence.reason // null)} elif .active then {id:.active.id,status:.active.status,continuationDelivery:(.active.evidence.continuationDelivery // null),continuationDeliveryReason:(.active.evidence.continuationDeliveryReason // null),reason:(.active.evidence.reason // null)} else null end' <<<"${ACTIVE_ACTION_DIAGNOSTIC:-null}" 2>/dev/null || printf 'null')" \
+      '{runs:$runs,liveRuns:$live,matchingOutputComments:$comments,issue:$issue,activeRecoveryAction:$action}')"
+    fail_ "7d recovered task reaches one successful outcome and one visible output before timeout ($SAFE_RECOVERY_STATE)"
+    exit 1
+  fi
   ACTIVE_ISSUE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
     || { fail_ "7d recovered task read after update"; exit 1; }
   ACTIVE_WORKSPACE_AFTER="$(curl --fail --silent --show-error --max-time 5 "$origin/api/execution-workspaces/$ACTIVE_WORKSPACE_ID")" \

@@ -74,10 +74,16 @@ test("active process recovery binds durable workspace and delivers one reconcile
   assert.match(source, /while \[ "\$\(date \+%s\)" -lt "\$effect_deadline" \].*\[ "\$\(cat "\$ACTIVE_EFFECT"\)" != "effect" \]/);
   assert.match(source, /provider process cwd and identity match the bound workspace/);
   assert.match(source, /completed effect marker contains exactly one effect/);
+  assert.match(source, /ACTIVE_HOLD_TIMEOUT_MS=5400000/);
+  assert.match(source, /watchdog expired before managed service shutdown/);
+  assert.doesNotMatch(source, /process\.exit\(0\), 600_000/);
   assert.match(source, /\.executionWorkspaceId \/\/ empty/);
   assert.match(source, /executionWorkspaceId from the task binding/);
   assert.match(source, /legacy_execution_requires_reconciliation/);
   assert.match(source, /providerStopped:true,actionOutcome:"mixed"/);
+  assert.match(source, /X-Proprio-Run-Id": process\.env\.PROPRIO_RUN_ID/);
+  assert.match(source, /status: "done"/);
+  assert.match(source, /SAFE_RECOVERY_STATE/);
   assert.match(source, /qualification-process\.json/);
   assert.match(source, /ACTIVE_PROCESS_CURRENT_START/);
   assert.match(source, /ACTIVE_PROCESS_STATE.*!= Z/);
@@ -126,6 +132,15 @@ test("fixture worker changes into the task workspace and completes the effect ma
       response.end("{}");
       return;
     }
+    if (request.url === "/api/issues/issue-1" && request.method === "PATCH") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      assert.equal(request.headers["x-proprio-run-id"], "run-fixture");
+      assert.deepEqual(JSON.parse(body), { status: "done" });
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ status: "done" }));
+      return;
+    }
     response.statusCode = 404;
     response.end("not found");
   });
@@ -137,10 +152,10 @@ test("fixture worker changes into the task workspace and completes the effect ma
     const workerFile = path.join(home, "worker.mjs");
     await import("node:fs/promises").then(fs => fs.writeFile(workerFile, worker));
     const output = "Recovered task output: qualification effect completed exactly once.";
-    const runWorker = async () => {
-      const child = spawn(process.execPath, [workerFile, marker, "issue-1", `http://127.0.0.1:${address.port}`, output, "complete"], {
+    const runWorker = async (workerMarker = marker, mode = "complete", holdTimeoutMs = 5_400_000) => {
+      const child = spawn(process.execPath, [workerFile, workerMarker, "issue-1", `http://127.0.0.1:${address.port}`, output, mode, String(holdTimeoutMs)], {
         cwd: repoRoot,
-        env: { ...cleanEnv, PROPRIO_API_KEY: "fixture-token" },
+        env: { ...cleanEnv, PROPRIO_API_KEY: "fixture-token", PROPRIO_RUN_ID: "run-fixture" },
       });
       let stdout = "";
       let stderr = "";
@@ -168,6 +183,13 @@ test("fixture worker changes into the task workspace and completes the effect ma
     assert.equal(continuation.exitCode, 0, continuation.stderr || continuation.stdout);
     assert.equal(readFileSync(identityPath, "utf8"), firstIdentityContents, "continuation keeps the original provider process identity");
     assert.deepEqual(comments, [{ body: output }], "continuation delivers the task output once");
+
+    const holdMarker = path.join(home, "held-effect.txt");
+    const expiredHold = await runWorker(holdMarker, "hold", 25);
+    assert.equal(expiredHold.exitCode, 124);
+    assert.match(expiredHold.stderr, /qualification hold watchdog expired before managed service shutdown/);
+    assert.equal(readFileSync(holdMarker, "utf8"), "effect\n");
+    assert.deepEqual(comments, [{ body: output }], "hold watchdog failure does not deliver completion output");
 
     rmSync(path.join(workspace, "qualification-checkpoint.txt"));
     const missingCheckpoint = await runWorker();
