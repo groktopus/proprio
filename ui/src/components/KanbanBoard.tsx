@@ -443,7 +443,7 @@ function KanbanCard({
         {boardStatuses.map((status) => (
           <option key={status} value={status} disabled={status === "monitoring"}>{statusLabel(status)}</option>
         ))}
-      </select>
+      </NativeSelect>
     </Card>
   );
 }
