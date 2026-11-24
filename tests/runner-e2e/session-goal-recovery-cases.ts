@@ -5,7 +5,10 @@ import type { RunnerTaskFixture } from "./types.js";
 
 export const SESSION_GOAL_RECOVERY_SUITE = "session-goal-recovery";
 export const SESSION_GOAL_RECOVERY_BUDGET_CENTS = 1_000;
-export const SESSION_GOAL_RECOVERY_TOKEN_BUDGET = 6_000;
+// A bounded native Codex turn consumed 34,017 uncached tokens before the
+// checkpoint. Leave room for several turns while the fixture stays capped at
+// one seven-minute execution and the existing ten-dollar issue budget.
+export const SESSION_GOAL_RECOVERY_TOKEN_BUDGET = 120_000;
 export const SESSION_GOAL_RECOVERY_WAIT_SECONDS = 35;
 
 export function structuredGoalObjective(nonce: string): string {

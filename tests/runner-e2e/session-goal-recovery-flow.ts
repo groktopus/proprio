@@ -104,6 +104,21 @@ export function sessionGoalControllerReadinessTerms(value: {
   };
 }
 
+export function initialGoalCheckpointRejection(value: { goal: Row; issue: Row }): string | undefined {
+  const goalStatus = String(value.goal.goal?.status ?? "");
+  if (goalStatus === "complete") {
+    return "Provider claimed the structured goal complete before the durable first checkpoint";
+  }
+  if (["blocked", "limited", "usage_limited", "budget_limited", "exhausted"].includes(goalStatus)) {
+    return `Provider goal reached ${goalStatus} before the durable first checkpoint`;
+  }
+  const issueStatus = String(value.issue.status ?? "");
+  if (["failed", "timed_out", "cancelled"].includes(issueStatus)) {
+    return `Task reached ${issueStatus} before the durable checkpoint`;
+  }
+  return undefined;
+}
+
 async function runArtifactOracle(archivePath: string, nonce: string, deadlineAt: number) {
   const childEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     ["PATH", "SYSTEMROOT", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "HOME"].includes(key)));
@@ -207,10 +222,7 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
       && value.goal.goal?.tokenBudget === SESSION_GOAL_RECOVERY_TOKEN_BUDGET
       && typeof value.goal.activeRunId === "string" && value.runs.some((run: Row) => run.id === value.goal.activeRunId && run.status === "running")
       && value.checkpoint !== null,
-    reject: value => value.goal.goal?.status === "complete"
-      ? "Provider claimed the structured goal complete before the durable first checkpoint"
-      : ["failed", "timed_out", "cancelled"].includes(String(value.issue.status))
-        ? `Task reached ${value.issue.status} before the durable checkpoint` : undefined,
+    reject: initialGoalCheckpointRejection,
   });
   const initialGoal = boundary.goal.goal as Row;
   const activeRun = boundary.runs.find((run: Row) => run.id === boundary.goal.activeRunId)!;

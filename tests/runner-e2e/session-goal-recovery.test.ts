@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runnerMatrix, runnerSuites, suiteDefinitionHash } from "./catalog.js";
 import { controllerOutageForExecution, validControllerOutageReceipt } from "./controller-outage.js";
-import { isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
+import { initialGoalCheckpointRejection, isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
 import { SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import type { SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 
@@ -70,6 +70,12 @@ describe("structured session-goal recovery Product E2E", () => {
     };
     expect(isSessionGoalControllerReady(observation)).toBe(true);
   });
+
+  it.each(["blocked", "limited", "usage_limited", "budget_limited", "exhausted"])(
+    "rejects a terminal %s goal before the first checkpoint",
+    status => expect(initialGoalCheckpointRejection({ goal: { goal: { status } }, issue: { status: "in_progress" } }))
+      .toBe(`Provider goal reached ${status} before the durable first checkpoint`),
+  );
 
   it("reports allowlisted startup readiness terms without exposing event payloads", () => {
     const observation = {
