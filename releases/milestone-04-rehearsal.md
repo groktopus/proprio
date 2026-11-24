@@ -7,9 +7,9 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 ## Scope and evidence
 
-On November 24, 2026, all 43 draft heads matched GitHub and composed without
+On November 24, 2026, all 44 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `137113d261fe1b5d047ada9a2cd6668d65360e12`. The pull
+rehearsal revision is `abb3e78962b7236089ff42c59a4e53cffb879615`. The pull
 requests record the exact heads and test scope for the individual results
 below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
@@ -32,9 +32,11 @@ below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
   [Native handoff #342](https://github.com/groktopus/proprio/pull/342) · [Completion history #335](https://github.com/groktopus/proprio/pull/335) · [Scope correction #345](https://github.com/groktopus/proprio/pull/345) · [Recovery history #355](https://github.com/groktopus/proprio/pull/355) · [Decision restart #364](https://github.com/groktopus/proprio/pull/364)
 - **Bound signoff and shared spend.** PostgreSQL tests exercised an edit racing
   with signoff, concurrent sibling reservations, reparenting, overlapping
-  limits, and unknown usage. Board tests covered exact review targets and
-  access to task-tree budget controls.
-  [Signoff #324](https://github.com/groktopus/proprio/pull/324) · [Review #328](https://github.com/groktopus/proprio/pull/328) · [Reservations #327](https://github.com/groktopus/proprio/pull/327) · [Budget controls #334](https://github.com/groktopus/proprio/pull/334) · [Retry and admission #338](https://github.com/groktopus/proprio/pull/338)
+  limits, and unknown usage. The operator API identified the hard stop from
+  settled spend. It recorded the board operator who raised the shared limit,
+  then the previously blocked sibling reserved successfully. Board tests
+  covered exact review targets and access to task-tree budget controls.
+  [Signoff #324](https://github.com/groktopus/proprio/pull/324) · [Review #328](https://github.com/groktopus/proprio/pull/328) · [Reservations #327](https://github.com/groktopus/proprio/pull/327) · [Budget controls #334](https://github.com/groktopus/proprio/pull/334) · [Retry and admission #338](https://github.com/groktopus/proprio/pull/338) · [Budget resolution #372](https://github.com/groktopus/proprio/pull/372)
 - **Mixed-runner handoff and uncertain effects.** Chromium exercised the
   legacy process adapter to native Rust Runner with a scripted Codex
   app-server, then back to a legacy verifier. Restart and revocation tests
