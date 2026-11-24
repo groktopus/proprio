@@ -542,7 +542,7 @@ export function KanbanBoard({
 
   function handleStatusChange(id: string, status: IssueStatus) {
     const issue = issues.find((candidate) => candidate.id === id);
-    if (!issue || status === "monitoring" || issue.status === status) return;
+    if (!issue || issue.status === status) return;
     pendingAnnouncement.current = { issueId: id, targetStatus: status, title: issue.title };
     onUpdateIssue(id, { status });
     setFocusIssueId(id);

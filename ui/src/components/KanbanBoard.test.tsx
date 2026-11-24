@@ -266,7 +266,7 @@ describe("KanbanBoard", () => {
 
     expect(onUpdateIssue).toHaveBeenCalledWith("issue-1", { status: "todo" });
     render({ issues: [{ ...issue, status: "todo", displayStatus: "todo" }], onUpdateIssue });
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Todo");
     expect(document.activeElement).toBe(container.querySelector('button[aria-label="Move task Issue 1"]'));
   });
