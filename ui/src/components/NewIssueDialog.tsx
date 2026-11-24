@@ -1475,6 +1475,30 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     return () => window.cancelAnimationFrame(frame);
   }, [visualViewportLayout]);
 
+  // Radix opens the dialog before the rich editor has finished initializing.
+  // Its initial auto-focus therefore cannot find the editor while it is still
+  // read-only. Observe that transition and restore the intended initial focus
+  // once the contenteditable is available, without stealing focus later from
+  // a control the user has already chosen.
+  useEffect(() => {
+    if (!newIssueOpen || !dialogBodyRef.current) return;
+    const body = dialogBodyRef.current;
+    const focusEditor = () => {
+      const editor = body.querySelector<HTMLElement>('[contenteditable="true"]');
+      if (!editor) return false;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== body && !body.contains(active)) return false;
+      editor.focus();
+      return true;
+    };
+    if (focusEditor()) return;
+    const observer = new MutationObserver(() => {
+      if (focusEditor()) observer.disconnect();
+    });
+    observer.observe(body, { subtree: true, attributes: true, attributeFilter: ["contenteditable"] });
+    return () => observer.disconnect();
+  }, [newIssueOpen]);
+
   const modelAgents = useMemo(() => new Map((agents ?? []).map((agent) => [agent.id, agent])), [agents]);
   const inheritedOverrides = buildAssigneeAdapterOverrides({
     adapterType: assigneeAdapterType,
