@@ -62,8 +62,26 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
   const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  const hiddenTaskBinding = and(isNotNull(managedAuditEvents.taskId), exists(tx.select({ id: issues.id }).from(issues)
+    .where(and(
+      eq(issues.companyId, scope.companyId),
+      eq(issues.id, managedAuditEvents.taskId),
+      not(issuePrivacySqlCondition(scope.actor)),
+    ))));
+  const hiddenRunBinding = and(isNotNull(managedAuditEvents.runId), exists(tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .where(and(
+      eq(heartbeatRuns.companyId, scope.companyId),
+      eq(heartbeatRuns.id, managedAuditEvents.runId),
+      eq(heartbeatRuns.scopeKind, "issue"),
+      exists(tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.companyId, scope.companyId),
+        eq(issues.id, heartbeatRuns.issueId),
+        not(issuePrivacySqlCondition(scope.actor)),
+      ))),
+    ))));
+  const conclusivelyHidden = or(hiddenTaskBinding, hiddenRunBinding);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
-    .where(and(sourceWindow, or(missingRun, missingTask))).limit(1);
+    .where(and(sourceWindow, or(missingRun, missingTask), not(conclusivelyHidden))).limit(1);
   if (missing) throw conflict("Managed audit source has unavailable event bindings. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
 }
 

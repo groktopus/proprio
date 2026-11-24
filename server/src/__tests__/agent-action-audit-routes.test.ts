@@ -281,6 +281,43 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("does not reveal a missing run bound to another user's private task", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const [privateTask] = await db.insert(issues).values({
+      companyId: company.id, title: "Private binding", visibility: "private", responsibleUserId: randomUUID(),
+    }).returning();
+    const [deletedRun] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id }).returning();
+    await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", taskId: privateTask.id,
+      runId: deletedRun.id, invocationId: randomUUID(),
+    });
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, deletedRun.id));
+
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const created = await board.post(path).send(window).expect(201);
+      expect(created.body.eventCount).toBe(0);
+      const page = await board.get(`${path}/${created.body.exportId}`).expect(200);
+      expect(page.body).toMatchObject({ eventCount: 0, events: [], complete: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("retains archive bytes and checkpoints outside an older restore and rotates the source epoch", async ({ skip }) => {
     const oldEpoch = randomUUID();
     const newEpoch = randomUUID();
