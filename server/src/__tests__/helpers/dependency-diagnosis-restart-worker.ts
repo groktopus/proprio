@@ -15,7 +15,7 @@ const recovery = recoveryService(db, {
 });
 let exitCode = 0;
 try {
-  const results = [];
+  const results: Awaited<ReturnType<typeof recovery.assignedWork.checkIssue>>[] = [];
   for (const issueId of issueIds) results.push(await recovery.assignedWork.checkIssue({ companyId, issueId }));
   await heartbeat.resumeQueuedRuns();
   await heartbeat.drainActiveRunExecutions();
