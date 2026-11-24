@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { agents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, issues, type Db } from "@groktopus/db";
+import { activityLog, agents, budgetIncidents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, issues, type Db } from "@groktopus/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { reserveRunBudget } from "./budget-reservations.js";
 import { computeObservedSpend } from "./budget-exposure.js";
 import { budgetService, flushBudgetEvaluationWork } from "./budgets.js";
+import { activityService } from "./activity.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 
@@ -119,5 +120,30 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const [company] = await db.select().from(companies).where(eq(companies.id, f.companyId));
     expect(updatedPolicy!.enforcementVersion).toBeGreaterThan(0);
     expect(company!.status).toBe("active");
+  });
+
+  it("filters company-wide budget listings and incidents by readable task roots", async () => {
+    const f = await fixture();
+    const visibleRoot = await f.makeIssue("Readable outcome"), privateRoot = await f.makeIssue("Private outcome");
+    const visiblePolicy = await f.makePolicy(visibleRoot.id, { amount: 100, reservationCents: "0" });
+    const privatePolicy = await f.makePolicy(privateRoot.id, { amount: 100, reservationCents: "0" });
+    const windowStart = new Date(0), windowEnd = new Date("9999-01-01T00:00:00Z");
+    await db.insert(budgetIncidents).values([visiblePolicy, privatePolicy].map(policy => ({
+      companyId: f.companyId, policyId: policy.id, scopeType: "task_tree", scopeId: policy.scopeId,
+      metric: "billed_cents", windowKind: "lifetime", windowStart, windowEnd, thresholdType: "hard",
+      amountLimit: 100, amountObserved: 100,
+    })));
+    await db.insert(activityLog).values([visiblePolicy, privatePolicy].map(policy => ({
+      companyId: f.companyId, actorType: "user", actorId: "board", action: "budget.policy_upserted",
+      entityType: "budget_policy", entityId: policy.id,
+      details: { scopeType: "task_tree", scopeId: policy.scopeId },
+    })));
+
+    const overview = await budgetService(db).overview(f.companyId, [visibleRoot.id]);
+    const activity = await activityService(db).list({ companyId: f.companyId, visibleBudgetTaskTreeScopeIds: [visibleRoot.id] });
+
+    expect(overview.policies.map(policy => policy.scopeId)).toEqual([visibleRoot.id]);
+    expect(overview.activeIncidents.map(incident => incident.scopeId)).toEqual([visibleRoot.id]);
+    expect(activity.map(row => row.details?.scopeId)).toEqual([visibleRoot.id]);
   });
 });

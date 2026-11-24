@@ -162,12 +162,18 @@ export function publishActivity(publication: ActivityPublication) {
       });
       return;
     }
+    const details = publication.payload.details;
+    const taskTreeBudget = Boolean(details && typeof details === "object" && !Array.isArray(details)
+      && (details as Record<string, unknown>).scopeType === "task_tree");
     publishLiveEvent({
       companyId: publication.companyId,
       type: "activity.logged",
-      payload: publication.payload,
+      payload: taskTreeBudget
+        ? { action: "budgets.changed", entityType: "budget", entityId: "budget", issueId: null,
+          actorType: publication.payload.actorType, actorId: publication.payload.actorId }
+        : publication.payload,
     });
-    if (publication.pluginEvent) publishPluginDomainEvent(publication.pluginEvent);
+    if (publication.pluginEvent && !taskTreeBudget) publishPluginDomainEvent(publication.pluginEvent);
   } finally { finish(); }
 }
 
@@ -209,7 +215,7 @@ export async function persistActivity(db: Db, input: LogActivityInput, receipt?:
     details: redactedDetails,
   };
   const pluginEventType = eventTypeForActivityAction(input.action);
-  const pluginEvent: PluginEvent | null = pluginEventType
+  const pluginEvent: PluginEvent | null = pluginEventType && redactedDetails?.scopeType !== "task_tree"
     ? {
         eventId: randomUUID(),
         eventType: pluginEventType,

@@ -61655,6 +61655,7 @@
           "costs"
         ],
         "summary": "Create or update a budget policy",
+        "description": "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read.",
         "responses": {
           "200": {
             "description": "Success",
@@ -61729,7 +61730,8 @@
                     "enum": [
                       "company",
                       "agent",
-                      "project"
+                      "project",
+                      "task_tree"
                     ]
                   },
                   "scopeId": {
@@ -61815,7 +61817,7 @@
           "costs"
         ],
         "summary": "Resolve a budget incident",
-        "description": "Board only: agent credentials get 403, so an agent cannot raise a limit or resume a budget-stopped agent. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
+        "description": "Board only: agent credentials get 403, so an agent cannot raise a limit or resume budget-stopped work. Task-tree incidents can be resolved only by a board user who can read the root task. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
         "responses": {
           "200": {
             "description": "Success",
@@ -61937,6 +61939,7 @@
           "costs"
         ],
         "summary": "Get budget overview",
+        "description": "Company-level budgets remain company-wide. Task-tree policies and incidents are included only when the caller can read their root task.",
         "responses": {
           "200": {
             "description": "Success",

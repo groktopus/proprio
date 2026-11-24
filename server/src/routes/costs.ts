@@ -34,7 +34,8 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchCompanyQuotaWindows } from "../services/quota-windows.js";
 import { attentionHandledDetails, attentionHandledFor } from "../services/attention-receipts.js";
-import { badRequest, forbidden } from "../errors.js";
+import { canReadBudgetTaskTreeRoot, visibleBudgetTaskTreeScopeIds } from "../services/budget-scope-visibility.js";
+import { badRequest, forbidden, notFound } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
 const reportDateSchema = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
@@ -348,7 +349,8 @@ export function costRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
-    const overview = await budgets.overview(companyId);
+    const visibleTaskTreeScopeIds = await visibleBudgetTaskTreeScopeIds(db, companyId, req.actor);
+    const overview = await budgets.overview(companyId, visibleTaskTreeScopeIds);
     res.json(overview);
   });
 
@@ -359,6 +361,8 @@ export function costRoutes(
       assertBoard(req);
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
+      if (req.body.scopeType === "task_tree"
+        && !await canReadBudgetTaskTreeRoot(db, companyId, req.body.scopeId, req.actor)) throw notFound("Task tree root not found");
       const summary = await budgets.upsertPolicy(companyId, req.body, req.actor.userId ?? "board");
       res.json(summary);
     },
@@ -372,6 +376,9 @@ export function costRoutes(
       const companyId = req.params.companyId as string;
       const incidentId = req.params.incidentId as string;
       assertCompanyAccess(req, companyId);
+      const incidentScope = await budgets.getIncidentScope(companyId, incidentId);
+      if (incidentScope?.scopeType === "task_tree"
+        && !await canReadBudgetTaskTreeRoot(db, companyId, incidentScope.scopeId, req.actor)) throw notFound("Budget incident not found");
       const actorUserId = req.actor.userId ?? "board";
       // A hard stop is the budget owner's card. When someone else raises or
       // keeps the limit, read that before the incident closes, so the owner

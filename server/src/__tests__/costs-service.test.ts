@@ -104,10 +104,15 @@ const mockBudgetService = vi.hoisted(() => ({
     pendingApprovalCount: 0,
   }),
   upsertPolicy: vi.fn(),
+  getIncidentScope: vi.fn().mockResolvedValue(null),
   resolveIncident: vi.fn(),
 }));
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
+}));
+const mockBudgetScopeVisibility = vi.hoisted(() => ({
+  canReadBudgetTaskTreeRoot: vi.fn().mockResolvedValue(true),
+  visibleBudgetTaskTreeScopeIds: vi.fn().mockResolvedValue([]),
 }));
 
 function registerModuleMocks() {
@@ -126,6 +131,7 @@ function registerModuleMocks() {
   vi.doMock("../services/quota-windows.js", () => ({
     fetchAllQuotaWindows: mockFetchAllQuotaWindows,
   }));
+  vi.doMock("../services/budget-scope-visibility.js", () => mockBudgetScopeVisibility);
 }
 
 describe("cost routes", () => {
@@ -208,6 +214,9 @@ describe("cost routes", () => {
       identifier: "PC1A2-1",
     });
     mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
+    mockBudgetService.getIncidentScope.mockResolvedValue(null);
+    mockBudgetScopeVisibility.canReadBudgetTaskTreeRoot.mockResolvedValue(true);
+    mockBudgetScopeVisibility.visibleBudgetTaskTreeScopeIds.mockResolvedValue([]);
   });
 
   it("accepts valid ISO date strings", async () => {
@@ -291,6 +300,29 @@ describe("cost routes", () => {
   it("accepts valid finance event list limits", async () => {
     const { parseCostLimit } = loadCostParsers();
     expect(parseCostLimit({ limit: "25" })).toBe(25);
+  });
+
+  it("requires root task visibility to create or resolve a task-tree budget", async () => {
+    const rootId = "11111111-1111-4111-8111-111111111111";
+    mockBudgetScopeVisibility.canReadBudgetTaskTreeRoot.mockResolvedValue(false);
+    const create = await request(createApp()).post("/api/companies/company-1/budgets/policies").send({
+      scopeType: "task_tree", scopeId: rootId, amount: 250, windowKind: "lifetime",
+    });
+    expect(create.status).toBe(404);
+    expect(mockBudgetService.upsertPolicy).not.toHaveBeenCalled();
+
+    mockBudgetService.getIncidentScope.mockResolvedValue({ scopeType: "task_tree", scopeId: rootId });
+    const resolve = await request(createApp()).post("/api/companies/company-1/budget-incidents/incident-1/resolve")
+      .send({ action: "keep_paused" });
+    expect(resolve.status).toBe(404);
+    expect(mockBudgetService.resolveIncident).not.toHaveBeenCalled();
+  });
+
+  it("limits company budget overview to task-tree roots the actor can read", async () => {
+    const visibleRootId = "22222222-2222-4222-8222-222222222222";
+    mockBudgetScopeVisibility.visibleBudgetTaskTreeScopeIds.mockResolvedValue([visibleRootId]);
+    await request(createApp()).get("/api/companies/company-1/budgets/overview").expect(200);
+    expect(mockBudgetService.overview).toHaveBeenCalledExactlyOnceWith("company-1", [visibleRootId]);
   });
 
   it("rejects company budget updates for board users outside the company", async () => {

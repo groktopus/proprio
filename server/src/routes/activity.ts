@@ -10,6 +10,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { badRequest, forbidden } from "../errors.js";
 import { agentActionAuditService } from "../services/agent-action-audit.js";
 import { logActivity } from "../services/activity-log.js";
+import { visibleBudgetTaskTreeScopeIds } from "../services/budget-scope-visibility.js";
 import { issueContextUsage } from "../services/issue-context-usage.js";
 import { contextCompactionService } from "../services/context-compaction.js";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
@@ -240,6 +241,7 @@ export function activityRoutes(db: Db) {
       entityId: req.query.entityId as string | undefined,
       limit: normalizeActivityLimit(Number(req.query.limit)),
       readCondition: await issueReadSqlCondition(db, req.actor),
+      visibleBudgetTaskTreeScopeIds: await visibleBudgetTaskTreeScopeIds(db, companyId, req.actor),
       dashboardUserId: req.actor.type === "board" ? req.actor.userId : null,
       caseReadCondition: await caseActivityReadSqlCondition(db, req.actor),
     };

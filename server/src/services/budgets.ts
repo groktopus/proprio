@@ -8,7 +8,7 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, or, isNull, lte, exists, ne, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 
 import {
@@ -60,6 +60,11 @@ type ScopeRecord = {
 
 type PolicyRow = typeof budgetPolicies.$inferSelect;
 type IncidentRow = typeof budgetIncidents.$inferSelect;
+type BudgetOverviewReadOptions = {
+  approvalReadCondition?: SQL<boolean>;
+  visibleTaskTreeScopeIds?: readonly string[];
+};
+
 type InternalBudgetScopeType = BudgetScopeType | "task_tree";
 
 export type BudgetEnforcementScope = {
@@ -499,11 +504,13 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     return policy;
   }
 
-  async function listPolicyRows(companyId: string) {
+  async function listPolicyRows(companyId: string, visibleTaskTreeScopeIds?: readonly string[]) {
     return db
       .select()
       .from(budgetPolicies)
-      .where(eq(budgetPolicies.companyId, companyId))
+      .where(and(eq(budgetPolicies.companyId, companyId), visibleTaskTreeScopeIds === undefined ? undefined
+        : or(ne(budgetPolicies.scopeType, "task_tree"), visibleTaskTreeScopeIds.length
+          ? inArray(budgetPolicies.scopeId, [...visibleTaskTreeScopeIds]) : sql`false`)))
       .orderBy(desc(budgetPolicies.updatedAt));
   }
 
@@ -702,7 +709,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     });
   }
 
-  async function listOpenIncidents(companyId: string, options: { approvalReadCondition?: SQL<boolean> } = {}): Promise<BudgetIncident[]> {
+  async function listOpenIncidents(companyId: string, options: BudgetOverviewReadOptions = {}): Promise<BudgetIncident[]> {
     const readableApproval = options.approvalReadCondition
       ? exists(db.select({ id: approvals.id }).from(approvals).where(and(
         eq(approvals.id, budgetIncidents.approvalId),
@@ -716,6 +723,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         eq(budgetIncidents.companyId, companyId),
         eq(budgetIncidents.status, "open"),
         readableApproval ? or(isNull(budgetIncidents.approvalId), readableApproval) : undefined,
+        options.visibleTaskTreeScopeIds === undefined ? undefined : or(ne(budgetIncidents.scopeType, "task_tree"),
+          options.visibleTaskTreeScopeIds.length ? inArray(budgetIncidents.scopeId, [...options.visibleTaskTreeScopeIds]) : sql`false`),
       ))
       .orderBy(desc(budgetIncidents.createdAt)));
   }
@@ -827,6 +836,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
             action: "budget.soft_threshold_crossed",
             entityType: "budget_incident",
             entityId: softIncident.incident.id,
+            ...(policy.scopeType === "task_tree" ? { issueId: policy.scopeId } : {}),
             details: {
               scopeType: policy.scopeType,
               scopeId: policy.scopeId,
@@ -849,6 +859,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
             action: "budget.hard_threshold_crossed",
             entityType: "budget_incident",
             entityId: hardIncident.incident.id,
+            ...(policy.scopeType === "task_tree" ? { issueId: policy.scopeId } : {}),
             details: {
               scopeType: policy.scopeType,
               scopeId: policy.scopeId,
@@ -908,8 +919,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
 
   return {
     reconcileScope,
-    listPolicies: async (companyId: string): Promise<BudgetPolicy[]> => {
-      const rows = await listPolicyRows(companyId);
+    listPolicies: async (companyId: string, visibleTaskTreeScopeIds?: readonly string[]): Promise<BudgetPolicy[]> => {
+      const rows = await listPolicyRows(companyId, visibleTaskTreeScopeIds);
       return rows.map((row) => ({
         ...row,
         scopeType: row.scopeType as BudgetScopeType,
@@ -1051,6 +1062,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         action: "budget.policy_upserted",
         entityType: "budget_policy",
         entityId: row.id,
+        ...(row.scopeType === "task_tree" ? { issueId: row.scopeId } : {}),
         details: {
           scopeType: row.scopeType,
           scopeId: row.scopeId,
@@ -1065,8 +1077,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     /** The `activeIncidents` of `overview`, without the spend of every policy. */
     openIncidents: listOpenIncidents,
 
-    overview: async (companyId: string, options: { approvalReadCondition?: SQL<boolean> } = {}): Promise<BudgetOverview> => {
-      const rows = await listPolicyRows(companyId);
+    overview: async (companyId: string, options: BudgetOverviewReadOptions = {}): Promise<BudgetOverview> => {
+      const rows = await listPolicyRows(companyId, options.visibleTaskTreeScopeIds);
       const policies = await mapBudgetReads(rows, buildPolicySummary);
       const activeIncidents = await listOpenIncidents(companyId, options);
       return {
@@ -1176,6 +1188,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           action: "budget.cancelled_work_resume_requested",
           entityType: "budget_incident",
           entityId: incident.id,
+          ...(policy.scopeType === "task_tree" ? { issueId: policy.scopeId } : {}),
           details: { scopeType: policy.scopeType, scopeId: policy.scopeId, runCount: claimedRunIds.length,
             sampleRunIds: claimedRunIds.slice(0, 20) },
         });
@@ -1208,6 +1221,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         action: "budget.incident_resolved",
         entityType: "budget_incident",
         entityId: incident.id,
+        ...(incident.scopeType === "task_tree" ? { issueId: incident.scopeId } : {}),
         details: {
           action: input.action,
           amount: input.amount ?? null,
@@ -1463,12 +1477,12 @@ export function budgetService(db: Db, _hooks: BudgetServiceHooks = {}) {
       return result;
     });
   return {
-    listPolicies: (companyId: string) => withAccountingReadSnapshot(db, companyId,
-      tx => budgetServiceInTransaction(tx).listPolicies(companyId)),
-    overview: (companyId: string) => withAccountingReadSnapshot(db, companyId,
-      tx => budgetServiceInTransaction(tx).overview(companyId)),
-    openIncidents: (companyId: string) => withAccountingReadSnapshot(db, companyId,
-      tx => budgetServiceInTransaction(tx).openIncidents(companyId)),
+    listPolicies: (companyId: string, visibleTaskTreeScopeIds?: readonly string[]) => withAccountingReadSnapshot(db, companyId,
+      tx => budgetServiceInTransaction(tx).listPolicies(companyId, visibleTaskTreeScopeIds)),
+    overview: (companyId: string, options: BudgetOverviewReadOptions = {}) => withAccountingReadSnapshot(db, companyId,
+      tx => budgetServiceInTransaction(tx).overview(companyId, options)),
+    openIncidents: (companyId: string, options: BudgetOverviewReadOptions = {}) => withAccountingReadSnapshot(db, companyId,
+      tx => budgetServiceInTransaction(tx).openIncidents(companyId, options)),
     evaluateAdmission: (companyId: string, agentId: string | null, context?: AdmissionContext) =>
       withAccountingReadSnapshot(db, companyId, tx => budgetServiceInTransaction(tx).evaluateAdmission(companyId, agentId, context)),
     evaluateAffectedScopes: (companyId: string, agentId: string | null, projectId: string | null) =>
@@ -1476,6 +1490,11 @@ export function budgetService(db: Db, _hooks: BudgetServiceHooks = {}) {
     reconcileScope: (companyId: string, scopeType: BudgetScopeType, scopeId: string) =>
       mutate(companyId, service => service.reconcileScope(companyId, scopeType, scopeId), { scopeType, scopeId }),
     reconcilePolicies: () => reconcileDueBudgetPolicies(db, { startup: true }),
+    getIncidentScope: async (companyId: string, incidentId: string) => {
+      const [scope] = await db.select({ scopeType: budgetIncidents.scopeType, scopeId: budgetIncidents.scopeId })
+        .from(budgetIncidents).where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.id, incidentId))).limit(1);
+      return scope ?? null;
+    },
     upsertPolicy: (companyId: string, input: BudgetPolicyUpsertInput, actorUserId: string | null) =>
       mutate(companyId, service => service.upsertPolicy(companyId, input, actorUserId), input),
     evaluateCostEvent: (event: typeof costEvents.$inferSelect) => withOperationAccountingTransaction(db, event.companyId, tx => queueBudgetEvaluation(tx, { companyId: event.companyId, agentId: event.agentId, projectId: event.projectId })),

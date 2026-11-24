@@ -1,6 +1,7 @@
 import { dashboardActivityCondition, dashboardAuditConversationCondition } from "./responsibility-privacy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { skillAccessService } from "./skill-access.js";
+import { readableTaskTreeBudgetActivityCondition } from "./budget-scope-visibility.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
 import { acceptedFirstTurnCommentIdsSql } from "./queued-comment-delivery.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -37,6 +38,7 @@ export interface ActivityFilters {
   entityId?: string;
   limit?: number;
   readCondition?: SQL<boolean>;
+  visibleBudgetTaskTreeScopeIds?: readonly string[];
   caseReadCondition?: SQL<boolean>;
   dashboardUserId?: string | null;
 }
@@ -447,6 +449,8 @@ export function activityService(db: Db) {
         .where(
           and(
             ...conditions,
+            filters.visibleBudgetTaskTreeScopeIds === undefined ? undefined
+              : readableTaskTreeBudgetActivityCondition(filters.visibleBudgetTaskTreeScopeIds),
             or(
               sql`${activityLog.entityType} != 'issue'`,
               and(visibleIssueCondition(), filters.readCondition ?? sql<boolean>`true`),
