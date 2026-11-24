@@ -9,7 +9,7 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 On November 24, 2026, all 44 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `a817cd45746a1a4fa399b381234ebbcc9ee8e2ca`. The pull
+rehearsal revision is `b089265c8dc80fcdf179b4e12b4a78c42ebc1dfc`. The pull
 requests record the exact heads and test scope for the individual results
 below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
@@ -48,11 +48,22 @@ below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
   synthetic external effect and verified the hold and effect count again
   after restart and the retry delay.
   [Mixed handoff #319](https://github.com/groktopus/proprio/pull/319) · [Restart #323](https://github.com/groktopus/proprio/pull/323) · [Authority #332](https://github.com/groktopus/proprio/pull/332) · [Uncertain effect #341](https://github.com/groktopus/proprio/pull/341)
-- **Context compaction.** The explicit paired Codex case is discoverable.
-  Deterministic fixtures check retention, dropped requirements, superseded
-  instructions, and premature action. The provider-backed Codex pair remains
-  pending separate authorization and a configured credential. ACPX Claude
-  requires its own qualification.
+- **Context compaction.** A local Codex subscription trial on `gpuslut01`
+  used `gpt-6.1-sol` and completed seven runs on `36aaa376`. Both lanes
+  retained the persistent requirement, applied the revised format, omitted
+  the obsolete instruction, and wrote the receipt after the prerequisite
+  answer. Treatment recorded one Codex compaction notification and control
+  recorded none. The earlier grader could not establish the required session
+  and manual-request attribution. The launcher withheld compressed reports
+  because the host lacked `unzip`.
+  [Trial revision](https://github.com/groktopus/proprio/commit/36aaa376d6bf8b5cb16a289424fbd92123fcd653)
+- The corrected fixture binds the compaction notification to the admitted
+  manual request and the same session and Runner. It supports both durable
+  free-text question forms. All 128 focused tests and the Runner E2E project
+  typecheck passed on `b7701ed2`. A fresh run reached the control turns but
+  the launcher exited after reporting stalled Runner event writes, with no
+  paired verdict. The Codex qualification gate remains open. ACPX Claude
+  requires its own trial.
   [Codex experiment #321](https://github.com/groktopus/proprio/pull/321)
 
 The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
