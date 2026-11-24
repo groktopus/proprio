@@ -52,3 +52,24 @@ an inferred zero.
 The native-runtime owner reviews this report at each release qualification.
 The review cadence is one report per release, with follow-up when p95 or the
 no-visible-activity count regresses.
+
+## Credential-free contract fixture
+
+`tests/restart-chaos/ttft-baseline-stats.test.ts` also drives the real
+`createNativeRunTrace` writer with a deterministic process-adapter fixture.
+It emits an accepted-input (`comment.to_run_created`) span, queue wait, turn
+submission, first visible activity, and first text, then feeds the committed
+run-log events through the reporter. Run it with the focused Vitest command:
+
+```sh
+pnpm exec vitest run tests/restart-chaos/ttft-baseline-stats.test.ts
+```
+
+This proves the event boundaries and queue arithmetic without provider
+credentials. Its fixed durations are synthetic contract evidence, not
+provider or deployment latency. A release comparison still requires the same
+fixture/test overlay applied to the exact v0.0.3 commit
+`4e3525fd8381bc813f1fd9e54b8753e6bd6cd49e` and to the candidate SHA, or a
+credentialed native run. The existing credentials-free Linux source
+qualification wake does not create an accepted-input span and therefore cannot
+serve as this latency measurement.
