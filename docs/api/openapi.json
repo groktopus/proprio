@@ -136874,6 +136874,233 @@
         }
       }
     },
+    "/api/cases/{caseId}/handoffs/{handoffId}/decision": {
+      "post": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "Record a recipient decision on a versioned handoff offer",
+        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "caseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "handoffId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "accepted"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "clarification"
+                        ]
+                      },
+                      "reasonCode": {
+                        "type": "string",
+                        "enum": [
+                          "missing_prerequisite",
+                          "unclear_requirements",
+                          "missing_evidence",
+                          "other"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome",
+                      "reasonCode",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "declined"
+                        ]
+                      },
+                      "reasonCode": {
+                        "type": "string",
+                        "enum": [
+                          "unavailable",
+                          "missing_capability",
+                          "outside_scope",
+                          "other"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome",
+                      "reasonCode",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
     "/api/cases/{caseId}/handoffs/{handoffId}/retry": {
       "post": {
         "tags": [
