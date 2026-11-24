@@ -464,7 +464,11 @@ export function KanbanBoard({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [movementAnnouncement, setMovementAnnouncement] = useState("");
   const moveButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const [focusIssueId, setFocusIssueId] = useState<string | null>(null);
+  const [focusIntent, setFocusIntent] = useState<{
+    issueId: string;
+    targetStatus: IssueStatus;
+    initiator: HTMLElement | null;
+  } | null>(null);
   const [keyboardMove, setKeyboardMove] = useState<{ issueId: string; targetIndex: number } | null>(null);
   const pendingAnnouncement = useRef<{ issueId: string; targetStatus: IssueStatus; title: string } | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
@@ -475,6 +479,15 @@ export function KanbanBoard({
   }>({ paginationKey, counts: {} });
   const visibleCountByStatus = visibleState.paginationKey === paginationKey ? visibleState.counts : {};
   const collapsedStatusSet = useMemo(() => new Set(collapsedStatuses), [collapsedStatuses]);
+
+  function requestFocusRestore(issueId: string, targetStatus: IssueStatus) {
+    const active = document.activeElement;
+    setFocusIntent({
+      issueId,
+      targetStatus,
+      initiator: active instanceof HTMLElement ? active : null,
+    });
+  }
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -525,39 +538,35 @@ export function KanbanBoard({
     if (targetStatus && targetStatus !== issue.status) {
       pendingAnnouncement.current = { issueId, targetStatus, title: issue.title };
       onUpdateIssue(issueId, { status: targetStatus });
-      setFocusIssueId(issueId);
+      requestFocusRestore(issueId, targetStatus);
     }
   }
 
   useEffect(() => {
-    if (!focusIssueId) return;
-    const issueId = focusIssueId;
-    let frame = 0;
-    let attempts = 0;
-    const restore = () => {
+    if (!focusIntent) return;
+    const { issueId, targetStatus, initiator } = focusIntent;
+    const issue = issues.find((candidate) => candidate.id === issueId);
+    if (issue && (issue.displayStatus ?? issue.status) !== targetStatus) return;
+    const active = document.activeElement;
+    if (active !== initiator && active !== document.body && active !== boardRef.current) {
+      setFocusIntent(null);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
       const mover = moveButtonRefs.current[issueId];
-      if (mover) {
-        mover.focus();
-        setFocusIssueId((current) => current === issueId ? null : current);
-        return;
-      }
-      if (attempts++ < 30) {
-        frame = requestAnimationFrame(restore);
-      } else {
-        boardRef.current?.focus();
-        setFocusIssueId((current) => current === issueId ? null : current);
-      }
-    };
-    frame = requestAnimationFrame(restore);
+      if (mover) mover.focus();
+      else boardRef.current?.focus();
+      setFocusIntent((current) => current?.issueId === issueId ? null : current);
+    });
     return () => cancelAnimationFrame(frame);
-  }, [focusIssueId, issues]);
+  }, [focusIntent, issues]);
 
   function handleStatusChange(id: string, status: IssueStatus) {
     const issue = issues.find((candidate) => candidate.id === id);
     if (!issue || issue.status === status) return;
     pendingAnnouncement.current = { issueId: id, targetStatus: status, title: issue.title };
     onUpdateIssue(id, { status });
-    setFocusIssueId(id);
+    requestFocusRestore(id, status);
   }
 
   function handleKeyboardMove(event: React.KeyboardEvent<HTMLButtonElement>, issue: Issue) {
@@ -590,7 +599,6 @@ export function KanbanBoard({
     setKeyboardMove(null);
     if (targetStatus && targetStatus !== issue.status) {
       handleStatusChange(issue.id, targetStatus);
-      setFocusIssueId(issue.id);
     }
   }
 
