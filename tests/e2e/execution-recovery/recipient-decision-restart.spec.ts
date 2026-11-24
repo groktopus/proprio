@@ -7,13 +7,13 @@ import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { and, eq } from "../../../server/node_modules/drizzle-orm/index.js";
 import { expect, test } from "@playwright/test";
-import { agentApiKeys, agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
+import { agentApiKeys, agents, caseAccessSources, caseEvents, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
 import { caseHandoffService } from "../../../server/src/services/case-handoffs.ts";
 
 const outcomes = [
-  { outcome: "accepted", state: "awaiting_release" },
-  { outcome: "clarification", reasonCode: "missing_prerequisite", state: "cancelled" },
-  { outcome: "declined", reasonCode: "missing_capability", state: "cancelled" },
+  { outcome: "accepted" },
+  { outcome: "clarification", reasonCode: "missing_prerequisite" },
+  { outcome: "declined", reasonCode: "missing_capability" },
 ] as const;
 
 test("recipient decisions survive a controller restart with their Case audit history", async ({ request }) => {
@@ -107,7 +107,7 @@ test("recipient decisions survive a controller restart with their Case audit his
     await db.insert(agentApiKeys).values({ companyId: company.id, agentId: recipient.id, name: "Restart fixture decision key",
       keyHash: createHash("sha256").update(recipientToken).digest("hex"), responsibleUserId: responsibleMembership!.principalId });
 
-    const seeded: { caseId: string; taskId: string; handoffId: string; runId: string; outcome: string; reasonCode?: string }[] = [];
+    const seeded: { caseId: string; taskId: string; handoffId: string; runId: string; requirementRevisionId: string; outcome: string; reasonCode?: string }[] = [];
     for (const [index, decision] of outcomes.entries()) {
       const caseId = randomUUID(), taskId = randomUUID(), runId = randomUUID();
       const requirementId = randomUUID();
@@ -133,19 +133,23 @@ test("recipient decisions survive a controller restart with their Case audit his
         expectedIssueStatusVersion: 1, toAgentId: recipient.id, phase: "implementation", instructions: "Review the stated requirements.",
         offer: { expectedDeliverable: "A verified result", prerequisites: ["Read the task brief"] } });
       expect(offer.state).toBe("offered");
-      seeded.push({ caseId, taskId, handoffId: offer.handoffId, runId, outcome: decision.outcome,
+      seeded.push({ caseId, taskId, handoffId: offer.handoffId, runId, requirementRevisionId: contract!.id, outcome: decision.outcome,
         ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}) });
     }
 
+    const recorded = new Map<string, unknown>();
     for (const entry of seeded) {
       const response = await request.post(`${base}/api/cases/${entry.caseId}/handoffs/${entry.handoffId}/decision`, {
         headers: { authorization: `Bearer ${recipientToken}` },
         data: { outcome: entry.outcome, ...(entry.reasonCode ? { reasonCode: entry.reasonCode, message: `Recorded ${entry.reasonCode}` } : {}),
-          expectedHandoffVersion: 2, requirementRevisionId: (await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, entry.handoffId)))[0]!.offerContract!.requirementRevision.id },
+          expectedHandoffVersion: 2, requirementRevisionId: entry.requirementRevisionId },
       });
       const responseBody = await response.json();
       expect(response.ok(), `${entry.outcome}: ${response.status()} ${JSON.stringify(responseBody)}`).toBe(true);
-      expect(responseBody.recipientDecision).toMatchObject({ outcome: entry.outcome, actorId: recipient.id, handoffVersion: 2 });
+      expect(responseBody.recipientDecision).toMatchObject({ outcome: entry.outcome, actorType: "agent", actorId: recipient.id,
+        handoffVersion: 2, requirementRevisionId: entry.requirementRevisionId, decidedAt: expect.any(String),
+        ...(entry.reasonCode ? { reasonCode: entry.reasonCode } : {}) });
+      recorded.set(entry.handoffId, responseBody.recipientDecision);
     }
 
     const stopTime = new Date().toISOString();
@@ -157,10 +161,8 @@ test("recipient decisions survive a controller restart with their Case audit his
       const history = await api(`/cases/${entry.caseId}/handoffs?limit=5`);
       const items = Array.isArray(history) ? history : history.items ?? history.handoffs;
       const handoff = items.find((item: { id: string }) => item.id === entry.handoffId);
-      expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2, recipientDecision: {
-        outcome: entry.outcome, actorType: "agent", actorId: recipient.id, handoffVersion: 2,
-        ...(entry.reasonCode ? { reasonCode: entry.reasonCode } : {}),
-      } });
+      expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2 });
+      expect(handoff.recipientDecision).toEqual(recorded.get(entry.handoffId));
       const events = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, entry.caseId), eq(caseEvents.kind, "handoff_decision_recorded")));
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ actorType: "agent", actorAgentId: recipient.id, payload: { handoffId: entry.handoffId,
