@@ -63,6 +63,7 @@ import {
   type CompiledPolicySelector,
   type PolicySelectorIndex,
 } from "./tool-access/policy-selector-index.js";
+import { isRecord } from "./tool-access/records.js";
 
 class RejectedInvocationAdmission extends Error {
   constructor(readonly decision: ToolAccessDecision) {
@@ -132,10 +133,6 @@ const SENSITIVE_KEY_RE =
   /(^|[_-])(api[_-]?key|authorization|bearer|client[_-]?secret|cookie|credential|jwt|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|token)($|[_-])/i;
 const SECRET_VALUE_RE = /\b(sk-[a-z0-9_-]{12,}|ghp_[a-z0-9_]{12,}|xox[baprs]-[a-z0-9-]{12,}|bearer\s+[a-z0-9._-]{12,})\b/i;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
 function nonBlankString(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -165,6 +162,30 @@ export type ToolAccessDecisionCache = Map<string, Promise<unknown>>;
 
 export function createToolAccessDecisionCache(): ToolAccessDecisionCache {
   return new Map();
+}
+
+/** Add roles to snapshots only when a delegated call is being recorded. */
+export function mergeDelegatedPolicyEvaluations(input: {
+  chosen: ToolAccessDecision;
+  caller: ToolAccessDecision | null;
+  target: ToolAccessDecision;
+  selectedRole: "caller" | "target";
+}): ToolAccessDecision {
+  const evaluations = [
+    ...(input.caller ? [{ role: "caller" as const, decision: input.caller }] : []),
+    { role: "target" as const, decision: input.target },
+  ];
+  const snapshots = evaluations.flatMap(({ role, decision }) => {
+    const values = decision.policyExplanation?.explicitMatchedPolicies;
+    if (!Array.isArray(values)) return [];
+    return values.filter(isRecord).map(value => ({ ...value, principalRole: role,
+      selected: role === input.selectedRole }));
+  });
+  if (!snapshots.length) return input.chosen;
+  return { ...input.chosen, policyExplanation: {
+    ...input.chosen.policyExplanation,
+    explicitMatchedPolicies: snapshots,
+  } };
 }
 
 function cachedRead<T>(
@@ -220,6 +241,12 @@ function isoDateOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function policyExplanationForAudit(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const { explicitMatchedPolicies: _evaluationSnapshots, ...publicExplanation } = value;
+  return publicExplanation;
 }
 
 function policyConfig(policy: typeof toolPolicies.$inferSelect): TrustRuleConfig {
@@ -338,27 +365,33 @@ function auditOutcome(accessDecision: ToolAccessDecision): "pending" | "success"
 function policyEvaluationSnapshot(
   policy: typeof toolPolicies.$inferSelect,
   decisionReason: string,
+  signingSecret: string,
 ) {
   const revisionUpdatedAt = policy.updatedAt.toISOString();
+  const config = policyConfig(policy);
+  const trustRule = policy.policyType === "trust_rule" && isRecord(config.trustRule)
+    ? Object.fromEntries(Object.entries(config.trustRule).filter(([key]) => key !== "hitCount" && key !== "lastHitAt"))
+    : config.trustRule;
   const revision = stableStringify({
     policyId: policy.id,
-    revisionUpdatedAt,
     policyType: policy.policyType,
     priority: policy.priority,
     enabled: policy.enabled,
     selectors: policy.selectors,
     conditions: policy.conditions,
-    config: policy.config,
+    config: policy.policyType === "trust_rule" ? { ...config, trustRule } : policy.config,
   });
   return {
     policyId: policy.id,
     policyType: policy.policyType,
     priority: policy.priority,
     revisionUpdatedAt,
-    revisionFingerprint: createHmac("sha256", resolveDecisionSigningSecret())
+    revisionFingerprint: createHmac("sha256", signingSecret)
       .update("tool-policy-revision-v1:").update(revision).digest("hex"),
     decisionReason,
     evaluatedAt: new Date().toISOString(),
+    principalRole: "actor" as const,
+    selected: false,
   };
 }
 
@@ -1454,7 +1487,8 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     };
     await db
       .update(toolPolicies)
-      .set({ config: { ...config, trustRule: nextRule }, updatedAt: now })
+      // Usage counters are operational bookkeeping, not a policy revision.
+      .set({ config: { ...config, trustRule: nextRule } })
       .where(eq(toolPolicies.id, policy.id));
     await db.insert(toolAccessAuditEvents).values({
       companyId: ctx.companyId,
@@ -1609,18 +1643,21 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
    */
   async function decide(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision } = {},
+    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision; capturePolicyProvenance?: boolean } = {},
   ): Promise<ToolAccessDecision> {
     const consumedRateAdmissions: ConsumedRateAdmission[] = [];
     const result = await decideInternal(input, options, consumedRateAdmissions);
-    return consumedRateAdmissions.length ? { ...result,
-      policyExplanation: { ...result.policyExplanation, consumedRateAdmissions },
+    const withProvenance = options.capturePolicyProvenance === true ? { ...result,
+      policyExplanation: { ...result.policyExplanation, explicitMatchedPolicies: result.policyExplanation?.explicitMatchedPolicies ?? [] },
     } : result;
+    return consumedRateAdmissions.length ? { ...withProvenance,
+      policyExplanation: { ...withProvenance.policyExplanation, consumedRateAdmissions },
+    } : withProvenance;
   }
 
   async function decideInternal(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision },
+    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision; capturePolicyProvenance?: boolean },
     consumedRateAdmissions: ConsumedRateAdmission[],
   ): Promise<ToolAccessDecision> {
     // A decision that consumes a rate limit can also record a trust-rule hit
@@ -1664,16 +1701,22 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       extra: Partial<ToolAccessDecision> = {},
     ) => {
       const decisiveIds = new Set(matchedPolicyIds);
-      const explicitMatchedPolicies = ("unsupportedConditions" in policyMatch ? [policyMatch.unsupportedConditions] : policyMatch.matching)
-        .filter(({ policy }) => decisiveIds.has(policy.id) || ratePoliciesEvaluated.has(policy.id))
-        .map(({ policy }) => policyEvaluationSnapshot(policy,
-          decisiveIds.has(policy.id) ? reasonCode : "rate_limit_enforced"));
+      const policiesForSnapshot = options.capturePolicyProvenance === true
+        ? ("unsupportedConditions" in policyMatch ? [policyMatch.unsupportedConditions] : policyMatch.matching)
+          .filter(({ policy }) => decisiveIds.has(policy.id) || ratePoliciesEvaluated.has(policy.id))
+        : null;
+      const policyProvenanceSecret = policiesForSnapshot?.length ? resolveDecisionSigningSecret() : null;
+      const explicitMatchedPolicies = policiesForSnapshot?.map(({ policy }) => ({
+        ...policyEvaluationSnapshot(policy,
+          decisiveIds.has(policy.id) ? reasonCode : "rate_limit_enforced", policyProvenanceSecret!),
+        selected: decisiveIds.has(policy.id),
+      })) ?? null;
       return decision(kind, reasonCode, explanation, effectiveProfileIds, matchedPolicyIds, {
         ...extra,
-        policyExplanation: {
+        ...(explicitMatchedPolicies ? { policyExplanation: {
           ...(isRecord(extra.policyExplanation) ? extra.policyExplanation : {}),
           explicitMatchedPolicies,
-        },
+        } } : {}),
       });
     };
     if ("unsupportedConditions" in policyMatch) {
@@ -1863,7 +1906,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           riskLevel: ctx.riskLevel,
           argumentsSummary: redaction.summary,
           redactionPlan: redaction.redactionPlan,
-          policyExplanation: accessDecision.policyExplanation ?? null,
+          policyExplanation: policyExplanationForAudit(accessDecision.policyExplanation),
           rateLimitState: accessDecision.rateLimitState ?? null,
         },
       }).returning();
@@ -1892,7 +1935,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           legacyAuditEventId: legacyAuditEvent.id,
           effectiveProfileIds: accessDecision.effectiveProfileIds,
           explanation: accessDecision.explanation,
-          policyExplanation: accessDecision.policyExplanation ?? null,
+          policyExplanation: policyExplanationForAudit(accessDecision.policyExplanation),
           providerType: ctx.providerType,
           applicationKey: ctx.applicationKey,
           upstreamToolName: ctx.upstreamToolName,

@@ -257,6 +257,7 @@ import {
 } from "./remote-url-credentials.js";
 import {
   createToolAccessDecisionCache,
+  mergeDelegatedPolicyEvaluations,
   runContextSnapshotString,
   toolAccessPolicyService,
   type ToolAccessDecisionCache,
@@ -1534,12 +1535,11 @@ export function createToolGatewayService(
     const chosen = !issuer.allowed && issuer.decision !== "require_approval" ? issuer
       : !target.allowed ? target : issuer.decision === "require_approval" ? issuer : target;
     if (input.consumeRateLimit) await policy.writeAudit(issuerInput, issuer);
-    return { ...chosen, matchedPolicyIds: [...new Set([...issuer.matchedPolicyIds, ...target.matchedPolicyIds])], policyExplanation: {
-      ...chosen.policyExplanation,
-      explicitMatchedPolicies: [
-        ...(Array.isArray(issuer.policyExplanation?.explicitMatchedPolicies) ? issuer.policyExplanation.explicitMatchedPolicies : []),
-        ...(Array.isArray(target.policyExplanation?.explicitMatchedPolicies) ? target.policyExplanation.explicitMatchedPolicies : []),
-      ],
+    const selectedRole = !issuer.allowed && issuer.decision !== "require_approval" ? "caller"
+      : !target.allowed ? "target" : issuer.decision === "require_approval" ? "caller" : "target";
+    const merged = mergeDelegatedPolicyEvaluations({ chosen, caller: issuer, target, selectedRole });
+    return { ...merged, matchedPolicyIds: [...new Set([...issuer.matchedPolicyIds, ...target.matchedPolicyIds])], policyExplanation: {
+      ...merged.policyExplanation,
       consumedRateAdmissions: target.policyExplanation?.consumedRateAdmissions,
       delegatedCallerConsumedRateAdmissions: issuer.policyExplanation?.consumedRateAdmissions,
       delegatedGatewayIssuer: issuerId,
@@ -10316,12 +10316,8 @@ export function createToolGatewayService(
           const chosen = caller && !caller.allowed && caller.decision !== "require_approval" ? caller
             : !target.allowed ? target : caller?.decision === "require_approval" ? caller : target;
           if (callerInput && caller) await policy.writeAudit(callerInput, caller);
-          return { ...chosen, matchedPolicyIds: [...new Set([...(caller?.matchedPolicyIds ?? []), ...target.matchedPolicyIds])], policyExplanation: {
+          return { ...chosen, policyExplanation: {
             ...chosen.policyExplanation,
-            explicitMatchedPolicies: [
-              ...(Array.isArray(caller?.policyExplanation?.explicitMatchedPolicies) ? caller.policyExplanation.explicitMatchedPolicies : []),
-              ...(Array.isArray(target.policyExplanation?.explicitMatchedPolicies) ? target.policyExplanation.explicitMatchedPolicies : []),
-            ],
             consumedRateAdmissions: target.policyExplanation?.consumedRateAdmissions,
             delegatedCallerConsumedRateAdmissions: caller?.policyExplanation?.consumedRateAdmissions,
           } };
@@ -12304,19 +12300,19 @@ export function createToolGatewayService(
       await assertDelegatedTestCredentialAccess(session, tool);
       const callerSession = delegatedTestCallerSession(session);
       const callerDecisionInput = callerSession ? policyInputForTool({ session: callerSession, tool, parameters: requestedParameters, consumeRateLimit: true }) : null;
-      const callerDecision = callerDecisionInput ? await policyService.decide(callerDecisionInput) : null;
-      const targetDecision = await policyService.decide(decisionInput, { sharedRateDecision: callerDecision ?? undefined });
+      const callerDecision = callerDecisionInput ? await policyService.decide(callerDecisionInput, { capturePolicyProvenance: true }) : null;
+      const targetDecision = await policyService.decide(decisionInput, { sharedRateDecision: callerDecision ?? undefined, capturePolicyProvenance: true });
       // Both principals' action controls apply. Either denial wins; either
       // Ask first decision creates the ordinary human approval request.
       const chosenDecision = callerDecision && !callerDecision.allowed && callerDecision.decision !== "require_approval" ? callerDecision
         : !targetDecision.allowed ? targetDecision
           : callerDecision?.decision === "require_approval" ? callerDecision : targetDecision;
-      const accessDecision = { ...chosenDecision, matchedPolicyIds: [...new Set([...(callerDecision?.matchedPolicyIds ?? []), ...targetDecision.matchedPolicyIds])], policyExplanation: {
-        ...chosenDecision.policyExplanation,
-        explicitMatchedPolicies: [
-          ...(Array.isArray(callerDecision?.policyExplanation?.explicitMatchedPolicies) ? callerDecision.policyExplanation.explicitMatchedPolicies : []),
-          ...(Array.isArray(targetDecision.policyExplanation?.explicitMatchedPolicies) ? targetDecision.policyExplanation.explicitMatchedPolicies : []),
-        ],
+      const selectedRole = callerDecision && !callerDecision.allowed && callerDecision.decision !== "require_approval" ? "caller"
+        : !targetDecision.allowed ? "target" : callerDecision?.decision === "require_approval" ? "caller" : "target";
+      const mergedDecision = mergeDelegatedPolicyEvaluations({ chosen: chosenDecision, caller: callerDecision,
+        target: targetDecision, selectedRole });
+      const accessDecision = { ...mergedDecision, matchedPolicyIds: [...new Set([...(callerDecision?.matchedPolicyIds ?? []), ...targetDecision.matchedPolicyIds])], policyExplanation: {
+        ...mergedDecision.policyExplanation,
         consumedRateAdmissions: targetDecision.policyExplanation?.consumedRateAdmissions,
         delegatedCallerConsumedRateAdmissions: callerDecision?.policyExplanation?.consumedRateAdmissions,
       } };
@@ -13732,7 +13728,7 @@ export function createToolGatewayService(
           idempotencyKey: input.idempotencyKey,
           consumeRateLimit: true,
         });
-        let accessDecision = await policyService.decide(decisionInput);
+        let accessDecision = await policyService.decide(decisionInput, { capturePolicyProvenance: true });
         if (accessDecision.allowed && tool.providerType === "proprio_slack_chat" && SLACK_TOOLS.some(t => t.name === tool.upstreamToolName && t.risk === "approval")) {
           accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions, channel creation and invitations require approval." };
         }
@@ -14307,7 +14303,7 @@ export function createToolGatewayService(
         parameters: requestedParameters,
         consumeRateLimit: true,
       });
-      const accessDecision = await policyService.decide(decisionInput);
+      const accessDecision = await policyService.decide(decisionInput, { capturePolicyProvenance: true });
       const recorded = await recordToolInvocation(
         decisionInput,
         accessDecision,
