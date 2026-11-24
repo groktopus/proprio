@@ -14,7 +14,7 @@ The referenced work was open on November 24, 2026. Check each merge and its exac
 
 ## Evidence and qualification still required
 
-Focused Node 24 tests used isolated PostgreSQL. The reconstruction test exercised the authenticated controller with a process adapter and synthetic MCP target. The export and dispatch tests also passed with the two audit branches combined locally. Repeat the applicable checks through the same entry points on the integrated candidate. Record commands, revision, environment, results and links. Required candidate CI typecheck, tests and build must pass. Record the evidence separately for each runner, connector and recovery mode covered by the release. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
+Focused Node 24 tests used isolated PostgreSQL. The reconstruction test exercised the authenticated controller with a process adapter and synthetic MCP target. The reconstruction, checkpointed export, older restore, and direct and approved dispatch tests passed with the audit and provenance changes combined locally. The fixture observed one approved effect, zero denied effects, and an interrupted response with an effect visible in the synthetic target ledger. Repeat the applicable checks through the same entry points on the integrated candidate. Record commands, revision, environment, results and links. Required candidate CI typecheck, tests and build must pass. Record the evidence separately for each runner, connector and recovery mode covered by the release. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
 
 The release decision depends on the following checks.
 
@@ -35,7 +35,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 
 ## Related public PRs
 
-- Governance evidence and commentary defaults. [#351](https://github.com/groktopus/proprio/pull/351) [#352](https://github.com/groktopus/proprio/pull/352)
+- Governance evidence and commentary defaults. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352)
 - Older restore deletion reconciliation. [#361](https://github.com/groktopus/proprio/pull/361)
 - Audit delivery design, capture, export and restore. [#353](https://github.com/groktopus/proprio/pull/353) [#359](https://github.com/groktopus/proprio/pull/359) [#360](https://github.com/groktopus/proprio/pull/360) [#362](https://github.com/groktopus/proprio/pull/362) [#366](https://github.com/groktopus/proprio/pull/366) [#369](https://github.com/groktopus/proprio/pull/369) [#370](https://github.com/groktopus/proprio/pull/370)
 - Run visibility and historical provenance. [#354](https://github.com/groktopus/proprio/pull/354) [#358](https://github.com/groktopus/proprio/pull/358) [#363](https://github.com/groktopus/proprio/pull/363)
