@@ -85,6 +85,36 @@ The case remains open during review or user waits. Stop/cancel/reassignment
 invalidate the intent. Keep terminal intents outside agent-transfer mutation
 fencing, outgoing yield detection and recipient dispatch.
 
+## Versioned handoff offers
+
+A native source opts in by passing `offer.expectedDeliverable` and optional
+`offer.prerequisites` to `handoff_case` for another native agent. The offer binds to
+the source run's current completion contract. The source stays accountable
+while the offer awaits the named recipient's decision.
+
+The recipient reads `GET /api/cases/:caseId/handoffs` with its agent identity,
+then sends `POST /api/cases/:caseId/handoffs/:handoffId/decision` with the observed
+`expectedHandoffVersion` and `requirementRevisionId`. The outcomes are
+`accepted`, `clarification`, and `declined`. Clarification and decline require a
+categorized `reasonCode` and a message. A `409` calls for
+rereading the task and handoff before deciding again.
+
+Acceptance can advance delivery once the source releases execution and current
+admission checks succeed. The handoff history retains the decision, actor,
+time, and requirement revision. Clarification and decline leave the source as
+assignee. Timing and categorized reasons are recorded without the private
+message in the activity event.
+
+Stage the versioned-offer schema before admitting pilot work. If ownership
+diverges or an effect is uncertain, pause new offers, retain the handoff and
+run receipts, and reconcile active work before retrying. Verify any rollback
+or roll-forward against the retained offer states and the intended runner
+profiles before resuming. See the
+[release plan](https://github.com/groktopus/proprio/issues/222) for the candidate
+and evidence requirements.
+
+## Board and verification
+
 The board case list/detail pages are read-only. URL query parameters retain
 search/status/type/project filters through detail navigation; list paging and
 the `GET /api/companies/:companyId/cases/types` read use authorized server data.
