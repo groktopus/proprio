@@ -1,0 +1,161 @@
+name: Linux image release
+run-name: Linux image ${{ github.sha }} (${{ inputs.release_tag || 'candidate' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published tag of the form linux-0.0.x (omit to qualify a candidate only)
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-image-release-${{ inputs.release_tag || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/groktopus/proprio
+
+jobs:
+  build:
+    name: Build and sign one Linux image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Require the authorized repository and main revision
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$GITHUB_REPOSITORY" = groktopus/proprio
+          test "$GITHUB_REF" = refs/heads/main
+          [[ -z "$RELEASE_TAG" || "$RELEASE_TAG" =~ ^linux-0\.0\.[1-9][0-9]*$ ]]
+      - name: Check out exact main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Make room for the build on the GitHub-hosted runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Sign in to GitHub Container Registry
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build the production target and record its digest
+        id: build
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node --test scripts/ci/promote-linux-image.test.mjs
+          node scripts/check-self-hosted-image-pins.mjs
+          candidate="$IMAGE:candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$RUNNER_TEMP/image-evidence"
+          docker buildx build --platform linux/amd64 --target production --push \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --provenance=mode=max --tag "$candidate" \
+            --metadata-file "$RUNNER_TEMP/image-evidence/build.json" .
+          digest="$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/image-evidence/build.json")"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Generate the SBOM from the candidate digest
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          output-file: ${{ runner.temp }}/image-evidence/sbom.spdx.json
+          format: spdx-json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Sign build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Sign the image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/image-evidence/sbom.spdx.json
+          push-to-registry: true
+      - name: Retain build and SBOM records
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-image-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  qualify:
+    name: Qualify the candidate digest in Compose
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    outputs:
+      digest: ${{ steps.smoke.outputs.digest }}
+    steps:
+      - name: Check out the tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install and smoke test the candidate by digest
+        id: smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          reference="$IMAGE@$CANDIDATE_DIGEST"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          verify_args=(--repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/linux-image-release.yml" \
+            --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners)
+          gh attestation verify "oci://$reference" "${verify_args[@]}"
+          gh attestation verify "oci://$reference" "${verify_args[@]}" --predicate-type https://spdx.dev/Document
+          docker pull --platform linux/amd64 "$reference"
+          test "$(docker image inspect "$reference" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          docker run --rm --entrypoint npm "$reference" ls --global --depth=0 --json | node scripts/check-self-hosted-image-pins.mjs --installed
+          scripts/compose-state-smoke.sh "$reference"
+          printf 'digest=%s\n' "$CANDIDATE_DIGEST" >> "$GITHUB_OUTPUT"
+          printf 'Compose state smoke passed on Linux amd64 for `%s` from `%s`.\n' "$reference" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Promote the qualified digest without rebuilding
+    if: inputs.release_tag != ''
+    needs: [build, qualify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    steps:
+      - name: Check out the promotion guard
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Promote only the matching signed digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT_DIGEST: ${{ needs.build.outputs.digest }}
+          QUALIFIED_DIGEST: ${{ needs.qualify.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          scripts/ci/promote-linux-image.sh "$GITHUB_SHA" "$BUILT_DIGEST" "$QUALIFIED_DIGEST" "$RELEASE_TAG" | tee -a "$GITHUB_STEP_SUMMARY"

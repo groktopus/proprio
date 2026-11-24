@@ -82,6 +82,10 @@ jobs:
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+      - name: Check self-hosted Docker image pins
+        run: |
+          node --test scripts/check-self-hosted-image-pins.test.mjs
+          node scripts/check-self-hosted-image-pins.mjs
       - name: Lint server, UI, and CLI source
         run: pnpm lint
       - name: Check authorization, audit access, and credential lifecycle

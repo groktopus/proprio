@@ -18,15 +18,10 @@ Build arguments:
 |-----|---------|---------|
 | `USER_UID` | `1000` | UID for the container `node` user (match your host UID to avoid permission issues on bind mounts) |
 | `USER_GID` | `1000` | GID for the container `node` group |
-| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh the CLI-install layer; CI supplies the current ISO week |
+| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh OS package and transitive npm resolution |
 | `PROPRIO_BUILD_VERSION` | empty | Runtime version when Git metadata is unavailable |
 | `PROPRIO_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
 | `PROPRIO_RUNNER_EXPECT_INPUTS_DIGEST` | empty | Inputs digest of the published Runner image a build was given as `runner-artifacts`; the build fails on any other Runner. Leave it empty for a build that makes its own Runner |
-
-Changing the build version or commit preserves the CLI-install cache. The
-tool layer refreshes when its weekly epoch, base image, installation command,
-or earlier build inputs change. Local builds can set a new epoch explicitly
-to refresh tools without clearing the entire build cache.
 
 ```sh
 docker build --target production -t proprio-local \
@@ -41,10 +36,35 @@ This avoids transpiling them through the tsx loader on every boot. To check a
 build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
 PR CI runs the same check after `pnpm build`.
 
+### Refresh pinned image inputs
+
+The production build pins the external Node image indexes by digest and the
+five top-level harness CLIs by exact npm version. The full-stack Compose file
+also pins PostgreSQL. For the Linux amd64 profile, record the resolved platform
+manifest with `docker buildx imagetools inspect --raw` and retain it with the
+build evidence. The index digest fixes its platform manifests.
+
+To refresh the pins, resolve the new image index and CLI versions, update
+`Dockerfile` and the full-stack Compose file in a PR, and run:
+
+```sh
+node scripts/check-self-hosted-image-pins.mjs
+docker build --pull --no-cache --platform linux/amd64 --target production -t proprio-local .
+docker run --rm --entrypoint npm proprio-local ls --global --depth=0 --json \
+  | node scripts/check-self-hosted-image-pins.mjs --installed
+```
+
+Run both Compose readiness and state retention checks before qualifying the
+new build. The checks cover base-image identity and exact top-level harness
+versions. OS packages and npm transitive dependencies can still change on a
+clean rebuild. Promote by tested artifact digest when distributing an image.
+The CLI layer can be refreshed with `CLI_TOOLS_CACHE_EPOCH`.
+
 ## Image source
 
-Proprio does not publish or promote images for this bootstrap. Build from this
-checkout, and do not substitute a container image from a different project.
+For a published Linux amd64 image, use its release record and follow the
+[digest verification and installation instructions](LINUX-IMAGE-RELEASE.md#verify-and-install).
+For a source checkout, build its `production` target above.
 
 ## Docker Compose
 
@@ -131,6 +151,164 @@ authenticated access enabled and restrict access at the network or proxy.
 
 PostgreSQL stays on the Compose network. See [Local PostgreSQL](DATABASE.md#2-local-postgresql-docker)
 to opt in to a loopback-only port for development tools.
+
+### Back up and restore Compose data
+
+Keep the exact source SHA or image digest, project name, Compose files and
+overrides, and a protected copy of `docker/.env` with each backup. Retain
+the local secrets master key in `/proprio`, or save the external key using
+your deployment's secret store. Back up any workspace bind mounts, object
+storage, or other external artifact directories separately. The commands
+below cover the default storage layout.
+
+Run from the repository root. Use the same Compose project name and overrides
+you used when launching. For each backup of either layout, create a private
+directory outside the checkout and application volumes. The commands publish
+the recovery set as `backup` after all archive commands succeed.
+
+```bash
+umask 077
+backup_root="$(mktemp -d)" && backup_dir="$backup_root/backup"
+```
+
+#### Embedded PostgreSQL quickstart
+
+Stop Proprio before copying embedded PostgreSQL files. The archive includes
+the database, instance configuration, local keys, storage, and workspaces
+under the bind mount.
+
+```bash
+(
+  set -euo pipefail
+  quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
+  staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${quick[@]}" stop proprio
+  "${quick[@]}" run --rm --no-deps -T --entrypoint tar proprio \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
+```
+
+Keep the archive off the host. After a routine backup, restart the same
+project with `up -d --wait`. For a pre-upgrade backup, keep the app and
+other writers stopped until the upgrade step below.
+
+To restore, use a clean checkout of the recorded revision and copy
+`compose.env` from the backup to a private `docker/restore.env`. Set
+`PROPRIO_DATA_DIR` to a new, empty path, `PROPRIO_PORT` to a free port, and
+`PROPRIO_PUBLIC_URL` to a matching URL if it was set explicitly. Use a new
+Compose project, for example `proprio-restore`. Build the image if needed.
+
+Before the first rehearsal boot, use a disposable host or enforce an
+outbound firewall policy for the restore network. Block access to production
+integrations and agent runtimes. Mount only copies of external workspaces,
+artifact storage, and other shared data. Save the following override as
+`docker/restore-only.yml`, using `server` in place of `proprio` for the full
+stack. This disables scheduled heartbeats during the rehearsal. Keep the
+external isolation in place because startup still performs recovery.
+
+```yaml
+services:
+  proprio:
+    environment:
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
+```
+
+```bash
+(
+  set -euo pipefail
+  quick_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml)
+  "${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${quick_restore[@]}" up -d --wait
+)
+```
+
+#### Separate PostgreSQL full stack
+
+Stop the app and any other database writers. Leave PostgreSQL running and
+use its native logical backup, then save the Proprio volume separately.
+Do not copy a live PostgreSQL data directory.
+
+```bash
+(
+  set -euo pipefail
+  full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
+  staged="$backup_dir.partial"
+  test ! -e "$backup_dir"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${full[@]}" stop server
+  "${full[@]}" exec -T db sh -ec 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    > "$staged/postgres.dump"
+  "${full[@]}" exec -T db pg_restore --list < "$staged/postgres.dump" >/dev/null
+  "${full[@]}" run --rm --no-deps -T --entrypoint tar server \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
+```
+
+Use the same restart guidance as for the embedded layout. Restore with a
+fresh Compose project and fresh named volumes on the recorded version.
+Use the restored environment, outbound isolation, and `server` override
+described above. Keep the signing values and master key from the backup.
+
+```bash
+(
+  set -euo pipefail
+  full_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.yml -f docker/restore-only.yml)
+  "${full_restore[@]}" up -d --wait db
+  "${full_restore[@]}" exec -T db sh -ec '
+    pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$backup_dir/postgres.dump"
+  "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${full_restore[@]}" up -d --wait
+)
+```
+
+If a restore fails, use a fresh target for the next attempt. After either
+restore succeeds, check `/api/health` for `"status":"ok"`, sign in, and
+verify a known board record and any required files. Rehearse in isolation
+before pointing production traffic at the restored deployment. Linux
+host-loss recovery is tracked separately in
+[#134](https://github.com/groktopus/proprio/issues/134).
+
+### Upgrade the Compose application
+
+1. Record the running revision or digest and back up the topology using the
+   commands above. Keep the original keys, configuration, and backup. Keep
+   production traffic and other writers off the instance until the candidate
+   is verified.
+2. Check out the selected candidate. Use the same Compose project name, data
+   path or volumes, and signing values. Review its release notes for database
+   and credential changes.
+3. Run the normal `up --build -d --wait` command against the candidate.
+   Check readiness, sign in, and verify a known board record and file.
+4. If the new revision fails after a database migration, follow the release's
+   recovery path. Restore into a fresh project on the known-good revision
+   unless the documented change supports a payload rollback on the new
+   schema. Never use `down --volumes` on an existing installation to upgrade.
+
+Run `scripts/compose-state-smoke.sh` on a disposable Docker host to rehearse
+application recreation and fresh restore for both default topologies. The
+script creates isolated projects, signs in through the normal board API,
+and runs a synthetic local agent. It checks the same company, successful
+run, and single persisted receipt after recreation and restore. It reports
+the PostgreSQL versions on both sides and the dump and restore client
+versions for the full stack.
+Pass a locally available image or immutable image reference as its argument
+to check that image without rebuilding. The smoke uses synthetic credentials
+and requires Docker Compose, Bash, Python 3, OpenSSL, curl, and jq.
 
 ### Untrusted PR review
 
