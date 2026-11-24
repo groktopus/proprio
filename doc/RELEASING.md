@@ -21,7 +21,8 @@ docs-only diff.
 Review the [release checklist](RELEASE-CHECKLIST.md) with the CI and Linux
 deployment owners. Record the exact candidate and predecessor SHAs, passing
 run and artifact links, verified architecture and database topology, and
-known gaps in the qualification record. For upgrade qualification, record the
+known gaps in `releases/v0.0.x-qualification.md`. Link the record from the
+[release index](../releases/README.md). For upgrade qualification, record the
 retained-record and rollback results, recovery time, and observed data loss.
 Identify which results use synthetic tasks and which cover provider-backed runs.
 

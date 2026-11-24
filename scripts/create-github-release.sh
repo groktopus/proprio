@@ -125,6 +125,9 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files="$untracked_
   release_fail "The release checkout must be clean before generating the feature catalog."
 fi
 
+catalog_dir="$(mktemp -d)"
+trap 'rm -rf "$catalog_dir"' EXIT
+
 remote_tag_commit() {
   local tag_ref="refs/tags/$1"
   local refs
@@ -144,7 +147,9 @@ if [ "$source_prerelease" = true ]; then
   canonical_remote "$(git -C "$REPO_ROOT" remote get-url --all "$PUBLISH_REMOTE")" &&
     canonical_remote "$(git -C "$REPO_ROOT" remote get-url --push --all "$PUBLISH_REMOTE")" ||
     release_fail "Source prereleases require canonical groktopus/proprio fetch and push destinations."
-  grep -q '[^[:space:]]' "$notes_file" || release_fail "Source release notes must contain operator guidance."
+  source_notes="$catalog_dir/release-notes.md"
+  cp -- "$notes_file" "$source_notes" || release_fail "Cannot copy the source release notes."
+  grep -q '[^[:space:]]' "$source_notes" || release_fail "Source release notes must contain operator guidance."
   main_ref="$(git -C "$REPO_ROOT" ls-remote --exit-code "$PUBLISH_REMOTE" refs/heads/main)"
   main_sha="${main_ref%%$'\t'*}"
   if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$head_commit" "$main_sha"; then
@@ -184,8 +189,6 @@ if [ "$source_prerelease" = true ]; then
     release_fail "Source release is blocked until the exact candidate passes Linux qualification."
 fi
 
-catalog_dir="$(mktemp -d)"
-trap 'rm -rf "$catalog_dir"' EXIT
 catalog_file="$catalog_dir/feature-catalog.json"
 node "$REPO_ROOT/cli/node_modules/tsx/dist/cli.mjs" \
   "$REPO_ROOT/scripts/generate-feature-catalog.ts" \
@@ -209,14 +212,14 @@ if [ "$source_prerelease" = true ]; then
 
   case "$release_state" in
     create)
-      gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$notes_file"
+      gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$source_notes"
       ;;
     "finish draft")
       gh release upload "$tag" "$catalog_file" -R "$GITHUB_REPO" --clobber
       safe_draft="$(gh release view "$tag" -R "$GITHUB_REPO" --json isDraft,assets \
         --jq '.isDraft and ([.assets[].name] == ["feature-catalog.json"])')"
       [ "$safe_draft" = true ] || release_fail "The draft contains an unverified asset or changed during upload."
-      gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$notes_file"
+      gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$source_notes"
       ;;
     "leave published release unchanged")
       printf 'Source prerelease %s is already published at %s.\n' "$tag" "$tag_commit"
