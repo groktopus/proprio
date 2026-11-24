@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
 import { and, eq } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, authUsers, companyMemberships, companies, createDb, issueRelations, issues,
+import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, issueRelations, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { afterEach, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -143,7 +143,6 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       controller = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
       const prefix = `D${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`;
       await db.insert(companies).values({ id: companyId, name: "Full controller diagnosis", issuePrefix: prefix, requireBoardApprovalForNewAgents: false });
-      await db.insert(authUsers).values({ id: "local-board", name: "Local board", email: `${companyId}@example.invalid`, createdAt: new Date(), updatedAt: new Date() });
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", membershipRole: "owner" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Process fixture", role: "engineer", status: "idle",
         lifecycleState: "ready", adapterType: "process", adapterConfig: { command: process.execPath,
