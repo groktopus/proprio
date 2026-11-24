@@ -21,8 +21,8 @@ export function ProprioLockup({
       aria-label={decorative ? undefined : title}
       focusable="false"
     >
-      <rect width="24" height="24" y="2" rx="5" fill="#093a34" />
-      <path transform="translate(0 2)" d="M7 19V5h6a4.5 4.5 0 0 1 0 9H7m10 4h.01" fill="none" stroke="#e7faf4" strokeLinecap="round" strokeWidth="2.25" />
+      <rect width="24" height="24" y="2" rx="5" fill="var(--proprio-mark-background)" />
+      <path transform="translate(0 2)" d="M7 19V5h6a4.5 4.5 0 0 1 0 9H7m10 4h.01" fill="none" stroke="var(--proprio-mark-foreground)" strokeLinecap="round" strokeWidth="2.25" />
       <text x="32" y="20" fill="currentColor" fontFamily="system-ui,sans-serif" fontSize="18" fontWeight="700">Proprio</text>
     </svg>
   );
@@ -44,8 +44,8 @@ export function ProprioMark({
       aria-label={decorative ? undefined : title}
       focusable="false"
     >
-      <rect width="24" height="24" rx="5" fill="#093a34" />
-      <path d="M7 19V5h6a4.5 4.5 0 0 1 0 9H7m10 4h.01" fill="none" stroke="#e7faf4" strokeLinecap="round" strokeWidth="2.25" />
+      <rect width="24" height="24" rx="5" fill="var(--proprio-mark-background)" />
+      <path d="M7 19V5h6a4.5 4.5 0 0 1 0 9H7m10 4h.01" fill="none" stroke="var(--proprio-mark-foreground)" strokeLinecap="round" strokeWidth="2.25" />
     </svg>
   );
 }
