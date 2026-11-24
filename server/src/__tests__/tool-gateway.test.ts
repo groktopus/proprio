@@ -49,6 +49,7 @@ import {
   toolProfiles,
   toolStdioCommandTemplates,
   toolRuntimeSlots,
+  toolRuntimeMetricCounters,
   secretAccessEvents,
   userSecretDeclarations,
   userSecretDefinitions,
@@ -615,8 +616,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
   it("records managed dispatch intent before direct MCP send and terminal receipt with the result", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
-    const run = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
-      invocationSource: "assignment", status: "running", contextSnapshot: {} }).returning().then(rows => rows[0]!);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
     let intentWasVisibleAtSend = false;
     const remote = await startFakeRemoteMcpServer(({ body }) => {
       const args = body?.params && typeof body.params === "object"
@@ -642,7 +642,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         }
         return fetch(url, init);
       } });
-      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
       const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
         connectionId: connection.id, toolName: catalogEntry.toolName });
       const input = { sessionToken: session.token, tool, parameters: { key: "audit-private-key", value: "audit-private-value" },
@@ -653,15 +653,18 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id));
       expect(events).toHaveLength(3);
       const invocation = events.find(event => event.phase === "policy_decision")!;
-      expect(invocation).toMatchObject({ runId: run.id, taskId: null,
+      expect(invocation).toMatchObject({ runId: run.id, taskId: issue.id,
         connectionId: connection.id, actorType: "agent", phase: "policy_decision" });
       expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
         eventType: "provider_dispatch_intended", status: "dispatch_intended", decision: "allow",
-        runId: run.id, taskId: null, invocationId: invocation.invocationId, connectionId: connection.id,
+        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
       });
+      const intent = events.find(event => event.phase === "dispatch_intent")!;
+      const providerRequest = remote.requests.find(request => request.body?.method === "tools/call")!;
+      expect(intent.providerRequestId).toBe(String(providerRequest.body?.id));
       expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
         eventType: "gateway_terminal_outcome_recorded", status: "succeeded", reasonCode: "tool_completed",
-        runId: run.id, taskId: null, invocationId: invocation.invocationId, connectionId: connection.id,
+        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
       });
       expect(JSON.stringify(events)).not.toContain("audit-private-key");
       expect(JSON.stringify(events)).not.toContain("audit-private-value");
@@ -687,7 +690,21 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         expect(await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguous.id), eq(managedAuditEvents.phase, "terminal_outcome"),
         ))).toHaveLength(0);
+        expect(await db.select().from(toolCallEvents).where(and(
+          eq(toolCallEvents.invocationId, ambiguous.id), eq(toolCallEvents.eventType, "call_completed"),
+        ))).toHaveLength(0);
+        expect((await db.select().from(toolRuntimeMetricCounters).where(and(
+          eq(toolRuntimeMetricCounters.companyId, company.id), eq(toolRuntimeMetricCounters.metric, "audit_write_failed"),
+        ))).reduce((sum, row) => sum + row.count, 0)).toBeGreaterThan(0);
         await expect(gateway.executeTool(ambiguousInput)).rejects.toMatchObject({
+          status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+        });
+        const replacementRun = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+          invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning().then(rows => rows[0]!);
+        const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: replacementRun.id, issueId: issue.id });
+        await expect(gateway.executeTool({ ...ambiguousInput, sessionToken: replacementSession.token,
+          idempotencyKey: "managed-mcp-audit-ambiguous-different-key" })).rejects.toMatchObject({
           status: 409, reasonCode: "managed_dispatch_outcome_unknown",
         });
         expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);

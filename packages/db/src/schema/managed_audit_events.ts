@@ -14,6 +14,10 @@ export const managedAuditEvents = pgTable("managed_audit_events", {
   taskId: uuid("task_id"),
   invocationId: uuid("invocation_id").notNull(),
   requestId: uuid("request_id"),
+  /** Hash of company/actor/destination/canonical arguments; used only to fence unresolved writes. */
+  operationFingerprint: text("operation_fingerprint"),
+  /** JSON-RPC id sent with tools/call, distinct from the approval request id above. */
+  providerRequestId: text("provider_request_id"),
   connectionId: uuid("connection_id"),
   actorType: text("actor_type").notNull(),
   actorId: text("actor_id").notNull(),
