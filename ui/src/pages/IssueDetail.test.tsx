@@ -2425,25 +2425,14 @@ describe("IssueDetail", () => {
     const activity = createDeferred<unknown[]>();
     const runs = createDeferred<unknown[]>();
     const cost = createDeferred<unknown>();
-    queryClient.setQueryData(["issues", "history-expanded", "PAP-1"], false);
+    mockLocation.hash = "#continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
     mockIssuesApi.get.mockResolvedValue(createIssue());
     mockActivityApi.forIssue.mockReturnValue(activity.promise);
     mockActivityApi.runsForIssue.mockReturnValue(runs.promise);
     mockIssuesApi.getCostSummary.mockReturnValue(cost.promise);
 
     await act(async () => renderIssueView());
-    await waitForAssertion(() => expect(mockIssueChatThreadRender).toHaveBeenCalled());
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('button[aria-label="More task actions"]')!.click();
-    });
-    await waitForAssertion(() => {
-      expect(Array.from(document.body.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Show task activity")).toBe(true);
-    });
-    await act(async () => {
-      Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
-        .find((button) => button.textContent?.trim() === "Show task activity")!
-        .click();
-    });
     await waitForAssertion(() => {
       expect(mockActivityApi.forIssue).toHaveBeenCalledWith("PAP-1");
       expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("PAP-1");
