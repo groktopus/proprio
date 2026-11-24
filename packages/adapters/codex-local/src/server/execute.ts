@@ -55,6 +55,7 @@ import {
   isProprioSkillSourceMissing,
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
+  removeUnselectedProprioSkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectInitialCommunicationGuidance,
@@ -248,6 +249,7 @@ async function isLikelyProprioRuntimeSkillPath(
 
 async function pruneBrokenUnavailableProprioSkillSymlinks(
   skillsHome: string,
+  availableEntries: Array<{ key: string; runtimeName: string; source: string }>,
   allowedSkillNames: Iterable<string>,
   onLog: AdapterExecutionContext["onLog"],
 ) {
@@ -262,12 +264,12 @@ async function pruneBrokenUnavailableProprioSkillSymlinks(
     if (!linkedPath) continue;
 
     const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-    if (await pathExists(resolvedLinkedPath)) continue;
-    if (
-      !(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
-        requireSkillMarkdown: false,
-      }))
-    ) {
+    const knownProprioSource = availableEntries.some(candidate => candidate.runtimeName === entry.name
+      && path.resolve(candidate.source) === resolvedLinkedPath);
+    const likelyProprioSource = await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
+      requireSkillMarkdown: false,
+    });
+    if (!knownProprioSource && !likelyProprioSource) {
       continue;
     }
 
@@ -286,6 +288,7 @@ function resolveCodexSkillsDir(codexHome: string): string {
 type EnsureCodexSkillsInjectedOptions = {
   skillsHome?: string;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
+  managedSkillEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: string[];
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
@@ -524,8 +527,7 @@ export async function ensureCodexSkillsInjected(
     options.desiredSkillNames ?? allSkillsEntries.map((entry) => entry.key);
   const desiredSet = new Set(desiredSkillNames);
   const skillsEntries = allSkillsEntries.filter((entry) => desiredSet.has(entry.key));
-  if (skillsEntries.length === 0) return;
-
+  const managedSkillEntries = options.managedSkillEntries ?? allSkillsEntries;
   const skillsHome = options.skillsHome ?? resolveCodexSkillsDir(resolveSharedCodexHomeDir());
   await fs.mkdir(skillsHome, { recursive: true });
   const linkSkill = options.linkSkill;
@@ -573,8 +575,14 @@ export async function ensureCodexSkillsInjected(
     }
   }
 
+  await removeUnselectedProprioSkillSymlinks(
+    skillsHome,
+    managedSkillEntries,
+    skillsEntries.map(entry => entry.runtimeName),
+  );
   await pruneBrokenUnavailableProprioSkillSymlinks(
     skillsHome,
+    allSkillsEntries,
     skillsEntries.map((entry) => entry.runtimeName),
     onLog,
   );
@@ -859,6 +867,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       {
         skillsHome: codexSkillsDir,
         skillsEntries: codexSkillEntries,
+        managedSkillEntries: [
+          ...codexSkillEntries,
+          ...(await readProprioRuntimeSkillEntries({}, __moduleDir)),
+        ],
         desiredSkillNames,
       },
     );
