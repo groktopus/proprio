@@ -1,27 +1,14 @@
-import { Link } from "@/lib/router";
 import type { InboxTab } from "@/lib/inbox";
+import { RouteTabBar } from "./RouteTabBar";
 
 const views = [
-  { value: "mine", label: "Mine" },
-  { value: "recent", label: "Recent" },
-  { value: "unread", label: "Unread" },
-  { value: "blocked", label: "Blocked" },
-  { value: "all", label: "All" },
-] as const;
+  { href: "/inbox/mine", label: "Mine" },
+  { href: "/inbox/recent", label: "Recent" },
+  { href: "/inbox/unread", label: "Unread" },
+  { href: "/inbox/blocked", label: "Blocked" },
+  { href: "/inbox/all", label: "All" },
+];
 
 export function InboxViewNavigation({ current }: { current: InboxTab }) {
-  return (
-    <nav aria-label="Inbox views" data-canonical-tabs="standard" className="canonical-tab-list">
-      {views.map(({ value, label }) => (
-        <Link
-          key={value}
-          to={`/inbox/${value}`}
-          aria-current={current === value ? "page" : undefined}
-          className="canonical-tab no-underline"
-        >
-          {label}
-        </Link>
-      ))}
-    </nav>
-  );
+  return <RouteTabBar label="Inbox views" current={`/inbox/${current}`} items={views} />;
 }

@@ -96,7 +96,7 @@ import {
 } from "./KanbanBoard";
 import { buildIssueTree, countDescendants } from "../lib/issue-tree";
 import { getInboxKeyboardSelectionIndex } from "../lib/inbox";
-import { hasBlockingShortcutDialog, isKeyboardShortcutTextInputTarget } from "../lib/keyboardShortcuts";
+import { hasBlockingShortcutDialog, isKeyboardShortcutActivationTarget, isKeyboardShortcutTextInputTarget } from "../lib/keyboardShortcuts";
 import { buildSubIssueDefaultsForViewer } from "../lib/subIssueDefaults";
 import { statusBadge } from "../lib/status-colors";
 import { isSuccessfulRunHandoffRequired } from "../lib/successful-run-handoff";
@@ -1615,6 +1615,7 @@ function StreamlinedIssuesList({
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           const entry = st.flatNavEntries[currentIndex];
           if (!entry || entry.type !== "issue") return;
           e.preventDefault();

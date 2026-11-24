@@ -61,6 +61,7 @@ import {
 import { prefetchIssueDetailForNavigation } from "../lib/issueDetailCache";
 import {
   hasBlockingShortcutDialog,
+  isKeyboardShortcutActivationTarget,
   isKeyboardShortcutTextInputTarget,
   resolveInboxUndoArchiveKeyAction,
   shouldBlurPageSearchOnEnter,
@@ -809,7 +810,7 @@ function InboxCollectionToolbar({
   if (streamlined) {
     return (
       <CollectionToolbar
-        className={cn("inbox-collection-toolbar", ariaLabel === "Tasks controls" && "mobile-task-toolbar")}
+        className={ariaLabel === "Tasks controls" ? "mobile-task-toolbar" : undefined}
         ariaLabel={ariaLabel}
         context={context}
         search={search}
@@ -2598,6 +2599,7 @@ function StreamlinedInbox({
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           if (effectiveIndex < 0 || effectiveIndex >= navCount) return;
           e.preventDefault();
           const { issue, item } = resolveNavEntry(effectiveIndex);

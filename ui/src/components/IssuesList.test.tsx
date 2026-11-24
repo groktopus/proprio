@@ -651,8 +651,15 @@ describe("IssuesList", () => {
         expect(disclosure()?.getAttribute("aria-label")).toBe("Collapse sub-tasks");
         expect(disclosure()?.getAttribute("aria-expanded")).toBe("true");
       });
+      const selectRow = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+      await act(() => { document.body.dispatchEvent(selectRow); });
+      expect(selectRow.defaultPrevented).toBe(true);
       disclosure()?.focus();
       expect(document.activeElement).toBe(disclosure());
+      const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      await act(() => { disclosure()?.dispatchEvent(enter); });
+      expect(enter.defaultPrevented).toBe(false);
+      // jsdom does not synthesize a button click from the Enter key.
       await act(() => disclosure()?.click());
       expect(disclosure()?.getAttribute("aria-label")).toBe("Expand sub-tasks");
       expect(disclosure()?.getAttribute("aria-expanded")).toBe("false");

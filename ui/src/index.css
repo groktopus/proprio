@@ -4980,9 +4980,6 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   flex-wrap: wrap;
   gap: var(--collection-toolbar-gap);
 }
-[data-canonical-toolbar].inbox-collection-toolbar {
-  --collection-toolbar-control-text: var(--foreground);
-}
 [data-canonical-toolbar] :is(button:not([data-toolbar-clear], .canonical-tab), a[data-slot="button"], select, [data-toolbar-control]) {
   height: var(--collection-toolbar-height);
   border: var(--task-row-rule-width) solid var(--collection-toolbar-border);
@@ -4993,7 +4990,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   line-height: var(--design-page-type-leading);
   font-weight: var(--font-weight-normal);
   background: var(--design-page-control-surface);
-  color: var(--collection-toolbar-control-text, var(--muted-foreground));
+  color: var(--foreground);
 }
 [data-canonical-toolbar] button:not([data-toolbar-clear]):is([data-size="icon"], [data-size="icon-sm"], [data-size="icon-xs"], .design-toolbar-icon) {
   width: var(--collection-toolbar-height);
@@ -5108,6 +5105,9 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   outline: var(--focus-ring-stroke-width) solid var(--ring);
   outline-offset: var(--focus-ring-stroke-width);
   box-shadow: var(--focus-ring-shadow);
+}
+[data-canonical-tabs] a.canonical-tab:focus-visible {
+  outline-color: var(--foreground);
 }
 [data-canonical-tabs] .canonical-tab:disabled { opacity: var(--canonical-tab-disabled-opacity); pointer-events: none; }
 [data-canonical-toolbar] .collection-toolbar-tabs select {

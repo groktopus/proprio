@@ -48,6 +48,7 @@ import {
 import { prefetchIssueDetailForNavigation } from "../lib/issueDetailCache";
 import {
   hasBlockingShortcutDialog,
+  isKeyboardShortcutActivationTarget,
   isKeyboardShortcutTextInputTarget,
   resolveInboxUndoArchiveKeyAction,
   shouldBlurPageSearchOnEnter,
@@ -2183,6 +2184,7 @@ export function Inbox() {
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           if (effectiveIndex < 0 || effectiveIndex >= navCount) return;
           e.preventDefault();
           const { issue, item } = resolveNavEntry(effectiveIndex);

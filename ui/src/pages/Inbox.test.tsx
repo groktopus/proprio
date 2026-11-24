@@ -536,8 +536,14 @@ describe("Inbox toolbar", () => {
     expect(views?.querySelector('a[aria-current="page"]')?.textContent).toBe("Mine");
     const unread = views?.querySelector<HTMLAnchorElement>('a[href="/inbox/unread"]');
     expect(unread?.textContent).toBe("Unread");
+    const selectRow = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    await act(() => { document.body.dispatchEvent(selectRow); });
+    expect(selectRow.defaultPrevented).toBe(true);
     unread?.focus();
     expect(document.activeElement).toBe(unread);
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    await act(() => { unread?.dispatchEvent(enter); });
+    expect(enter.defaultPrevented).toBe(false);
     expect(container.querySelector('[data-slot="task-row"]')).toBeNull();
     const issueLink = container.querySelector('[data-inbox-issue-link]');
     // Production reads the legacy Inbox column key and must ignore the
