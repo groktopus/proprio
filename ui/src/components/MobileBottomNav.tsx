@@ -68,7 +68,7 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
         : []),
       { type: "link", to: "/chats", label: "Chat", icon: MessageCircle },
       { type: "link", to: "/issues", label: "Tasks", icon: CircleCheck },
-      { type: "link", to: "/decisions", label: "Inbox", icon: Inbox, badge: attentionCount },
+      { type: "link", to: "/decisions", label: "Needs You", icon: Inbox, badge: attentionCount },
       { type: "action", label: "New task", icon: SquarePen, onClick: () => openNewIssue() },
     ] : !agentChatEnabled && !combinedInboxTasksEnabled ? [
       { type: "link", to: homePath, label: "Home", icon: House },
@@ -133,7 +133,7 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
                 )}
               >
                 <Icon className="h-(--sz-18px) w-(--sz-18px)" />
-                <span className="truncate">{item.label}</span>
+                <span className="truncate text-foreground">{item.label}</span>
               </button>
             );
           }
@@ -163,7 +163,7 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
                       </Badge>
                     )}
                   </span>
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate text-foreground">{item.label}</span>
                 </>
               )}
             </NavLink>

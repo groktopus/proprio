@@ -24,7 +24,7 @@ running the [agent worktree preflight](#agent-worktree-preflight).
 Pull requests targeting `main` run the **Stability smoke** workflow for
 same-repository branches and forks. It installs the frozen workspace dependencies and
 runs onboarding, cost-summary, backup, chat, native replay, and settlement
-regressions. It also typechecks the server and compiles affected packages. The
+regressions. It also typechecks the server and board UI and compiles affected packages. The
 **Droid Auto Review** workflow reviews non-draft pull requests from
 same-repository branches. Neither workflow
 replaces the focused verification below or broader qualification required for
@@ -621,19 +621,12 @@ Accepted visual changes should update the manifest metadata and publish a new
 immutable archive with `pnpm storybook-visual:baseline pack` and
 `pnpm storybook-visual:baseline upload`; do not commit generated PNG snapshots.
 
-Known limitation: Storybook visual baselines are Linux/Ubuntu-only. The manifest
-pins the capture environment to `ubuntu-24.04` and the Playwright suite uses
-pixel-exact comparison, so local runs on macOS, Windows, or other non-matching
-platforms can report false-positive diffs from font rasterization and subpixel
-rendering. Use the `Storybook Visual` GitHub Actions workflow on `ubuntu-latest`
-as the source of truth, or run locally in a matching Linux environment before
-accepting or updating baselines.
-
-PR visual checks are opt-in while the suite stabilizes. Add the
-`storybook-visual` label to a PR, or run the `Storybook Visual` GitHub Actions
-workflow manually, to produce downloadable Playwright report/test-result
-artifacts. Normal PR visual runs use read-only repository permissions and do not
-upload or mutate baseline objects.
+The operator attention fixtures use the pinned Ubuntu 24.04 Chromium
+environment in **Operator attention visual**. Add the
+`operator-attention-visual` label to compare a PR against its retained test
+archive. Use `storybook-baseline-capture` only when an explicit reference
+capture is required. See [the visual test runbook](../tests/storybook-visual/README.md#operator-attention-test-baseline)
+for artifact retention and the local reproduction command.
 
 ## CLI Client Operations
 

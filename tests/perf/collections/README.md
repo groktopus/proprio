@@ -190,3 +190,28 @@ Retain intercepted runs as separate diagnostic evidence.
 Match the server's hashed asset cache policy (`public, max-age=31536000, immutable`);
 Vite preview's default `no-cache` policy adds revalidation that the shipped server
 does not require. Keep HTML uncached and return 404 for missing assets.
+
+## Focused CI suite
+
+The Board performance workflow runs on Ubuntu 24.04 with the Chromium revision
+locked by Playwright. It runs on applicable pull requests and by manual
+dispatch. It boots a disposable loopback instance with embedded PostgreSQL and
+a fresh production UI build. The checks cover project-list and editor-only
+reads from Mine, along with task preloading, first-frame reads, and composer
+and layout stability. The workflow records deterministic checks and timing
+samples in separate result directories. Timing outcomes are diagnostic and
+do not determine the deterministic check.
+
+After a frozen dependency install and installation of Playwright Chromium, run
+this command inside a disposable checkout:
+
+```sh
+pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+scripts/run-board-performance.sh
+```
+
+The command builds the board into `server/ui-dist`. It removes the temporary
+instance after Playwright stops. The JSON report, timing samples, screenshots,
+and failure traces go under `test-results/board-performance`. Set
+`PROPRIO_COLLECTION_PERF_PORT` to use a different loopback port. The CI
+artifact and summary identify the tested revision, fixture, and result counts.

@@ -130,7 +130,7 @@ remote_tag_commit() {
   local refs
   refs="$(git -C "$REPO_ROOT" ls-remote --exit-code --tags "$PUBLISH_REMOTE" "$tag_ref" "$tag_ref^{}")" || return "$?"
   awk -v tag_ref="$tag_ref" -v peeled_ref="$tag_ref^{}" \
-    '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print peeled != "" ? peeled : ref }' \
+    '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print (peeled != "" ? peeled : ref) }' \
     <<<"$refs"
 }
 
