@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { ComponentProps } from "react";
+import { useEffect, useRef } from "react";
 import { Inbox } from "@/pages/Inbox";
+import { useNavigate } from "@/lib/router";
 import { instanceExperimentalSettingsSchema } from "@groktopus/shared";
 import { storybookIssues } from "../../fixtures/proprioData";
 import {
@@ -8,7 +10,20 @@ import {
   type FixtureState,
 } from "../../support/capability-gaps/api";
 function InboxHost(props: NonNullable<ComponentProps<typeof Inbox>>) {
-  return <Inbox {...props} />;
+  const { tab: initialTab = "mine", ...inboxProps } = props;
+  const navigate = useNavigate();
+  const seeded = useRef(false);
+
+  useEffect(() => {
+    if (seeded.current) return;
+    seeded.current = true;
+    navigate(`/inbox/${initialTab}`, { replace: true });
+  }, [initialTab, navigate]);
+
+  // Route changes are the source of truth after the initial story seed. Do not
+  // pass the story arg back as an Inbox override, or links appear to navigate
+  // while the rendered view remains on the original story tab.
+  return <Inbox {...inboxProps} />;
 }
 const meta = {
   id: "feature-inbox-views",
