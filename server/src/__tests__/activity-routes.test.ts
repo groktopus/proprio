@@ -2,6 +2,11 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockVisibleBudgetScopes = vi.hoisted(() => vi.fn());
+vi.mock("../services/budget-scope-visibility.js", () => ({
+  visibleBudgetTaskTreeScopeIds: mockVisibleBudgetScopes,
+}));
+
 const mockActivityService = vi.hoisted(() => ({
   list: vi.fn(),
   forIssue: vi.fn(),
@@ -29,11 +34,6 @@ const mockAccessService = vi.hoisted(() => ({
 
 const mockAgentActionAuditService = vi.hoisted(() => ({
   list: vi.fn(),
-}));
-
-const mockVisibleBudgetScopes = vi.hoisted(() => vi.fn());
-vi.mock("../services/budget-scope-visibility.js", () => ({
-  visibleBudgetTaskTreeScopeIds: mockVisibleBudgetScopes,
 }));
 
 const caseReadCondition = vi.hoisted(() => ({ policy: "authorized-cases" }));
@@ -135,7 +135,6 @@ describe("activity routes", () => {
     mockAccessService.decide.mockReset();
     mockAccessService.canUser.mockReset();
     mockAgentActionAuditService.list.mockReset();
-    mockVisibleBudgetScopes.mockReset().mockResolvedValue([]);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       action: "company_scope:read",
@@ -143,6 +142,7 @@ describe("activity routes", () => {
       explanation: "Allowed by test mock.",
     });
     mockAccessService.canUser.mockResolvedValue(false);
+    mockVisibleBudgetScopes.mockReset().mockResolvedValue([]);
   });
 
   it("lets an agent read activity for an authorized issue", async () => {
