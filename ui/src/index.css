@@ -209,6 +209,8 @@
 }
 
 :root {
+  --proprio-mark-background: #093a34;
+  --proprio-mark-foreground: #e7faf4;
   --breadcrumb-parent-max-width: 40%;
   color-scheme: light;
   --font-paper-mono: "Paper Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
