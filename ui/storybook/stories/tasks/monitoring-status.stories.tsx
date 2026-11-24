@@ -40,9 +40,13 @@ function fixtures(allowTitleUpdate = false) {
   let currentTask = monitored;
   return installFixtureApi([
     ...(allowTitleUpdate ? [{
-      path: `/api/issues/${monitored.id}`,
+      path: /^\/api\/issues\/[^/]+$/,
       method: "PATCH",
-      read: ({ body }: { body: Record<string, unknown> }) => {
+      read: ({ body, url }: { body: Record<string, unknown>; url: URL }) => {
+        const issueRef = url.pathname.split("/").at(-1);
+        if (issueRef !== monitored.id && issueRef !== monitored.identifier) {
+          return Response.json({ error: "Unknown fixture issue" }, { status: 404 });
+        }
         if (typeof body.title === "string") currentTask = { ...currentTask, title: body.title };
         return currentTask;
       },
@@ -65,7 +69,7 @@ function fixtures(allowTitleUpdate = false) {
       countsByType: { issue: 1, artifact: 0, agent: 0, project: 0, comment: 0, document: 0 },
       filterOptionCounts: { status: { in_progress: 1 }, displayStatus: { monitoring: 1 }, priority: {}, assigneeAgentId: {}, assigneeUserId: {}, projectId: {}, labelId: {}, updatedWithin: {} },
       results: [{ id: monitored.id, type: "issue", score: 6000, title: monitored.title, href: `/PAP/issues/${monitored.identifier}`, matchedFields: ["title"], sourceLabel: null, snippet: null, snippets: [], updatedAt: monitored.updatedAt.toISOString(), previewImageUrl: null, issue: { ...monitored, updatedAt: monitored.updatedAt.toISOString() } }] }) },
-    { path: /^\/api\/issues\/[^/]+$/, read: ({ url }) => [currentTask, ...rows.slice(1)].find(row => url.pathname.endsWith(row.id) || url.pathname.endsWith(row.identifier ?? "__none__")) ?? currentTask },
+    { path: /^\/api\/issues\/[^/]+$/, method: "GET", read: ({ url }) => [currentTask, ...rows.slice(1)].find(row => url.pathname.endsWith(row.id) || url.pathname.endsWith(row.identifier ?? "__none__")) ?? currentTask },
     { path: /^\/api\/issues\/[^/]+\/recent-comments$/, read: () => ({ comments: [], hasMore: false, latestCommentId: null }) },
     { path: /^\/api\/issues\/[^/]+\/tree-control\/state$/, read: () => ({ activePauseHold: null }) },
     { path: /^\/api\/issues\/[^/]+\/active-run$/, read: () => null },

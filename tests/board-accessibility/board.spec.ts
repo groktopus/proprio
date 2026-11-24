@@ -90,6 +90,7 @@ test("the saved task title can be edited with a keyboard", async ({ page }) => {
   await expect(editor).toBeFocused();
   await expectAccessible(page, story, "textarea[aria-label='Click to edit...']");
   await page.keyboard.insertText("Verify release recovery");
+  await expect(editor).toHaveValue("Verify release recovery");
   await page.keyboard.press("Enter");
   const saved = page.getByRole("button", { name: "Verify release recovery", exact: true });
   await expect(saved).toBeFocused();
