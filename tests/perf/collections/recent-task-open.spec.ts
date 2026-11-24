@@ -88,6 +88,22 @@ function recordRequests(page: Page) {
   return requests;
 }
 
+async function recordTaskRequestStarts(page: Page) {
+  const session = await page.context().newCDPSession(page);
+  const reads: Array<{ kind: string; startedAt: number }> = [];
+  session.on("Network.requestWillBeSent", ({ request, wallTime }) => {
+    const kind = classifyTaskRead(new URL(request.url));
+    if (kind) reads.push({ kind, startedAt: wallTime * 1000 });
+  });
+  await session.send("Network.enable");
+  return reads;
+}
+
+function firstFrameReads(reads: Array<{ kind: string; startedAt: number }>, frameAt: number) {
+  return reads.filter(({ kind, startedAt }) => startedAt <= frameAt && FIRST_FRAME_READS.has(kind))
+    .map(({ kind }) => kind);
+}
+
 async function loadIdle(page: Page) {
   await page.goto(`/${fixture.company.issuePrefix}/projects`);
   await expect(page.getByRole("link", { name: recents[0]!.title }).first()).toBeVisible();
@@ -95,7 +111,7 @@ async function loadIdle(page: Page) {
   await page.waitForTimeout(IDLE_SETTLE_MS);
 }
 
-/** Click a Recents link and return ms from the click to the latest saved comment being on screen. */
+/** Click a Recents link and measure when the latest saved comment is on screen. */
 async function openRecent(page: Page, task: RecentTask) {
   await page.evaluate((marker) => {
     const state = window as unknown as { __recentOpen?: { clickedAt?: number; shownAt?: number } };
@@ -121,7 +137,7 @@ async function openRecent(page: Page, task: RecentTask) {
   await page.waitForFunction(() => (window as unknown as { __recentOpen?: { shownAt?: number } }).__recentOpen?.shownAt !== undefined);
   return page.evaluate(() => {
     const state = (window as unknown as { __recentOpen: { clickedAt: number; shownAt: number } }).__recentOpen;
-    return state.shownAt - state.clickedAt;
+    return { elapsedMs: state.shownAt - state.clickedAt, frameAt: performance.timeOrigin + state.shownAt };
   });
 }
 
@@ -150,14 +166,14 @@ test("an idle page with Recents makes one chat-bootstrap read and no per-task re
 test("clicking a preloaded recent task shows its chat without first-frame reads", async ({ page, request }) => {
   await seedRecents(page, request);
   await loadIdle(page);
-  const requests = recordRequests(page);
-  const before = requests.length;
-  const task = recents[1]!;
-  await openRecent(page, task);
-  const reads = requests.slice(before).map(classifyTaskRead).filter((kind): kind is string => !!kind);
-  // The full detail read revalidates after the first frame; it is not a gate.
-  test.info().annotations.push({ type: "after-click task reads", description: JSON.stringify(reads) });
-  expect(reads.filter(kind => FIRST_FRAME_READS.has(kind))).toEqual([]);
+  const reads = await recordTaskRequestStarts(page);
+  const { frameAt } = await openRecent(page, recents[1]!);
+  // Polls can start after Chromium displays the chat but before Playwright finishes waiting.
+  test.info().annotations.push({
+    type: "task read start relative to first frame",
+    description: JSON.stringify(reads.map(({ kind, startedAt }) => ({ kind, offsetMs: startedAt - frameAt }))),
+  });
+  expect(firstFrameReads(reads, frameAt)).toEqual([]);
 });
 
 test("a task added after the initial Recents preload opens without first-frame reads", async ({ page, request }) => {
@@ -169,7 +185,7 @@ test("a task added after the initial Recents preload opens without first-frame r
   await expect.poll(() => requests.some(url => url.pathname.endsWith("/issues/chat-bootstrap")
     && url.searchParams.get("ids")?.split(",").includes(added.id))).toBe(true);
   await page.waitForLoadState("networkidle");
-  requests.length = 0;
+  const reads = await recordTaskRequestStarts(page);
   let release!: () => void;
   let holding = true;
   const held = new Promise<void>(resolve => {
@@ -190,8 +206,8 @@ test("a task added after the initial Recents preload opens without first-frame r
     new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
   );
   try {
-    await openRecent(page, added);
-    expect(requests.map(classifyTaskRead).filter(kind => kind && FIRST_FRAME_READS.has(kind))).toEqual([]);
+    const { frameAt } = await openRecent(page, added);
+    expect(firstFrameReads(reads, frameAt)).toEqual([]);
     const editor = page.getByTestId("task-chat-composer-stack").locator('[contenteditable="true"]').first();
     await editor.fill("Keep this draft during background refresh");
     const savedEditor = await editor.elementHandle();
@@ -246,7 +262,7 @@ for (const scenario of ["initial", "added"] as const) for (const apiDelayMs of [
         await cdp.send("Profiler.enable");
         await cdp.send("Profiler.start");
       }
-      timings.push(await openRecent(page, task));
+      timings.push((await openRecent(page, task)).elapsedMs);
       if (profile) {
         const result = await cdp.send("Profiler.stop");
         const file = test.info().outputPath(`cpu-${run}.cpuprofile`);
