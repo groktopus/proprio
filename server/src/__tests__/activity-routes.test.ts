@@ -31,6 +31,11 @@ const mockAgentActionAuditService = vi.hoisted(() => ({
   list: vi.fn(),
 }));
 
+const mockVisibleBudgetScopes = vi.hoisted(() => vi.fn());
+vi.mock("../services/budget-scope-visibility.js", () => ({
+  visibleBudgetTaskTreeScopeIds: mockVisibleBudgetScopes,
+}));
+
 const caseReadCondition = vi.hoisted(() => ({ policy: "authorized-cases" }));
 vi.mock("../services/case-activity-access.js", () => ({
   caseActivityReadSqlCondition: vi.fn(async () => caseReadCondition),
@@ -130,6 +135,7 @@ describe("activity routes", () => {
     mockAccessService.decide.mockReset();
     mockAccessService.canUser.mockReset();
     mockAgentActionAuditService.list.mockReset();
+    mockVisibleBudgetScopes.mockReset().mockResolvedValue([]);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       action: "company_scope:read",
@@ -279,11 +285,15 @@ describe("activity routes", () => {
 
   it("limits company activity lists by default", async () => {
     mockActivityService.list.mockResolvedValue([]);
+    mockVisibleBudgetScopes.mockResolvedValue(["allowed-task-root"]);
 
     const app = await createApp();
     const res = await requestApp(app, (baseUrl) => request(baseUrl).get("/api/companies/company-1/activity"));
 
     expect(res.status).toBe(200);
+    expect(mockVisibleBudgetScopes).toHaveBeenCalledWith(
+      expect.anything(), "company-1", expect.objectContaining({ type: "board", userId: "user-1" }),
+    );
     expect(mockActivityService.list).toHaveBeenCalledWith({
       companyId: "company-1",
       dashboardUserId: "user-1",
@@ -291,6 +301,7 @@ describe("activity routes", () => {
       entityType: undefined,
       entityId: undefined,
       limit: 100,
+      visibleBudgetTaskTreeScopeIds: ["allowed-task-root"],
       readCondition: expect.anything(),
       caseReadCondition,
     });
@@ -312,6 +323,7 @@ describe("activity routes", () => {
       entityType: "issue",
       entityId: undefined,
       limit: 500,
+      visibleBudgetTaskTreeScopeIds: [],
       readCondition: expect.anything(),
       caseReadCondition,
     });
