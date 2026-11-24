@@ -64,3 +64,32 @@ baseline bucket still requires the explicit maintainer upload command below.
 
 Generated snapshots, review bundles, Playwright reports, and downloaded caches
 are ignored by git.
+
+## Operator attention test baseline
+
+The **Operator attention visual** workflow uses a fixture-backed Storybook test
+instance. It takes no production data or credentials. To capture a candidate,
+dispatch the workflow with `capture` enabled or apply the
+`storybook-baseline-capture` label to its pull request. Review the eight
+screenshots and record the exact source commit, run ID, artifact name, SHA-256,
+byte size, and snapshot count in `operator-attention-baseline.json` through a PR.
+The candidate is retained in Actions test artifacts for 90 days. Recapture and
+review the reference before it expires.
+
+Compare using a regular dispatch or the `storybook-visual` PR label. The test
+job downloads the pinned archive, verifies its checksum and count, and compares
+the four fixtures in both themes. The report retains actual, expected, and diff
+screenshots on failure. This path uses Actions test artifacts and does not
+publish to external storage.
+
+For local reproduction on the pinned Linux environment, download the recorded
+artifact and unpack the verified archive from the repository root:
+
+```sh
+export STORYBOOK_VISUAL_BASELINE_MANIFEST=tests/storybook-visual/operator-attention-baseline.json
+pnpm storybook-visual:baseline download --archive ./snapshots.tgz
+pnpm storybook-visual:baseline verify
+pnpm build-storybook
+pnpm exec playwright test operator-attention.spec.ts \
+  --config tests/storybook-visual/playwright.config.ts --project stories --workers 1
+```

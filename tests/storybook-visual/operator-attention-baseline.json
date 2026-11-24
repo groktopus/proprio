@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "baselineId": "operator-attention-test-baseline",
+  "sourceCommit": null,
+  "snapshotCount": 0,
+  "testArtifact": {
+    "runId": null,
+    "name": null
+  },
+  "archive": {
+    "sha256": "",
+    "byteSize": 0
+  },
+  "environment": {
+    "platform": "ubuntu-24.04",
+    "architecture": "amd64",
+    "browser": "locked Playwright Chromium",
+    "viewports": ["1200x800", "390x844"],
+    "deviceScaleFactor": 1
+  }
+}
