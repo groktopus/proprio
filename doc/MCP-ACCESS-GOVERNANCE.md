@@ -293,34 +293,63 @@ run tasks and request changes. Remove its `tools:manage_profiles` and
 `tools:manage_connections` grants, and remove `agents:configure` where it
 could permit installation changes. A board permission manager can revoke
 individual grants with `proprio agent permission:revoke <agentId> <permissionKey>`.
-Check the effective grants after onboarding because standard agents can receive
-connection management grants by default. Keep any bounded setup workflow on a
-separately authorized principal. Review alternate paths to the target, such as
-a separate connection, a standing token or a provider-native tool.
+Check effective grants after onboarding and after creating agents: standard
+agents can receive connection-management grants by default, and root CEO grant
+reconciliation restores `agents:configure`. Do not use a root CEO as the
+requester when the protected posture depends on revoking that grant; use a
+non-root principal whose grants are not restored by that reconciliation.
+
+Agent hiring is a separate path to new authority. Require board approval for
+new agents in company settings so an agent with `agents:create` can submit only
+a pending hire; an authenticated board user must approve it before activation.
+If agents must not even submit hires, also remove their effective
+`agents:create` grant. Keep any bounded setup workflow on a separately
+authorized principal. Review alternate paths to the target, such as a separate
+connection, a standing token or a provider-native tool.
 
 The requester records the desired change on a task visible to the reviewers.
-Include the agent, connection or grant, current scope, proposed scope, reason
-and expiry or revocation plan. A different, authorized human compares the
-request with current authority and decides whether to apply the exact change
-through the board or authenticated API. The same governance role can revoke it.
-Keep that role separate from the agent and the requesting workflow.
+Include the agent, connection or grant, exact catalog entry or selector scope,
+current scope, proposed scope, reason and expiry or revocation plan. A
+connection-scoped policy mutation requires both effective
+`tools:manage_profiles` and `tools:manage_connections`; `users:manage_permissions`
+is for administering grants and does not replace either right. Reading company
+activity and run decisions used to verify changes and calls also requires
+effective `tools:view_audit`. Use an authenticated deployment and a distinct,
+named reviewer account. In
+`local_trusted`, board actions share the implicit `local-board` actor and do
+not provide individual attribution. The reviewer's authenticated account must
+not be the agent or the requesting workflow.
 
-Record the request comment ID, prior and new scope, policy or grant ID, and
-decision on the task. Use product activity to verify the deciding actor and
-the activation and revocation times. Test with a synthetic connector before
-granting access to the real target. Verify that the original call is denied,
-the call after activation reaches the target, and the next call after
-revocation is denied with no additional target effect. Reconcile any call
-already in flight separately.
+Policy PATCH requests have no revision precondition and can retain selectors
+when only the policy type changes. Serialize protected-scope changes through
+one controlled workflow: prevent other administrators from editing the rule
+between review and activation/revocation, read and record the selectors before
+each mutation, then read them again and confirm they still match the reviewed
+scope. Stop and restart review if the scope changed. Keep a reviewer-controlled
+receipt containing the exact request, prior selectors, applied selectors,
+policy ID, decision, reviewer and timestamps. Do not rely on the requester's
+comment or policy mutation activity to preserve selector values; the requester
+can delete their own comment and policy activity records the policy type but
+not its selectors.
 
-The restricted posture uses current grants and a human procedure. Product
-activity records the mutation, and the review task preserves the request and
-the before/after scope. The product does not require a second human approval
-from a principal who already has authority to edit the policy. Deployments
-that require enforced two-person control or per-rule co-signing need an
-additional control. The fixture qualifies authenticated policy updates and
-the managed synthetic connection test path. Qualification of other runners
-and external paths requires separate evidence.
+Use the company activity API to verify the policy mutation actor and times. Use
+the company run-decisions API to inspect each test call's invocation ID, agent,
+catalog entry, decision, outcome and matched policy IDs. Test with a synthetic
+connector before granting access to the real target: the reviewed tool should
+be denied before activation, return the expected synthetic result while active,
+and be denied after revocation with no additional target effect. Include a
+second tool on that connection and verify it remains denied while the reviewed
+tool's rule is active. Reconcile any call already in flight separately.
+
+This is an operational separation of duties, not enforced two-person control:
+the product does not require a second human approval from a principal who
+already has authority to edit the policy. The reviewer-controlled receipt and
+serialized procedure supply evidence for this workflow; deployments requiring
+enforced co-signing need an additional control. The fixture qualifies the
+authenticated update path and synthetic connection test endpoint for one
+catalog entry, while checking call events by invocation ID. It does not qualify
+other runners, root CEO requesters, `local_trusted` attribution or external
+provider paths.
 
 ## Policies
 

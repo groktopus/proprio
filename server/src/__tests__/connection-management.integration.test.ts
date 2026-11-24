@@ -819,6 +819,9 @@ describe("connection management with production default agents", () => {
     const access = accessService(server.db);
     await access.ensureMembership(f.companyId, "user", reviewerId, "owner", "active");
     await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "owner", reviewerId);
+    await access.setPrincipalPermission(f.companyId, "user", reviewerId, "tools:view_audit", true, reviewerId);
+    await access.ensureMembership(f.companyId, "user", reviewerId, "owner", "active");
+    await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "owner", reviewerId);
     const cookie = await server.humanSession(reviewerId);
     const review = async (method: string, path: string, body: unknown) => {
       const response = await fetch(`${server.apiUrl}/api${path}`, {
@@ -865,6 +868,11 @@ describe("connection management with production default agents", () => {
         entryKind: "tool", name: "Fixture effect", toolName: "fixture_effect",
         inputSchema: { type: "object" }, riskLevel: "write", status: "active", versionHash: "fixture-v1",
       }).returning();
+      const [otherEntry] = await server.db.insert(toolCatalogEntries).values({
+        companyId: f.companyId, applicationId: connection.body.applicationId, connectionId,
+        entryKind: "tool", name: "Other fixture effect", toolName: "other_fixture_effect",
+        inputSchema: { type: "object" }, riskLevel: "write", status: "active", versionHash: "fixture-v1-other",
+      }).returning();
       expect(await review("POST", `${companyPath}/apps/${connectionId}/finish`, {
         enabledCatalogEntryIds: [entry.id], access: { agentIds: [f.agentId] },
       })).toMatchObject({ status: 200 });
@@ -873,12 +881,28 @@ describe("connection management with production default agents", () => {
       for (const permissionKey of ["tools:manage_profiles", "tools:manage_connections", "agents:configure"]) {
         expect(await review("PATCH", grantPath, { permissionKey, enabled: false })).toMatchObject({ status: 200 });
       }
+      // Use a non-root requester: root CEO reconciliation restores agents:configure.
+      // Even an agent allowed to submit a hire cannot activate it without a board decision.
+      await server.db.update(companies).set({ requireBoardApprovalForNewAgents: true }).where(eq(companies.id, f.companyId));
+      const pendingHire = await f.request("POST", `/companies/${f.companyId}/agent-hires`, {
+        name: "Unapproved teammate", role: "engineer", adapterType: "proprio_runner", adapterConfig: { provider: "codex" },
+        runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } },
+      }, f.jwt);
+      expect(pendingHire).toMatchObject({ status: 201, body: { agent: { status: "pending_approval" }, approval: { status: "pending" } } });
+      expect(await agentService(server.db).getById(pendingHire.body.agent.id)).toMatchObject({ status: "pending_approval" });
       const policies = `${companyPath}/policies`;
-      const selectors = { connectionId, agentId: f.agentId };
+      const selectors = { connectionId, agentId: f.agentId, catalogEntryId: entry.id };
       const rule = await review("POST", policies, { name: "Review required for fixture effect", policyType: "block", selectors, priority: 1 });
       expect(rule).toMatchObject({ status: 201 });
       const policyId = rule.body.id as string;
       const policy = `${policies}/${policyId}`;
+      const assertPolicyScope = async () => {
+        const listing = await review("GET", policies, undefined);
+        expect(listing.status).toBe(200);
+        const saved = (listing.body.policies as Array<{ id: string; selectors: unknown }>).find(item => item.id === policyId);
+        expect(saved?.selectors).toEqual(selectors);
+      };
+      await assertPolicyScope();
       const comments = `/issues/${f.issueId}/comments`;
       const requested = await f.request("POST", comments, { body: `Request changing policy ${policyId} from block to allow for the fixture effect.` }, f.jwt);
       expect(requested).toMatchObject({ status: 201, body: { authorAgentId: f.agentId } });
@@ -886,34 +910,75 @@ describe("connection management with production default agents", () => {
       expect(await f.request("PATCH", grantPath, { permissionKey: "tools:manage_profiles", enabled: true }, f.jwt))
         .toMatchObject({ status: 403 });
 
-      const testCall = () => f.request("POST", `/tool-connections/${connectionId}/test-calls`, {
-        agentId: f.agentId, toolName: "fixture_effect", parameters: {},
+      const testCall = (toolName: string) => f.request("POST", `/tool-connections/${connectionId}/test-calls`, {
+        agentId: f.agentId, toolName, parameters: {},
       }, f.jwt);
-      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "off" } });
+      const deniedBefore = await testCall("fixture_effect");
+      expect(deniedBefore).toMatchObject({ status: 200, body: { decision: "off" } });
+      const otherWhileBlocked = await testCall("other_fixture_effect");
+      expect(otherWhileBlocked).toMatchObject({ status: 200, body: { decision: "off" } });
       expect(calls).toEqual([]);
 
+      // Capture the exact requested, prior, and applied scope in a reviewer-owned
+      // comment. The agent's request comment can be deleted by its author.
+      await assertPolicyScope();
       expect(await review("PATCH", policy, { policyType: "allow" })).toMatchObject({ status: 200 });
+      await assertPolicyScope();
       expect(await review("POST", comments, {
-        body: `Reviewed request ${requested.body.id}. Changed policy ${policyId} from block to allow.`,
+        body: `Review receipt for request ${requested.body.id}. Policy ${policyId}. Request: enable ${entry.id} (fixture_effect) for agent ${f.agentId} on connection ${connectionId}. Prior scope: ${JSON.stringify(selectors)} with block. Applied scope: ${JSON.stringify(selectors)} with allow. Decision: approved for this catalog entry only.`,
       })).toMatchObject({ status: 201, body: { authorUserId: reviewerId } });
-      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "allowed" } });
+      const allowed = await testCall("fixture_effect");
+      expect(allowed).toMatchObject({ status: 200, body: { decision: "allowed", result: { content: "Fixture effect recorded" } } });
+      expect(calls).toEqual(["fixture_effect"]);
+      const otherWhileAllowed = await testCall("other_fixture_effect");
+      expect(otherWhileAllowed).toMatchObject({ status: 200, body: { decision: "off" } });
       expect(calls).toEqual(["fixture_effect"]);
 
+      await assertPolicyScope();
       expect(await review("PATCH", policy, { policyType: "block" })).toMatchObject({ status: 200 });
+      await assertPolicyScope();
       expect(await review("POST", comments, {
-        body: `Revoked request ${requested.body.id}. Changed policy ${policyId} from allow to block.`,
+        body: `Revocation receipt for request ${requested.body.id}. Policy ${policyId}. Reviewed scope: ${JSON.stringify(selectors)}. Revoked the allow and restored block. Decision: revoked by ${reviewerId}.`,
       })).toMatchObject({ status: 201, body: { authorUserId: reviewerId } });
-      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "off" } });
+      const deniedAfter = await testCall("fixture_effect");
+      expect(deniedAfter).toMatchObject({ status: 200, body: { decision: "off" } });
       expect(calls).toEqual(["fixture_effect"]);
 
-      const changes = await server.db.select().from(activityLog)
-        .where(and(eq(activityLog.companyId, f.companyId), eq(activityLog.entityId, policyId)))
-        .orderBy(activityLog.createdAt);
-      expect(changes.map(row => [row.action, row.actorId, row.details?.policyType])).toEqual([
-        ["tool_policy.created", reviewerId, "block"],
-        ["tool_policy.updated", reviewerId, "allow"],
+      const productActivity = await review("GET", `/companies/${f.companyId}/activity?entityType=tool_policy&entityId=${policyId}&limit=20`, undefined);
+      expect(productActivity.status).toBe(200);
+      const changes = productActivity.body.items ?? productActivity.body;
+      expect(changes.map((row: { action: string; actorId: string; details?: { policyType?: string } }) => [row.action, row.actorId, row.details?.policyType])).toEqual([
         ["tool_policy.updated", reviewerId, "block"],
+        ["tool_policy.updated", reviewerId, "allow"],
+        ["tool_policy.created", reviewerId, "block"],
       ]);
+
+      const runDecisions = await review("GET", `/companies/${f.companyId}/tools/runs/${f.runId}/decisions`, undefined);
+      expect(runDecisions.status).toBe(200);
+      const byInvocation = new Map(
+        (runDecisions.body.decisions as Array<{ invocation: { id: string }; decision: string; outcome: string | null }>)
+          .map(item => [item.invocation.id, item]),
+      );
+      const callEvent = (response: typeof deniedBefore) => {
+        const invocationId = response.body.invocationId as string;
+        expect(invocationId).toEqual(expect.any(String));
+        const decision = byInvocation.get(invocationId);
+        expect(decision).toBeDefined();
+        expect(decision!.invocation).toMatchObject({ agentId: f.agentId });
+        return decision!;
+      };
+      expect(callEvent(deniedBefore)).toMatchObject({ invocation: { catalogEntryId: entry.id, policyDecision: "deny", matchedPolicyIds: [policyId] }, decision: "deny" });
+      expect(callEvent(deniedBefore).invocation.toolName).toContain("fixture-effect");
+      expect(callEvent(allowed)).toMatchObject({ invocation: { catalogEntryId: entry.id, policyDecision: "allow", matchedPolicyIds: [policyId], status: "succeeded" }, decision: "allow", outcome: "success" });
+      expect(callEvent(allowed).invocation.toolName).toContain("fixture-effect");
+      expect(callEvent(deniedAfter)).toMatchObject({ invocation: { catalogEntryId: entry.id, policyDecision: "deny", matchedPolicyIds: [policyId] }, decision: "deny" });
+      expect(callEvent(deniedAfter).invocation.toolName).toContain("fixture-effect");
+      for (const response of [otherWhileBlocked, otherWhileAllowed]) {
+        const decision = callEvent(response);
+        expect(decision.invocation).toMatchObject({ catalogEntryId: otherEntry.id, policyDecision: "deny" });
+        expect(decision.invocation.toolName).toContain("other-fixture-effect");
+        expect(decision.invocation.matchedPolicyIds).not.toContain(policyId);
+      }
     } finally {
       await new Promise<void>(resolve => remote.close(() => resolve()));
     }
