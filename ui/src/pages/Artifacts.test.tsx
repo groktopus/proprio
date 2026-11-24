@@ -303,6 +303,59 @@ describe("Artifacts page", () => {
     });
   });
 
+  it("keeps the first page visible and retries a failed next page at the boundary", async () => {
+    artifactsApiMock.list
+      .mockResolvedValueOnce({
+        artifacts: [sampleArtifact({ id: "artifact-1", title: "First Artifact" })],
+        nextCursor: "cursor-2",
+      })
+      .mockRejectedValueOnce(Object.assign(new Error("Server unavailable"), { status: 500 }))
+      .mockResolvedValueOnce({
+        artifacts: [sampleArtifact({ id: "artifact-2", title: "Second Artifact" })],
+        nextCursor: null,
+      });
+
+    const { root } = renderArtifacts(container, ["/artifacts?groupBy=none"]);
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("First Artifact");
+      expect(latestObserverCallback).not.toBeNull();
+    });
+    latestObserverCallback?.(
+      [{ isIntersecting: true } as IntersectionObserverEntry],
+      {} as IntersectionObserver,
+    );
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("First Artifact");
+      expect(container.textContent).toContain("Retry loading more artifacts");
+      expect(container.querySelectorAll('[data-testid="artifact-card"]')).toHaveLength(1);
+    });
+
+    const retry = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry loading more artifacts",
+    );
+    expect(retry).toBeTruthy();
+    retry?.click();
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Second Artifact");
+      expect(container.querySelectorAll('[data-testid="artifact-card"]')).toHaveLength(2);
+    });
+    expect(artifactsApiMock.list).toHaveBeenLastCalledWith("company-1", {
+      kind: "all",
+      q: undefined,
+      groupBy: "none",
+      groupIssueId: undefined,
+      limit: 30,
+      cursor: "cursor-2",
+    });
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
   it("switches grouping via the group control and refetches stacks", async () => {
     artifactsApiMock.list.mockImplementation((_companyId: string, params?: { groupBy?: string }) => {
       if (params?.groupBy === "none") {

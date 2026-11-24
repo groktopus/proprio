@@ -14,6 +14,7 @@ import { ArtifactEmptyGraphic } from "@/components/artifacts/v1/ArtifactEmptyGra
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { Button } from "@/components/ui/button";
 import { ArtifactCard } from "../components/artifacts/ArtifactCard";
 import { ArtifactGroupCard } from "../components/artifacts/ArtifactGroupCard";
 import { useSearchParams, Link } from "@/lib/router";
@@ -191,11 +192,13 @@ export function Artifacts() {
     hasNextPage,
     fetchNextPage,
   } = artifactsQuery;
+  const hasLoadedArtifactPages = (data?.pages.length ?? 0) > 0;
+  const nextPageError = artifactsQuery.isFetchNextPageError && hasLoadedArtifactPages;
   const artifactsView = useQueryView(artifactsQuery);
 
   useEffect(() => {
     const target = loadMoreRef.current;
-    if (!target || !hasNextPage || isFetchingNextPage) return;
+    if (!target || !hasNextPage || isFetchingNextPage || nextPageError) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         void fetchNextPage();
@@ -203,7 +206,7 @@ export function Artifacts() {
     }, { rootMargin: "320px 0px" });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, nextPageError]);
 
   const artifacts = useMemo(() => data?.pages.flatMap((page) => page.artifacts) ?? [], [data]);
   const groups = useMemo(
@@ -281,7 +284,7 @@ export function Artifacts() {
           before the first load shows the skeleton, a real failure shows copy. */}
       {artifactsView.kind === "loading" || artifactsView.kind === "reconnecting" ? (
         <PageSkeleton variant="list" />
-      ) : artifactsView.kind === "error" ? (
+      ) : artifactsView.kind === "error" && !nextPageError ? (
         <QueryErrorState
           error={artifactsView.error}
           action="load artifacts"
@@ -319,7 +322,14 @@ export function Artifacts() {
                 ))}
           </ArtifactTileGrid>
           <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center pb-2 text-xs text-muted-foreground">
-            {isFetchingNextPage ? "Loading more artifacts..." : hasNextPage ? null : isFetching ? "Updating artifacts..." : null}
+            {isFetchingNextPage ? "Loading more artifacts..." : nextPageError ? (
+              <span role="alert" className="flex flex-wrap items-center justify-center gap-2">
+                <span>Couldn’t load more artifacts.</span>
+                <Button type="button" variant="outline" size="xs" onClick={() => void fetchNextPage()}>
+                  Retry loading more artifacts
+                </Button>
+              </span>
+            ) : hasNextPage ? null : isFetching ? "Updating artifacts..." : null}
           </div>
         </>
       ) : (
@@ -336,6 +346,15 @@ export function Artifacts() {
           <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center pb-2 text-xs text-muted-foreground">
             {isFetchingNextPage
               ? "Loading more artifacts..."
+              : nextPageError
+                ? (
+                  <span role="alert" className="flex flex-wrap items-center justify-center gap-2">
+                    <span>Couldn’t load more artifacts.</span>
+                    <Button type="button" variant="outline" size="xs" onClick={() => void fetchNextPage()}>
+                      Retry loading more artifacts
+                    </Button>
+                  </span>
+                )
               : hasNextPage
                 ? null
                 : isFetching

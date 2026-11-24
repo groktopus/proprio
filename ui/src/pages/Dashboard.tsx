@@ -26,6 +26,7 @@ import { ActivityRow } from "../components/ActivityRow";
 import { ActivityList } from "../components/ActivityList";
 import { timeAgo } from "../lib/timeAgo";
 import { cn, formatCents } from "../lib/utils";
+import { isTransientError } from "../api/errors";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle } from "lucide-react";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
@@ -77,6 +78,12 @@ export type PausedAgentBanner =
   | { kind: "all-paused" }
   | null;
 
+type ResumeOutcome = {
+  agentId: string;
+  agentName: string;
+  status: "resumed" | "failed" | "unknown";
+};
+
 /**
  * Which paused-agents banner the dashboard should show. Import-paused agents
  * get the specific banner with a bulk resume (they were parked by the import
@@ -114,6 +121,7 @@ export function Dashboard() {
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
+  const [resumeOutcomes, setResumeOutcomes] = useState<ResumeOutcome[]>([]);
 
   // Bulk resume for agents parked by a company import. Sequential on purpose
   // (mirrors the import page's activation checklist); a per-agent failure is
@@ -121,17 +129,29 @@ export function Dashboard() {
   // re-renders the banner with whatever remains paused.
   const queryClient = useQueryClient();
   const resumeImportedAgents = useMutation({
-    mutationFn: async () => {
-      const targets = derivePausedAgentBanner(agents);
-      if (!targets || targets.kind !== "imported") return;
-      for (const agentId of targets.pausedImportedAgentIds) {
+    mutationFn: async (requestedAgentIds?: string[]) => {
+      const ids = requestedAgentIds ?? (() => {
+        const targets = derivePausedAgentBanner(agents);
+        return targets?.kind === "imported" ? targets.pausedImportedAgentIds : [];
+      })();
+      const outcomes: ResumeOutcome[] = [];
+      for (const agentId of ids) {
+        const agentName = agents?.find((agent) => agent.id === agentId)?.name ?? agentId;
         try {
           await agentsApi.resume(agentId, selectedCompanyId ?? undefined);
-        } catch {
-          // Leave the agent paused; the banner re-renders with the remainder.
+          outcomes.push({ agentId, agentName, status: "resumed" });
+        } catch (error) {
+          // A transient failure may have committed before the response was lost.
+          // Keep it distinct from an explicit rejection until the next read.
+          outcomes.push({ agentId, agentName, status: isTransientError(error) ? "unknown" : "failed" });
         }
       }
+      return outcomes;
     },
+    onSuccess: (outcomes) => setResumeOutcomes((previous) => {
+      const updatedIds = new Set(outcomes.map((outcome) => outcome.agentId));
+      return [...previous.filter((outcome) => !updatedIds.has(outcome.agentId)), ...outcomes];
+    }),
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) }),
@@ -334,6 +354,7 @@ export function Dashboard() {
   const pausedBanner = derivePausedAgentBanner(agents);
   const pausedImportedCount =
     pausedBanner?.kind === "imported" ? pausedBanner.pausedImportedAgentIds.length : 0;
+  const failedResumeOutcomes = resumeOutcomes.filter((outcome) => outcome.status !== "resumed");
 
   return (
     <div className="space-y-6">
@@ -367,6 +388,28 @@ export function Dashboard() {
           }
         >
           Resume at least one agent to let assigned tasks start.
+        </InlineBanner>
+      ) : null}
+
+      {resumeOutcomes.length > 0 ? (
+        <InlineBanner
+          tone={failedResumeOutcomes.length > 0 ? "warning" : "info"}
+          title="Resume results"
+          actions={failedResumeOutcomes.length > 0 ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => resumeImportedAgents.mutate(failedResumeOutcomes.map((outcome) => outcome.agentId))}
+              disabled={resumeImportedAgents.isPending}
+              data-testid="dashboard-retry-failed-resumes"
+            >
+              {resumeImportedAgents.isPending ? "Retrying…" : "Retry failed"}
+            </Button>
+          ) : undefined}
+        >
+          {resumeOutcomes
+            .map((outcome) => `${outcome.agentName}: ${outcome.status === "resumed" ? "resumed" : outcome.status === "failed" ? "still paused" : "status unknown"}`)
+            .join(" · ")}
         </InlineBanner>
       ) : null}
 
