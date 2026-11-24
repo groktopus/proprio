@@ -22,3 +22,5 @@ Use the [source release runbook](../../../doc/RELEASING.md) and
    the published links, qualification, supported scope, and known gaps.
 
 Handle a partial publication using the retry procedure in the runbook.
+
+For the historical stable content workflow, see [release-content Cases](references/historical-release-content-cases.md).

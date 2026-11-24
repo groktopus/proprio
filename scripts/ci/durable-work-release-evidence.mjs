@@ -220,13 +220,20 @@ export async function verifyDurableWorkSourceRelease({
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const [sourceSha, baseSha, ...flags] = process.argv.slice(2);
-    const requireLinux = flags.length === 1 && flags[0] === "--require-linux";
-    if (!sourceSha || !baseSha || (flags.length > 0 && !requireLinux)) {
-      throw new Error("Usage: node scripts/ci/durable-work-release-evidence.mjs <source-sha> <previous-release-sha> [--require-linux]");
+    const requireLinux = flags.includes("--require-linux");
+    const markdown = flags.includes("--markdown");
+    if (!sourceSha || !baseSha || flags.length !== Number(requireLinux) + Number(markdown) || (markdown && !requireLinux)) {
+      throw new Error("Usage: node scripts/ci/durable-work-release-evidence.mjs <source-sha> <previous-release-sha> [--require-linux [--markdown]]");
     }
     const result = await verifyDurableWorkSourceRelease({ sourceSha, baseSha, requireLinux });
     if (!result.applicable) {
       console.log(`Durable-work release qualification does not apply to ${sourceSha}.`);
+    } else if (markdown) {
+      const run = `https://github.com/${repository}/actions/runs/${result.runId}`;
+      console.log(`- Source commit \`${sourceSha}\`
+- Previous release commit \`${baseSha}\`
+- [Linux qualification attempt](${run}/attempts/${result.attempt})
+- [Retained case evidence](${run}/artifacts/${result.artifactId})`);
     } else {
       console.log(`Durable-work qualification passed for ${sourceSha}: https://github.com/${repository}/actions/runs/${result.runId}/attempts/${result.attempt} (job ${result.jobId}); artifact https://github.com/${repository}/actions/runs/${result.runId}/artifacts/${result.artifactId}.`);
     }

@@ -119,7 +119,9 @@ fi
 if [ "$head_commit" != "$tag_commit" ]; then
   release_fail "HEAD ($head_commit) does not match tag $tag ($tag_commit)."
 fi
-if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]; then
+untracked_mode=no
+[ "$source_prerelease" = false ] || untracked_mode=normal
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files="$untracked_mode")" ]; then
   release_fail "The release checkout must be clean before generating the feature catalog."
 fi
 
@@ -133,7 +135,16 @@ remote_tag_commit() {
 }
 
 if [ "$source_prerelease" = true ]; then
-  [ "$GITHUB_REPO" = "groktopus/proprio" ] || release_fail "Source prereleases must use groktopus/proprio."
+  canonical_remote() {
+    case "$1" in
+      https://github.com/groktopus/proprio|https://github.com/groktopus/proprio.git|git@github.com:groktopus/proprio.git|ssh://git@github.com/groktopus/proprio.git) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  canonical_remote "$(git -C "$REPO_ROOT" remote get-url --all "$PUBLISH_REMOTE")" &&
+    canonical_remote "$(git -C "$REPO_ROOT" remote get-url --push --all "$PUBLISH_REMOTE")" ||
+    release_fail "Source prereleases require canonical groktopus/proprio fetch and push destinations."
+  grep -q '[^[:space:]]' "$notes_file" || release_fail "Source release notes must contain operator guidance."
   main_ref="$(git -C "$REPO_ROOT" ls-remote --exit-code "$PUBLISH_REMOTE" refs/heads/main)"
   main_sha="${main_ref%%$'\t'*}"
   if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$head_commit" "$main_sha"; then
@@ -143,9 +154,24 @@ if [ "$source_prerelease" = true ]; then
   if [ "$base_sha" = "$head_commit" ] || ! git -C "$REPO_ROOT" merge-base --is-ancestor "$base_sha" "$head_commit"; then
     release_fail "The previous source tag must be an ancestor of the candidate. Fetch the release tags."
   fi
-  previous_release="$(gh release view "$previous_tag" -R "$GITHUB_REPO" --json isDraft,isPrerelease --jq '(.isDraft | not) and .isPrerelease')"
-  [ "$previous_release" = true ] || release_fail "The previous tag has no published source prerelease."
-
+  inventory="$(gh api --paginate "/repos/$GITHUB_REPO/releases?per_page=100" \
+    --jq '.[] | {tag_name,draft,prerelease,assets:[.assets[].name]}')"
+  release_state="$(node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const [target, expectedPrevious] = process.argv.slice(1);
+    const releases = readFileSync(0, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+    const number = (tag) => BigInt(tag.slice(5));
+    const previous = releases.filter(release => release.prerelease && !release.draft &&
+       /^v0\.0\.[1-9][0-9]*$/.test(release.tag_name) && number(release.tag_name) < number(target))
+       .reduce((latest, release) => !latest || number(release.tag_name) > number(latest) ? release.tag_name : latest, null);
+    if (previous !== expectedPrevious) throw new Error(`Expected previous published source tag ${previous ?? "none"}, got ${expectedPrevious}`);
+    const current = releases.find(release => release.tag_name === target);
+    if (!current) console.log("create");
+    else if (current.assets.some(name => name !== "feature-catalog.json")) throw new Error("The existing release has an unverified asset.");
+    else if (current.draft) console.log("finish draft");
+    else if (current.prerelease && current.assets.length === 1) console.log("leave published release unchanged");
+    else throw new Error("The existing release must be inspected before publication.");
+  ' "$tag" "$previous_tag" <<<"$inventory")"
   existing_source_tag=""
   if existing_source_tag="$(remote_tag_commit "$tag")"; then
     [ "$existing_source_tag" = "$tag_commit" ] ||
@@ -153,7 +179,8 @@ if [ "$source_prerelease" = true ]; then
   elif [ "$?" -ne 2 ]; then
     release_fail "Cannot check remote tag $tag."
   fi
-  node "$REPO_ROOT/scripts/ci/durable-work-release-evidence.mjs" "$tag_commit" "$base_sha" --require-linux ||
+  qualification="$(cd "$REPO_ROOT" &&
+    node scripts/ci/durable-work-release-evidence.mjs "$tag_commit" "$base_sha" --require-linux --markdown)" ||
     release_fail "Source release is blocked until the exact candidate passes Linux qualification."
 fi
 
@@ -166,34 +193,41 @@ node "$REPO_ROOT/cli/node_modules/tsx/dist/cli.mjs" \
   --out "$catalog_file"
 
 if [ "$source_prerelease" = true ]; then
+  verified_notes="$catalog_dir/release-notes.md"
+  {
+    cat "$notes_file"
+    printf '\n\n## Verified source\n\n- Tag `%s`\n- Previous release tag `%s`\n%s\n' \
+      "$tag" "$previous_tag" "$qualification"
+  } > "$verified_notes"
   if [ "$dry_run" = true ]; then
-    printf '[dry-run] Verified %s at %s from %s (%s). Would publish the GitHub prerelease with feature-catalog.json.\n' \
-      "$tag" "$tag_commit" "$previous_tag" "$base_sha"
+    printf '[dry-run] Verified %s at %s from %s (%s). Would %s.\n%s\n' \
+      "$tag" "$tag_commit" "$previous_tag" "$base_sha" "$release_state" "$qualification"
     exit 0
   fi
 
   tag_ref="refs/tags/$tag"
   if [ -z "$existing_source_tag" ]; then
+    [ "$release_state" = "create" ] || release_fail "The existing release has no matching remote tag."
     git -C "$REPO_ROOT" push "$PUBLISH_REMOTE" "$tag_commit:$tag_ref"
   fi
   published_sha="$(remote_tag_commit "$tag")"
   [ "$published_sha" = "$tag_commit" ] || release_fail "Remote tag $tag changed before publication."
 
-  # The CLI uploads the asset to a draft before publishing the release.
-  existing_release_state=""
-  if existing_release_state="$(gh release view "$tag" -R "$GITHUB_REPO" --json isDraft,isPrerelease,assets \
-    --jq 'if .isDraft then "draft" elif .isPrerelease and any(.assets[]; .name == "feature-catalog.json") then "published" else "unexpected" end' 2>/dev/null)"; then
-    case "$existing_release_state" in
-      draft)
-        gh release upload "$tag" "$catalog_file" -R "$GITHUB_REPO" --clobber
-        gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$notes_file"
-        ;;
-      published) printf 'Source prerelease %s is already published at %s.\n' "$tag" "$tag_commit" ;;
-      *) release_fail "Existing release $tag must be inspected before retrying publication." ;;
-    esac
-  else
-    gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$notes_file"
-  fi
+  case "$release_state" in
+    create)
+      gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$verified_notes"
+      ;;
+    "finish draft")
+      gh release upload "$tag" "$catalog_file" -R "$GITHUB_REPO" --clobber
+      safe_draft="$(gh release view "$tag" -R "$GITHUB_REPO" --json isDraft,assets \
+        --jq '.isDraft and ([.assets[].name] == ["feature-catalog.json"])')"
+      [ "$safe_draft" = true ] || release_fail "The draft contains an unverified asset or changed during upload."
+      gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$verified_notes"
+      ;;
+    "leave published release unchanged")
+      printf 'Source prerelease %s is already published at %s.\n' "$tag" "$tag_commit"
+      ;;
+  esac
   exit 0
 fi
 
@@ -231,7 +265,7 @@ if [ -z "$stable_tag" ]; then
   exit 1
 fi
 previous_release_sha="$(git -C "$REPO_ROOT" rev-parse "${stable_tag}^{commit}")"
-if ! node "$REPO_ROOT/scripts/ci/durable-work-release-evidence.mjs" "$tag_commit" "$previous_release_sha"; then
+if ! (cd "$REPO_ROOT" && node scripts/ci/durable-work-release-evidence.mjs "$tag_commit" "$previous_release_sha"); then
   echo "Error: source release is blocked until the exact candidate passes Linux durable-work qualification." >&2
   exit 1
 fi

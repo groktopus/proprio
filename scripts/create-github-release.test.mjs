@@ -16,7 +16,7 @@ const ciDiff = readFileSync(new URL("../.github/scripts/ci-diff.mjs", import.met
 const fixtures = [];
 after(() => fixtures.forEach((root) => rmSync(root, { recursive: true, force: true })));
 
-function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_sumo.sql", existingRelease = false, missingEvidence = false, remoteTagMismatch = false, wrongReportSha = false, sourcePrerelease = false } = {}) {
+function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_sumo.sql", existingRelease = false, missingEvidence = false, remoteTagMismatch = false, wrongReportSha = false, sourcePrerelease = false, interruptedRelease = false, unverifiedAsset = false, skippedPredecessor = false } = {}) {
   const migrationChanged = /^packages\/db\/src\/migrations\/[^/]+\.sql$/.test(changedPath);
   const root = mkdtempSync(join(tmpdir(), "proprio-source-release-gate-"));
   fixtures.push(root);
@@ -47,7 +47,7 @@ function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_s
   const baseSha = git("rev-parse", "HEAD").trim();
 
   write(changedPath, "candidate\n");
-  const tag = sourcePrerelease ? "v0.0.2" : "v0.0.2-rc.1";
+  const tag = sourcePrerelease ? (skippedPredecessor ? "v0.0.3" : "v0.0.2") : "v0.0.2-rc.1";
   write(`releases/${tag}.md`, "source prerelease notes\n");
   git("add", ".");
   git("commit", "-qm", "source candidate");
@@ -73,13 +73,21 @@ exec "${realGit}" "$@"
   writeFileSync(join(bin, "git"), gitWrapper, { mode: 0o755 });
 
   const gh = `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const args = process.argv.slice(2);
 const log = process.env.GH_LOG;
 appendFileSync(log, args.join(' ') + '\\n');
 if (args[0] === 'api') {
-  const endpoint = args[1];
+  const endpoint = args[1] === '--paginate' ? args[2] : args[1];
+  const draftPath = join('${bin}', 'draft');
+  if (endpoint.endsWith('/releases?per_page=100')) {
+    const releases = [{ tag_name: 'v0.0.1', prerelease: true, draft: false, assets: [] }];
+    if (${skippedPredecessor}) releases.push({ tag_name: 'v0.0.2', prerelease: true, draft: false, assets: [] });
+    if (existsSync(draftPath)) releases.push({ tag_name: '${tag}', prerelease: true, draft: true, assets: ${unverifiedAsset} ? ['other.tar.gz'] : [] });
+    process.stdout.write(releases.map(release => JSON.stringify(release)).join('\\n'));
+  }
+  else
   if (endpoint.endsWith('/actions/workflows/linux-source-qualification.yml')) process.stdout.write(JSON.stringify({ id: 77, path: '.github/workflows/linux-source-qualification.yml' }));
   else if (endpoint.includes('/runs?')) process.stdout.write(JSON.stringify(process.env.MISSING_EVIDENCE === '1' ? { total_count: 0, workflow_runs: [] } : { total_count: 1, workflow_runs: [{ id: 55, workflow_id: 77, path: '.github/workflows/linux-source-qualification.yml', repository: { full_name: 'groktopus/proprio' }, head_repository: { full_name: 'groktopus/proprio' }, head_sha: '${sourceSha}', head_branch: 'main', event: 'workflow_dispatch', display_title: 'Source qualification ${sourceSha} from ${baseSha}', run_attempt: 1, status: 'completed', conclusion: 'success' }] }));
   else if (endpoint.includes('/jobs?')) process.stdout.write(JSON.stringify({ jobs: [{ id: 88, name: 'source-and-runner', status: 'completed', conclusion: 'success', run_id: 55, run_attempt: 1 }] }));
@@ -90,10 +98,18 @@ if (args[0] === 'api') {
   const dir = args[args.indexOf('--dir') + 1]; mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'durable-work-acceptance.json'), process.env.REPORT);
 } else if (args[0] === 'release' && args[1] === 'view') {
-  if (args[2] === 'v0.0.1') process.stdout.write('true');
+  if (existsSync(join('${bin}', 'draft'))) process.stdout.write('true');
   else if (process.env.EXISTING_RELEASE === '1') process.exit(0);
   else process.exit(1);
 } else if (args[0] === 'release' && ['create', 'edit', 'upload'].includes(args[1])) {
+  if (args.includes('--notes-file')) {
+    const notes = readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8');
+    writeFileSync(join('${bin}', 'notes'), notes);
+  }
+  if (args[1] === 'create' && ${interruptedRelease}) {
+    writeFileSync(join('${bin}', 'draft'), '');
+    process.exit(1);
+  }
   process.stdout.write('stubbed release side effect\\n');
 } else process.exit(4);
 `;
@@ -113,7 +129,7 @@ if (args[0] === 'api') {
 
   return {
     root, bin, git, sourceSha, baseSha, logPath, reportPath, existingRelease, missingEvidence,
-    run(args = sourcePrerelease ? ["0.0.2", "--previous-tag", "v0.0.1"] : ["0.0.2-rc.1"]) {
+    run(args = sourcePrerelease ? [tag.slice(1), "--previous-tag", "v0.0.1"] : ["0.0.2-rc.1"]) {
       return spawnSync("bash", [join(root, "scripts/create-github-release.sh"), ...args], {
         cwd: root, encoding: "utf8", env: {
           ...process.env,
@@ -222,4 +238,47 @@ test("plain source version tags the qualified candidate before creating a prerel
   assert.ok(evidence >= 0 && evidence < push && push < publish, calls.join("\n"));
   assert.match(calls[push], new RegExp(`${fixture.sourceSha}:refs/tags/v0.0.2`));
   assert.match(calls[publish], /feature-catalog\.json .*--verify-tag --prerelease/);
+});
+
+test("source publication cannot skip a newer published source release", () => {
+  const fixture = createFixture({ sourcePrerelease: true, skippedPredecessor: true });
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Expected previous published source tag v0\.0\.2/);
+  assert.doesNotMatch(readFileSync(fixture.logPath, "utf8"), /(^push |release (?:create|edit|upload))/m);
+});
+
+test("a source publication retry reuses the remote tag and safe draft", () => {
+  const fixture = createFixture({ sourcePrerelease: true, interruptedRelease: true });
+  assert.notEqual(fixture.run().status, 0);
+  const preview = fixture.run(["0.0.2", "--previous-tag", "v0.0.1", "--dry-run"]);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout, /Would finish draft/);
+  const retry = fixture.run();
+  assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+  const calls = readFileSync(fixture.logPath, "utf8");
+  assert.equal((calls.match(/^push /gm) ?? []).length, 1);
+  assert.match(calls, /release edit .*--draft=false --prerelease/);
+  const notes = readFileSync(join(fixture.bin, "notes"), "utf8");
+  assert.match(notes, /Verified source/);
+  assert.ok(notes.includes(fixture.sourceSha) && notes.includes(fixture.baseSha));
+  assert.match(notes, /actions\/runs\/55\/attempts\/1/);
+});
+
+test("an interrupted draft with an unexpected asset fails closed in preview", () => {
+  const fixture = createFixture({ sourcePrerelease: true, interruptedRelease: true, unverifiedAsset: true });
+  assert.notEqual(fixture.run().status, 0);
+  const preview = fixture.run(["0.0.2", "--previous-tag", "v0.0.1", "--dry-run"]);
+  assert.notEqual(preview.status, 0);
+  assert.match(preview.stderr, /existing release has an unverified asset/);
+  assert.doesNotMatch(readFileSync(fixture.logPath, "utf8"), /release (?:edit|upload)/);
+});
+
+test("a mismatched Git push destination blocks qualified source publication", () => {
+  const fixture = createFixture({ sourcePrerelease: true });
+  fixture.git("remote", "set-url", "--push", "origin", "git@github.com:another/proprio.git");
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /require canonical groktopus\/proprio fetch and push destinations/);
+  assert.equal(readFileSync(fixture.logPath, "utf8"), "");
 });
