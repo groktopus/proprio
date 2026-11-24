@@ -382,35 +382,41 @@ NODE
     # after the bounded admission window, make exactly one issue-linked wake;
     # never duplicate an execution already represented in the issue run list.
     ACTIVE_RUNS_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs" 2>/dev/null || true)"
-    [ "$(jq -er 'length' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || echo 1)" = 0 ] \
-      || { fail_ "4f assignment wake left a durable run; refusing to issue a duplicate wake"; exit 1; }
-    WAKE_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
-    WAKE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/agents/$ACTIVE_AGENT_ID/wakeup" \
-      -H "Origin: $origin" -H 'Content-Type: application/json' \
-      --data "$(jq -n --arg issue "$ACTIVE_ISSUE_ID" --arg key "$WAKE_KEY" '{source:"on_demand",reason:"Qualification assignment wake fallback",payload:{issueId:$issue,mutation:"qualification_assignment_fallback"},idempotencyKey:$key}')")" \
-      || { fail_ "4f issue-linked wake request failed"; exit 1; }
-    WAKE_STATUS="${WAKE_RESPONSE##*$'\n'}"
-    WAKE_BODY="${WAKE_RESPONSE%$'\n'*}"
-    [[ "$WAKE_STATUS" =~ ^2[0-9][0-9]$ ]] \
-      || { fail_ "4f issue-linked wake returned HTTP $(jq -cn --arg status "$WAKE_STATUS" --arg body "$WAKE_BODY" '{status:(try ($status|tonumber) catch 0),error:(try ((($body|fromjson).error // null)|if type=="string" then .[0:200] else null end) catch null),code:(try (($body|fromjson).code // null) catch null)}')"; exit 1; }
-    ACTIVE_RUN_ID="$(jq -er '.id // .executionRunId // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
-    [ -n "$ACTIVE_RUN_ID" ] \
-      || { fail_ "4f issue-linked wake did not return a durable run id"; exit 1; }
+    ACTIVE_RUN_ID="$(jq -er '[.[]][0].id // empty' <<<"$ACTIVE_RUNS_BEFORE" 2>/dev/null || true)"
+    if [ -n "$ACTIVE_RUN_ID" ]; then
+      pass "4f assignment admitted run $ACTIVE_RUN_ID at the deadline; reusing it without a duplicate wake"
+    else
+      WAKE_KEY="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+      WAKE_RESPONSE="$(curl --silent --show-error --max-time 10 --write-out $'\n%{http_code}' "$origin/api/agents/$ACTIVE_AGENT_ID/wakeup" \
+        -H "Origin: $origin" -H 'Content-Type: application/json' \
+        --data "$(jq -n --arg issue "$ACTIVE_ISSUE_ID" --arg key "$WAKE_KEY" '{source:"on_demand",reason:"Qualification assignment wake fallback",payload:{issueId:$issue,mutation:"qualification_assignment_fallback"},idempotencyKey:$key}')")" \
+        || { fail_ "4f issue-linked wake request failed"; exit 1; }
+      WAKE_STATUS="${WAKE_RESPONSE##*$'\n'}"
+      WAKE_BODY="${WAKE_RESPONSE%$'\n'*}"
+      [[ "$WAKE_STATUS" =~ ^2[0-9][0-9]$ ]] \
+        || { fail_ "4f issue-linked wake returned HTTP $(jq -cn --arg status "$WAKE_STATUS" --arg body "$WAKE_BODY" '{status:(try ($status|tonumber) catch 0),error:(try ((($body|fromjson).error // null)|if type=="string" then .[0:200] else null end) catch null),code:(try (($body|fromjson).code // null) catch null)}')"; exit 1; }
+      ACTIVE_RUN_ID="$(jq -er '.id // .executionRunId // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
+      [ -n "$ACTIVE_RUN_ID" ] \
+        || { fail_ "4f issue-linked wake did not return a durable run id"; exit 1; }
+    fi
     active_deadline=$(( $(date +%s) + 90 ))
     ACTIVE_RUN_BEFORE=""
     while [ "$(date +%s)" -lt "$active_deadline" ]; do
       ACTIVE_RUN_BEFORE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/heartbeat-runs/$ACTIVE_RUN_ID" 2>/dev/null || true)"
       if jq -e '.status == "failed" or .status == "cancelled" or .status == "timed_out" or .status == "interrupted"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; then
         SAFE_RUN_FAILURE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:$run.id,status:$run.status,errorCode:($run.errorCode // null)}')"
-        fail_ "4f issue-linked wake reached terminal state $SAFE_RUN_FAILURE"
+        fail_ "4f task wake reached terminal state $SAFE_RUN_FAILURE"
         exit 1
       fi
       if [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then break; fi
       sleep 1
     done
-    [ -f "$ACTIVE_EFFECT" ] && { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; } \
-      || { fail_ "4f issue-linked wake did not reach its expected run state with the effect marker"; exit 1; }
-    pass "4f assignment admitted no run; one issue-linked wake created active durable run $ACTIVE_RUN_ID"
+    if [ ! -f "$ACTIVE_EFFECT" ] || ! { [ "$active_run_required" = 1 ] && jq -e '.status == "running"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1 || [ "$active_run_required" = 0 ] && jq -e '.status == "succeeded"' <<<"$ACTIVE_RUN_BEFORE" >/dev/null 2>&1; }; then
+      SAFE_RUN_STATE="$(jq -cn --argjson run "$ACTIVE_RUN_BEFORE" '{id:($run.id // null),status:($run.status // "unavailable"),errorCode:($run.errorCode // null)}' 2>/dev/null || printf '%s' '{"status":"unavailable"}')"
+      fail_ "4f task wake did not reach its expected state with the effect marker before timeout ($SAFE_RUN_STATE)"
+      exit 1
+    fi
+    pass "4f durable run $ACTIVE_RUN_ID reached its expected state with the effect marker"
   fi
   [ -n "$ACTIVE_RUN_ID" ] || { fail_ "4f recovered task assignment starts a durable run"; exit 1; }
   ACTIVE_WORKSPACE_ID="$(jq -er '.executionWorkspaceId // .execution.executionWorkspaceId' <<<"$ACTIVE_RUN_BEFORE")" \
@@ -426,6 +432,9 @@ NODE
     && [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
     && pass "4g task run saved one effect, its process identity, and a workspace checkpoint" \
     || { fail_ "4g task run checkpoint, process identity, and effect"; exit 1; }
+  ACTIVE_PROCESS_PID="$(jq -er '.pid' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process PID"; exit 1; }
+  ACTIVE_PROCESS_START="$(jq -er '.startTicks' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "4g recorded process start identity"; exit 1; }
+  pass "4g task run checkpoint identifies provider PID $ACTIVE_PROCESS_PID with start identity $ACTIVE_PROCESS_START before migration"
   if [ "$active_run_required" = 1 ]; then
     RECOVERY_STARTED_MS="$(( $(date +%s%3N) ))"
     pass "4h schema-upgrade run is active before candidate migration ($ACTIVE_RUN_ID)"
@@ -509,8 +518,6 @@ else
     || { fail_ "7b candidate manifest"; exit 1; }
   verify_record && pass "7c candidate reads the saved base record" || { fail_ "7c candidate record continuity"; exit 1; }
   if [ "$active_run_required" = 1 ]; then
-    ACTIVE_PROCESS_PID="$(jq -er '.pid' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "7d recorded process PID"; exit 1; }
-    ACTIVE_PROCESS_START="$(jq -er '.startTicks' "$ACTIVE_PROCESS_IDENTITY")" || { fail_ "7d recorded process start identity"; exit 1; }
     ACTIVE_PROCESS_STAT="$(cat "/proc/$ACTIVE_PROCESS_PID/stat" 2>/dev/null || true)"
     if [ -n "$ACTIVE_PROCESS_STAT" ]; then
       ACTIVE_PROCESS_REST="${ACTIVE_PROCESS_STAT##*) }"
@@ -589,8 +596,13 @@ else
     || { fail_ "7d task retains its execution workspace"; exit 1; }
   jq -e --arg id "$ACTIVE_WORKSPACE_ID" --arg cwd "$ACTIVE_WORKSPACE_CWD" '.id == $id and .cwd == $cwd' <<<"$ACTIVE_WORKSPACE_AFTER" >/dev/null \
     || { fail_ "7d execution workspace identity and path are retained"; exit 1; }
-  jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
-    || { fail_ "7d original run reached an allowed terminal recovery state"; exit 1; }
+  if [ "$active_run_required" = 1 ]; then
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and (.status == "interrupted" or .status == "failed")' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d original run reached an allowed terminal recovery state"; exit 1; }
+  else
+    jq -e --arg id "$ACTIVE_RUN_ID" '.id == $id and .status == "succeeded"' <<<"$ACTIVE_ORIGINAL_RUN_AFTER" >/dev/null \
+      || { fail_ "7d non-migration task run remains succeeded and readable"; exit 1; }
+  fi
   [ -f "$ACTIVE_CHECKPOINT" ] && [ "$(cat "$ACTIVE_CHECKPOINT")" = "checkpoint for $ACTIVE_ISSUE_ID" ] \
     || { fail_ "7e workspace checkpoint survives update"; exit 1; }
   [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
@@ -643,6 +655,27 @@ if [ "$probe" = 0 ]; then
   [ "$rollback_version" = "$base_version" ] && pass "9d rollback reports the original version and commit" \
     || fail_ "9d rollback version or commit"
   verify_record && pass "9e original service reads the same saved record after rollback"     || fail_ "9e rollback record continuity"
+  if [ "$active_run_required" = 1 ]; then
+    EXPECTED_ORIGINAL_STATUS='interrupted|failed'
+  else
+    EXPECTED_ORIGINAL_STATUS='succeeded'
+  fi
+  ROLLBACK_ISSUE="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID")" \
+    || { fail_ "9f rolled-back service reads the same qualification task"; exit 1; }
+  ROLLBACK_RUNS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/runs")" \
+    || { fail_ "9f rolled-back service reads qualification run history"; exit 1; }
+  ROLLBACK_COMMENTS="$(curl --fail --silent --show-error --max-time 5 "$origin/api/issues/$ACTIVE_ISSUE_ID/comments")" \
+    || { fail_ "9f rolled-back service reads qualification output"; exit 1; }
+  jq -e --arg id "$ACTIVE_ISSUE_ID" '.id == $id' <<<"$ROLLBACK_ISSUE" >/dev/null \
+    && jq -e --arg id "$ACTIVE_RUN_ID" --arg original "$EXPECTED_ORIGINAL_STATUS" --argjson active "$active_run_required" '
+      ([.[] | select(.id == $id and (if $original == "succeeded" then .status == "succeeded" else (.status == "interrupted" or .status == "failed") end))] | length == 1)
+      and ([.[] | select(.status == "succeeded")] | length == 1)
+      and (if $active == 1 then length == 2 else length == 1 end)
+    ' <<<"$ROLLBACK_RUNS" >/dev/null \
+    && jq -e --arg body "$ACTIVE_OUTPUT" '[.[] | select(.body == $body)] | length == 1' <<<"$ROLLBACK_COMMENTS" >/dev/null \
+    && [ -f "$ACTIVE_EFFECT" ] && [ "$(cat "$ACTIVE_EFFECT")" = "effect" ] \
+    && pass "9f rolled-back base API retains the same task, expected run history, one output, and one effect" \
+    || { fail_ "9f rolled-back base API retains the same task, expected run history, one output, and one effect"; exit 1; }
 fi
 
 note "10. cleanup"

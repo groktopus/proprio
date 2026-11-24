@@ -51,6 +51,9 @@ test("active process recovery requires board reconciliation before normal Retry"
   assert.match(source, /qualification-process\.json/);
   assert.match(source, /ACTIVE_PROCESS_CURRENT_START/);
   assert.match(source, /ACTIVE_PROCESS_STATE.*!= Z/);
+  assert.match(source, /provider PID \$ACTIVE_PROCESS_PID with start identity \$ACTIVE_PROCESS_START before migration/);
+  assert.match(source, /7d non-migration task run remains succeeded and readable/);
+  assert.match(source, /if \[ "\$active_run_required" = 1 \]; then\s+jq -e --arg id "\$ACTIVE_RUN_ID"/);
   assert.match(source, /recovery-actions\/resolve/);
   assert.match(source, /idempotencyKey:\$key,observedRunId:\$runId,retryAction:"move_forward"/);
   assert.match(source, /api\/issues\/\$ACTIVE_ISSUE_ID\/retry/);
@@ -63,8 +66,10 @@ test("recovery task uses the normal todo-then-assign flow and bounds HTTP diagno
   assert.match(source, /assigneeAgentId:\$agent/);
   assert.match(source, /api\/agents\/\$ACTIVE_AGENT_ID\/wakeup/);
   assert.match(source, /qualification_assignment_fallback/);
-  assert.match(source, /refusing to issue a duplicate wake/);
+  assert.match(source, /reusing it without a duplicate wake/);
+  assert.match(source, /before timeout \(\$SAFE_RUN_STATE\)/);
   assert.match(source, /terminal state \$SAFE_RUN_FAILURE/);
+  assert.match(source, /9f rolled-back base API retains the same task, expected run history, one output, and one effect/);
   assert.match(source, /--write-out \$'\\n%\{http_code\}'/);
   assert.match(source, /status: \(try \(\$status \| tonumber\) catch 0\)/);
   assert.match(source, /error: \(if \(\$response\.error \| type\) == \"string\" then \$response\.error\[0:200\]/);
