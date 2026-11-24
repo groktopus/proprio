@@ -8,6 +8,7 @@ import {
   agents,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
   projects,
   routines,
@@ -1924,53 +1925,74 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         : accessDecision.decision === "rate_limited"
           ? "rate_limited"
           : "denied";
-    const [invocation] = await db.insert(toolInvocations).values({
-      companyId: ctx.companyId,
-      idempotencyKey,
-      actorType: ctx.actorType,
-      actorId: ctx.actorId,
-      agentId: ctx.agentId,
-      issueId: ctx.issueId,
-      runId: ctx.heartbeatRunId,
-      gatewayId: ctx.gatewayId,
-      ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
-        where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
-          and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
-      applicationId: ctx.applicationId,
-      connectionId: ctx.connectionId,
-      catalogEntryId: ctx.catalogEntryId,
-      catalogVersionHash: ctx.catalogVersionHash,
-      catalogSchemaHash: ctx.catalogSchemaHash,
-      providerType: ctx.providerType,
-      applicationKey: ctx.applicationKey,
-      upstreamToolName: ctx.upstreamToolName,
-      riskLevel: ctx.riskLevel,
-      toolName: ctx.toolName,
-      argumentsHash,
-      argumentsSummary: redaction.summary,
-      policyDecision: accessDecision.decision,
-      policyExplanation: accessDecision.policyExplanation ?? null,
-      matchedPolicyIds: accessDecision.matchedPolicyIds,
-      approvalState: accessDecision.decision === "require_approval" ? "pending" : "not_required",
-      status,
-      errorCode: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.reasonCode,
-      errorMessage: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.explanation,
-      completedAt: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : new Date(),
-    }).returning();
-    let actionRequest = null;
-    if (accessDecision.decision === "require_approval") {
-      [actionRequest] = await db.insert(toolActionRequests).values({
+    const recorded = await db.transaction(async (tx) => {
+      const [invocation] = await tx.insert(toolInvocations).values({
         companyId: ctx.companyId,
-        invocationId: invocation.id,
+        idempotencyKey,
+        actorType: ctx.actorType,
+        actorId: ctx.actorId,
+        agentId: ctx.agentId,
         issueId: ctx.issueId,
-        status: "pending",
-        canonicalArgumentsHash: requestIdentityHash!,
-        canonicalArgumentsSummary: redaction.summary,
-        requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
-        requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
+        runId: ctx.heartbeatRunId,
+        gatewayId: ctx.gatewayId,
+        ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
+          where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
+            and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
+        applicationId: ctx.applicationId,
+        connectionId: ctx.connectionId,
+        catalogEntryId: ctx.catalogEntryId,
+        catalogVersionHash: ctx.catalogVersionHash,
+        catalogSchemaHash: ctx.catalogSchemaHash,
+        providerType: ctx.providerType,
+        applicationKey: ctx.applicationKey,
+        upstreamToolName: ctx.upstreamToolName,
+        riskLevel: ctx.riskLevel,
+        toolName: ctx.toolName,
+        argumentsHash,
+        argumentsSummary: redaction.summary,
+        policyDecision: accessDecision.decision,
+        policyExplanation: accessDecision.policyExplanation ?? null,
+        matchedPolicyIds: accessDecision.matchedPolicyIds,
+        approvalState: accessDecision.decision === "require_approval" ? "pending" : "not_required",
+        status,
+        errorCode: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.reasonCode,
+        errorMessage: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.explanation,
+        completedAt: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : new Date(),
       }).returning();
-    }
-    return { invocation, replayed: false, actionRequest };
+      let actionRequest = null;
+      if (accessDecision.decision === "require_approval") {
+        [actionRequest] = await tx.insert(toolActionRequests).values({
+          companyId: ctx.companyId,
+          invocationId: invocation.id,
+          issueId: ctx.issueId,
+          status: "pending",
+          canonicalArgumentsHash: requestIdentityHash!,
+          canonicalArgumentsSummary: redaction.summary,
+          requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
+          requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
+        }).returning();
+      }
+      await tx.insert(managedAuditEvents).values({
+        companyId: ctx.companyId,
+        source: "tool_gateway",
+        schemaVersion: 1,
+        eventType: "invocation_decision_recorded",
+        phase: "policy_decision",
+        occurredAt: invocation.createdAt,
+        runId: ctx.heartbeatRunId,
+        taskId: ctx.issueId,
+        invocationId: invocation.id,
+        requestId: actionRequest?.id ?? null,
+        connectionId: ctx.connectionId,
+        actorType: ctx.actorType,
+        actorId: ctx.actorId,
+        decision: accessDecision.decision,
+        status: invocation.status,
+        reasonCode: accessDecision.reasonCode,
+      });
+      return { invocation, actionRequest };
+    });
+    return { ...recorded, replayed: false };
   }
 
   async function matchingApprovedActionRequestCount(input: {
