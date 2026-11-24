@@ -1,4 +1,4 @@
-import type { ActivityEvent, ExecutionProjection, RunLivenessState } from "@groktopus/shared";
+import type { ActivityEvent, ExecutionProjection, NativeCompletionHistoryEntry, RunLivenessState } from "@groktopus/shared";
 import { api, type RequestOptions } from "./client";
 
 export type { RunLivenessState } from "@groktopus/shared";
@@ -96,6 +96,8 @@ export const activityApi = {
     return (await Promise.all(batches)).flat();
   },
   forIssue: (issueId: string) => api.get<ActivityEvent[]>(`/issues/${issueId}/activity`),
+  completionHistoryForIssue: (issueId: string) =>
+    api.get<NativeCompletionHistoryEntry[]>(`/issues/${issueId}/completion-history`),
   recentRunsForIssue: (issueId: string) => api.get<RunForIssue[]>(`/issues/${issueId}/runs?view=recent`),
   runsForIssue: (issueId: string) => api.get<RunForIssue[]>(`/issues/${issueId}/runs`),
   runsByIdsForIssue: (issueId: string, runIds: string[]) => {

@@ -82,6 +82,7 @@ import { SubtaskCancellationError, TaskCancellationDismissedError, useTaskCancel
 import { describeInteractionResolutionFailure, interactionResolutionErrorMessage } from "../lib/interaction-resolution-error";
 import { approvalsApi } from "../api/approvals";
 import { activityApi, type RunForIssue } from "../api/activity";
+import { NativeCompletionHistory } from "../components/NativeCompletionHistory";
 import {
   fetchRecentIssueActivity,
   fetchRecentIssueRunWindow,
@@ -2933,6 +2934,10 @@ function IssueDetailActivityTab({
     queryFn: () => activityApi.forIssue(issueId),
     placeholderData: keepPreviousDataForSameQueryTail<ActivityEvent[]>(issueId),
   });
+  const completionHistoryQuery = useQuery({
+    queryKey: queryKeys.issues.completionHistory(issueId),
+    queryFn: () => activityApi.completionHistoryForIssue(issueId),
+  });
   const { data: linkedRuns, isLoading: linkedRunsLoading } = useQuery({
     queryKey: queryKeys.issues.runs(issueId),
     queryFn: () => activityApi.runsForIssue(issueId),
@@ -3058,6 +3063,12 @@ function IssueDetailActivityTab({
 
   return (
     <>
+      <NativeCompletionHistory
+        entries={completionHistoryQuery.data}
+        isLoading={completionHistoryQuery.isLoading}
+        error={completionHistoryQuery.isError}
+        onRetry={() => { void completionHistoryQuery.refetch(); }}
+      />
       {shouldShowCostSummary && (
         <div className="mb-3 px-3 py-2 rounded-lg border border-border">
           <div className="text-sm font-medium text-muted-foreground mb-1">

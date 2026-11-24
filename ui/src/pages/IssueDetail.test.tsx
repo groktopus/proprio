@@ -118,6 +118,7 @@ const mockIssuesApi = vi.hoisted(() => ({
 
 const mockActivityApi = vi.hoisted(() => ({
   forIssue: vi.fn(),
+  completionHistoryForIssue: vi.fn(),
   recentForIssue: vi.fn(),
   inputFactsForIssue: vi.fn(),
   runsForIssue: vi.fn(),
@@ -1431,6 +1432,7 @@ describe("IssueDetail", () => {
     });
     mockIssuesApi.listTreeHolds.mockResolvedValue([]);
     mockActivityApi.forIssue.mockResolvedValue([]);
+    mockActivityApi.completionHistoryForIssue.mockResolvedValue([]);
     mockActivityApi.runsForIssue.mockResolvedValue([]);
     mockHeartbeatsApi.liveRunsForIssue.mockResolvedValue([]);
     mockHeartbeatsApi.activeRunForIssue.mockResolvedValue(null);
