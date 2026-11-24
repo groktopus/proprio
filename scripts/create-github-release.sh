@@ -8,23 +8,26 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 dry_run=false
 version=""
 notes_file_override=""
+previous_tag=""
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/create-github-release.sh <version> [--dry-run] [--notes-file PATH]
+  ./scripts/create-github-release.sh <version> [--dry-run] [--notes-file PATH] [--previous-tag TAG]
 
 Examples:
   ./scripts/create-github-release.sh 2026.318.0
   ./scripts/create-github-release.sh 2026.318.0 --dry-run
   ./scripts/create-github-release.sh 2026.318.0 --notes-file /tmp/stable-notes.md
-  ./scripts/create-github-release.sh 0.0.2-rc.1 --dry-run
+  ./scripts/create-github-release.sh 0.0.3 --previous-tag v0.0.2 --notes-file /tmp/v0.0.3.md --dry-run
 
 Notes:
-  - Run this after pushing the stable tag.
+  - For 0.0.x source prereleases, check out the qualified main revision.
+    Pass the previous source release tag. This script verifies before tagging.
+  - For other versions, run this after pushing the tag.
   - Resolves the git remote automatically.
   - In GitHub Actions, origin is used explicitly.
-  - Source prereleases may use 0.0.x-alpha.N, 0.0.x-beta.N, or 0.0.x-rc.N.
+  - The legacy path also accepts 0.0.x-alpha.N, 0.0.x-beta.N, and 0.0.x-rc.N.
   - If the release already exists, this script updates its title and notes.
 EOF
 }
@@ -32,6 +35,11 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=true ;;
+    --previous-tag)
+      shift
+      [ "$#" -gt 0 ] || release_fail "--previous-tag requires a tag."
+      previous_tag="$1"
+      ;;
     --notes-file)
       shift
       if [ $# -eq 0 ]; then
@@ -62,11 +70,20 @@ fi
 
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
   [[ ! "$version" =~ ^0\.0\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
-  echo "Error: version must be a stable calendar version or a 0.0.x alpha/beta/rc prerelease." >&2
+  echo "Error: use 0.0.x for a source prerelease or a supported legacy version." >&2
   exit 1
 fi
 
 tag="v$version"
+source_prerelease=false
+if [[ "$version" =~ ^0\.0\.[1-9][0-9]*$ ]]; then
+  source_prerelease=true
+  if [[ ! "$previous_tag" =~ ^v0\.0\.[1-9][0-9]*$ || "$previous_tag" == "$tag" ]]; then
+    release_fail "A source prerelease requires --previous-tag v0.0.x with a different published tag."
+  fi
+elif [ -n "$previous_tag" ]; then
+  release_fail "--previous-tag is only used for 0.0.x source prereleases."
+fi
 notes_file="$REPO_ROOT/releases/${tag}.md"
 if [ -n "$notes_file_override" ]; then
   notes_file="$notes_file_override"
@@ -91,22 +108,53 @@ if [ ! -f "$notes_file" ]; then
   exit 1
 fi
 
-if ! git -C "$REPO_ROOT" rev-parse "$tag" >/dev/null 2>&1; then
-  echo "Error: local git tag $tag does not exist." >&2
-  exit 1
+head_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+tag_commit="$head_commit"
+if [ "$source_prerelease" = false ]; then
+  tag_commit="$(git -C "$REPO_ROOT" rev-parse --verify "refs/tags/$tag^{commit}")" ||
+    release_fail "Local git tag $tag does not exist."
+elif git_local_tag_exists "$tag"; then
+  tag_commit="$(git -C "$REPO_ROOT" rev-parse "refs/tags/$tag^{commit}")"
+fi
+if [ "$head_commit" != "$tag_commit" ]; then
+  release_fail "HEAD ($head_commit) does not match tag $tag ($tag_commit)."
+fi
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]; then
+  release_fail "The release checkout must be clean before generating the feature catalog."
 fi
 
-# The catalog is derived from the checked-out sources, so it must be generated
-# from the exact commit the release tag points at, with no local edits.
-tag_commit="$(git -C "$REPO_ROOT" rev-parse "$tag^{commit}")"
-head_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-if [ "$head_commit" != "$tag_commit" ]; then
-  echo "Error: HEAD ($head_commit) does not match tag $tag ($tag_commit). Check out the release tag before generating the feature catalog." >&2
-  exit 1
-fi
-if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ]; then
-  echo "Error: working tree has uncommitted changes. The feature catalog must be generated from the pristine release commit." >&2
-  exit 1
+remote_tag_commit() {
+  local tag_ref="refs/tags/$1"
+  local refs
+  refs="$(git -C "$REPO_ROOT" ls-remote --exit-code --tags "$PUBLISH_REMOTE" "$tag_ref" "$tag_ref^{}")" || return "$?"
+  awk -v tag_ref="$tag_ref" -v peeled_ref="$tag_ref^{}" \
+    '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print peeled != "" ? peeled : ref }' \
+    <<<"$refs"
+}
+
+if [ "$source_prerelease" = true ]; then
+  [ "$GITHUB_REPO" = "groktopus/proprio" ] || release_fail "Source prereleases must use groktopus/proprio."
+  main_ref="$(git -C "$REPO_ROOT" ls-remote --exit-code "$PUBLISH_REMOTE" refs/heads/main)"
+  main_sha="${main_ref%%$'\t'*}"
+  if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$head_commit" "$main_sha"; then
+    release_fail "The candidate is not on current main. Fetch main and use a merged revision."
+  fi
+  base_sha="$(remote_tag_commit "$previous_tag")" || release_fail "Cannot resolve previous source tag $previous_tag."
+  if [ "$base_sha" = "$head_commit" ] || ! git -C "$REPO_ROOT" merge-base --is-ancestor "$base_sha" "$head_commit"; then
+    release_fail "The previous source tag must be an ancestor of the candidate. Fetch the release tags."
+  fi
+  previous_release="$(gh release view "$previous_tag" -R "$GITHUB_REPO" --json isDraft,isPrerelease --jq '(.isDraft | not) and .isPrerelease')"
+  [ "$previous_release" = true ] || release_fail "The previous tag has no published source prerelease."
+
+  existing_source_tag=""
+  if existing_source_tag="$(remote_tag_commit "$tag")"; then
+    [ "$existing_source_tag" = "$tag_commit" ] ||
+      release_fail "Remote tag $tag points to $existing_source_tag, expected $tag_commit."
+  elif [ "$?" -ne 2 ]; then
+    release_fail "Cannot check remote tag $tag."
+  fi
+  node "$REPO_ROOT/scripts/ci/durable-work-release-evidence.mjs" "$tag_commit" "$base_sha" --require-linux ||
+    release_fail "Source release is blocked until the exact candidate passes Linux qualification."
 fi
 
 catalog_dir="$(mktemp -d)"
@@ -117,22 +165,49 @@ node "$REPO_ROOT/cli/node_modules/tsx/dist/cli.mjs" \
   --version "$version" \
   --out "$catalog_file"
 
+if [ "$source_prerelease" = true ]; then
+  if [ "$dry_run" = true ]; then
+    printf '[dry-run] Verified %s at %s from %s (%s). Would publish the GitHub prerelease with feature-catalog.json.\n' \
+      "$tag" "$tag_commit" "$previous_tag" "$base_sha"
+    exit 0
+  fi
+
+  tag_ref="refs/tags/$tag"
+  if [ -z "$existing_source_tag" ]; then
+    git -C "$REPO_ROOT" push "$PUBLISH_REMOTE" "$tag_commit:$tag_ref"
+  fi
+  published_sha="$(remote_tag_commit "$tag")"
+  [ "$published_sha" = "$tag_commit" ] || release_fail "Remote tag $tag changed before publication."
+
+  # The CLI uploads the asset to a draft before publishing the release.
+  existing_release_state=""
+  if existing_release_state="$(gh release view "$tag" -R "$GITHUB_REPO" --json isDraft,isPrerelease,assets \
+    --jq 'if .isDraft then "draft" elif .isPrerelease and any(.assets[]; .name == "feature-catalog.json") then "published" else "unexpected" end' 2>/dev/null)"; then
+    case "$existing_release_state" in
+      draft)
+        gh release upload "$tag" "$catalog_file" -R "$GITHUB_REPO" --clobber
+        gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$notes_file"
+        ;;
+      published) printf 'Source prerelease %s is already published at %s.\n' "$tag" "$tag_commit" ;;
+      *) release_fail "Existing release $tag must be inspected before retrying publication." ;;
+    esac
+  else
+    gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$notes_file"
+  fi
+  exit 0
+fi
+
 if [ "$dry_run" = true ]; then
   echo "[dry-run] gh release create $tag -R $GITHUB_REPO --title $tag --notes-file $notes_file"
   echo "[dry-run] gh release upload $tag -R $GITHUB_REPO --clobber $catalog_file"
   exit 0
 fi
 
-tag_ref="refs/tags/$tag"
-if ! remote_tag_refs="$(git -C "$REPO_ROOT" ls-remote --exit-code --tags "$PUBLISH_REMOTE" "$tag_ref" "$tag_ref^{}" 2>/dev/null)"; then
-  echo "Error: remote tag $tag was not found on $PUBLISH_REMOTE. Push the release commit and tag first." >&2
-  exit 1
+if ! published_sha="$(remote_tag_commit "$tag")"; then
+  release_fail "Remote tag $tag was not found on $PUBLISH_REMOTE. Push the release commit and tag first."
 fi
-remote_tag_commit="$(awk -v tag_ref="$tag_ref" -v peeled_ref="$tag_ref^{}" \
-  '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print peeled != "" ? peeled : ref }' \
-  <<<"$remote_tag_refs")"
-if [ "$remote_tag_commit" != "$tag_commit" ]; then
-  echo "Error: remote tag $tag points to $remote_tag_commit, but local tag $tag points to $tag_commit." >&2
+if [ "$published_sha" != "$tag_commit" ]; then
+  echo "Error: remote tag $tag points to $published_sha, but local tag $tag points to $tag_commit." >&2
   exit 1
 fi
 

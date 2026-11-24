@@ -206,10 +206,10 @@ async function downloadWithGh(runId, name, directory) {
 }
 
 export async function verifyDurableWorkSourceRelease({
-  sourceSha, baseSha, api = ghJson, downloadArtifact = downloadWithGh, changedPaths: suppliedPaths,
+  sourceSha, baseSha, api = ghJson, downloadArtifact = downloadWithGh, changedPaths: suppliedPaths, requireLinux = false,
 }) {
   const changed = suppliedPaths ?? changedPathsSinceRelease(baseSha, sourceSha);
-  if (!requiresDurableWorkAcceptance(changed)) {
+  if (!requireLinux && !requiresDurableWorkAcceptance(changed)) {
     return { applicable: false, sourceSha, baseSha, changed };
   }
   const evidence = await readDurableWorkReleaseEvidence({ sourceSha, baseSha, api, downloadArtifact,
@@ -219,11 +219,12 @@ export async function verifyDurableWorkSourceRelease({
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const [sourceSha, baseSha] = process.argv.slice(2);
-    if (!sourceSha || !baseSha || process.argv.length !== 4) {
-      throw new Error("Usage: node scripts/ci/durable-work-release-evidence.mjs <source-sha> <previous-release-sha>");
+    const [sourceSha, baseSha, ...flags] = process.argv.slice(2);
+    const requireLinux = flags.length === 1 && flags[0] === "--require-linux";
+    if (!sourceSha || !baseSha || (flags.length > 0 && !requireLinux)) {
+      throw new Error("Usage: node scripts/ci/durable-work-release-evidence.mjs <source-sha> <previous-release-sha> [--require-linux]");
     }
-    const result = await verifyDurableWorkSourceRelease({ sourceSha, baseSha });
+    const result = await verifyDurableWorkSourceRelease({ sourceSha, baseSha, requireLinux });
     if (!result.applicable) {
       console.log(`Durable-work release qualification does not apply to ${sourceSha}.`);
     } else {

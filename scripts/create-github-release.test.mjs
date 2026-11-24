@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 const sourceRoot = new URL("../", import.meta.url);
 const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
@@ -13,9 +13,13 @@ const evidenceVerifier = readFileSync(new URL("./ci/durable-work-release-evidenc
 const pathPolicy = readFileSync(new URL("./ci/durable-work-acceptance.mjs", import.meta.url), "utf8");
 const ciDiff = readFileSync(new URL("../.github/scripts/ci-diff.mjs", import.meta.url), "utf8");
 
-function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_sumo.sql", existingRelease = false, missingEvidence = false, remoteTagMismatch = false } = {}) {
+const fixtures = [];
+after(() => fixtures.forEach((root) => rmSync(root, { recursive: true, force: true })));
+
+function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_sumo.sql", existingRelease = false, missingEvidence = false, remoteTagMismatch = false, wrongReportSha = false, sourcePrerelease = false } = {}) {
   const migrationChanged = /^packages\/db\/src\/migrations\/[^/]+\.sql$/.test(changedPath);
   const root = mkdtempSync(join(tmpdir(), "proprio-source-release-gate-"));
+  fixtures.push(root);
   const bin = join(root, "bin");
   mkdirSync(bin);
   const git = (...args) => execFileSync(realGit, args, { cwd: root, encoding: "utf8" });
@@ -34,6 +38,7 @@ function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_s
   write("scripts/ci/durable-work-acceptance.mjs", pathPolicy);
   write(".github/scripts/ci-diff.mjs", ciDiff);
   write("cli/node_modules/tsx/dist/cli.mjs", `import { writeFileSync } from 'node:fs';\nconst out = process.argv[process.argv.indexOf('--out') + 1];\nwriteFileSync(out, '{}');\n`);
+  write(".gitignore", "/bin/\n/calls.log\n/report.json\n");
   write("releases/v0.0.1.md", "baseline\n");
   write("README.md", "baseline\n");
   git("add", ".");
@@ -42,17 +47,29 @@ function createFixture({ changedPath = "packages/db/src/migrations/0502_stormy_s
   const baseSha = git("rev-parse", "HEAD").trim();
 
   write(changedPath, "candidate\n");
-  write("releases/v0.0.2-rc.1.md", "source prerelease notes\n");
+  const tag = sourcePrerelease ? "v0.0.2" : "v0.0.2-rc.1";
+  write(`releases/${tag}.md`, "source prerelease notes\n");
   git("add", ".");
   git("commit", "-qm", "source candidate");
-  git("tag", "v0.0.2-rc.1");
+  if (!sourcePrerelease) git("tag", tag);
   const sourceSha = git("rev-parse", "HEAD").trim();
   git("remote", "add", "origin", "git@github.com:groktopus/proprio.git");
 
   const logPath = join(root, "calls.log");
   writeFileSync(logPath, "");
   const remoteTagCommit = remoteTagMismatch ? "c".repeat(40) : sourceSha;
-  const gitWrapper = `#!/bin/sh\ncase " $* " in\n  *" ls-remote "*) printf '%s\\trefs/tags/v0.0.2-rc.1\\n' "${remoteTagCommit}"; exit 0 ;;\nesac\nexec "${realGit}" "$@"\n`;
+  const pushed = join(bin, "pushed");
+  const gitWrapper = `#!/bin/sh
+case " $* " in
+  *" ls-remote "*" refs/heads/main "*) printf '%s\\trefs/heads/main\\n' "${sourceSha}"; exit 0 ;;
+  *" ls-remote "*" refs/tags/v0.0.1 "*) printf '%s\\trefs/tags/v0.0.1\\n' "${baseSha}"; exit 0 ;;
+  *" ls-remote "*)
+    if [ "${sourcePrerelease}" = true ] && [ "${remoteTagMismatch}" = false ] && [ ! -f "${pushed}" ]; then exit 2; fi
+    printf '%s\\trefs/tags/${tag}\\n' "${remoteTagCommit}"; exit 0 ;;
+  *" push "*) touch "${pushed}"; printf '%s\\n' "push $*" >> "$GH_LOG"; exit 0 ;;
+esac
+exec "${realGit}" "$@"
+`;
   writeFileSync(join(bin, "git"), gitWrapper, { mode: 0o755 });
 
   const gh = `#!/usr/bin/env node
@@ -73,7 +90,9 @@ if (args[0] === 'api') {
   const dir = args[args.indexOf('--dir') + 1]; mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'durable-work-acceptance.json'), process.env.REPORT);
 } else if (args[0] === 'release' && args[1] === 'view') {
-  if (process.env.EXISTING_RELEASE === '1') process.exit(0); else process.exit(1);
+  if (args[2] === 'v0.0.1') process.stdout.write('true');
+  else if (process.env.EXISTING_RELEASE === '1') process.exit(0);
+  else process.exit(1);
 } else if (args[0] === 'release' && ['create', 'edit', 'upload'].includes(args[1])) {
   process.stdout.write('stubbed release side effect\\n');
 } else process.exit(4);
@@ -88,13 +107,13 @@ if (args[0] === 'api') {
     ? { ...cases["migration-active-run-recovery"], previousReleaseSha: baseSha,
       schemaCandidateSha: sourceSha, elapsedRecoveryMs: 1000, observedDataLoss: 0 }
     : { ...cases["migration-active-run-recovery"], outcome: "not_applicable" };
-  const report = { schema: "proprio.durable-work-qualification/v1", sourceSha, baseSha, cases };
+  const report = { schema: "proprio.durable-work-qualification/v1", sourceSha: wrongReportSha ? "b".repeat(40) : sourceSha, baseSha, cases };
   const reportPath = join(root, "report.json");
   writeFileSync(reportPath, JSON.stringify(report));
 
   return {
     root, bin, git, sourceSha, baseSha, logPath, reportPath, existingRelease, missingEvidence,
-    run(args = ["0.0.2-rc.1"]) {
+    run(args = sourcePrerelease ? ["0.0.2", "--previous-tag", "v0.0.1"] : ["0.0.2-rc.1"]) {
       return spawnSync("bash", [join(root, "scripts/create-github-release.sh"), ...args], {
         cwd: root, encoding: "utf8", env: {
           ...process.env,
@@ -164,4 +183,43 @@ test("unrelated candidate skips source qualification and 0.0.x prerelease dry-ru
   assert.equal(dryRunResult.status, 0, dryRunResult.stdout + dryRunResult.stderr);
   assert.match(dryRunResult.stdout, /\[dry-run\] gh release create v0\.0\.2-rc\.1/);
   assert.doesNotMatch(readFileSync(dryRun.logPath, "utf8"), /release (?:create|edit|upload)/);
+});
+
+test("plain source version dry-run verifies exact Linux evidence without tagging", () => {
+  const fixture = createFixture({ sourcePrerelease: true, changedPath: "doc/GOAL.md" });
+  const result = fixture.run(["0.0.2", "--previous-tag", "v0.0.1", "--dry-run"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /\[dry-run\] Verified v0\.0\.2/);
+  const calls = readFileSync(fixture.logPath, "utf8");
+  assert.match(calls, /actions\/runs\/55\/artifacts/);
+  assert.doesNotMatch(calls, /(^push |release (?:create|edit|upload))/m);
+});
+
+test("plain source version refuses mismatched evidence before writing a tag", () => {
+  const fixture = createFixture({ sourcePrerelease: true, wrongReportSha: true });
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /does not match the source and previous-release SHAs/);
+  assert.doesNotMatch(readFileSync(fixture.logPath, "utf8"), /(^push |release (?:create|edit|upload))/m);
+});
+
+test("plain source version refuses absent Linux evidence on an unrelated diff", () => {
+  const fixture = createFixture({ sourcePrerelease: true, changedPath: "doc/GOAL.md", missingEvidence: true });
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /No trusted Linux source qualification run/);
+  assert.doesNotMatch(readFileSync(fixture.logPath, "utf8"), /(^push |release (?:create|edit|upload))/m);
+});
+
+test("plain source version tags the qualified candidate before creating a prerelease", () => {
+  const fixture = createFixture({ sourcePrerelease: true });
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const calls = readFileSync(fixture.logPath, "utf8").trim().split("\n");
+  const evidence = calls.findIndex(line => line.includes("/actions/runs/55/artifacts"));
+  const push = calls.findIndex(line => line.startsWith("push "));
+  const publish = calls.findIndex(line => line.startsWith("release create "));
+  assert.ok(evidence >= 0 && evidence < push && push < publish, calls.join("\n"));
+  assert.match(calls[push], new RegExp(`${fixture.sourceSha}:refs/tags/v0.0.2`));
+  assert.match(calls[publish], /feature-catalog\.json .*--verify-tag --prerelease/);
 });

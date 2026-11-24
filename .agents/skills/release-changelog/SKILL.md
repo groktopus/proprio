@@ -9,6 +9,18 @@ description: >
 
 Generate the user-facing changelog for the **stable** Proprio release.
 
+## Proprio Linux source prereleases
+
+For a `v0.0.x` source prerelease, use the
+[source release runbook](../../../doc/RELEASING.md). Draft the notes for the
+exact range from the preceding published source tag. Include the candidate SHA,
+passing qualification and artifact links, supported scope, upgrade and restore
+outcomes, and known gaps. Keep the notes outside the candidate checkout and
+pass them to the release command with `--notes-file`.
+
+The remainder of this skill documents the historical calendar-versioned npm
+workflow.
+
 ## Versioning Model
 
 Proprio uses **calendar versioning (calver)**:
