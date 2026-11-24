@@ -4,13 +4,13 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
-import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRuns, issueComments, issueDocuments, issues, issueWorkProducts } from "@groktopus/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { activityLog, agentApiKeys, agentWakeupRequests, agents, authSessions, authUsers, boardApiKeys, companyMemberships, principalPermissionGrants, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, companies, completionContracts, createDb, documentRevisions, documents, dotAgentBindings, heartbeatRuns, issueComments, issueDocuments, issues, issueWorkProducts } from "@groktopus/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { caseHandoffRoutes } from "../routes/case-handoffs.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { resolveCloudTenantActor } from "../middleware/auth.js";
-import { caseHandoffService } from "./case-handoffs.js";
+import { caseHandoffService, computeCaseHandoffRequirementsDigest } from "./case-handoffs.js";
 import { caseHandoffDeliveryService } from "./case-handoff-delivery.js";
 import { completeTerminalCaseHandoffsForIssue, pendingCaseHandoffForRun, recordCaseHandoffExecutionReleased } from "./heartbeat/case-handoff-lifecycle.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -39,7 +39,7 @@ describe("durable same-task case handoffs", () => {
   afterAll(async () => { await temporary?.cleanup(); });
   afterEach(async () => {
     await db.delete(activityLog);
-    await db.delete(caseHandoffs); await db.delete(caseIssueLinks); await db.delete(cases);
+    await db.delete(caseHandoffs); await db.delete(caseIssueLinks); await db.delete(cases); await db.delete(completionContracts);
     await db.delete(documentRevisions); await db.delete(documents);
     await db.delete(issues); await db.delete(heartbeatRuns); await db.delete(agentWakeupRequests);
     await db.delete(agentApiKeys); await db.delete(boardApiKeys); await db.delete(authSessions);
@@ -113,6 +113,64 @@ describe("durable same-task case handoffs", () => {
       },
     };
   }
+
+  it("records an immutable offered revision without transferring ownership or dispatching work", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ adapterType: "proprio_runner" }).where(inArray(agents.id, [f.triage, f.engineer]));
+    const first = await f.service.handoff(f.companyId, board, f.input);
+    await db.update(caseHandoffs).set({ state: "delivered" }).where(eq(caseHandoffs.id, first.handoffId));
+    const runId = await sourceRun(f.companyId, f.triage, first.taskId);
+    const [contract] = await db.insert(completionContracts).values({ companyId: f.companyId, issueId: first.taskId, revision: 1,
+      schemaVersion: "proprio.completion-contract.v1", policyVersion: "test", risk: "standard",
+      completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+      contractJson: { objective: "Implement the feature", criteria: [{ id: "verified", requirement: "Verification passes" }] },
+      canonicalSha256: "a".repeat(64), createdByActorType: "agent", createdByActorId: f.triage }).returning();
+    await db.update(heartbeatRuns).set({ runtimeMode: "native", completionContractId: contract!.id }).where(eq(heartbeatRuns.id, runId));
+    const [taskBefore] = await db.select().from(issues).where(eq(issues.id, first.taskId));
+    const offer = { expectedDeliverable: "Implementation with passing tests", prerequisites: ["Review the saved brief"] };
+    const receipt = await f.service.handoff(f.companyId, { type: "agent", agentId: f.triage, companyId: f.companyId, runId, source: "agent_jwt" }, {
+      case: { id: first.caseId }, idempotencyKey: randomUUID(), expectedHandoffVersion: 1,
+      expectedIssueStatusVersion: taskBefore!.statusVersion, toAgentId: f.engineer, phase: "implementation",
+      instructions: "Implement the agreed scope", offer,
+    });
+    const [saved] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
+    const [taskAfter] = await db.select().from(issues).where(eq(issues.id, first.taskId));
+    const [caseAfter] = await db.select().from(cases).where(eq(cases.id, first.caseId));
+    expect(receipt).toMatchObject({ state: "offered", callerMustYield: true });
+    expect(saved).toMatchObject({ state: "offered", version: 2, fromAgentId: f.triage, toAgentId: f.engineer,
+      offerContract: { schema: "proprio.case-handoff-offer.v1", ...offer,
+        requirementRevision: { id: contract!.id, revision: 1, canonicalSha256: "a".repeat(64) },
+        decisionOwner: { type: "agent", id: f.engineer }, accountableOwner: { type: "agent", id: f.triage } } });
+    expect((saved!.offerContract as any).requirementsDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(computeCaseHandoffRequirementsDigest({ taskTitle: taskBefore!.title, taskDescription: taskBefore!.description,
+      phase: saved!.phase, instructions: saved!.instructions, expectedDeliverable: offer.expectedDeliverable,
+      prerequisites: offer.prerequisites, requirementRevision: { id: contract!.id, revision: 1, canonicalSha256: "a".repeat(64) },
+      workflowTransition: saved!.workflowTransition })).toBe((saved!.offerContract as any).requirementsDigest);
+    expect(taskAfter).toMatchObject({ assigneeAgentId: f.triage, assigneeUserId: null, statusVersion: taskBefore!.statusVersion });
+    expect(caseAfter).toMatchObject({ phase: "triage", handoffVersion: 2 });
+    const q = queue(() => new Date());
+    await q.worker.sweepPending();
+    expect(q.wakeup).not.toHaveBeenCalled();
+  });
+
+
+  it("rejects the opt-in offer when the native source has no immutable completion contract", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ adapterType: "proprio_runner" }).where(inArray(agents.id, [f.triage, f.engineer]));
+    const first = await f.service.handoff(f.companyId, board, f.input);
+    await db.update(caseHandoffs).set({ state: "delivered" }).where(eq(caseHandoffs.id, first.handoffId));
+    const runId = await sourceRun(f.companyId, f.triage, first.taskId);
+    await db.update(heartbeatRuns).set({ runtimeMode: "native" }).where(eq(heartbeatRuns.id, runId));
+    const [task] = await db.select().from(issues).where(eq(issues.id, first.taskId));
+    const idempotencyKey = randomUUID();
+    await expect(f.service.handoff(f.companyId, { type: "agent", agentId: f.triage, companyId: f.companyId, runId, source: "agent_jwt" }, {
+      case: { id: first.caseId }, idempotencyKey, expectedHandoffVersion: 1, expectedIssueStatusVersion: task!.statusVersion,
+      toAgentId: f.engineer, phase: "implementation", instructions: "Implement the agreed scope",
+      offer: { expectedDeliverable: "Implementation with passing tests" },
+    })).rejects.toThrow("Versioned offers require an active native source task with a completion contract");
+    expect((await db.select().from(issues).where(eq(issues.id, first.taskId)))[0]).toMatchObject({ assigneeAgentId: f.triage });
+    expect(await db.select().from(caseHandoffs).where(eq(caseHandoffs.idempotencyKey, idempotencyKey))).toEqual([]);
+  });
 
   async function cloudTransfer() {
     const userId = randomUUID(), stackId = `stack-${randomUUID()}`, stackSlug = "handoff-cloud";

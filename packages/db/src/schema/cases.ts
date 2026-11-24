@@ -20,7 +20,7 @@ import { issues } from "./issues.js";
 import { labels } from "./labels.js";
 import { projects } from "./projects.js";
 import { workflows } from "./workflows.js";
-import type { CaseWorkflowTransition } from "@groktopus/shared";
+import type { CaseHandoffOfferContract, CaseHandoffRecipientDecision, CaseWorkflowTransition } from "@groktopus/shared";
 
 export const cases = pgTable(
   "cases",
@@ -119,6 +119,7 @@ export const caseEvents = pgTable(
         'label_added',
         'label_removed',
         'handoff_requested',
+        'handoff_decision_recorded',
         'handoff_applied',
         'handoff_delivered',
         'handoff_completed',
@@ -219,7 +220,9 @@ export const caseHandoffs = pgTable("case_handoffs", {
   wakeupRequestId: uuid("wakeup_request_id").notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
   inputFingerprint: text("input_fingerprint").notNull(),
-  state: text("state").$type<"awaiting_release" | "pending_dispatch" | "delivered" | "awaiting_completion" | "completed" | "cancelled">().notNull(),
+  offerContract: jsonb("offer_contract").$type<CaseHandoffOfferContract | null>(),
+  recipientDecision: jsonb("recipient_decision").$type<CaseHandoffRecipientDecision | null>(),
+  state: text("state").$type<"offered" | "awaiting_release" | "pending_dispatch" | "delivered" | "awaiting_completion" | "completed" | "cancelled">().notNull(),
   attemptCount: integer("attempt_count").notNull().default(0),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
   leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
@@ -234,14 +237,14 @@ export const caseHandoffs = pgTable("case_handoffs", {
 }, (table) => ({
   versionUq: uniqueIndex("case_handoffs_case_version_uq").on(table.companyId, table.caseId, table.version),
   idempotencyUq: uniqueIndex("case_handoffs_actor_idempotency_uq").on(table.companyId, table.actorType, table.actorId, table.idempotencyKey),
-  pendingCaseUq: uniqueIndex("case_handoffs_pending_case_uq").on(table.caseId).where(sql`${table.state} in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')`),
-  pendingIssueUq: uniqueIndex("case_handoffs_pending_issue_uq").on(table.issueId).where(sql`${table.state} in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')`),
+  pendingCaseUq: uniqueIndex("case_handoffs_pending_case_uq").on(table.caseId).where(sql`${table.state} in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')`),
+  pendingIssueUq: uniqueIndex("case_handoffs_pending_issue_uq").on(table.issueId).where(sql`${table.state} in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')`),
   pendingAttemptIdx: index("case_handoffs_pending_attempt_idx").on(table.nextAttemptAt).where(sql`${table.state} in ('awaiting_release', 'pending_dispatch')`),
   caseCreatedIdx: index("case_handoffs_case_created_idx").on(table.caseId, table.createdAt),
   sourceRunIdx: index("case_handoffs_source_run_idx").on(table.companyId, table.sourceRunId).where(sql`${table.sourceRunId} is not null`),
   wakeupRequestUq: uniqueIndex("case_handoffs_wakeup_request_uq").on(table.wakeupRequestId),
-  stateCheck: check("case_handoffs_state_check", sql`${table.state} in ('awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')`),
+  stateCheck: check("case_handoffs_state_check", sql`${table.state} in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')`),
   destinationCheck: check("case_handoffs_destination_check", sql`(${table.destinationKind} = 'agent' and ${table.toAgentId} is not null) or (${table.destinationKind} = 'done' and ${table.toAgentId} is null)`),
-  destinationStateCheck: check("case_handoffs_destination_state_check", sql`(${table.destinationKind} = 'agent' and ${table.state} in ('awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (${table.destinationKind} = 'done' and ${table.state} in ('awaiting_completion', 'completed', 'cancelled'))`),
+  destinationStateCheck: check("case_handoffs_destination_state_check", sql`(${table.destinationKind} = 'agent' and ${table.state} in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (${table.destinationKind} = 'done' and ${table.state} in ('awaiting_completion', 'completed', 'cancelled'))`),
   actorCheck: check("case_handoffs_actor_type_check", sql`${table.actorType} in ('agent', 'user', 'system')`),
 }));

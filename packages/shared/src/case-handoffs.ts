@@ -24,9 +24,35 @@ export const caseInitialDocumentsSchema = z.array(caseInitialDocumentSchema).max
 });
 export type CaseInitialDocument = z.infer<typeof caseInitialDocumentSchema>;
 
-export const CASE_HANDOFF_STATES = ["awaiting_release", "pending_dispatch", "delivered", "awaiting_completion", "completed", "cancelled"] as const;
+export const CASE_HANDOFF_STATES = ["offered", "awaiting_release", "pending_dispatch", "delivered", "awaiting_completion", "completed", "cancelled"] as const;
 export type CaseHandoffState = typeof CASE_HANDOFF_STATES[number];
 export type CaseHandoffDestinationKind = "agent" | "done";
+
+export const caseHandoffOfferSchema = z.object({
+  expectedDeliverable: z.string().trim().min(1).max(8_000),
+  prerequisites: z.array(z.string().trim().min(1).max(2_000)).max(20).default([]),
+}).strict();
+export type CaseHandoffOfferInput = z.infer<typeof caseHandoffOfferSchema>;
+export interface CaseHandoffOfferContract extends CaseHandoffOfferInput {
+  schema: "proprio.case-handoff-offer.v1";
+  requirementRevision: { id: string; revision: number; canonicalSha256: string };
+  requirementsDigest: string;
+  workflowTransition: CaseWorkflowTransition | null;
+  decisionOwner: { type: "agent"; id: string };
+  accountableOwner: { type: "agent"; id: string };
+}
+
+export interface CaseHandoffRecipientDecision {
+  outcome: "accepted" | "clarification" | "declined";
+  actorType: "agent";
+  actorId: string;
+  handoffVersion: number;
+  requirementRevisionId: string;
+  requirementsDigest: string;
+  decidedAt: string;
+  reasonCode?: string;
+  message?: string;
+}
 
 export const agentCaseHandoffSchema = z.object({
   to: z.never().optional(),
@@ -50,6 +76,7 @@ export const agentCaseHandoffSchema = z.object({
   initialDocuments: caseInitialDocumentsSchema.optional(),
   workflow_document_text: caseWorkflowDocumentTextSchema.optional(),
   workflowId: z.string().guid().nullable().optional(),
+  offer: caseHandoffOfferSchema.optional(),
 }).strict().superRefine((input, ctx) => {
   if ("id" in input.case && input.expectedHandoffVersion === undefined) {
     ctx.addIssue({ code: "custom", path: ["expectedHandoffVersion"], message: "Required for an existing case" });
@@ -122,6 +149,8 @@ export interface CaseHandoff {
   wakeupRequestId: string;
   idempotencyKey: string;
   inputFingerprint: string;
+  offerContract: CaseHandoffOfferContract | null;
+  recipientDecision: CaseHandoffRecipientDecision | null;
   state: CaseHandoffState;
   attemptCount: number;
   nextAttemptAt: Date | string;

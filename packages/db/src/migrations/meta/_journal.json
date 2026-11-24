@@ -3536,6 +3536,13 @@
       "when": 1795475139103,
       "tag": "0506_cynical_power_man",
       "breakpoints": true
+    },
+    {
+      "idx": 507,
+      "version": "7",
+      "when": 1795534058840,
+      "tag": "0507_useful_leper_queen",
+      "breakpoints": true
     }
   ]
 }

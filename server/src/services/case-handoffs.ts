@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
-import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, heartbeatRuns, issues, projects } from "@groktopus/db";
-import { handoffCaseSchema, isUuidLike, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
+import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, completionContracts, heartbeatRuns, issues, projects } from "@groktopus/db";
+import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseWorkflowTransition, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { casesDisabledError } from "./cases-disabled.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -26,7 +26,7 @@ import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHa
 export type CaseHandoffRow = typeof caseHandoffs.$inferSelect;
 type CaseRow = typeof cases.$inferSelect;
 type IssueRow = typeof issues.$inferSelect;
-const PENDING = ["awaiting_release", "pending_dispatch", "awaiting_completion"] as const;
+const PENDING = ["offered", "awaiting_release", "pending_dispatch", "awaiting_completion"] as const;
 
 function publicHandoff(row: CaseHandoffRow) {
   const { actorContext: _actorContext, workflowPrompt: _prompt, baseWorkflowDocumentRevisionId: _base, ...publicRow } = row;
@@ -38,6 +38,22 @@ function canonical(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== undefined)
     .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
+}
+
+export interface CaseHandoffRequirementSnapshot {
+  taskTitle: string;
+  taskDescription: string | null;
+  phase: string;
+  instructions: string;
+  expectedDeliverable: string;
+  prerequisites: string[];
+  requirementRevision: { id: string; revision: number; canonicalSha256: string };
+  workflowTransition: CaseWorkflowTransition | null;
+}
+
+/** Stable digest for recipient decisions and later corrective-revision binding. */
+export function computeCaseHandoffRequirementsDigest(input: CaseHandoffRequirementSnapshot): string {
+  return createHash("sha256").update(canonical(input)).digest("hex");
 }
 
 function identity(actor: AuthorizationActor) {
@@ -61,18 +77,20 @@ function result(row: CaseHandoffRow, issue: Pick<IssueRow, "id" | "identifier">,
     callerMustYield: row.destinationKind === "agent" && Boolean(row.sourceRunId && row.sourceRunId === actor.runId && row.state !== "cancelled"), replayed };
 }
 
-async function event(tx: Db, row: CaseHandoffRow, kind: "handoff_requested" | "handoff_applied" | "handoff_delivered" | "handoff_cancelled", publications: ActivityPublication[], actor?: AuthorizationActor) {
+async function event(tx: Db, row: CaseHandoffRow, kind: "handoff_requested" | "handoff_decision_recorded" | "handoff_applied" | "handoff_delivered" | "handoff_cancelled", publications: ActivityPublication[], actor?: AuthorizationActor) {
   const who = actor ? identity(actor) : { actorType: row.actorType, actorId: row.actorId };
   const runId = actor ? actor.runId ?? null : row.sourceRunId;
   await tx.insert(caseEvents).values({ companyId: row.companyId, caseId: row.caseId, kind,
     actorType: who.actorType, actorUserId: who.actorType === "user" ? who.actorId : null,
     actorAgentId: who.actorType === "agent" ? who.actorId : null, runId,
     payload: { handoffId: row.id, issueId: row.issueId, phase: row.phase, version: row.version, destinationKind: row.destinationKind,
+      ...(kind === "handoff_decision_recorded" && row.recipientDecision ? { recipientDecision: row.recipientDecision } : {}),
       fromAgentId: row.fromAgentId, toAgentId: row.toAgentId, workflowTransition: row.workflowTransition } });
   const saved = await persistActivity(tx, { companyId: row.companyId, ...who,
     agentId: who.actorType === "agent" ? who.actorId : null, runId, issueId: row.issueId,
     action: `case.${kind}`, entityType: "case", entityId: row.caseId, responsibleUserIdOverride: row.responsibleUserId,
     details: { handoffId: row.id, issueId: row.issueId, phase: row.phase, version: row.version, state: row.state, destinationKind: row.destinationKind,
+      ...(kind === "handoff_decision_recorded" && row.recipientDecision ? { recipientDecision: row.recipientDecision } : {}),
       workflowTransition: row.workflowTransition } });
   publications.push(saved.publication);
 }
@@ -268,8 +286,33 @@ export function caseHandoffService(db: Db) {
     return row;
   }
 
+  async function assertOfferRequirementsCurrent(tx: Db, row: CaseHandoffRow, issue: IssueRow) {
+    const offer = row.offerContract;
+    if (!offer) return;
+    if (row.recipientDecision?.outcome !== "accepted") throw conflict("Versioned offer has not been accepted by its recipient");
+    const [contract] = await tx.select({ id: completionContracts.id, revision: completionContracts.revision,
+      canonicalSha256: completionContracts.canonicalSha256 }).from(completionContracts).where(and(
+        eq(completionContracts.id, offer.requirementRevision.id), eq(completionContracts.companyId, row.companyId),
+        eq(completionContracts.issueId, row.issueId),
+      )).limit(1);
+    const [sourceRun] = row.sourceRunId ? await tx.select({ runtimeMode: heartbeatRuns.runtimeMode,
+      completionContractId: heartbeatRuns.completionContractId }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, row.sourceRunId), eq(heartbeatRuns.companyId, row.companyId),
+      )).limit(1) : [];
+    if (!contract || !sourceRun || sourceRun.runtimeMode !== "native" || sourceRun.completionContractId !== offer.requirementRevision.id ||
+        contract.revision !== offer.requirementRevision.revision || contract.canonicalSha256 !== offer.requirementRevision.canonicalSha256) {
+      throw conflict("Versioned offer requirement revision changed; record a new offer");
+    }
+    const digest = computeCaseHandoffRequirementsDigest({ taskTitle: issue.title, taskDescription: issue.description,
+      phase: row.phase, instructions: row.instructions, expectedDeliverable: offer.expectedDeliverable,
+      prerequisites: offer.prerequisites, requirementRevision: offer.requirementRevision,
+      workflowTransition: offer.workflowTransition });
+    if (digest !== offer.requirementsDigest) throw conflict("Versioned offer requirements changed; record a new offer");
+  }
+
   async function apply(tx: Db, row: CaseHandoffRow, caseRow: CaseRow, issue: IssueRow, publications: ActivityPublication[], originalActor?: AuthorizationActor, cloudAuthority?: CurrentCloudOwnerAuthority | null) {
     if (row.destinationKind !== "agent" || !row.toAgentId) throw conflict("Only agent handoffs can transfer a task");
+    await assertOfferRequirementsCurrent(tx, row, issue);
     if (caseRow.workIssueId !== issue.id || caseRow.handoffVersion !== row.version || issue.statusVersion !== row.expectedIssueStatusVersion || issue.responsibleUserId !== row.responsibleUserId ||
         issue.assigneeAgentId !== row.fromAgentId || issue.assigneeUserId) throw conflict("Handoff was superseded by a newer task decision");
     await assertCaseTrustedForExecution(tx, caseRow);
@@ -546,17 +589,55 @@ export function caseHandoffService(db: Db) {
         if ((workflow.workflowPrompt?.length ?? 0) + (input.initialDocuments ?? []).reduce((total, doc) => total + doc.body.length, 0) > 200_000) {
           throw unprocessable("Workflow and initial document bodies must total at most 200000 characters");
         }
+        let offerContract: CaseHandoffOfferContract | null = null;
+        if (input.offer) {
+          if (actor.type !== "agent" || !source || source.runtimeMode !== "native" || !source.completionContractId ||
+              !sourceIssue || issue.id !== sourceIssue.id || sourceRunId !== source.id) {
+            throw unprocessable("Versioned offers require an active native source task with a completion contract");
+          }
+          const [sourceAgent] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+            eq(agents.id, actor.agentId!), eq(agents.companyId, companyId),
+          )).limit(1);
+          if (sourceAgent?.adapterType !== "proprio_runner") {
+            throw unprocessable("Versioned offers require a native Proprio source");
+          }
+          const [contract] = await tx.select().from(completionContracts).where(and(
+            eq(completionContracts.id, source.completionContractId), eq(completionContracts.companyId, companyId),
+            eq(completionContracts.issueId, issue.id),
+          )).limit(1);
+          if (!contract) throw unprocessable("Versioned offers require the source task's current completion contract");
+          const [recipient] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+            eq(agents.id, input.toAgentId), eq(agents.companyId, companyId),
+          )).limit(1);
+          if (!recipient || recipient.adapterType !== "proprio_runner") {
+            throw unprocessable("Versioned offers require a native Proprio recipient");
+          }
+          const requirementRevision = { id: contract.id, revision: contract.revision, canonicalSha256: contract.canonicalSha256 };
+          const snapshot: CaseHandoffRequirementSnapshot = {
+            taskTitle: issue.title, taskDescription: issue.description, phase: input.phase, instructions: input.instructions,
+            expectedDeliverable: input.offer.expectedDeliverable, prerequisites: input.offer.prerequisites,
+            requirementRevision, workflowTransition: workflow.workflowTransition,
+          };
+          offerContract = {
+            schema: "proprio.case-handoff-offer.v1", ...input.offer, requirementRevision,
+            requirementsDigest: computeCaseHandoffRequirementsDigest(snapshot), workflowTransition: workflow.workflowTransition,
+            decisionOwner: { type: "agent", id: input.toAgentId },
+            accountableOwner: { type: "agent", id: actor.agentId! },
+          };
+        }
         const version = caseRow!.handoffVersion + 1;
         [caseRow] = await tx.update(cases).set({ workIssueId: issue.id, handoffVersion: version, updatedAt: new Date() }).where(eq(cases.id, caseRow!.id)).returning();
         const [saved] = await tx.insert(caseHandoffs).values({ id, companyId, caseId: caseRow!.id, issueId: issue.id, version, ...workflow,
+          offerContract,
           fromAgentId: issue.assigneeAgentId, toAgentId: input.toAgentId, phase: input.phase, instructions: input.instructions,
           commentId: comment.id, ...who, actorContext: caseHandoffActorContext(actor, companyId), sourceRunId, responsibleUserId: issue.responsibleUserId, expectedIssueStatusVersion: issue.statusVersion,
-          idempotencyKey: input.idempotencyKey, inputFingerprint: fingerprint, wakeupRequestId: randomUUID(), state: sourceRunId ? "awaiting_release" : "pending_dispatch",
+          idempotencyKey: input.idempotencyKey, inputFingerprint: fingerprint, wakeupRequestId: randomUUID(),
+          state: offerContract ? "offered" : sourceRunId ? "awaiting_release" : "pending_dispatch",
         }).returning();
         let row = saved!;
         await event(tx, row, "handoff_requested", publications);
-        if (!sourceRunId) row = await apply(tx, row, caseRow!, issue, publications, actor);
-        await notifyDeliveryWork(tx, DELIVERY_QUEUES.caseHandoffs, row.id);
+        if (!offerContract && !sourceRunId) row = await apply(tx, row, caseRow!, issue, publications, actor);
+        if (!offerContract) await notifyDeliveryWork(tx, DELIVERY_QUEUES.caseHandoffs, row.id);
         return result(row, issue, actor, false);
       });
       publications.forEach(publishActivity);
@@ -602,6 +683,7 @@ export function caseHandoffService(db: Db) {
       const [issue] = await db.select().from(issues).where(eq(issues.id, row.issueId));
       if (!issue) throw notFound("Task not found");
       await authorizeHandoffControl(db, actor, row, issue);
+      if (row.state === "offered") return publicHandoff(row); // Recipient decision owns this state; never enqueue execution delivery.
       if (row.destinationKind === "done") return publicHandoff(row); // Completion is owned by the ordinary task completion path.
       if (!PENDING.includes(row.state as typeof PENDING[number])) return publicHandoff(row);
       let publication: ActivityPublication | null = null;
@@ -668,6 +750,7 @@ export function caseHandoffService(db: Db) {
         const [row] = await tx.select().from(caseHandoffs).where(eq(caseHandoffs.id, handoffId)).for("update");
         if (!caseRow || !row || row.state !== "pending_dispatch" || caseRow.workIssueId !== issue.id || caseRow.handoffVersion !== row.version ||
           row.appliedIssueStatusVersion !== issue.statusVersion || issue.assigneeAgentId !== row.toAgentId || issue.responsibleUserId !== row.responsibleUserId) throw conflict("Handoff was superseded by a newer task decision");
+        await assertOfferRequirementsCurrent(tx, row, issue);
         await assertCaseTrustedForExecution(tx, caseRow);
         await assertCaseHandoffDispatchAuthority(tx, row, issue, caseRow);
       });
