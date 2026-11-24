@@ -211,6 +211,7 @@ export {
   toolAccessAuditEvents,
 } from "./tool_access.js";
 export { managedAuditEvents } from "./managed_audit_events.js";
+export { managedAuditExports } from "./managed_audit_exports.js";
 export {
   companySkills,
   companySkillMutationReceipts,
