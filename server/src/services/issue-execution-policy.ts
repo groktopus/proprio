@@ -405,6 +405,7 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     commentRequired: true,
     stages,
     ...(parsed.data.requiredQualityReview ? { requiredQualityReview: parsed.data.requiredQualityReview } : {}),
+    ...(parsed.data.reviewTargetBinding ? { reviewTargetBinding: parsed.data.reviewTargetBinding } : {}),
     ...(monitor ? { monitor } : {}),
     ...(reviewPreset ? { reviewPreset } : {}),
     ...(authorizationPolicy ? { authorizationPolicy } : {}),

@@ -3,15 +3,15 @@ import { randomUUID } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, assets, companies, createDb, documents, heartbeatRuns, issueAttachments, issueThreadInteractionIdempotencyKeys, issueThreadInteractions, issues } from "@groktopus/db";
-import { requiredQualityReviewSchema } from "@groktopus/shared";
+import { agents, assets, companies, createDb, documents, heartbeatRuns, issueAttachments, issueThreadInteractionIdempotencyKeys, issueThreadInteractions, issues, type Db } from "@groktopus/db";
+import { issueExecutionReviewTargetBindingSchema, requiredQualityReviewSchema } from "@groktopus/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { issueService } from "../services/issues.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
-import { readRequiredQualityReview } from "../services/required-quality-review.js";
+import { captureRequiredQualityReviewBinding, captureRequiredQualityReviewDecisionBinding, qualityReviewRequirementHash, readRequiredQualityReview } from "../services/required-quality-review.js";
 import { nativeCompletionFeedback } from "../services/native-runtime/native-completion-feedback.js";
 import { ProprioRunnerToolAuthority } from "../services/native-runtime/proprio-runner-tool-authority.js";
 import type { PrpStructuredRunResult } from "../vendor/proprio-runner/index.js";
@@ -29,13 +29,14 @@ const support = await getEmbeddedPostgresTestSupport();
   beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("required-quality-review-"); db = createDb(temporary.connectionString);
     await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false, enableAgentChat: true }); }, 30_000);
   afterAll(async () => { await db?.$client.end({ timeout: 1 }); await temporary?.cleanup(); });
-  async function fixture(required = true) {
+  async function fixture(required = true, bindTargets = false) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), userId = "local-board";
     await db.insert(companies).values({ id: companyId, name: "Quality", issuePrefix: `Q${companyId.slice(0, 7)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Writer", status: "idle", adapterType: "proprio_runner" });
     const [task] = await db.insert(issues).values({ id: issueId, companyId, title: "Review outputs", status: "in_progress", assigneeAgentId: agentId,
       createdByUserId: userId, reviewPolicy: null,
-      executionPolicy: required ? executionPolicyRecord({ requiredQualityReview: requirement }) : null }).returning();
+      executionPolicy: required ? executionPolicyRecord({ requiredQualityReview: requirement,
+        ...(bindTargets ? { reviewTargetBinding: { source: "required_quality_review" } } : {}) }) : null }).returning();
     const saved = await documentService(db).upsertIssueDocument({ issueId, key: "copy", title: "Blog copy", body: "Draft one", format: "markdown", baseRevisionId: null, createdByUserId: userId });
     const copy = { type: "issue_document" as const, key: "copy", revisionId: saved.document.latestRevisionId! };
     const assetId = randomUUID(), attachmentId = randomUUID(), sha256 = "a".repeat(64);
@@ -51,8 +52,15 @@ const support = await getEmbeddedPostgresTestSupport();
   }
   it("retains the optional policy and validates unique required output keys", () => {
     expect(normalizeIssueExecutionPolicy({ requiredQualityReview: requirement })?.requiredQualityReview).toEqual(requirement);
+    const optInPolicy = { source: "required_quality_review" as const };
+    expect(normalizeIssueExecutionPolicy({ requiredQualityReview: requirement, reviewTargetBinding: optInPolicy })?.reviewTargetBinding).toEqual(optInPolicy);
+    expect(() => normalizeIssueExecutionPolicy({ reviewTargetBinding: optInPolicy })).toThrow("Invalid execution policy");
     expect(normalizeIssueExecutionPolicy({})).toBeNull();
     expect(requiredQualityReviewSchema.safeParse({ version: 1, deliverables: [requirement.deliverables[0], requirement.deliverables[0]] }).success).toBe(false);
+    const binding = { version: 1, requirementHash: "a".repeat(64), deliverables: [{ key: "copy", label: "Copy",
+      target: { type: "issue_document", key: "copy", revisionId: randomUUID() } }] };
+    expect(issueExecutionReviewTargetBindingSchema.safeParse(binding).success).toBe(true);
+    expect(issueExecutionReviewTargetBindingSchema.safeParse({ ...binding, deliverables: [{ ...binding.deliverables[0], target: { type: "custom", key: "copy" } }] }).success).toBe(false);
   });
   it("does not gate existing tasks without the opt-in requirement", async () => {
     const f = await fixture(false);
@@ -73,6 +81,66 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await readRequiredQualityReview(db, f.task)).toMatchObject({ satisfied: true });
     const [before] = await db.select().from(issues).where(eq(issues.id, f.issueId)); expect(before.status).toBe("in_progress");
     expect(await issueService(db).update(f.issueId, { status: "done", actorAgentId: f.agentId })).toMatchObject({ status: "done" });
+  });
+  it("captures opt-in signoff targets as immutable requirement and artifact references", async () => {
+    const f = await fixture(true, true);
+    expect(f.task.executionPolicy).toMatchObject({ reviewTargetBinding: { source: "required_quality_review" } });
+    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+    await f.approve("copy");
+    await f.approve("visual");
+    const binding = await captureRequiredQualityReviewBinding(db, f.task);
+    expect(issueExecutionReviewTargetBindingSchema.safeParse(binding).success).toBe(true);
+    expect(binding).toEqual({
+      version: 1,
+      requirementHash: qualityReviewRequirementHash(requirement),
+      deliverables: [
+        { key: "copy", label: "Blog copy", target: { type: "issue_document", key: "copy", revisionId: f.copy.revisionId } },
+        { key: "visual", label: "Supporting visual", target: { type: "issue_attachment", attachmentId: f.visual.attachmentId,
+          assetId: f.visual.assetId, sha256: f.visual.sha256 } },
+      ],
+    });
+    await documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy", body: "Changed copy",
+      format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
+    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+  });
+  it("locks reviewed artifacts while an approved decision snapshots them", async () => {
+    const f = await fixture(true, true);
+    await f.approve("copy"); await f.approve("visual");
+    const captured: { value: Awaited<ReturnType<typeof captureRequiredQualityReviewDecisionBinding>> } = { value: null };
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    let ready!: () => void;
+    const snapshotReady = new Promise<void>(resolve => { ready = resolve; });
+    const snapshot = db.transaction(async tx => {
+      captured.value = await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+        issue: f.task, previousPolicy: f.task.executionPolicy, nextPolicy: f.task.executionPolicy,
+      });
+      ready();
+      await hold;
+    });
+    await snapshotReady;
+    const edit = documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
+      body: "Edited while approval commits", format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
+    let editFinished = false;
+    void edit.then(() => { editFinished = true; });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(editFinished).toBe(false);
+    release();
+    await snapshot;
+    await edit;
+    expect(captured.value?.deliverables.find(item => item.key === "copy")?.target).toEqual({
+      type: "issue_document", key: "copy", revisionId: f.copy.revisionId,
+    });
+    expect(await readRequiredQualityReview(db, f.task)).toMatchObject({ satisfied: false, missing: [{ key: "copy", reason: "stale" }] });
+  });
+  it("leaves legacy issue policies without opt-in unbound", async () => {
+    const f = await fixture();
+    await f.approve("copy");
+    await f.approve("visual");
+    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+    expect(await captureRequiredQualityReviewDecisionBinding(db, {
+      issue: f.task, previousPolicy: f.task.executionPolicy, nextPolicy: f.task.executionPolicy,
+    })).toBeNull();
   });
   it("protects accepted requirements from agent removal or weakening and permits audited human edits", async () => {
     const f = await fixture();

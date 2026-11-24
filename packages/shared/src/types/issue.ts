@@ -798,9 +798,31 @@ export interface QualityReviewBinding {
   requirementHash?: string;
 }
 
+/** Opt-in source for binding an execution-stage signoff to required quality outputs. */
+export interface IssueExecutionReviewTargetBindingPolicy {
+  source: "required_quality_review";
+}
+
+export type IssueExecutionReviewTargetReference =
+  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "issueId" | "key" | "revisionId">
+  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "issueId" | "attachmentId" | "assetId" | "sha256">;
+
+/** Immutable requirement and artifact references captured for a future signoff check. */
+export interface IssueExecutionReviewTargetBinding {
+  version: 1;
+  requirementHash: string;
+  deliverables: Array<{
+    key: string;
+    label: string;
+    target: IssueExecutionReviewTargetReference;
+  }>;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   requiredQualityReview?: RequiredQualityReview;
+  /** Opt-in binding source. Admission enforcement is added at the transactional signoff boundary. */
+  reviewTargetBinding?: IssueExecutionReviewTargetBindingPolicy;
   commentRequired: boolean;
   stages: IssueExecutionStage[];
   monitor?: IssueExecutionMonitorPolicy | null;
@@ -843,6 +865,7 @@ export interface IssueExecutionState {
   currentParticipant: IssueExecutionStagePrincipal | null;
   returnAssignee: IssueExecutionStagePrincipal | null;
   reviewRequest: IssueReviewRequest | null;
+  reviewTargetBinding?: IssueExecutionReviewTargetBinding | null;
   completedStageIds: string[];
   lastDecisionId: string | null;
   lastDecisionOutcome: IssueExecutionDecisionOutcome | null;
@@ -861,6 +884,7 @@ export interface IssueExecutionDecision {
   actorUserId: string | null;
   outcome: IssueExecutionDecisionOutcome;
   body: string;
+  reviewTargetBinding?: IssueExecutionReviewTargetBinding | null;
   createdByRunId: string | null;
   createdAt: Date;
   updatedAt: Date;

@@ -482,8 +482,31 @@ export const requiredQualityReviewSchema = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Quality review deliverable keys must be unique", path: ["deliverables"] });
 });
 
+export const issueExecutionReviewTargetBindingPolicySchema = z.object({
+  source: z.literal("required_quality_review"),
+}).strict();
+
+export const issueExecutionReviewTargetReferenceSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("issue_document"), issueId: z.string().guid().nullable().optional(), key: z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/), revisionId: z.string().guid() }).strict(),
+  z.object({ type: z.literal("issue_attachment"), issueId: z.string().guid().nullable().optional(), attachmentId: z.string().guid(), assetId: z.string().guid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+]);
+
+export const issueExecutionReviewTargetBindingSchema = z.object({
+  version: z.literal(1),
+  requirementHash: z.string().regex(/^[a-f0-9]{64}$/),
+  deliverables: z.array(z.object({
+    key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
+    label: z.string().trim().min(1).max(120),
+    target: issueExecutionReviewTargetReferenceSchema,
+  }).strict()).min(1).max(10),
+}).strict().superRefine((binding, ctx) => {
+  if (new Set(binding.deliverables.map(item => item.key)).size !== binding.deliverables.length)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Review target binding keys must be unique", path: ["deliverables"] });
+});
+
 export const issueExecutionPolicySchema = z.object({
   requiredQualityReview: requiredQualityReviewSchema.optional(),
+  reviewTargetBinding: issueExecutionReviewTargetBindingPolicySchema.optional(),
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
   stages: z.array(issueExecutionStageSchema).default([]),
@@ -498,6 +521,10 @@ export const issueExecutionPolicySchema = z.object({
     .optional()
     .nullable()
     .default(null),
+}).superRefine((value, ctx) => {
+  if (value.reviewTargetBinding && !value.requiredQualityReview) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Review target binding requires requiredQualityReview", path: ["reviewTargetBinding"] });
+  }
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -560,6 +587,7 @@ export const issueExecutionStateSchema = z.object({
   currentParticipant: issueExecutionStagePrincipalSchema.nullable(),
   returnAssignee: issueExecutionStagePrincipalSchema.nullable(),
   reviewRequest: issueReviewRequestSchema.nullable().optional().default(null),
+  reviewTargetBinding: issueExecutionReviewTargetBindingSchema.nullable().optional(),
   completedStageIds: z.array(z.string().guid()).default([]),
   lastDecisionId: z.string().guid().nullable(),
   lastDecisionOutcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES).nullable(),

@@ -60,6 +60,7 @@ import { deferredWakeJoinsFirstTurn, firstTurnTakesAllQueuedComments, runAccepts
 import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
+import { captureRequiredQualityReviewDecisionBinding } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
 import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
@@ -10800,6 +10801,11 @@ export function issueRoutes(
                 ...nextExecutionState,
                 lastDecisionId: decisionId,
               };
+              const reviewTargetBinding = transition.decision.outcome === "approved"
+                ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+                    issue: lockedIssue, previousPolicy: lockedIssue.executionPolicy, nextPolicy: lockedIssue.executionPolicy,
+                  })
+                : null;
               await tx.insert(issueExecutionDecisions).values({
                 id: decisionId,
                 companyId: lockedIssue.companyId,
@@ -10810,6 +10816,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: transition.decision.outcome,
                 body: transition.decision.body,
+                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
                 createdByRunId: actor.runId ?? null,
               });
             }
@@ -15814,6 +15821,15 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
+            // updateIssue obtains the authoritative issue row lock. Validate and
+            // snapshot the exact artifacts while that lock remains held.
+            const policyChange = updated.changes?.executionPolicy;
+            const reviewTargetBinding = decision?.outcome === "approved"
+              ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+                  issue: updated, previousPolicy: policyChange ? policyChange.from : existing.executionPolicy,
+                  nextPolicy: nextExecutionPolicy,
+                })
+              : null;
             if (commentAttachmentIds?.length || commentWithAdapterOverrides || agentCommentUpdate) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
@@ -15853,6 +15869,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: decision.outcome,
                 body: decision.body,
+                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
                 createdByRunId: actor.runId ?? null,
               });
             }
@@ -19850,6 +19867,11 @@ export function issueRoutes(
             if (!updated) throw new AutoApprovalIssueMissingError();
 
             if (transition.decision && decisionId) {
+              const reviewTargetBinding = transition.decision.outcome === "approved"
+                ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+                    issue: updated, previousPolicy: currentIssue.executionPolicy, nextPolicy: updated.executionPolicy,
+                  })
+                : null;
               await tx.insert(issueExecutionDecisions).values({
                 id: decisionId,
                 companyId: updated.companyId,
@@ -19860,6 +19882,7 @@ export function issueRoutes(
                 actorUserId: actor.actorType === "user" ? actor.actorId : null,
                 outcome: transition.decision.outcome,
                 body: transition.decision.body,
+                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
                 createdByRunId: actor.runId ?? null,
               });
             }

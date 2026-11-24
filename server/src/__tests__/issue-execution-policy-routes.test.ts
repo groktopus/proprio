@@ -56,10 +56,11 @@ const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
 })));
 const mockDbSelectFrom = vi.hoisted(() => vi.fn((_table: unknown): { where: (...args: never[]) => unknown } => ({ where: mockDbSelectWhere })));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
+const mockDbInsertedValues = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
   transaction: vi.fn(async (callback: (tx: { select: typeof mockDbSelect }) => Promise<unknown>) =>
-    callback({ select: mockDbSelect })),
+    callback({ select: mockDbSelect, insert: () => ({ values: async (values: Record<string, unknown>) => { mockDbInsertedValues.push(values); } }) } as any)),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async (_db: unknown, _input: unknown) => undefined));
@@ -75,8 +76,18 @@ const mockRunnerGoalService = vi.hoisted(() => ({
   projection: vi.fn(async () => null),
   act: vi.fn(),
 }));
+const mockRequiredQualityReview = vi.hoisted(() => ({
+  requiredQualityReview: vi.fn((policy: any) => policy?.requiredQualityReview ?? null),
+  qualityReviewRequirementHash: vi.fn((requirement: any) => JSON.stringify(requirement?.deliverables ?? [])),
+  readRequiredQualityReview: vi.fn(async (): Promise<{ required: boolean; satisfied: boolean; missing: Array<{ key: string; label: string; reason: string }> }> => ({ required: true, satisfied: true, missing: [] })),
+  captureRequiredQualityReviewBinding: vi.fn(async () => ({ version: 1, requirementHash: JSON.stringify([{ key: "copy", label: "Copy" }]), deliverables: [
+    { key: "copy", label: "Copy", target: { type: "issue_document", key: "copy", revisionId: "99999999-9999-4999-8999-999999999999" } },
+  ] })),
+  captureRequiredQualityReviewDecisionBinding: vi.fn(),
+}));
 
 function registerModuleMocks() {
+  vi.doMock("../services/required-quality-review.js", () => mockRequiredQualityReview);
   vi.doMock("../services/queued-interaction-response.js", () => ({
     hasQueuedInteractionResponse: vi.fn(async () => false),
   }));
@@ -214,6 +225,7 @@ describe("issue execution policy routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDbInsertedValues.length = 0;
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
@@ -223,6 +235,30 @@ describe("issue execution policy routes", () => {
     mockIssueThreadInteractionService.listForIssue.mockResolvedValue([]);
     mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
     mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
+    mockRequiredQualityReview.readRequiredQualityReview.mockResolvedValue({ required: true, satisfied: true, missing: [] });
+    mockRequiredQualityReview.captureRequiredQualityReviewDecisionBinding.mockImplementation(async (_db: unknown, input: any) => {
+      const { unprocessable } = await import("../errors.js");
+      const optedIn = (policy: any) => policy?.reviewTargetBinding?.source === "required_quality_review";
+      if (!optedIn(input.previousPolicy) && !optedIn(input.nextPolicy) && !optedIn(input.issue.executionPolicy)) return null;
+      const requested = mockRequiredQualityReview.requiredQualityReview(input.nextPolicy);
+      const current = mockRequiredQualityReview.requiredQualityReview(input.issue.executionPolicy);
+      if (!optedIn(input.nextPolicy) || !optedIn(input.issue.executionPolicy) || !requested || !current ||
+          mockRequiredQualityReview.qualityReviewRequirementHash(requested) !== mockRequiredQualityReview.qualityReviewRequirementHash(current)) {
+        throw unprocessable("Required quality review requirements changed while the decision was being admitted", { code: "required_quality_review_stale" });
+      }
+      const review = await mockRequiredQualityReview.readRequiredQualityReview();
+      if (!review.satisfied) throw unprocessable("Required human quality review is not approved for the current outputs", {
+        code: "required_quality_review_incomplete", missing: review.missing,
+      });
+      const binding = await mockRequiredQualityReview.captureRequiredQualityReviewBinding();
+      if (!binding || binding.requirementHash !== mockRequiredQualityReview.qualityReviewRequirementHash(current)) {
+        throw unprocessable("Required quality review target changed before the decision was recorded", { code: "required_quality_review_stale" });
+      }
+      return binding;
+    });
+    mockRequiredQualityReview.captureRequiredQualityReviewBinding.mockResolvedValue({ version: 1, requirementHash: JSON.stringify([{ key: "copy", label: "Copy" }]), deliverables: [
+      { key: "copy", label: "Copy", target: { type: "issue_document", key: "copy", revisionId: "99999999-9999-4999-8999-999999999999" } },
+    ] });
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDbSelectFrom.mockImplementation((table) => {
       const name = getTableName(table as Parameters<typeof getTableName>[0]);
@@ -319,6 +355,77 @@ describe("issue execution policy routes", () => {
     expect(res.status).toBe(422);
     expect(mockIssueService.getById).not.toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("binds an approved execution decision to the exact reviewed output and refuses stale output", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", companyId: "company-1", status: "in_review",
+      assigneeAgentId: null, assigneeUserId: "local-board", createdByUserId: "local-board",
+      identifier: "PAP-REVIEW", title: "Review bound output",
+      executionPolicy: normalizeIssueExecutionPolicy({ requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Copy" }] },
+        reviewTargetBinding: { source: "required_quality_review" }, stages: [{ id: "11111111-1111-4111-8111-111111111111", type: "review",
+          participants: [{ type: "user", userId: "local-board" }] }] }),
+      executionState: { status: "pending", currentStageId: "11111111-1111-4111-8111-111111111111", currentStageIndex: 0,
+        currentStageType: "review", currentParticipant: { type: "user", userId: "local-board" },
+        returnAssignee: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" }, completedStageIds: [],
+        lastDecisionId: null, lastDecisionOutcome: null },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch }));
+    mockIssueService.addComment.mockResolvedValue({ id: "88888888-8888-4888-8888-888888888888", createdAt: new Date(), body: "Approved after checking the current copy.", issueId: issue.id, authorUserId: "local-board" });
+
+    const res = await request(await createApp()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", comment: "Approved after checking the current copy." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockRequiredQualityReview.captureRequiredQualityReviewDecisionBinding).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      previousPolicy: issue.executionPolicy, nextPolicy: issue.executionPolicy,
+    }));
+    const decision = mockDbInsertedValues.find(value => value.outcome === "approved");
+    expect(decision).toMatchObject({ reviewTargetBinding: { version: 1, requirementHash: JSON.stringify([{ key: "copy", label: "Copy" }]),
+      deliverables: [{ key: "copy", target: { type: "issue_document", key: "copy", revisionId: "99999999-9999-4999-8999-999999999999" } }] } });
+
+    mockDbInsertedValues.length = 0;
+    // The route may read quality review state before it reaches decision admission.
+    // Keep the stale result in place for every read in this request.
+    mockRequiredQualityReview.readRequiredQualityReview.mockResolvedValue({ required: true, satisfied: false,
+      missing: [{ key: "copy", label: "Copy", reason: "stale" }] });
+    const stale = await request(await createApp()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", comment: "Approve stale copy." });
+    expect(stale.status, JSON.stringify(stale.body)).toBe(422);
+    expect(stale.body.details).toMatchObject({ code: "required_quality_review_incomplete", missing: [{ reason: "stale" }] });
+    expect(mockDbInsertedValues.some(value => value.outcome === "approved")).toBe(false);
+
+    const removedBindingPolicy = normalizeIssueExecutionPolicy({ requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Copy" }] },
+      stages: [{ id: "11111111-1111-4111-8111-111111111111", type: "review",
+        participants: [{ type: "user", userId: "local-board" }] }] });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch, executionPolicy: removedBindingPolicy }));
+    const removedBinding = await request(await createApp()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", executionPolicy: removedBindingPolicy, comment: "Remove opt-in and approve." });
+    expect(removedBinding.status).toBe(422);
+    expect(removedBinding.body.details).toMatchObject({ code: "required_quality_review_stale" });
+    expect(mockDbInsertedValues.some(value => value.outcome === "approved")).toBe(false);
+
+    mockIssueService.update.mockImplementationOnce(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue, ...patch,
+      executionPolicy: { ...issue.executionPolicy, requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Changed copy requirement" }] } },
+    }));
+    const changedRequirement = await request(await createApp()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", comment: "Approve under changed requirements." });
+    expect(changedRequirement.status).toBe(422);
+    expect(changedRequirement.body.details).toMatchObject({ code: "required_quality_review_stale" });
+    expect(mockDbInsertedValues.some(value => value.outcome === "approved")).toBe(false);
+
+    mockIssueService.getById.mockResolvedValue({ ...issue, executionPolicy: removedBindingPolicy });
+    mockIssueService.update.mockImplementationOnce(async (_id: string, patch: Record<string, unknown>) => ({
+      ...issue, ...patch, executionPolicy: removedBindingPolicy,
+      changes: { executionPolicy: { from: issue.executionPolicy, to: removedBindingPolicy } },
+    }));
+    const racedOptIn = await request(await createApp()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", executionPolicy: removedBindingPolicy, comment: "Approve using an older policy snapshot." });
+    expect(racedOptIn.status).toBe(422);
+    expect(racedOptIn.body.details).toMatchObject({ code: "required_quality_review_stale" });
+    expect(mockDbInsertedValues.some(value => value.outcome === "approved")).toBe(false);
   });
 
   it("rejects a stale status version before changing or waking a task", async () => {

@@ -3242,6 +3242,35 @@ describe("issue comment reopen routes", () => {
     );
   });
 
+  it("keeps opted-in auto-comment approvals behind the required output review", async () => {
+    const selectFrom = mockDbSelectFrom.getMockImplementation()!;
+    mockDbSelectFrom.mockImplementation(table => getTableName(table as Parameters<typeof getTableName>[0]) === "issue_thread_interactions"
+      ? { where: () => ({ orderBy: () => ({ limit: () => ({ for: async () => [] }) }) }) }
+      : selectFrom(table));
+    const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
+    const basePolicy = await createAgentReviewPolicy(reviewerAgentId)!;
+    const policy = normalizeIssueExecutionPolicy({
+      ...basePolicy,
+      requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Copy" }] },
+      reviewTargetBinding: { source: "required_quality_review" },
+    });
+    if (!policy) throw new Error("Expected opted-in review policy");
+    const issue = createReviewIssue(policy, reviewerAgentId);
+    const reviewBody = "kind: review\ndecision: approved\nsummary: ship it";
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.addComment.mockResolvedValue({ id: "comment-review-opt-in", issueId: issue.id,
+      companyId: issue.companyId, body: reviewBody, createdAt: new Date(), updatedAt: new Date(), authorAgentId: reviewerAgentId, authorUserId: null });
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...issue, ...patch, status: "done" }));
+
+    const res = await request(await installActor(createApp(), {
+      type: "agent", agentId: reviewerAgentId, companyId: "company-1", source: "agent_key", runId: "run-review-opt-in",
+    })).post("/api/issues/11111111-1111-4111-8111-111111111111/comments").send({ body: reviewBody });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.details).toMatchObject({ code: "required_quality_review_incomplete" });
+    expect(mockTxInsertValues).not.toHaveBeenCalled();
+  });
+
   it("auto-approves a reviewer comment and wakes dependents when the final blocker resolves", async () => {
     const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
     const dependentAgentId = "44444444-4444-4444-8444-444444444444";

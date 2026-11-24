@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { assets, documents, issueAttachments, issueDocuments, issueThreadInteractions, type Db } from "@groktopus/db";
-import { requiredQualityReviewSchema, type RequiredQualityReview, type RequestConfirmationTarget, type QualityReviewBinding } from "@groktopus/shared";
+import { requiredQualityReviewSchema, type IssueExecutionReviewTargetBinding, type IssueExecutionReviewTargetReference, type RequiredQualityReview, type RequestConfirmationTarget, type QualityReviewBinding } from "@groktopus/shared";
 import { forbidden, unprocessable } from "../errors.js";
 
 function record(value: unknown): Record<string, any> {
@@ -72,6 +72,80 @@ export async function currentQualityReviewTarget(db: Db, companyId: string, issu
   return false;
 }
 
+/**
+ * Capture the exact required output targets for an opt-in execution-stage signoff.
+ * This prepares immutable evidence only; callers must validate it again under the
+ * transaction that admits the signoff.
+ */
+export async function captureRequiredQualityReviewBinding(db: Db,
+  issue: { id: string; companyId: string; executionPolicy?: unknown }, lock = false): Promise<IssueExecutionReviewTargetBinding | null> {
+  const policy = record(issue.executionPolicy);
+  if (record(policy.reviewTargetBinding).source !== "required_quality_review") return null;
+  const requirement = requiredQualityReview(issue.executionPolicy);
+  if (!requirement) return null;
+  const requirementHash = qualityReviewRequirementHash(requirement);
+  const deliverables: IssueExecutionReviewTargetBinding["deliverables"] = [];
+  for (const slot of requirement.deliverables) {
+    const interactionQuery = db.select().from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
+      sql`((${issueThreadInteractions.kind} = 'request_confirmation' AND ${issueThreadInteractions.payload}->'qualityReview'->>'key' = ${slot.key}) OR
+        (${issueThreadInteractions.kind} = 'request_item_verdicts' AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(${issueThreadInteractions.payload}->'items') item WHERE item->'qualityReview'->>'key' = ${slot.key})))`,
+    )).orderBy(desc(issueThreadInteractions.createdAt), desc(issueThreadInteractions.id)).limit(1);
+    const [row] = await (lock ? interactionQuery.for("update") : interactionQuery);
+    if (!row) return null;
+    const payload = record(row.payload);
+    const matching = row.kind === "request_item_verdicts"
+      ? (Array.isArray(payload.items) ? payload.items : []).filter((item: any) => item.qualityReview?.key === slot.key)
+      : [payload];
+    if (matching.length !== 1) return null;
+    const item = record(matching[0]);
+    const qualityBinding = record(item.qualityReview);
+    const target = record(item.target);
+    if (qualityBinding.requirementHash !== requirementHash ||
+        !["issue_document", "issue_attachment"].includes(String(target.type)) ||
+        !await currentQualityReviewTarget(db, issue.companyId, issue.id, target, lock)) return null;
+    const targetReference: IssueExecutionReviewTargetReference = target.type === "issue_document"
+      ? { type: "issue_document", ...(typeof target.issueId === "string" ? { issueId: target.issueId } : {}),
+        key: String(target.key), revisionId: String(target.revisionId) }
+      : { type: "issue_attachment", ...(typeof target.issueId === "string" ? { issueId: target.issueId } : {}),
+        attachmentId: String(target.attachmentId), assetId: String(target.assetId), sha256: String(target.sha256) };
+    deliverables.push({ key: slot.key, label: slot.label, target: targetReference });
+  }
+  return { version: 1, requirementHash, deliverables };
+}
+
+/** Validate and snapshot an opted-in execution approval while the issue row is locked. */
+export async function captureRequiredQualityReviewDecisionBinding(db: Db, input: {
+  issue: { id: string; companyId: string; executionPolicy?: unknown };
+  previousPolicy: unknown;
+  nextPolicy: unknown;
+}): Promise<IssueExecutionReviewTargetBinding | null> {
+  const optedIn = (policy: unknown) => record(record(policy).reviewTargetBinding).source === "required_quality_review";
+  if (!optedIn(input.previousPolicy) && !optedIn(input.nextPolicy) && !optedIn(input.issue.executionPolicy)) return null;
+  const requested = requiredQualityReview(input.nextPolicy);
+  const current = requiredQualityReview(input.issue.executionPolicy);
+  if (!optedIn(input.nextPolicy) || !optedIn(input.issue.executionPolicy) || !requested || !current ||
+      qualityReviewRequirementHash(requested) !== qualityReviewRequirementHash(current)) {
+    throw unprocessable("Required quality review requirements changed while the decision was being admitted", {
+      code: "required_quality_review_stale",
+    });
+  }
+  const review = await readRequiredQualityReview(db, input.issue, true);
+  if (!review.satisfied) {
+    throw unprocessable("Required human quality review is not approved for the current outputs", {
+      code: "required_quality_review_incomplete", missing: review.missing,
+    });
+  }
+  const binding = await captureRequiredQualityReviewBinding(db, input.issue, true);
+  if (!binding || binding.requirementHash !== qualityReviewRequirementHash(current)) {
+    throw unprocessable("Required quality review target changed before the decision was recorded", {
+      code: "required_quality_review_stale",
+    });
+  }
+  return binding;
+}
+
 export interface RequiredQualityReviewState {
   required: boolean;
   satisfied: boolean;
@@ -85,12 +159,13 @@ export async function readRequiredQualityReview(db: Db, issue: { id: string; com
   const fingerprint = qualityReviewRequirementHash(requirement);
   const missing: RequiredQualityReviewState["missing"] = [];
   for (const slot of requirement.deliverables) {
-    const [row] = await db.select().from(issueThreadInteractions).where(and(
+    const interactionQuery = db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
       sql`((${issueThreadInteractions.kind} = 'request_confirmation' AND ${issueThreadInteractions.payload}->'qualityReview'->>'key' = ${slot.key}) OR
         (${issueThreadInteractions.kind} = 'request_item_verdicts' AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(${issueThreadInteractions.payload}->'items') item WHERE item->'qualityReview'->>'key' = ${slot.key})))`,
     )).orderBy(desc(issueThreadInteractions.createdAt), desc(issueThreadInteractions.id)).limit(1);
+    const [row] = await (lock ? interactionQuery.for("update") : interactionQuery);
     if (!row) { missing.push({ ...slot, reason: "missing" }); continue; }
     const payload = record(row.payload), result = record(row.result);
     const matchingItems = row.kind === "request_item_verdicts"
