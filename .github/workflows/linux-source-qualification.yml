@@ -1,17 +1,19 @@
 name: Linux source qualification
-run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inputs.pr_number, inputs.test_head) || (inputs.test_head && inputs.base_sha && format('Source qualification {0} from {1}', inputs.test_head, inputs.base_sha)) || 'Linux source qualification' }}
+run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inputs.pr_number, inputs.test_head) || (inputs.test_head && inputs.base_sha && format('Source qualification {0} from {1}', inputs.test_head, inputs.base_sha)) || format('Linux source qualification {0}', github.sha) }}
 
 on:
+  schedule:
+    - cron: "43 5 * * *"
   workflow_dispatch:
     inputs:
       pr_number:
         description: Pull request number for a default-branch acceptance run
         type: string
       test_head:
-        description: Exact pull request head SHA to qualify
+        description: Exact source SHA to qualify (defaults to the selected main revision)
         type: string
       base_sha:
-        description: Exact base release SHA for manual PR qualification; source candidates default to v0.0.1
+        description: Exact upgrade baseline SHA (defaults to v0.0.1)
         type: string
   workflow_call:
 
@@ -50,6 +52,7 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
       - name: Verify head and install locked dependencies
+        id: install
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: |
@@ -72,6 +75,7 @@ jobs:
       - name: Install Chromium for recovered-task readback
         run: pnpm exec playwright install --with-deps chromium
       - name: Execute managed update and rollback on Linux
+        id: lifecycle
         env:
           BASE_SHA: ${{ inputs.base_sha }}
           NEXT_SHA: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
@@ -107,6 +111,7 @@ jobs:
           export E2E_UPDATE_STEP_SUMMARY="$GITHUB_STEP_SUMMARY"
           bash scripts/e2e-update-migrations.sh
       - name: Build the source checkout
+        id: build
         run: |
           rustc --version
           cargo --version
@@ -120,6 +125,7 @@ jobs:
           node --check cli/dist/index.js
           pnpm --dir cli exec tsx src/index.ts --version
       - name: Run a synthetic agent in a fresh source instance
+        id: first-task
         run: |
           command -v strace
           temp_home="$(mktemp -d "$RUNNER_TEMP/proprio-source.XXXXXX")"
@@ -128,6 +134,7 @@ jobs:
             exec runuser -u "$1" -- env -i HOME="$2" PROPRIO_HOME="$2/state" PATH="$3" "$4" scripts/ci/linux-source-qualification.mjs
           ' bash "$(id -un)" "$temp_home" "$PATH" "$(command -v node)"
       - name: Check native fresh-target restore
+        id: restore
         env:
           PROPRIO_BACKUP_TEST_NATIVE_PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
           PROPRIO_PSQL_PATH: /usr/lib/postgresql/18/bin/psql
@@ -145,6 +152,7 @@ jobs:
           });
           JS
       - name: Check interruption, restart, cancellation, and disk-pressure diagnostics
+        id: recovery
         run: |
           test -x packages/proprio-runner/runner/target/debug/proprio-runnerd
           test -x packages/proprio-runner/runner/target/debug/fake-codex-app-server
@@ -196,27 +204,52 @@ jobs:
             ],
           });
           JS
-      - name: Retain case reports for the tested revision
-        if: always()
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
-        run: |
-          echo "Linux durable-work qualification for \`$EXPECTED_HEAD\`." >> "$GITHUB_STEP_SUMMARY"
-          for report in "$RUNNER_TEMP"/durable-work-*.json; do
-            if [[ -f "$report" ]]; then
-              jq -r '(.testResults // [])[] | .assertionResults[] | [.status, .fullName] | @tsv' "$report" \
-                | awk -F '\t' '$1 != "pending" && $1 != "skipped" {print "- " $1 " — " $2}' >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
       - name: Write durable-work acceptance evidence
+        id: write-evidence
         if: success()
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
         run: node scripts/ci/write-durable-work-acceptance.mjs
       - name: Retain downloadable durable-work acceptance evidence
+        id: retain-evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: durable-work-acceptance
           path: ${{ runner.temp }}/durable-work-acceptance/durable-work-acceptance.json
           if-no-files-found: error
+      - name: Summarize qualification for the tested revision
+        if: always()
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || inputs.test_head || github.sha }}
+          INSTALL: ${{ steps.install.outcome }}
+          LIFECYCLE: ${{ steps.lifecycle.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          FIRST_TASK: ${{ steps.first-task.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
+          RECOVERY: ${{ steps.recovery.outcome }}
+          WRITE_EVIDENCE: ${{ steps.write-evidence.outcome }}
+          RETAIN_EVIDENCE: ${{ steps.retain-evidence.outcome }}
+        run: |
+          {
+            printf '## Linux source qualification\n\n'
+            printf 'Source: `%s` · trigger: `%s` · [run attempt](%s/%s/actions/runs/%s/attempts/%s)\n\n' \
+              "$EXPECTED_HEAD" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf '| Required stage | Outcome |\n| --- | --- |\n'
+            printf '| %s | %s |\n' \
+              'Locked dependency install' "${INSTALL:-incomplete}" \
+              'Managed update, rollback and browser readback' "${LIFECYCLE:-incomplete}" \
+              'Source and Runner build' "${BUILD:-incomplete}" \
+              'First synthetic task and persisted receipt' "${FIRST_TASK:-incomplete}" \
+              'Fresh-target PostgreSQL restore' "${RESTORE:-incomplete}" \
+              'Interruption, restart, cancel and disk pressure' "${RECOVERY:-incomplete}" \
+              'Write acceptance report' "${WRITE_EVIDENCE:-incomplete}" \
+              'Retain downloadable report' "${RETAIN_EVIDENCE:-incomplete}"
+            printf '\n### Recorded test cases\n\n'
+            for report in "$RUNNER_TEMP"/durable-work-{restore,controller,runner,integration}.json; do
+              [[ -f "$report" ]] || continue
+              if ! jq -r '(.testResults // [])[] | .assertionResults[] | "- " + .status + " — " + .fullName' "$report"; then
+                printf -- '- Incomplete result in %s\n' "${report##*/}"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
