@@ -1546,10 +1546,10 @@ export function createToolGatewayService(
    * The implicit connector of a legacy plugin tool, when it is installed for
    * this agent: its connection and the catalog entry for this tool.
    */
-  async function legacyPluginToolBinding(companyId: string, agentId: string, toolName: string) {
+  async function legacyPluginToolBinding(companyId: string, agentId: string, toolName: string, database: Db = db) {
     const separator = toolName.indexOf(":");
     if (separator <= 0) return null;
-    const [row] = await db
+    const [row] = await database
       .select({ connectionId: toolConnections.id, applicationId: toolConnections.applicationId, catalogEntryId: toolCatalogEntries.id })
       .from(toolConnections)
       .innerJoin(toolConnectionInstalls, and(
@@ -1586,11 +1586,13 @@ export function createToolGatewayService(
   async function decideWithLegacyPluginRules(
     input: ToolAccessDecisionInput,
     decisionOptions: Parameters<typeof decideGatewayPolicy>[1] = {},
+    policy: Pick<typeof basePolicyService, "decide" | "writeAudit"> = basePolicyService,
+    database: Db = db,
   ): Promise<ToolAccessDecision> {
-    const decision = await decideGatewayPolicy(input, decisionOptions);
+    const decision = await decideGatewayPolicy(input, decisionOptions, policy, database);
     const agentId = input.actor.agentId;
     if (decision.decision !== "allow" || input.request.providerType !== "proprio_plugin" || !agentId) return decision;
-    const binding = await legacyPluginToolBinding(input.companyId, agentId, input.request.toolName);
+    const binding = await legacyPluginToolBinding(input.companyId, agentId, input.request.toolName, database);
     if (!binding) return decision;
     const restricted = await decideGatewayPolicy({
       ...input,
@@ -1602,7 +1604,7 @@ export function createToolGatewayService(
         connectionId: binding.connectionId,
         catalogEntryId: binding.catalogEntryId,
       },
-    }, { ...decisionOptions, cache: undefined });
+    }, { ...decisionOptions, cache: undefined }, policy, database);
     return restricted.decision === "allow" ? decision : restricted;
   }
 
@@ -1614,6 +1616,25 @@ export function createToolGatewayService(
         decideGatewayPolicy(admissionInput, { admittedInvocationId: invocationId, requiredGatewayAction: "tools/call" }, policy, transaction));
     },
   };
+
+  async function decideInitialInvocation(
+    input: ToolAccessDecisionInput,
+    policy: Pick<typeof basePolicyService, "decide" | "writeAudit"> = policyService,
+    database: Db = db,
+  ): Promise<ToolAccessDecision> {
+    let accessDecision = await decideWithLegacyPluginRules(input, {}, policy, database);
+    if (accessDecision.allowed && input.request.providerType === "proprio_slack_chat"
+      && SLACK_TOOLS.some(tool => tool.name === input.request.upstreamToolName && tool.risk === "approval")) {
+      accessDecision = {
+        ...accessDecision,
+        allowed: false,
+        decision: "require_approval",
+        reasonCode: "requires_approval_policy",
+        explanation: "Slack destructive actions, channel creation and invitations require approval.",
+      };
+    }
+    return accessDecision;
+  }
 
   async function assertGatewayIssuerAuthority(input: ToolAccessDecisionInput, requiredAction?: ToolMcpGatewayTokenAction, database: Db = db) {
     const [row] = await database.select({ token: toolMcpGatewayTokens, gateway: toolMcpGateways }).from(toolMcpGatewayTokens)
@@ -1634,9 +1655,13 @@ export function createToolGatewayService(
     await connectionManagementService(database).authorize(actor, "connections:gateway", resource, { mutation: false });
     await connectionManagementService(database).authorize(actor, "connections:test", resource, { mutation: false });
   }
-  async function recordToolInvocation(input: ToolAccessDecisionInput, decision: ToolAccessDecision) {
+  async function recordToolInvocation(
+    input: ToolAccessDecisionInput,
+    decision: ToolAccessDecision,
+    evaluate?: (transaction: Db) => Promise<ToolAccessDecision>,
+  ) {
     try {
-      return await policyService.recordInvocation(input, decision);
+      return await policyService.recordInvocation(input, decision, evaluate);
     } catch (error) {
       const details = error instanceof HttpError ? asRecord(error.details) : null;
       if (error instanceof HttpError && error.status === 409 && details?.reasonCode === "legacy_tool_idempotency_unverifiable") {
@@ -1654,6 +1679,7 @@ export function createToolGatewayService(
     destinationFingerprint: string;
     toolName: string;
     argumentsHash: string;
+    routingHash: string;
     providerRequestId: string;
   }): Promise<boolean> {
     return db.transaction(async (tx) => {
@@ -1674,7 +1700,7 @@ export function createToolGatewayService(
       // The arguments component is already a keyed digest; no raw input is persisted.
       const operationFingerprint = createHash("sha256").update(JSON.stringify([
         admission.companyId, admission.actorType, admission.actorId, admission.connectionId,
-        input.destinationFingerprint, input.toolName, input.argumentsHash,
+        input.destinationFingerprint, input.toolName, input.argumentsHash, input.routingHash,
       ])).digest("hex");
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${operationFingerprint}, 0))`);
       const openIntent = await tx.execute(sql`select 1 from managed_audit_events i
@@ -8388,6 +8414,7 @@ export function createToolGatewayService(
       };
       let managedDispatchEligible = false;
       let managedDispatchIntentWritten = false;
+      let managedRoutingHash = toolRequestIdentityHash({}, options.toolActionSigningSecret);
       const dispatchRemote = async (target: string, init: RequestInit, toolCall = false) => {
         // Refresh can reduce consent. Recheck the selected grant after refreshing
         // credentials and before every dispatch (including an authorization retry).
@@ -8406,6 +8433,7 @@ export function createToolGatewayService(
             destinationFingerprint: createHash("sha256").update(String(endpoint)).digest("hex"),
             toolName: upstreamToolName,
             argumentsHash: toolRequestIdentityHash(parameters ?? {}, options.toolActionSigningSecret),
+            routingHash: managedRoutingHash,
             providerRequestId: String(message.id),
           });
         }
@@ -8670,6 +8698,7 @@ export function createToolGatewayService(
       // route the call too, so they are part of a task's identity. Per-run
       // metadata headers and credentials are not: they change on recovery.
       const taskCallerHeaders = mcpTaskCallerHeaders(connection, callerHeaders);
+      managedRoutingHash = toolRequestIdentityHash(taskCallerHeaders, options.toolActionSigningSecret);
       const taskRoutingIdentity = mcpTaskArgumentsIdentity(taskCallerHeaders);
       // Built from the version a request actually used: a version retry can
       // move a saved legacy connection to stateless MCP mid-call.
@@ -13903,14 +13932,20 @@ export function createToolGatewayService(
           idempotencyKey: input.idempotencyKey,
           consumeRateLimit: true,
         });
-        let accessDecision = await policyService.decide(decisionInput);
-        if (accessDecision.allowed && tool.providerType === "proprio_slack_chat" && SLACK_TOOLS.some(t => t.name === tool.upstreamToolName && t.risk === "approval")) {
-          accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions, channel creation and invitations require approval." };
-        }
+        // Replays need the current policy verdict for the existing audit path,
+        // but only a new invocation is allowed to consume a rate slot. The
+        // authoritative consuming decision is re-evaluated inside recordInvocation's
+        // invocation + approval + managed-capture transaction below.
+        let accessDecision = await decideInitialInvocation({ ...decisionInput, consumeRateLimit: false });
         const recorded = await recordToolInvocation(
           decisionInput,
           accessDecision,
+          async (transaction) => {
+            const txPolicy = toolAccessPolicyService(transaction, { toolActionSigningSecret: options.toolActionSigningSecret });
+            return decideInitialInvocation(decisionInput, txPolicy, transaction);
+          },
         );
+        accessDecision = recorded.decision;
         await policyService.writeAudit(decisionInput, accessDecision);
         invocationId = recorded.invocation.id;
         const retryingSlackRateLimit = recorded.replayed && accessDecision.allowed && tool.providerType === "proprio_slack_chat" && session.agentId && session.runId && session.issueId

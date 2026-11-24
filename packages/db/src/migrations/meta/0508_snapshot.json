@@ -1,5 +1,5 @@
 {
-  "id": "526691e6-1899-44ab-b7d0-8e1b94fad672",
+  "id": "9ed5d98d-791a-4b0c-add0-b00bdf3e13c3",
   "prevId": "97182361-53f9-4f2a-9cca-97ba40627d34",
   "version": "7",
   "dialect": "postgresql",
@@ -45762,18 +45762,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "operation_fingerprint": {
-          "name": "operation_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provider_request_id": {
-          "name": "provider_request_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "connection_id": {
           "name": "connection_id",
           "type": "uuid",
@@ -45877,6 +45865,124 @@
         "managed_audit_events_company_id_companies_id_fk": {
           "name": "managed_audit_events_company_id_companies_id_fk",
           "tableFrom": "managed_audit_events",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.managed_audit_exports": {
+      "name": "managed_audit_exports",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_epoch": {
+          "name": "source_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_at": {
+          "name": "from_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "to_at": {
+          "name": "to_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event_ids": {
+          "name": "event_ids",
+          "type": "uuid[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "watermark": {
+          "name": "watermark",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cursor_secret": {
+          "name": "cursor_secret",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "managed_audit_exports_company_expiry_idx": {
+          "name": "managed_audit_exports_company_expiry_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "managed_audit_exports_company_id_companies_id_fk": {
+          "name": "managed_audit_exports_company_id_companies_id_fk",
+          "tableFrom": "managed_audit_exports",
           "tableTo": "companies",
           "columnsFrom": [
             "company_id"
