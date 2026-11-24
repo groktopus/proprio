@@ -44,6 +44,7 @@ for (const reportName of reports) {
 }
 
 let retryPasses = null;
+let blockedTests = 0;
 const timingDir = path.join(directory, "timings");
 if (existsSync(timingDir)) {
   retryPasses = 0;
@@ -51,9 +52,16 @@ if (existsSync(timingDir)) {
     for (const line of readFileSync(path.join(timingDir, name), "utf8").trim().split("\n").filter(Boolean)) {
       const event = JSON.parse(line);
       if (event.kind === "test" && event.status === "passed" && event.retries > 0) retryPasses += 1;
+      if (event.kind === "suite-error") {
+        incompleteSuites.add(event.file);
+        blockedTests += event.blockedTests;
+      }
     }
   }
 }
+
+counts.skipped = Math.max(0, counts.skipped - blockedTests);
+counts.incomplete += blockedTests;
 
 const executed = counts.passed + counts.failed;
 const baselineIncomplete = lane === "cli-and-health-baseline" &&
@@ -62,7 +70,7 @@ const incomplete = outcome !== "success" || executed === 0 || counts.incomplete 
   incompleteSuites.size > 0 || retryPasses === null || baselineIncomplete;
 const result = {
   source, lane, stepOutcome: outcome, reports: reports.length, executed,
-  ...counts, incompleteSuites: [...incompleteSuites].sort(),
+  ...counts, blockedTests, incompleteSuites: [...incompleteSuites].sort(),
   completePass: !incomplete && counts.failed === 0, retryPasses, requiredSuites,
 };
 writeFileSync(path.join(directory, "summary.json"), JSON.stringify(result, null, 2) + "\n");

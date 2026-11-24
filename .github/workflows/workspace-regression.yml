@@ -81,6 +81,7 @@ jobs:
         id: tests
         env:
           TEST_ARGS: ${{ matrix.args }}
+          PROPRIO_REQUIRE_RUNNER_API_INTEGRATION: ${{ matrix.lane == 'server-runner' && '1' || '' }}
         run: |
           if [[ "$TEST_ARGS" == baseline ]]; then
             mkdir -p "$PROPRIO_WORKSPACE_REGRESSION_DIR"

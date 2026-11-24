@@ -108,7 +108,7 @@ schema migration and its run and workspace recovery evidence remain tracked in
 ### Scheduled Linux source qualification
 
 GitHub Actions runs Linux source qualification on the default branch daily at
-07:43 UTC. Workspace regression starts in its own 08:23 UTC window. The
+07:43 UTC. See [Workspace regression](#workspace-regression) for its schedule. The
 scheduled source run uses the event's exact `main` SHA and the `v0.0.1`
 upgrade baseline. Use **Run workflow** on `main` to repeat the
 current checkout. For a pinned candidate and predecessor, use the
@@ -160,11 +160,18 @@ CLI install, update, and server health files ran and passed.
 
 Each lane retains its Vitest results, retry timings, and a summary with the
 tested SHA and counts for executed, failed, skipped, and unresolved cases.
-The summary names suites that failed before recording an assertion failure.
+The summary names incomplete suites and counts tests blocked by suite setup
+separately from intentional skips.
 A failed or incomplete required lane fails the workflow. A test that passes
 on retry is visible in the summary. Live provider journeys, real browser E2E,
 and non-Linux environments remain separate coverage. The CI maintainers
 triage failures and record any excluded environments and test skips.
+
+The first [manual baseline](https://github.com/groktopus/proprio/actions/runs/45338518747)
+tested `8c88f5605cdfa48f9d73bf8b41703c2a5688534e` on Ubuntu 24.04. The
+CLI install, update, and health lane passed all 71 tests. The full run
+reported failures in the broader workspace lanes, including Runner package
+collection errors before the server lanes built its TypeScript exports.
 
 ### Standalone sandbox-provider dependencies
 
