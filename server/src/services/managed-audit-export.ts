@@ -15,6 +15,7 @@ type ExportScope = {
   userId: string;
   sourceEpoch: string;
   actor: AuthorizationActor;
+  retainAfter: Date | null;
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
@@ -125,6 +126,9 @@ export async function readManagedAuditExportPage(
     }
     if (snapshot.expiresAt <= new Date()) {
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
+    }
+    if (scope.retainAfter && snapshot.from < scope.retainAfter) {
+      throw conflict("The export window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
     }
     const offset = decodeCursor(snapshot, cursor);
     const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);

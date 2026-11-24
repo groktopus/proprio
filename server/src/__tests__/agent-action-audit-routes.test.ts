@@ -223,12 +223,13 @@ describePostgres("agent action audit routes", () => {
     const newEpoch = randomUUID();
     const from = "2026-07-17T00:00:00.000Z";
     const to = "2026-07-17T00:00:02.000Z";
+    const olderFrom = "2026-07-16T00:00:00.000Z";
     const tempDir = await mkdtemp(join(tmpdir(), "managed-audit-restore-"));
     let targetUrl: string | null = null;
     let targetName: string | null = null;
     let adminUrl: string | null = null;
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", olderFrom);
     try {
       const rows = Array.from({ length: 205 }, () => ({
         companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
@@ -264,6 +265,14 @@ describePostgres("agent action audit routes", () => {
         exportId: created.body.exportId, sourceEpoch: oldEpoch, cursor: first.body.nextCursor,
         watermark: created.body.watermark, eventCount: created.body.eventCount,
       }));
+
+      const [olderEvent] = await db.insert(managedAuditEvents).values({
+        ...rows[0]!, invocationId: randomUUID(), occurredAt: new Date(olderFrom),
+      }).returning();
+      const olderReceipt = await board.post(path).send({ from: olderFrom, to: from });
+      expect(olderReceipt.status).toBe(201);
+      expect((await board.get(`${path}/${olderReceipt.body.exportId}`)).body.events)
+        .toMatchObject([expect.objectContaining({ id: olderEvent.id })]);
 
       const expired = await board.post(path).send(window);
       expect(expired.status).toBe(201);
@@ -316,10 +325,22 @@ describePostgres("agent action audit routes", () => {
       expect(stale.status).toBe(409);
       expect(stale.body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
 
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", from);
+      const beyondRetention = await restoredBoard.post(path).send({ from: olderFrom, to });
+      expect(beyondRetention.status).toBe(409);
+      expect(beyondRetention.body).toMatchObject({ details: { reasonCode: "retention_window_expired" } });
+
       const fresh = await restoredBoard.post(path).send(window);
       expect(fresh.status, fresh.text).toBe(201);
       expect(fresh.body).toMatchObject({ sourceEpoch: newEpoch, eventCount: rows.length });
-      expect((await restoredBoard.get(`${path}/${fresh.body.exportId}`)).body).toMatchObject({ complete: false });
+      const restoredPage = await restoredBoard.get(`${path}/${fresh.body.exportId}`);
+      expect(restoredPage.body).toMatchObject({ complete: false });
+      expect(restoredPage.body.events.some((event: { id: string }) =>
+        event.id === olderEvent.id || event.id === restricted.id)).toBe(false);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", to);
+      const shortened = await restoredBoard.get(`${path}/${fresh.body.exportId}`).query({ cursor: restoredPage.body.nextCursor });
+      expect(shortened.status).toBe(409);
+      expect(shortened.body).toMatchObject({ details: { reasonCode: "retention_window_expired" } });
       expect((await restoredBoard.get(`${path}/${expired.body.exportId}`)).status).toBe(404);
 
       const retained = (await readFile(archiveFile, "utf8")).trim().split("\n").map(line => JSON.parse(line));

@@ -15,6 +15,12 @@ before enabling export. Record which intervals require reconciliation. The
 database and these settings cannot tell an archive that an event was lost before
 it was first collected.
 
+Set `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER` to the earliest event time allowed by
+the deployment's data retention policy, if it has an expiry boundary. The API
+returns `retention_window_expired` for an export that overlaps an older interval.
+This also invalidates a cursor created before the retention boundary advanced.
+Keep this boundary outside the database rollback domain.
+
 1. Send `POST /api/companies/:companyId/audit/managed-exports` with `from` and
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
@@ -48,15 +54,13 @@ ID watermark after a source row is deleted. The old checkpoint reports
 `snapshot_incomplete` when its row is missing. After restoring the older backup
 and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint reports
 `source_epoch_changed`; it is not a new complete export. A fresh API snapshot
-uses the restored data and current access, omits a private-task event, and
-removes expired snapshot records. The fixture qualifies an isolated logical
-restore/fork, not production PITR or an external archive provider.
+uses the restored data and current access. The test rejects the expired event
+window, verifies a new page omits restricted evidence, and verifies an advanced
+retention boundary invalidates its cursor. The qualification scope is an
+isolated logical restore with a local archive fixture.
 
-The 24-hour expiry applies to export snapshots, not individual managed audit
-events. There is no event-level expiry marker or restore-time deletion ledger
-for this source. The independent archive owner must apply its own retention and
-erasure rules. Before reopening export after an older restore, reconcile
-product deletion obligations from the separately retained records; rotating
-the source epoch only fences old checkpoints and does not identify rows a
-restore may have resurrected. The test demonstrates snapshot-gap and epoch
-signals, not automatic reconciliation of event deletion obligations.
+The 24-hour snapshot expiry and the operator's event retention boundary control
+delivery. The independent archive owner applies a separate erasure policy.
+Before reopening export after an older restore, reconcile individual deletion
+obligations from separately retained records. Rotating the source epoch fences
+old checkpoints. It cannot identify an individual record restored from backup.

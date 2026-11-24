@@ -152,9 +152,15 @@ export function activityRoutes(db: Db) {
       throw forbidden("Managed audit exports require authenticated board access");
     }
     const epoch = z.guid().safeParse(process.env.PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH);
-    const captureFrom = z.iso.datetime({ offset: true }).safeParse(process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM);
-    if (!epoch.success || !captureFrom.success) throw forbidden("Managed audit export is unavailable");
-    return { companyId, userId: req.actor.userId, sourceEpoch: epoch.data, actor: req.actor, captureFrom: new Date(captureFrom.data) };
+    const boundary = z.iso.datetime({ offset: true });
+    const captureFrom = boundary.safeParse(process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM);
+    const retainAfter = boundary.optional().safeParse(process.env.PROPRIO_MANAGED_AUDIT_RETAIN_AFTER);
+    if (!epoch.success || !captureFrom.success || !retainAfter.success) throw forbidden("Managed audit export is unavailable");
+    return {
+      companyId, userId: req.actor.userId, sourceEpoch: epoch.data, actor: req.actor,
+      captureFrom: new Date(captureFrom.data),
+      retainAfter: retainAfter.data ? new Date(retainAfter.data) : null,
+    };
   }
 
   function hasAttributionFilters(query: z.infer<typeof agentActionAuditQuerySchema>) {
@@ -311,6 +317,9 @@ export function activityRoutes(db: Db) {
     const from = new Date(window.data.from);
     const to = new Date(window.data.to);
     if (from >= to || to > new Date()) throw badRequest("Invalid managed audit export window");
+    if (scope.retainAfter && from < scope.retainAfter) {
+      throw conflict("The requested window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
+    }
     if (from < scope.captureFrom) {
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
