@@ -8,7 +8,7 @@ type Company = { id: string; prefix: string };
 type Issue = { id: string; identifier: string };
 
 async function json<T>(response: Awaited<ReturnType<APIRequestContext["get"]>> | Awaited<ReturnType<APIRequestContext["post"]>>): Promise<T> {
-  if (!response.ok()) throw new Error(`${response.request().method()} ${response.url()} -> ${response.status()}: ${await response.text()}`);
+  if (!response.ok()) throw new Error(`HTTP ${response.url()} -> ${response.status()}: ${await response.text()}`);
   return response.json() as Promise<T>;
 }
 
