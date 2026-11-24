@@ -137,6 +137,8 @@ describe("classic Decisions views", () => {
 
   it("opens For you by default with the shared badge count and the Unassigned banner", async () => {
     await render();
+    expect(container.textContent).toContain("Pending decisions live here");
+    expect(container.querySelector('a[href="/issues"]')?.textContent).toBe("Tasks");
     expect(fixture.calls).toContainEqual(expect.objectContaining({ all: true, view: "mine" }));
     // The views never ask for hidden cards; those live in the Archived view (PAP-749 plan §3).
     expect(fixture.calls.some((call) => "includeDismissed" in call)).toBe(false);

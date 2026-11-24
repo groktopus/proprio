@@ -4,7 +4,7 @@ import { useCoordinatorWorkspaceEnabled } from "../hooks/useCoordinatorWorkspace
 import { CoordinatorNeedsYou } from "../components/coordinator/CoordinatorNeedsYou";
 import { CheckCircle2, History, Inbox } from "lucide-react";
 import type { Agent, AttentionItem, AttentionPersonalView, AttentionSubject } from "@groktopus/shared";
-import { useNavigate, useSearchParams } from "@/lib/router";
+import { Link, useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
@@ -620,6 +620,9 @@ function ClassicWhatNeedsMe() {
             Decision history
           </Button>
         </div>
+        <p className="text-sm text-muted-foreground">
+          Pending decisions live here. Use <Link to="/issues">Tasks</Link> for filtered work views such as Mine, Unread, and Blocked.
+        </p>
         <AttentionViewSwitch value={view} counts={viewCounts} onChange={setView} everyone={everyone} />
         {view === "mine" ? <AttentionUnassignedBanner count={viewCounts.unassigned} onOpen={() => setView("unassigned")} /> : null}
         <DecisionsToolbar
