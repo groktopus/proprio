@@ -61,15 +61,20 @@ function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<s
   const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
   const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
   const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
-  const prerequisiteCount = Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
-  evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: prerequisiteCount > 0 ? "review_in_case" : "none",
+  const hasPrerequisites = typeof caseHandoff.prerequisiteCount === "number"
+    ? caseHandoff.prerequisiteCount > 0
+    : Array.isArray(caseHandoff.prerequisites) && caseHandoff.prerequisites.length > 0;
+  evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: hasPrerequisites ? "review_in_case" : "none",
     unmetCriterionCount, evidenceIssueCount };
   const guidance = [
-    prerequisiteCount > 0 ? "Review the prerequisite checklist in the authorized Case view." : null,
+    hasPrerequisites ? "Review the prerequisite checklist in the authorized Case view." : null,
     unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
     evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
   ].filter((item): item is string => Boolean(item));
-  return { evidence, nextAction: guidance.length ? `Review the task completion assessment. ${guidance.join(" ")}` : "Review the task completion assessment." };
+  const opening = isRecoveryBudgetExhausted(evidence)
+    ? `Completion recovery stopped after ${row.attemptCount} attempts. Review the accepted handoff in the Case before assigning further work.`
+    : "Review the task completion assessment.";
+  return { evidence, nextAction: guidance.length ? `${opening} ${guidance.join(" ")}` : opening };
 }
 
 export type UpsertIssueRecoveryActionInput = {

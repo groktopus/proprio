@@ -36,7 +36,7 @@ describe("accepted case-handoff completion recovery evidence", () => {
       createdByActorType: "agent", createdByActorId: agentId });
     await db.insert(cases).values({ id: caseId, companyId, handoffVersion: 2, caseNumber: 1, identifier: `C-${caseId.slice(0, 8)}`,
       caseType: "task", title: "Artifact delivery", workIssueId: issueId });
-    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: "Deliver artifact", prerequisites: [],
+    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: "Deliver artifact", prerequisites: ["Review the saved brief"],
       requirementRevision: { id: contractId, revision: 1, canonicalSha256 }, requirementsDigest, workflowTransition: null,
       decisionOwner: { type: "agent" as const, id: agentId }, accountableOwner: { type: "agent" as const, id: agentId } };
     await db.insert(caseHandoffs).values({ id: handoffId, companyId, caseId, issueId, version: 2, fromAgentId: agentId,
@@ -69,7 +69,7 @@ describe("accepted case-handoff completion recovery evidence", () => {
     const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" });
     expect(receipt).toMatchObject({
       schema: "proprio.case-handoff-completion-recovery.v1",
-      caseHandoff: { id: f.handoffId, version: 2, recipientAgentId: f.agentId,
+      caseHandoff: { id: f.handoffId, version: 2, recipientAgentId: f.agentId, prerequisiteCount: 1,
         acceptedRequirementRevision: { id: f.contractId, revision: 1 } },
       decision: { id: f.decisionId, recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "completion_evidence_incomplete" },
       assessment: { resultId: expect.any(String), assessedContractId: f.assessedContractId,
@@ -79,6 +79,7 @@ describe("accepted case-handoff completion recovery evidence", () => {
         ] }] },
     });
     expect(JSON.stringify(receipt)).not.toContain("event:5");
+    expect(JSON.stringify(receipt)).not.toContain("Review the saved brief");
 
     await db.update(caseHandoffs).set({ recipientDecision: { outcome: "accepted", actorType: "agent", actorId: randomUUID(),
       handoffVersion: 2, requirementRevisionId: f.contractId, requirementsDigest: "b".repeat(64), decidedAt: new Date().toISOString() } })
