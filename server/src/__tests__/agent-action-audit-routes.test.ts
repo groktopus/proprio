@@ -227,7 +227,7 @@ describePostgres("agent action audit routes", () => {
       expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
       await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
       await expect(readManagedAuditExportPage(db, {
-        companyId: company.id, sourceEpoch: epoch.toLowerCase(),
+        companyId: company.id, sourceEpoch: epoch.toLowerCase(), retainAfter: null,
         actor: { type: "board", source: "session", userId, companyIds: [company.id] },
       }, receipt.body.exportId)).rejects.toMatchObject({ status: 403 });
       expect((await board.get(exportPath)).status).toBe(403);
