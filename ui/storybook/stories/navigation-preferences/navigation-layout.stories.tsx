@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
 import {
   Bot,
   CircleDot,
@@ -248,24 +249,20 @@ function NavigationLayoutStories() {
           </div>
         </Section>
 
-        <Section eyebrow="Menus" title="Account, company, and switcher menus in open state">
+        <Section eyebrow="Menus" title="Account, company, and switcher triggers">
           <div className="grid gap-5 xl:grid-cols-3">
             <div className="relative h-[440px] overflow-hidden border border-border bg-background">
               <div className="absolute bottom-0 left-0 w-72">
-                <SidebarAccountMenu
-                  deploymentMode="authenticated"
-                  open
-                  onOpenChange={() => undefined}
-                />
+                <SidebarAccountMenu deploymentMode="authenticated" />
               </div>
             </div>
 
             <div className="h-[260px] overflow-hidden border border-border bg-background p-3">
-              <SidebarCompanyMenu open onOpenChange={() => undefined} />
+              <SidebarCompanyMenu />
             </div>
 
             <div className="h-[320px] overflow-hidden border border-border bg-background p-4">
-              <CompanySwitcher open onOpenChange={() => undefined} />
+              <CompanySwitcher />
             </div>
           </div>
         </Section>
@@ -358,7 +355,8 @@ const meta = {
         "navigation-preferences/navigation"
       ],
       "implementation": "production",
-      "boundary": "fixtures"
+      "boundary": "fixtures",
+      "notes": "BoardChromeMatrix compares the shell and closed menu triggers. The isolated account, organization menu, and switcher stories exercise one production overlay at a time."
     },
   },
 } satisfies Meta<typeof NavigationLayoutStories>;
@@ -368,6 +366,43 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const BoardChromeMatrix: Story = {};
+
+async function exerciseOverlay(canvasElement: HTMLElement, trigger: HTMLElement, role: "dialog" | "menu") {
+  const body = within(canvasElement.ownerDocument.body);
+  await expect(body.queryByRole(role)).not.toBeInTheDocument();
+  trigger.focus();
+  await userEvent.keyboard("{Enter}");
+  const overlay = await body.findByRole(role);
+  await expect(overlay).toContainElement(canvasElement.ownerDocument.activeElement as HTMLElement);
+  await userEvent.keyboard("{Escape}");
+  await expect(body.queryByRole(role)).not.toBeInTheDocument();
+  await expect(trigger).toHaveFocus();
+  canvasElement.dataset.navigationOverlayVerified = "true";
+}
+
+export const AccountPopover: Story = {
+  render: () => <SidebarAccountMenu deploymentMode="authenticated" />,
+  play: async ({ canvasElement }) => {
+    const trigger = await within(canvasElement).findByRole("button", { name: "Open account menu" });
+    await exerciseOverlay(canvasElement, trigger, "dialog");
+  },
+};
+
+export const OrganizationMenu: Story = {
+  render: () => <SidebarCompanyMenu />,
+  play: async ({ canvasElement }) => {
+    const trigger = await within(canvasElement).findByRole("button", { name: /Open .*organization switcher/ });
+    await exerciseOverlay(canvasElement, trigger, "menu");
+  },
+};
+
+export const OrganizationSwitcher: Story = {
+  render: () => <CompanySwitcher />,
+  play: async ({ canvasElement }) => {
+    const trigger = await within(canvasElement).findByRole("button");
+    await exerciseOverlay(canvasElement, trigger, "menu");
+  },
+};
 
 // PAP-10676 verification harness: renders the real Sidebar at a fixed width so a
 // screenshot of the expanded state and a screenshot of the pinned-collapsed rail
