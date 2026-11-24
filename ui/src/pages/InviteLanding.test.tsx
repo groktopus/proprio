@@ -1342,6 +1342,7 @@ describe("InviteLandingPage", () => {
     let resolveInvite: ((value: typeof invite) => void) | null = null;
     getInviteMock.mockImplementation(() => new Promise((resolve) => { resolveInvite = resolve; }));
     listCompaniesMock.mockResolvedValue([]);
+    acceptInviteMock.mockResolvedValue({ id: "join-1", companyId: "company-1", requestType: "human", status: "pending_approval" });
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     await act(async () => renderInviteLanding(root, queryClient));

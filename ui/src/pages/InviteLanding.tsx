@@ -467,8 +467,22 @@ export function InviteLandingPage() {
     return <div className="mx-auto max-w-xl py-10 text-sm text-destructive">Invalid invite token.</div>;
   }
 
-  if (inviteQuery.isLoading || healthQuery.isLoading || sessionQuery.isLoading) {
+  if (healthQuery.isLoading || sessionQuery.isLoading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading invite...</div>;
+  }
+
+  if (!invite && (inviteView.kind === "loading" || inviteView.kind === "reconnecting")) {
+    return (
+      <div className="mx-auto max-w-xl py-10">
+        <QueryPlaceholder label={inviteView.kind === "reconnecting" ? "Reconnecting to load invite" : "Loading invite"} />
+        <p className="text-sm text-muted-foreground">
+          {inviteView.kind === "reconnecting" ? "Reconnecting to load this invite..." : "Loading invite..."}
+        </p>
+        <Button type="button" className="mt-4 rounded-none" onClick={inviteView.retry} disabled={inviteView.isFetching}>
+          {inviteView.isFetching ? "Retrying…" : "Retry"}
+        </Button>
+      </div>
+    );
   }
 
   if (isCheckingExistingMembership) {
