@@ -51,6 +51,7 @@ import {
 import { hasBlockingShortcutDialog, resolveAttentionQueueKeyAction } from "../lib/keyboardShortcuts";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { QueryErrorState, QueryPlaceholder, QueryStaleHint, useQueryView, type QueryViewState } from "../components/QueryView";
+import { errorStatus } from "../api/errors";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
 import { DecisionsToolbar } from "../components/DecisionsToolbar";
 import { Curtain, AgingItemRow } from "../components/DecisionShelf";
@@ -80,15 +81,22 @@ function DecisionHistoryBody({
   children: ReactNode;
 }) {
   const focusTarget = useRef<HTMLElement>(null);
+  const restoreFocusAfterRetry = useRef(false);
   const retry = useCallback(() => {
+    restoreFocusAfterRetry.current = true;
     view.retry();
-    requestAnimationFrame(() => focusTarget.current?.focus());
   }, [view.retry]);
-  const hasSavedRows = view.data !== undefined;
+  useEffect(() => {
+    if (!restoreFocusAfterRetry.current || view.kind !== "ready") return;
+    restoreFocusAfterRetry.current = false;
+    requestAnimationFrame(() => focusTarget.current?.focus());
+  }, [view.kind]);
+  const accessDenied = errorStatus(view.error) === 401 || errorStatus(view.error) === 403;
+  const canRenderSavedRows = view.data !== undefined && !accessDenied;
   if (view.kind === "loading" || view.kind === "reconnecting") {
     return <section ref={focusTarget} tabIndex={-1}><QueryPlaceholder size="inline" label="Loading decision history" /></section>;
   }
-  if (view.kind === "error" && !hasSavedRows) {
+  if (view.kind === "error" && !canRenderSavedRows) {
     return <section ref={focusTarget} tabIndex={-1}><QueryErrorState size="inline" error={view.error} action="load decision history" onRetry={retry} retrying={view.isFetching} /></section>;
   }
   return (
@@ -99,8 +107,8 @@ function DecisionHistoryBody({
           <QueryErrorState size="inline" error={view.error} action="refresh decision history" onRetry={retry} retrying={view.isFetching} />
         </div>
       ) : null}
-      {children}
-      {hasSavedRows && (view.data?.length ?? 0) === 0 ? <p className="text-xs text-muted-foreground">{emptyCopy}</p> : null}
+      {canRenderSavedRows ? children : null}
+      {view.kind === "ready" && view.data?.length === 0 ? <p className="text-xs text-muted-foreground">{emptyCopy}</p> : null}
     </section>
   );
 }
