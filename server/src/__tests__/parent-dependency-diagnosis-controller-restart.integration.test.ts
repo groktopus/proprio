@@ -160,7 +160,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", membershipRole: "owner" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Process fixture", role: "engineer", status: "idle",
         lifecycleState: "ready", adapterType: "process", adapterConfig: { command: process.execPath,
-          args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'invoked')", effectFile], cwd: process.cwd() },
+          args: ["-e", "require('node:fs').appendFileSync(process.argv[1], 'invoked\\n')", effectFile], cwd: process.cwd() },
         runtimeConfig: { heartbeat: { enabled: true, intervalSec: 0, wakeOnDemand: true } }, permissions: {} });
       const old = new Date(Date.now() - 10 * 60_000);
       await db.insert(issues).values([
@@ -234,18 +234,20 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         const rows = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
           eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
         return rows[0] ?? null;
-      }, row => row.status !== "deferred_issue_execution", "Controller restart did not persist its diagnosis wake");
+      }, row => row.status === "completed", "Controller restart did not complete its diagnosis wake");
       const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
       expect(wakes).toHaveLength(1);
       expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system",
         payload: { issueId: parentId, dependencyDiagnosis: true } });
+      expect(await readFile(effectFile, "utf8")).toBe("invoked\n");
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
       const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string; status?: string }> }>(
         "GET", `/issues/${parentId}/diagnostics/wakes`);
-      expect(diagnostics.events).toContainEqual(expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled" }));
+      expect(diagnostics.events.filter(event => event.kind === "wake_request" && event.reason === "issue_blocker_stalled"))
+        .toEqual([expect.objectContaining({ status: "completed" })]);
     } finally {
       if (restarted) await restarted.stop().catch(() => {});
       if (controller && controller.child.exitCode === null && controller.child.signalCode === null) {
