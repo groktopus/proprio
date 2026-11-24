@@ -506,12 +506,16 @@ jobs:
           });
           JS
           pnpm exec vitest run ui/src/pages/TeamCatalog.test.tsx
+      - name: Check Agent Detail header
+        run: pnpm exec vitest run --maxWorkers 1 ui/src/pages/AgentDetail.header.test.tsx
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs
           pnpm --filter @groktopus/server typecheck
           pnpm --filter @groktopus/hermes-proprio-adapter build
           node scripts/run-tsc.mjs -p server/tsconfig.build.json
+      - name: Typecheck the board UI
+        run: pnpm --filter @groktopus/ui typecheck
 
   board-accessibility:
     needs: route-durable-work

@@ -27,14 +27,15 @@ pnpm lockfile. Its checks include:
 - strict cron parsing and routine and plugin schedule recovery;
 - late live-settlement metadata regressions;
 - Team Catalog runtime preview parity and the install wizard tests;
-- the server typecheck, Hermes adapter build, and server TypeScript build compilation.
+- the Agent Detail header regression for a loaded agent;
+- the server and board UI typechecks, Hermes adapter build, and server TypeScript build compilation;
 - recovery of interrupted plugin jobs and preservation of active owners.
 
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
 
 The workflow has read-only repository permissions and a 25-minute timeout. It
-is a focused smoke lane. The server typecheck and selected builds do not replace
+is a focused smoke lane. The typechecks and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
