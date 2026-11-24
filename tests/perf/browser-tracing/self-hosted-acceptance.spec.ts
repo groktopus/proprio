@@ -4,7 +4,7 @@ const mode = process.env.PROPRIO_BROWSER_TRACING_MODE ?? "enabled";
 const collectorPort = Number(process.env.PROPRIO_BROWSER_TRACING_COLLECTOR_PORT ?? 3238);
 const collectorUrl = `http://127.0.0.1:${collectorPort}/v1/traces`;
 
-type Company = { id: string; prefix: string };
+type Company = { id: string; issuePrefix: string };
 type Issue = { id: string; identifier: string };
 
 async function json<T>(response: Awaited<ReturnType<APIRequestContext["get"]>> | Awaited<ReturnType<APIRequestContext["post"]>>): Promise<T> {
@@ -36,7 +36,13 @@ function traceSpans(bodies: string[]): Array<Record<string, unknown>> {
 
 test.describe("self-hosted browser tracing on Linux", () => {
   test("proves opt-in, sampling, sink failure, redaction, and task-list/detail samples", async ({ page, request }, testInfo) => {
-    const session = await json<{ browserTracing: Record<string, unknown> | null }>(await request.get("/api/auth/get-session"));
+    const session = await json<{
+      session: { id: string; userId: string };
+      user: { id: string };
+      browserTracing: Record<string, unknown> | null;
+    }>(await request.get("/api/auth/get-session"));
+    expect(session.session).toEqual(expect.objectContaining({ id: expect.any(String), userId: expect.any(String) }));
+    expect(session.user).toEqual(expect.objectContaining({ id: session.session.userId }));
     const traceBodies: string[] = [];
     const tracePosts: string[] = [];
     const sdkLoads: string[] = [];
@@ -45,13 +51,15 @@ test.describe("self-hosted browser tracing on Linux", () => {
     page.on("request", (requestEvent) => {
       if (requestEvent.resourceType() === "script" && sdkRequest(requestEvent.url())) sdkLoads.push(requestEvent.url());
     });
-    if (mode === "enabled") {
-      await page.route(collectorUrl, async (route) => {
-        tracePosts.push(route.request().url());
-        traceBodies.push(route.request().postData() ?? "");
-        await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    await page.route(collectorUrl, async (route) => {
+      tracePosts.push(route.request().url());
+      traceBodies.push(route.request().postData() ?? "");
+      await route.fulfill({
+        status: mode === "sink-failure" ? 503 : 200,
+        contentType: "application/json",
+        body: "{}",
       });
-    }
+    });
 
     const fixture = await seed(request);
     if (mode === "disabled") expect(session.browserTracing).toBeNull();
@@ -59,27 +67,38 @@ test.describe("self-hosted browser tracing on Linux", () => {
     if (mode === "unsampled") {
       await page.addInitScript(() => { Math.random = () => 0.99; });
     }
-    await page.goto(`/${fixture.company.prefix}/issues`);
+    await page.goto(`/${fixture.company.issuePrefix}/issues`);
     await expect(page.getByRole("button", { name: "Open account menu" })).toBeVisible();
-    await page.goto(`/${fixture.company.prefix}/issues/${fixture.task.identifier}`);
+    await expect(page.getByText("PRIVATE_BROWSER_TRACE_TASK_CONTENT", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "New task" }).first()).toBeVisible();
+    await page.getByRole("button", { name: "New task" }).first().click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByLabel("Task title")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(2_000);
+    await page.goto(`/${fixture.company.issuePrefix}/issues/${fixture.task.identifier}`);
     await expect(page.getByRole("button", { name: "Open account menu" })).toBeVisible();
+    await expect(page.getByText("PRIVATE_BROWSER_TRACE_TASK_CONTENT", { exact: true }).first()).toBeVisible();
     await page.waitForTimeout(2_000);
 
-    if (mode === "enabled") {
+    if (mode === "disabled") {
+      expect(sdkLoads).toHaveLength(0);
+      expect(tracePosts).toHaveLength(0);
+    } else {
       expect(sdkLoads.length).toBeGreaterThan(0);
-      expect(tracePosts.length).toBeGreaterThan(0);
+      if (mode === "enabled" || mode === "sink-failure") expect(tracePosts.length).toBeGreaterThan(0);
+      if (mode === "unsampled") expect(tracePosts).toHaveLength(0);
       const spans = traceSpans(traceBodies);
-      expect(spans.filter((span) => span.name === "page.load").map((span) => JSON.stringify(span))).toEqual(expect.arrayContaining([
-        expect.stringContaining("/:companyPrefix/issues"),
-        expect.stringContaining("/:companyPrefix/issues/:issueId"),
-      ]));
+      if (mode !== "unsampled") {
+        expect(spans.filter((span) => span.name === "page.load").map((span) => JSON.stringify(span))).toEqual(expect.arrayContaining([
+          expect.stringContaining("/:companyPrefix/issues"),
+          expect.stringContaining("/:companyPrefix/issues/:issueId"),
+        ]));
+      }
       const serialized = traceBodies.join("\n");
       expect(serialized).not.toContain("PRIVATE_BROWSER_TRACE_TASK_CONTENT");
       expect(serialized).not.toContain(fixture.task.identifier);
       expect(serialized).not.toContain(fixture.company.id);
-    } else {
-      expect(sdkLoads).toHaveLength(0);
-      expect(tracePosts).toHaveLength(0);
     }
     if (mode === "sink-failure") {
       expect(pageErrors).toEqual([]);
