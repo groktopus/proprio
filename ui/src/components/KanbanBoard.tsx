@@ -532,11 +532,23 @@ export function KanbanBoard({
   useEffect(() => {
     if (!focusIssueId) return;
     const issueId = focusIssueId;
-    const frame = requestAnimationFrame(() => {
-      moveButtonRefs.current[issueId]?.focus();
-      if (!moveButtonRefs.current[issueId]) boardRef.current?.focus();
-      setFocusIssueId((current) => current === issueId ? null : current);
-    });
+    let frame = 0;
+    let attempts = 0;
+    const restore = () => {
+      const mover = moveButtonRefs.current[issueId];
+      if (mover) {
+        mover.focus();
+        setFocusIssueId((current) => current === issueId ? null : current);
+        return;
+      }
+      if (attempts++ < 30) {
+        frame = requestAnimationFrame(restore);
+      } else {
+        boardRef.current?.focus();
+        setFocusIssueId((current) => current === issueId ? null : current);
+      }
+    };
+    frame = requestAnimationFrame(restore);
     return () => cancelAnimationFrame(frame);
   }, [focusIssueId, issues]);
 
