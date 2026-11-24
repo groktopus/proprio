@@ -1,6 +1,6 @@
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { commitToolActionReview } from "../services/tool-action-review.js";
-import { googleWorkspaceSelectedScopes, defaultGitHubReviewPolicy, SLACK_CHAT_BOT_SCOPES, SLACK_BOT_TOOL_SCOPES } from "@groktopus/shared";
+import { googleWorkspaceSelectedScopes, defaultGitHubReviewPolicy, SLACK_CHAT_BOT_SCOPES, SLACK_BOT_TOOL_SCOPES, type ToolRunDecision } from "@groktopus/shared";
 import { createHash, randomBytes, randomUUID, generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -956,7 +956,7 @@ describe("connection management with production default agents", () => {
       const runDecisions = await review("GET", `/companies/${f.companyId}/tools/runs/${f.runId}/decisions`, undefined);
       expect(runDecisions.status).toBe(200);
       const byInvocation = new Map(
-        (runDecisions.body.decisions as Array<{ invocation: { id: string }; decision: string; outcome: string | null }>)
+        (runDecisions.body.decisions as ToolRunDecision[])
           .map(item => [item.invocation.id, item]),
       );
       const callEvent = (response: typeof deniedBefore) => {
