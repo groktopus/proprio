@@ -1005,6 +1005,7 @@ function MarkdownBodyImpl({
         const resolved = resolveImageSrc && src ? resolveImageSrc(src) : null;
         const finalSrc = resolved ?? src;
         return (
+          // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Gallery images use a button role, tab stop, and keyboard activation.
           <img
             {...imgProps}
             src={finalSrc}

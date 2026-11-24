@@ -333,6 +333,7 @@ export function ThreadCard(props: {
 
   return (
     <li>
+      {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Thread articles contain independent controls. Enter or Space on the article opens the thread. */}
       <article
         role="article"
         data-thread-id={thread.id}
@@ -347,6 +348,11 @@ export function ThreadCard(props: {
         )}
         tabIndex={0}
         onClick={props.onFocus}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          props.onFocus();
+        }}
       >
         <blockquote
           id={`thread-quote-${thread.id}`}

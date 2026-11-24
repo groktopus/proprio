@@ -792,6 +792,7 @@ function EnvironmentCustomImageBrowserTerminal({
         </div>
       </div>
       <div className="bg-neutral-950 p-2 focus-within:ring-2 focus-within:ring-ring">
+        {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Both focus and click transfer input to the terminal widget. */}
         <div
           ref={terminalElementRef}
           data-testid={`custom-image-terminal-screen-${sessionId}`}
