@@ -1,17 +1,17 @@
 {
   "version": 1,
   "baselineId": "operator-attention-test-baseline",
-  "sourceCommit": "9a2a0e0cf74886dc61b4e2f6a12601695675c881",
+  "sourceCommit": "d248c619b908e8c0d542df2ff894ea66fa94ffe9",
   "snapshotCount": 8,
   "testArtifact": {
-    "runId": 45417162815,
-    "artifactId": 14934872760,
+    "runId": 45427071206,
+    "artifactId": 14938547846,
     "name": "operator-attention-baseline-candidate-1",
     "retentionDays": 90
   },
   "archive": {
-    "sha256": "0191729a4d3309f9d209346f079cf6d9fbaeb9d4474e243b29c014668e1bf7a6",
-    "byteSize": 282968
+    "sha256": "275fe5b48ec332d4df7752c718f05c2f9e5d9a6c11f7ee2ea95dfd733da0ec70",
+    "byteSize": 282798
   },
   "environment": {
     "platform": "ubuntu-24.04",
