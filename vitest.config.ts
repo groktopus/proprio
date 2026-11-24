@@ -2,9 +2,13 @@ import { configDefaults, defineConfig } from "vitest/config";
 import { retryReporterEnabled } from "./scripts/ci/vitest-retry.mjs";
 import { stalledFileReporterEnabled } from "./scripts/ci/stalled-file-reporter.mjs";
 
+const jsonReport = process.env.PROPRIO_VITEST_JSON_REPORT;
+
 export default defineConfig({
   test: {
+    ...(jsonReport ? { outputFile: { json: jsonReport } } : {}),
     reporters: [...configDefaults.reporters,
+      ...(jsonReport ? ["json"] : []),
       ...(process.env.GITHUB_ACTIONS === "true"
         ? ["./scripts/ci/test-timing-reporter.mjs", "./scripts/ci/oversized-test-files.mjs"] : []),
       ...(process.env.PROPRIO_CI_PROFILE === "true" ? ["./scripts/ci-profile/vitest-reporter.mjs"] : []),
