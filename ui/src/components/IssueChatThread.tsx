@@ -12,6 +12,7 @@ import type { ComposerRunSettings } from "./task-chat/composer-run-settings";
 import { ComposerRunSettingsPicker } from "./task-chat/ComposerRunSettingsPicker";
 import { ComposerAddMenu, ComposerModeChip } from "./task-chat/ComposerAddMenu";
 import { TaskChatPausedTakeover, type TaskComposerPause } from "./task-chat/TaskChatPausedTakeover";
+import { DependencyDiagnosisNotice } from "./DependencyDiagnosisNotice";
 import { useEmailComment } from "./EmailMessageCard";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import type {
@@ -51,6 +52,7 @@ import type {
   IssueDocumentSummary,
   IssueBlockerAttention,
   IssueBlockerStalledWakeContext,
+  DependencyDiagnosis,
   IssueRecoveryAction,
   IssueQueuedCommentQueue,
   IssueRelationIssueSummary,
@@ -591,6 +593,9 @@ interface IssueChatThreadProps {
   blockerAttention?: IssueBlockerAttention | null;
   /** Children and blockers stalled on the board (`stalledDependencies` on the issue). */
   stalledDependencies?: IssueBlockerStalledWakeContext[];
+  dependencyDiagnosis?: DependencyDiagnosis | null;
+  dependencyDiagnosisError?: string | null;
+  onRetryDependencyDiagnosis?: () => void;
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   scheduledRetry?: IssueScheduledRetry | null;
   recoveryAction?: IssueRecoveryAction | null;
@@ -5885,6 +5890,9 @@ export function IssueChatThread({
   liveIssueIds,
   blockerAttention = null,
   stalledDependencies,
+  dependencyDiagnosis,
+  dependencyDiagnosisError,
+  onRetryDependencyDiagnosis,
   successfulRunHandoff = null,
   scheduledRetry = null,
   recoveryAction = null,
@@ -6859,6 +6867,8 @@ export function IssueChatThread({
                           : null
                       }
                     />
+                    <DependencyDiagnosisNotice issueId={issueId ?? ""} diagnosis={dependencyDiagnosis} canRequest={showComposer}
+                      diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
                     <StalledDependencyNotice stalled={stalledDependencies} />
                     <IssueAssigneePausedNotice
                       agent={assignedAgent}
@@ -6873,6 +6883,8 @@ export function IssueChatThread({
                     data-testid="issue-chat-thread-notices"
                     className="space-y-2"
                   >
+                    <DependencyDiagnosisNotice issueId={issueId ?? ""} diagnosis={dependencyDiagnosis} canRequest={false}
+                      diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
                     <IssueAssigneePausedNotice
                       agent={assignedAgent}
                       issueStatus={issueStatus}

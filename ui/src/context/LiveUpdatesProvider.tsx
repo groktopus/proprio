@@ -1535,13 +1535,19 @@ function invalidateIssueDetailsEmbeddingRelation(queryClient: QueryClient, refs:
       const record = readRecord(summary);
       return !!record && (changed.has(readString(record.id) ?? "") || changed.has(readString(record.identifier) ?? ""));
     });
+  const affectedDetails = queryClient.getQueryCache().findAll({ queryKey: ["issues", "detail"] }).filter((query) => {
+    const cached = readRecord(query.state.data);
+    return !!cached && !changed.has(readString(cached.id) ?? "") && (embeds(cached.blockedBy) || embeds(cached.blocks));
+  });
   queryClient.invalidateQueries({
     queryKey: ["issues", "detail"],
-    predicate: (query) => {
-      const cached = readRecord(query.state.data);
-      return !!cached && !changed.has(readString(cached.id) ?? "") && (embeds(cached.blockedBy) || embeds(cached.blocks));
-    },
+    predicate: (query) => affectedDetails.includes(query),
   });
+  for (const query of affectedDetails) {
+    const cached = readRecord(query.state.data);
+    const issueId = cached ? readString(cached.id) : null;
+    if (issueId) queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(issueId) });
+  }
 }
 
 function invalidateActivityQueries(
@@ -1752,6 +1758,7 @@ function invalidateActivityQueries(
             ? { refetchType: "inactive" as const }
             : undefined;
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(ref), ...invalidationOptions });
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(ref), ...invalidationOptions });
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
         if (action === "issue.comment_added" || action === "issue.conversation_session_started" || visibleConversation) {
           queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...(visibleConversation ? undefined : invalidationOptions) });

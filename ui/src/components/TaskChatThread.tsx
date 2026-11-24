@@ -151,6 +151,8 @@ import {
   TaskChatBlockerLinks,
   TaskChatLiveWorkLinks,
 } from "@/components/task-chat/TaskChatBlockerLinks";
+import { DependencyDiagnosisNotice } from "@/components/DependencyDiagnosisNotice";
+import { StalledDependencyNotice } from "@/components/StalledDependencyNotice";
 import { buildDocumentAnnotationHash } from "@/lib/document-annotation-hash";
 import {
   documentDisplayTitle,
@@ -853,9 +855,17 @@ export function TaskChatThread(props: TaskChatThreadProps) {
   );
 
   const threadHeaderWithBlockers =
-    threadHeader || blockerLinks || liveWorkLinks ? (
+    threadHeader || blockerLinks || liveWorkLinks || props.dependencyDiagnosis || props.dependencyDiagnosisError || props.stalledDependencies?.length ? (
       <>
         {threadHeader}
+        <DependencyDiagnosisNotice
+          issueId={issueId ?? ""}
+          diagnosis={props.dependencyDiagnosis}
+          canRequest={props.showComposer ?? true}
+          diagnosisError={props.dependencyDiagnosisError}
+          onRetryDiagnosis={props.onRetryDependencyDiagnosis}
+        />
+        {props.showComposer === false ? null : <StalledDependencyNotice stalled={props.stalledDependencies} />}
         {liveWorkLinks ? (
           <TaskChatLiveWorkLinks liveWork={liveWorkLinks} placement="top" companyId={companyId} />
         ) : blockerLinks ? (

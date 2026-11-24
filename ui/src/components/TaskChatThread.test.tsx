@@ -17,6 +17,9 @@ import { INITIAL_TRANSCRIPT_REVEAL_BUDGET_MS, TaskChatThread } from "./TaskChatT
 import { IssueChatThread } from "./IssueChatThread";
 import type {
   Agent,
+  DependencyDiagnosis,
+  Issue,
+  IssueBlockerStalledWakeContext,
   IssueDocument,
   IssueQueuedCommentQueue,
   IssueThreadInteraction,
@@ -30,6 +33,7 @@ import { CoordinatorPresentation } from "./coordinator/CoordinatorPresentation";
 import type { HeartbeatRunEvent } from "@groktopus/shared";
 import type { HeartbeatRun } from "@groktopus/shared";
 import { waitForStoppedRuns } from "@/lib/wait-for-stopped-runs";
+import { issuesApi } from "@/api/issues";
 
 const transcriptState = vi.hoisted(() => ({
   transcriptByRun: new Map(),
@@ -344,6 +348,45 @@ describe.each(["legacy", "native"] as const)("historical %s system status", (run
     expect(container.textContent).toContain("Worked");
     expect(container.textContent).not.toContain("Stopped");
     expect(container.textContent).not.toContain("Run failed");
+  });
+});
+
+describe("TaskChatThread dependency diagnosis", () => {
+  it("shows the parent diagnosis and retains child Retry targeting in the default task detail conversation", async () => {
+    const diagnosis: DependencyDiagnosis = {
+      state: "active",
+      dependencyPath: [{ issueId: "child-id", identifier: "CHA-8", title: "Ship the migration", status: "blocked" }],
+      cause: { kind: "retry_exhausted", issueId: "child-id" },
+      nextOwner: { type: "agent", name: "Current assignee" },
+      nextAction: "Investigate the blocked child.",
+      wake: { idempotencyKey: "wake-key", status: "exhausted" },
+      canInvestigate: false,
+    };
+    const stalled: IssueBlockerStalledWakeContext = {
+      stalledIssueId: "child-id",
+      stalledIssueIdentifier: "CHA-8",
+      stalledIssueTitle: "Ship the migration",
+      stalledIssueStatus: "blocked",
+      relation: "child",
+      recoveryAction: { id: "recovery-id", kind: "active_run_watchdog", cause: "retry_exhausted",
+        status: "resolved", ownerType: "board", nextAction: "Automatic recovery stopped." },
+    };
+    vi.spyOn(issuesApi, "get").mockResolvedValue({
+      id: "child-id", identifier: "CHA-8", status: "blocked",
+      interruption: { canRetry: true, observedRunId: "child-run" },
+    } as Issue);
+    const retry = vi.spyOn(issuesApi, "retryTask").mockResolvedValue({
+      requestId: "request", accepted: true, stale: false, presentation: null,
+    });
+    render(<TaskChatThread issueId="parent-id" comments={[]} onAdd={async () => {}}
+      dependencyDiagnosis={diagnosis} stalledDependencies={[stalled]} />);
+    await settleThreadLayout();
+
+    expect(container.querySelector("[data-testid='dependency-diagnosis-notice']")?.textContent).toContain("CHA-8: Ship the migration");
+    expect(container.querySelector("[data-testid='dependency-parent-wake-state']")?.textContent).toBe("The parent wake has exhausted its attempts.");
+    const retryButton = await vi.waitFor(() => container.querySelector<HTMLButtonElement>("button[aria-label='Retry CHA-8']"));
+    await act(async () => { retryButton!.click(); });
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledWith("child-id", expect.objectContaining({ observedRunId: "child-run" })));
   });
 });
 

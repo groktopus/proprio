@@ -51,11 +51,15 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const blocker = { id: "blocker-uuid", identifier: "PAP-3808", title: "Blocker", status: "blocked" };
     const dependentKey = queryKeys.issues.detail("PAP-3797");
     const dependentByIdKey = queryKeys.issues.detail("dependent-uuid");
+    const dependentDiagnosisKey = queryKeys.issues.dependencyInvestigation("dependent-uuid");
     const blockedTaskKey = queryKeys.issues.detail("PAP-3900");
+    const blockedTaskDiagnosisKey = queryKeys.issues.dependencyInvestigation("blocked-uuid");
     const unrelatedKey = queryKeys.issues.detail("PAP-1");
     client.setQueryData(dependentKey, { id: "dependent-uuid", identifier: "PAP-3797", blockedBy: [blocker], blocks: [] });
     client.setQueryData(dependentByIdKey, { id: "dependent-uuid", identifier: "PAP-3797", blockedBy: [blocker], blocks: [] });
     client.setQueryData(blockedTaskKey, { id: "blocked-uuid", identifier: "PAP-3900", blockedBy: [], blocks: [blocker] });
+    client.setQueryData(dependentDiagnosisKey, { state: "active" });
+    client.setQueryData(blockedTaskDiagnosisKey, { state: "active" });
     client.setQueryData(unrelatedKey, { id: "other-uuid", identifier: "PAP-1", blockedBy: [], blocks: [] });
     // Authenticated events can carry only the UUID; the dependent cache is still found by its summary id.
     __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
@@ -65,6 +69,8 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryState(dependentKey)?.isInvalidated).toBe(true);
     expect(client.getQueryState(dependentByIdKey)?.isInvalidated).toBe(true);
     expect(client.getQueryState(blockedTaskKey)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(dependentDiagnosisKey)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(blockedTaskDiagnosisKey)?.isInvalidated).toBe(true);
     expect(client.getQueryState(unrelatedKey)?.isInvalidated).toBe(false);
     client.clear();
   });
@@ -323,6 +329,9 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.issues.detail("issue-1"),
+    });
+    expect(invalidations).toContainEqual({
+      queryKey: queryKeys.issues.dependencyInvestigation("issue-1"),
     });
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.issues.activity("issue-1"),
