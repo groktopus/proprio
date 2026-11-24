@@ -10632,6 +10632,7 @@ export async function executeProprioNativeSession(input: {
   taskSessionPublication?: NativeTaskSessionPublicationContext;
   sessionGoalControl?: NativeSessionGoalControl | null;
   resumeSessionGoalHeartbeat?: boolean;
+  reconcileSessionGoalRequestId?: string | null;
   /** Compact the resumed provider session instead of running a task turn. */
   sessionCompaction?: { requestId: string; contextTokensBefore?: number } | null;
   preparationSpans?: NativeRunHistoricalSpan[];
@@ -12835,6 +12836,7 @@ async function executeProprioNativeSessionAttempt(
             keepSessionOpen: warmSessionId !== null,
             sessionGoalControl: input.sessionGoalControl,
             resumeSessionGoalHeartbeat: input.resumeSessionGoalHeartbeat,
+            reconcileSessionGoalRequestId: input.reconcileSessionGoalRequestId ?? undefined,
             sessionCompaction: input.sessionCompaction,
             requireSessionCloseBeforeReturn: runnerdBackend !== null || input.instructionWorkingCopy !== undefined,
             onSessionClosed: input.instructionWorkingCopy?.collectStopped,
@@ -12862,7 +12864,8 @@ async function executeProprioNativeSessionAttempt(
               if (
                 snapshot.goal ||
                 input.sessionGoalControl ||
-                input.resumeSessionGoalHeartbeat
+                input.resumeSessionGoalHeartbeat ||
+                input.reconcileSessionGoalRequestId
               ) {
                 await input.onGoalCheckpoint?.(snapshot);
               }

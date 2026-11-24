@@ -1,4 +1,4 @@
-import { lockCurrentSessionGoalRecovery } from "../../../services/heartbeat/session-goal-recovery.js";
+import { lockCurrentGoalControlReconciliation, lockCurrentSessionGoalRecovery } from "../../../services/heartbeat/session-goal-recovery.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
 import { notifyDeferredExecutionWork, notifyDeferredWakesForIssue } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
@@ -677,6 +677,7 @@ export function createPostgresRunDispatchAdapter(
     }
 
     let sessionGoalRecoveryCurrent = true;
+    let goalControlReconciliationCurrent = true;
     if (context.resumeSessionGoalHeartbeat === true) {
       const recoveryFence = parseObject(context.sessionGoalRecovery);
       const [agent] = await dbOrTx.select({ adapterType: agents.adapterType }).from(agents).where(and(
@@ -688,6 +689,31 @@ export function createPostgresRunDispatchAdapter(
             companyId: input.companyId, issueId, agentId: input.agentId, adapterType: agent.adapterType,
             sessionId: readNonEmptyString(recoveryFence.sessionId) ?? undefined,
             revision: typeof recoveryFence.revision === "number" ? recoveryFence.revision : undefined,
+          }),
+      );
+    }
+    const reconciliationRequestId = readNonEmptyString(context.goalControlReconciliationRequestId);
+    if (reconciliationRequestId) {
+      const reconciliation = parseObject(context.goalControlReconciliation);
+      const [agent] = await dbOrTx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+        eq(agents.id, input.agentId), eq(agents.companyId, input.companyId),
+      )).limit(1);
+      goalControlReconciliationCurrent = Boolean(
+        issue && issue.assigneeAgentId === input.agentId && !issue.assigneeUserId && agent &&
+          typeof reconciliation.sessionId === "string" &&
+          typeof reconciliation.revision === "number" &&
+          (reconciliation.sourceId === null || typeof reconciliation.sourceId === "string") &&
+          (reconciliation.sourceCursor === null || typeof reconciliation.sourceCursor === "number") &&
+          await lockCurrentGoalControlReconciliation(dbOrTx as Db, {
+            companyId: input.companyId,
+            issueId,
+            agentId: input.agentId,
+            adapterType: agent.adapterType,
+            sessionId: reconciliation.sessionId,
+            requestId: reconciliationRequestId,
+            revision: reconciliation.revision,
+            sourceId: reconciliation.sourceId as string | null,
+            sourceCursor: reconciliation.sourceCursor as number | null,
           }),
       );
     }
@@ -776,6 +802,7 @@ export function createPostgresRunDispatchAdapter(
       continuationParksExecutor,
       continuationSummaryBody,
       sessionGoalRecoveryCurrent,
+      goalControlReconciliationCurrent,
       wakeReason,
       retryReason,
       reviewParticipant: issue
