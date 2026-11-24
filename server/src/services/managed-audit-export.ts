@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
+import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db } from "@groktopus/db";
 import { and, asc, eq, exists, gte, inArray, isNull, lt, lte, or } from "drizzle-orm";
 import { conflict, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -7,6 +7,8 @@ import { issueReadSqlCondition, type AuthorizationActor } from "./authorization.
 
 const PAGE_SIZE = 200;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 type ExportScope = {
   companyId: string;
