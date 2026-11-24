@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { Db } from "@groktopus/db";
+import { and, eq } from "drizzle-orm";
+import { caseHandoffs, cases, type Db } from "@groktopus/db";
 import { normalizeIssueIdentifier } from "@groktopus/shared";
 import { validate } from "../middleware/validate.js";
 import { activityService, normalizeActivityLimit } from "../services/activity.js";
@@ -15,6 +16,8 @@ import { contextCompactionService } from "../services/context-compaction.js";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
 import { issueReadSqlCondition } from "../services/authorization.js";
 import { caseActivityReadSqlCondition } from "../services/case-activity-access.js";
+import { caseReadSqlCondition } from "../services/case-access.js";
+import { readNativeCompletionHistory } from "../services/native-runtime/native-completion-history.js";
 
 /** Max rows a single CSV export will stream (guards against runaway exports). */
 const AUDIT_CSV_EXPORT_MAX_ROWS = 10_000;
@@ -370,6 +373,20 @@ export function activityRoutes(db: Db) {
     }
     const result = await (req.query.view === "recent" ? svc.forIssue(issue.id, 50) : svc.forIssue(issue.id));
     res.json(await svc.withActorNames(result));
+  });
+
+  router.get("/issues/:id/completion-history", async (req, res) => {
+    const rawId = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const readableCases = await caseReadSqlCondition(db, req.actor);
+    const readableHandoffs = await db.select({ id: caseHandoffs.id }).from(caseHandoffs)
+      .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, issue.companyId)))
+      .where(and(eq(caseHandoffs.companyId, issue.companyId), eq(caseHandoffs.issueId, issue.id), readableCases));
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(await readNativeCompletionHistory(db, { companyId: issue.companyId, issueId: issue.id,
+      readableCaseHandoffIds: new Set(readableHandoffs.map((row) => row.id)) }));
   });
 
   router.get("/issues/:id/runs", async (req, res) => {
