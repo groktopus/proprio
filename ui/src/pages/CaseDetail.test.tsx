@@ -50,7 +50,7 @@ function detail(): CaseDetailData {
 }
 
 function handoff(overrides: Partial<CaseHandoffView> = {}): CaseHandoffView {
-  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
+  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", offerContract: null, recipientDecision: null, state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
 }
 
 async function settle() {
@@ -223,6 +223,61 @@ describe("read-only CaseDetail", () => {
     expect(handoffs.querySelectorAll('a[href="/issues/PAP-123"]')).toHaveLength(2);
     expect(container.textContent).toContain("Check the saved draft independently.");
     expect(cases.retryHandoff).not.toHaveBeenCalled(); expect(cases.cancelHandoff).not.toHaveBeenCalled(); expect(cases.patch).not.toHaveBeenCalled();
+  });
+
+  it("shows an unanswered versioned offer and preserves ordinary historical handoffs", async () => {
+    const offered = handoff({ id: "handoff-offered", phase: "implementation", state: "offered", version: 3,
+      offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A tested implementation",
+        prerequisites: ["Review the requirements", "Confirm the test fixture"],
+        requirementRevision: { id: "contract-revision-7", revision: 7, canonicalSha256: "sha256:contract-hash" },
+        requirementsDigest: "sha256:requirements-digest", workflowTransition: null,
+        decisionOwner: { type: "agent" as const, id: "agent-2" }, accountableOwner: { type: "agent" as const, id: "agent-1" } },
+      recipientDecision: null });
+    const ordinary = handoff({ id: "handoff-ordinary", phase: "verification", state: "awaiting_release", offerContract: null, recipientDecision: null });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
+      id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress", statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer",
+    } });
+    cases.listHandoffs.mockResolvedValue({ items: [offered, ordinary], nextCursor: null });
+    render();
+    await waitFor(() => {
+      const section = container.querySelector('[aria-label="Case handoffs"]');
+      expect(section?.textContent).toContain("Offered · awaiting recipient decision");
+    });
+    const history = container.querySelector('[aria-label="Case handoffs"]')!;
+    expect(history.textContent).toContain("Expected deliverable: A tested implementation");
+    expect(history.textContent).toContain("Review the requirements");
+    expect(history.textContent).toContain("Confirm the test fixture");
+    expect(history.textContent).toContain("Recipient:");
+    expect(history.textContent).toContain("Verifier");
+    expect(history.textContent).toContain("Accountable source:");
+    expect(history.textContent).toContain("Writer");
+    expect(history.textContent).toContain("Requirement revision 7");
+    expect(history.textContent).toContain("contract-revision-7");
+    expect(history.textContent).toContain("sha256:requirements-digest");
+    expect(history.textContent).toContain("No recipient decision recorded.");
+    expect(history.textContent).toContain("Pending transfer");
+    expect(history.textContent).toContain("Check the saved draft independently.");
+    expect(cases.retryHandoff).not.toHaveBeenCalled();
+    expect(cases.cancelHandoff).not.toHaveBeenCalled();
+  });
+
+  it("shows a recipient decision's recorded time and reason in handoff history", async () => {
+    const decisionAt = "2026-10-19T10:05:00.000Z";
+    const offered = handoff({ id: "handoff-decided", state: "cancelled", cancelledAt: decisionAt,
+      offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A tested implementation", prerequisites: [],
+        requirementRevision: { id: "contract-revision-7", revision: 7, canonicalSha256: "sha256:contract-hash" }, requirementsDigest: "sha256:requirements-digest",
+        workflowTransition: null, decisionOwner: { type: "agent", id: "agent-2" }, accountableOwner: { type: "agent", id: "agent-1" } },
+      recipientDecision: { outcome: "clarification", actorType: "agent", actorId: "agent-2", handoffVersion: 1,
+        requirementRevisionId: "contract-revision-7", requirementsDigest: "sha256:requirements-digest", decidedAt: decisionAt, reasonCode: "missing_prerequisite" } });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
+      id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress", statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer",
+    } });
+    cases.listHandoffs.mockResolvedValue({ items: [offered], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.textContent).toContain("Clarification requested · Missing Prerequisite"));
+    expect(container.querySelector(`time[datetime="${decisionAt}"]`)).not.toBeNull();
+    expect(container.textContent).not.toContain("No recipient decision recorded.");
+    expect(cases.patch).not.toHaveBeenCalled();
   });
 
   it("shows paused delivery without implying that the recipient is working", async () => {

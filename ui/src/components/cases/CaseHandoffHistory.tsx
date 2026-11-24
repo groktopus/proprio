@@ -44,7 +44,8 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
   const createdAt = new Date(handoff.createdAt).toISOString();
   const terminal = handoff.destinationKind === "done";
   const settled = handoff.state === "delivered" || handoff.state === "completed";
-  const stateLabel = handoff.state === "cancelled" ? (handoff.assignmentAppliedAt ? "Applied · delivery cancelled" : "Cancelled before transfer") : settled ? null
+  const stateLabel = handoff.state === "offered" ? "Offered · awaiting recipient decision"
+    : handoff.state === "cancelled" ? (handoff.assignmentAppliedAt ? "Applied · delivery cancelled" : "Cancelled before transfer") : settled ? null
     : terminal ? "Waiting for task completion" : handoff.assignmentAppliedAt ? "Applied · waiting for delivery" : "Pending transfer";
   const handoffTask = task?.id === handoff.issueId ? task : null;
   return <li>
@@ -72,9 +73,44 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
           {handoff.workflowTransition.from.name ?? "Case instructions"}{handoff.workflowTransition.from.phase ? ` · ${handoff.workflowTransition.from.phase}` : ""}
           {" → "}{handoff.workflowTransition.to.name ?? "Case instructions"} · {handoff.workflowTransition.to.phase}
         </p>}
+        {handoff.offerContract && <HandoffOffer handoff={handoff} agents={agents} />}
         {handoff.lastError && !settled && handoff.state !== "cancelled" ? <p className="text-xs text-muted-foreground">{handoff.lastError}</p> : null}
         <MarkdownBody linkIssueReferences linkCaseReferences>{handoff.instructions}</MarkdownBody>
       </div>
     </details>
   </li>;
+}
+
+function HandoffOffer({ handoff, agents }: { handoff: CaseHandoffView; agents?: CaseAgentMap }) {
+  const offer = handoff.offerContract!;
+  const decision = handoff.recipientDecision;
+  const decidedAt = decision ? new Date(decision.decidedAt).toISOString() : null;
+  const outcome = decision?.outcome === "accepted" ? "Accepted"
+    : decision?.outcome === "clarification" ? "Clarification requested"
+      : decision?.outcome === "declined" ? "Declined" : null;
+  const reason = decision?.reasonCode?.replaceAll("_", " ");
+  const titleCase = (value: string) => value.replace(/\b\w/g, character => character.toUpperCase());
+  return <section className="space-y-2" aria-label="Versioned handoff offer">
+    <h3 className="text-xs font-semibold">Agreed requirements</h3>
+    <p className="text-xs">Expected deliverable: {offer.expectedDeliverable}</p>
+    <div className="text-xs">
+      <span>Prerequisites:</span>
+      {offer.prerequisites.length ? <ul className="list-disc pl-5">{offer.prerequisites.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+        : <span className="ml-1 text-muted-foreground">None listed</span>}
+    </div>
+    <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>Recipient:</span><HandoffActor id={offer.decisionOwner.id} name={handoff.toAgentName} fallback="Agent" agents={agents} />
+      <span>Accountable source:</span><HandoffActor id={offer.accountableOwner.id} name={handoff.fromAgentName} fallback="Agent" agents={agents} />
+    </p>
+    <p className="break-all text-xs text-muted-foreground">
+      Requirement revision <span className="font-mono">{offer.requirementRevision.revision}</span>
+      {" · ID "}<code className="font-mono">{offer.requirementRevision.id}</code>
+      {" · SHA-256 "}<code className="font-mono">{offer.requirementRevision.canonicalSha256}</code>
+    </p>
+    <p className="break-all text-xs text-muted-foreground">Offer digest <code className="font-mono">{offer.requirementsDigest}</code></p>
+    {decision ? <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>{outcome}{reason ? ` · ${titleCase(reason)}` : ""}</span>
+      {decidedAt && <time dateTime={decidedAt} title={formatDateTime(decidedAt)} className="font-mono">{formatDateTime(decidedAt)}</time>}
+    </p> : <p className="text-xs text-muted-foreground">No recipient decision recorded.</p>}
+  </section>;
 }

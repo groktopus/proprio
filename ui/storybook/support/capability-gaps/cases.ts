@@ -78,7 +78,7 @@ export function installCaseFixtures(state: FixtureState = "ready", workflow?: "w
     phase: "verification", instructions: "Verify the saved release checklist and report any missing evidence on this task.",
     commentId: null, actorType: "agent", actorId: "agent-coder", sourceRunId: "run-gap", responsibleUserId: "user-storybook",
     expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-gap", idempotencyKey: "storybook-handoff",
-    inputFingerprint: "fixture", state: "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
+    inputFingerprint: "fixture", offerContract: null, recipientDecision: null, state: "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
     leaseExpiresAt: null, lastErrorCode: workflow === "blocked" ? "workspace_settlement" : null,
     lastError: workflow === "blocked" ? "Waiting for the outgoing workspace to finish saving." : null,
     createdAt: caseItem.updatedAt, assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: caseItem.updatedAt,

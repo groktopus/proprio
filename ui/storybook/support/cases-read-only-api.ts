@@ -21,6 +21,7 @@ export function caseFixtureHandoffs(record: CaseRecord): CaseHandoffView[] {
     actorType: actor(handoff.from)?.kind ?? "user", actorId: actor(handoff.from)?.id ?? "user-dotta",
     sourceRunId: null, responsibleUserId: "user-dotta",
     expectedIssueStatusVersion: 1, appliedIssueStatusVersion: handoff.state === "awaiting_release" ? null : 2,
+    offerContract: null, recipientDecision: null,
     wakeupRequestId: `wake-${handoff.id}`, idempotencyKey: `storybook-${handoff.id}`, inputFingerprint: "fixture",
     state: handoff.state, attemptCount: 1, nextAttemptAt: handoff.at, leaseExpiresAt: null,
     lastErrorCode: handoff.waitingReason ? "agent_paused" : null, lastError: handoff.waitingReason ?? null,
