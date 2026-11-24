@@ -10,14 +10,14 @@ import {
 import { routeTemplateForElements } from "@/lib/browser-tracing/route-template";
 
 /**
- * Browser performance tracing for hosted Proprio Cloud instances. Renders
+ * Browser performance tracing for operator-opted-in deployments. Renders
  * nothing.
  *
  * It reads the signed-in session, like `SentryGate`. The server sends a
- * `browserTracing` config only for a cloud-managed instance with an operator
- * endpoint, so self-hosted installs, local development, and tests never start
- * the controller and never download the tracing SDK chunk. Sign-out clears the
- * session and stops tracing.
+ * `browserTracing` is absent unless the server's managed or explicit
+ * self-hosted opt-in is configured, so disabled installs never start the
+ * controller or download the tracing SDK chunk. Sign-out clears the session
+ * and stops tracing.
  *
  * `routes` is the same `<Route>` tree that `App` renders, so every page is
  * measured under its route pattern without per-page code.

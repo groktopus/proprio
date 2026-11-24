@@ -223,6 +223,54 @@ describe("KanbanBoard", () => {
     expect(container.textContent).toContain("Live");
   });
 
+  it("exposes separate move and status controls without nesting interactive elements", () => {
+    const onUpdateIssue = vi.fn();
+    const { container, render } = renderBoard({
+      issues: [createIssue(1, "backlog")],
+      onUpdateIssue,
+    });
+
+    const moveButton = container.querySelector('button[aria-label="Move task Issue 1"]');
+    const statusSelect = container.querySelector('select[aria-label="Change status for Issue 1"]') as HTMLSelectElement | null;
+    const taskLink = container.querySelector('a[href="/issues/PAP-1"]');
+
+    expect(moveButton).toBeTruthy();
+    expect(statusSelect).toBeTruthy();
+    expect(container.querySelector('[role="status"][aria-live="polite"]')).toBeTruthy();
+    expect(moveButton?.querySelector("a")).toBeNull();
+    expect(taskLink?.closest("button")).toBeNull();
+
+    act(() => {
+      if (!statusSelect) throw new Error("status control missing");
+      statusSelect.value = "todo";
+      statusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
+  });
+
+  it("moves Backlog to Todo with Space, ArrowRight, Space and restores focus", async () => {
+    const onUpdateIssue = vi.fn();
+    const issue = { ...createIssue(1, "backlog"), id: "issue-1" };
+    const { container, render } = renderBoard({
+      issues: [issue],
+      onUpdateIssue,
+    });
+    const moveButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task Issue 1"]')!;
+    moveButton.focus();
+    expect(document.activeElement).toBe(moveButton);
+
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
+
+    expect(onUpdateIssue).toHaveBeenCalledWith("issue-1", { status: "todo" });
+    render({ issues: [{ ...issue, status: "todo", displayStatus: "todo" }], onUpdateIssue });
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Todo");
+    expect(document.activeElement).toBe(container.querySelector('button[aria-label="Move task Issue 1"]'));
+  });
+
   it("resolves drop targets from status rails and cards", () => {
     const issues = [
       createIssue(1, "todo"),

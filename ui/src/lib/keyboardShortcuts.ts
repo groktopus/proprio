@@ -28,6 +28,10 @@ export function isKeyboardShortcutTextInputTarget(target: EventTarget | null): b
   return !!target.closest(KEYBOARD_SHORTCUT_TEXT_INPUT_SELECTOR);
 }
 
+export function isKeyboardShortcutActivationTarget(target: HTMLElement): boolean {
+  return Boolean(target.closest("a[href], button, summary, [role='button'], [role='link'], [role='tab'], [role^='menuitem']"));
+}
+
 export function hasBlockingShortcutDialog(root: ParentNode = document): boolean {
   return !!root.querySelector("[role='dialog'][aria-modal='true']");
 }
@@ -107,6 +111,7 @@ export function resolveAttentionQueueKeyAction({
 }): AttentionQueueKeyAction {
   if (defaultPrevented || metaKey || ctrlKey || altKey || isModifierOnlyKey(key)) return "ignore";
   if (hasOpenDialog || isKeyboardShortcutTextInputTarget(target)) return "ignore";
+  if (target instanceof HTMLElement && target.closest("button, [role='button'], a[href], summary")) return "ignore";
 
   switch (key) {
     case "j":

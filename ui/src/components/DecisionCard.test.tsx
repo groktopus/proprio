@@ -277,7 +277,7 @@ describe("DecisionCard", () => {
     expect([...el.querySelectorAll("button")].length).toBe(0);
   });
 
-  it("surfaces failure cause and the fail-closed / re-propose guidance on partial", () => {
+  it("explains completed and failed actions in plain operator language", () => {
     const el = render({
       decision: mkDecision({ status: "decided", executionStatus: "partial", chosenOptionId: "create" }),
       executions: [
@@ -286,9 +286,12 @@ describe("DecisionCard", () => {
       ],
     });
     expect(el.textContent).toContain("Partial");
-    expect(el.textContent).toContain("permission boundary");
-    expect(el.textContent).toContain("may already have been applied");
-    expect(el.textContent).toContain("re-propose");
+    expect(el.textContent).toContain("Commented on PAP-456");
+    expect(el.textContent).toContain("Could not complete the status-update action on PAP-456");
+    expect(el.textContent).toContain("this action was not authorized");
+    expect(el.textContent).toContain("code: deny_decision_intersection");
+    expect(el.textContent).toContain("Some actions completed and others did not");
+    expect(el.textContent).toContain("revise only the actions that did not run");
   });
 
   it("marks skipped effects as target-changed on a failed decision", () => {
@@ -297,7 +300,26 @@ describe("DecisionCard", () => {
       executions: [exec({ effectIndex: 0, effectType: "cancel_issue_tree", status: "skipped", error: "target_changed" })],
     });
     expect(el.textContent).toContain("Failed");
-    expect(el.textContent).toContain("target changed since proposal");
+    expect(el.textContent).toContain("tree-cancellation action was not applied");
+    expect(el.textContent).toContain("Request a fresh proposal");
+  });
+
+  it("explains the next step when no action completes", () => {
+    const el = render({
+      decision: mkDecision({ status: "decided", executionStatus: "failed", chosenOptionId: "comment" }),
+      executions: [exec({ effectIndex: 0, effectType: "comment_on_issue", status: "failed", error: "deny_decision_intersection" })],
+    });
+    expect(el.textContent).toContain("No actions completed");
+    expect(el.textContent).toContain("Review the failure before asking the proposer to try again");
+  });
+
+  it("keeps retry guidance out of an in-flight execution", () => {
+    const el = render({
+      decision: mkDecision({ status: "decided", executionStatus: "partial", chosenOptionId: "comment" }),
+      executions: [exec({ status: "claimed" })],
+    });
+    expect(el.textContent).toContain("Running on PAP-456");
+    expect(el.textContent).not.toContain("asking the proposer to try again");
   });
 
   it("renders expired and dismissed terminal states", () => {

@@ -155,7 +155,7 @@ export function Sidebar() {
           {showDecisions ? (
             <SidebarNavItem
               to="/decisions"
-              label="Decisions"
+              label="Needs You"
               icon={ListChecks}
               badge={attentionCount}
               badgeLabel="decisions"

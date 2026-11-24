@@ -144,10 +144,8 @@ function inboxBoundary(scenarioId: string): ChatCatalogCase {
       const sidebarLink = (label: string) => page.locator("aside").getByRole("link", { name: new RegExp(`^${label}(?![\\w-])`) }).filter({ visible: true }).first();
       if (href) await internalResultLink(ctx, o, href).first().click();
       else {
-        await sidebarLink("Inbox").click();
-        await page.waitForURL(url => /\/(?:decisions|inbox|issues)(?:\/|$)/.test(url.pathname));
-        // In the coordinator shell, Inbox is the decisions inbox; personal work is the Tasks "Mine" view.
-        if (/\/decisions\/?$/.test(new URL(page.url()).pathname)) await sidebarLink("Tasks").click();
+        await sidebarLink("Tasks").click();
+        await page.waitForURL(url => /\/issues(?:\/|$)/.test(url.pathname));
       }
       const tabMine = page.getByRole("button", { name: "Mine", exact: true }).or(page.getByRole("link", { name: "Mine", exact: true }))
         .or(page.getByRole("tab", { name: "Mine", exact: true }));

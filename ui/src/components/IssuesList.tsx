@@ -96,7 +96,7 @@ import {
 } from "./KanbanBoard";
 import { buildIssueTree, countDescendants } from "../lib/issue-tree";
 import { getInboxKeyboardSelectionIndex } from "../lib/inbox";
-import { hasBlockingShortcutDialog, isKeyboardShortcutTextInputTarget } from "../lib/keyboardShortcuts";
+import { hasBlockingShortcutDialog, isKeyboardShortcutActivationTarget, isKeyboardShortcutTextInputTarget } from "../lib/keyboardShortcuts";
 import { buildSubIssueDefaultsForViewer } from "../lib/subIssueDefaults";
 import { statusBadge } from "../lib/status-colors";
 import { isSuccessfulRunHandoffRequired } from "../lib/successful-run-handoff";
@@ -1615,6 +1615,7 @@ function StreamlinedIssuesList({
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           const entry = st.flatNavEntries[currentIndex];
           if (!entry || entry.type !== "issue") return;
           e.preventDefault();
@@ -2209,6 +2210,7 @@ function StreamlinedIssuesList({
                   const hasChildren = children.length > 0;
                   const totalDescendants = hasChildren ? countDescendants(issue.id, childMap) : 0;
                   const isExpanded = !viewState.collapsedParents.includes(issue.id);
+                  const disclosureLabel = isExpanded ? "Collapse sub-tasks" : "Expand sub-tasks";
                   const useDeferredRowRendering = !(hasChildren && isExpanded);
                   const issueProject = issue.projectId ? projectById.get(issue.projectId) ?? null : null;
                   const parentIssue = issue.parentId ? issueById.get(issue.parentId) ?? null : null;
@@ -2361,7 +2363,8 @@ function StreamlinedIssuesList({
                               type="button"
                               data-slot="icon-button"
                               className="inline-flex h-4 w-4 shrink-0 items-center justify-center"
-                              aria-label={isExpanded ? "Collapse sub-tasks" : "Expand sub-tasks"}
+                              aria-label={disclosureLabel}
+                              aria-expanded={isExpanded}
                               onClick={toggleCollapse}
                             >
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
@@ -2392,7 +2395,13 @@ function StreamlinedIssuesList({
                         showIdentifier={visibleIssueColumnSet.has("id") && availableIssueColumnSet.has("id")}
                         mobileLeading={
                           hasChildren ? (
-                            <button type="button" data-slot="icon-button" onClick={toggleCollapse}>
+                            <button
+                              type="button"
+                              data-slot="icon-button"
+                              aria-label={disclosureLabel}
+                              aria-expanded={isExpanded}
+                              onClick={toggleCollapse}
+                            >
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                             </button>
                           ) : (
@@ -2408,6 +2417,8 @@ function StreamlinedIssuesList({
                                 type="button"
                                 data-slot="icon-button"
                                 className="relative z-10 hidden w-4 shrink-0 items-center justify-center sm:inline-flex"
+                                aria-label={disclosureLabel}
+                                aria-expanded={isExpanded}
                                 onClick={toggleCollapse}
                               >
                                 <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
