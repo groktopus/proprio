@@ -42,6 +42,7 @@ import {
   toolCatalogEntries,
   toolConnections,
   toolAccessAuditEvents,
+  managedAuditEvents,
   toolActionRequests,
   toolCallEvents,
   toolGatewaySessions,
@@ -249,6 +250,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await db.delete(toolGatewaySessions);
     await db.delete(toolCallEvents);
     await db.delete(toolAccessAuditEvents);
+    await db.delete(managedAuditEvents);
     await db.delete(toolActionRequests);
     await db.delete(toolInvocations);
     await db.delete(issueApprovals);
@@ -1802,6 +1804,58 @@ describeEmbeddedPostgres("tool gateway service", () => {
         decision, actor: { userId: "reviewer" } });
       await quiet();
       expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, pending.id)))[0].status).toBe(decision);
+    });
+
+    it("captures a covered approval resolution atomically and replays without duplicating it", async () => {
+      const pending = await request();
+      const [admission] = await db.select().from(managedAuditEvents).where(
+        eq(managedAuditEvents.invocationId, pending.invocationId),
+      );
+      expect(admission).toMatchObject({
+        source: "tool_gateway", phase: "policy_decision", requestId: pending.id,
+      });
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_approval_capture_failure_${suffix}`;
+      const triggerName = `managed_approval_capture_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed approval capture fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'approval_resolution') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        await expect(commitToolActionReview(db, {
+          companyId: fixture.company.id, actionRequestId: pending.id,
+          decision: "approved", actor: { userId: "reviewer" }, reason: "private free-form note",
+        })).rejects.toThrow(/managed_audit_events/);
+        expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, pending.id)))[0].status).toBe("pending");
+        expect((await db.select().from(toolInvocations).where(eq(toolInvocations.id, pending.invocationId)))[0].approvalState).toBe("pending");
+        expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, pending.invocationId))).toHaveLength(1);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+
+      const resolved = await commitToolActionReview(db, {
+        companyId: fixture.company.id, actionRequestId: pending.id,
+        decision: "approved", actor: { userId: "reviewer" }, reason: "private free-form note",
+      });
+      await commitToolActionReview(db, {
+        companyId: fixture.company.id, actionRequestId: pending.id,
+        decision: "approved", actor: { userId: "reviewer" },
+      });
+      const events = await db.select().from(managedAuditEvents).where(
+        eq(managedAuditEvents.invocationId, pending.invocationId),
+      );
+      expect(events).toHaveLength(2);
+      expect(events.find(event => event.phase === "approval_resolution")).toMatchObject({
+        source: "tool_gateway", schemaVersion: admission.schemaVersion,
+        eventType: "approval_resolution_recorded", phase: "approval_resolution",
+        occurredAt: resolved.decidedAt,
+        runId: admission.runId, taskId: admission.taskId,
+        invocationId: pending.invocationId, requestId: pending.id,
+        connectionId: admission.connectionId, actorType: "user", actorId: "reviewer",
+        decision: "approved", status: "approved", reasonCode: null,
+      });
+      expect(JSON.stringify(events)).not.toContain("private free-form note");
     });
 
     it.each([false, true])("observes outer transaction settlement (rollback %s)", async rollback => {
