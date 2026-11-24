@@ -318,7 +318,7 @@ export function InviteLandingPage() {
   const canCompleteAcceptedHumanInvite =
     inviteJoinRequestType === "human" &&
     (inviteJoinRequestStatus === "pending_approval" || inviteJoinRequestStatus === "approved");
-  const inviteReadIsAuthoritative = inviteQuery.isSuccess && inviteQuery.isFetchedAfterMount && inviteView.kind === "ready";
+  const inviteReadIsAuthoritative = inviteQuery.isSuccess && inviteQuery.isFetchedAfterMount && !inviteQuery.isFetching && inviteView.kind === "ready";
 
   useEffect(() => {
     if (inviteJoinRequestStatus !== "approved" || inviteJoinRequestType !== "human" || !isCurrentMember) return;
