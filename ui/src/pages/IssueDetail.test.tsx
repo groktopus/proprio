@@ -2425,7 +2425,8 @@ describe("IssueDetail", () => {
     const activity = createDeferred<unknown[]>();
     const runs = createDeferred<unknown[]>();
     const cost = createDeferred<unknown>();
-    mockLocation.hash = "#continuation-summary";
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
     mockIssuesApi.get.mockResolvedValue(createIssue());
     mockActivityApi.forIssue.mockReturnValue(activity.promise);
