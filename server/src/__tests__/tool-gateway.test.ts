@@ -43,6 +43,7 @@ import {
   toolInvocations,
   toolMcpGateways,
   toolMcpGatewayTokens,
+  toolMcpElicitations,
   toolPolicies,
   toolProfileBindings,
   toolProfileEntries,
@@ -711,6 +712,66 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("does not resend an approved MCP action when its elicitation continuation has expired", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => {
+      if (body?.method === "tools/call") return {
+        headers: { "content-type": "text/event-stream" },
+        rawBody: `data: ${JSON.stringify({ jsonrpc: "2.0", id: "saved-question", method: "elicitation/create",
+          params: { message: "Which folder?", requestedSchema: { type: "object" } } })}\n\n`,
+      };
+      return { body: { jsonrpc: "2.0", id: body?.id ?? "reply", result: { action: "cancel" } } };
+    });
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask before remote write",
+        policyType: "require_approval", selectors: { connectionId: connection.id }, priority: 10 });
+      const reviewer = "managed-audit-elicitation-reviewer";
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: reviewer, status: "active", membershipRole: "owner" });
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const parameters = { key: "elicitation-private-key", value: "elicitation-private-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [actionRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
+      const app = createGatewayRouteApp(db, gateway, {
+        type: "board", userId: reviewer, source: "session", companyIds: [company.id],
+        memberships: [{ companyId: company.id, membershipRole: "owner", status: "active" }], isInstanceAdmin: false,
+      });
+      const firstApproval = await request(app).post(`/api/tool-gateway/action-requests/${actionRequest.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(firstApproval.body).toMatchObject({ id: actionRequest.id, status: "approved" });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const [elicitation] = await db.select().from(toolMcpElicitations).where(eq(toolMcpElicitations.invocationId, actionRequest.invocationId));
+      expect(elicitation).toMatchObject({ status: "waiting", invocationId: actionRequest.invocationId });
+      await db.update(toolMcpElicitations).set({ status: "expired", claimedUntil: null, updatedAt: new Date() })
+        .where(eq(toolMcpElicitations.id, elicitation.id));
+
+      const retry = await request(app).post(`/api/tool-gateway/action-requests/${actionRequest.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(retry.body).toMatchObject({ id: actionRequest.id, status: "executing" });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, actionRequest.invocationId));
+      expect(invocation).toMatchObject({ status: "executing" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, actionRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, actionRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("captures an approved run-session MCP dispatch and terminal decision through the approval route", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
@@ -798,6 +859,11 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         expect(partial.body).toMatchObject({ id: ambiguousRequest.id, status: "executing" });
         const [ambiguousInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, ambiguousRequest.invocationId));
         expect(ambiguousInvocation).toMatchObject({ status: "executing" });
+        const dispatchIntents = await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+        ));
+        expect(dispatchIntents).toHaveLength(1);
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
         expect(await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
         ))).toHaveLength(0);
