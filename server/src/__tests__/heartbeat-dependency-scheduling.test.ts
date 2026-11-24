@@ -1084,6 +1084,46 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     // Once the stall's action is no longer current, the retry waits for the blocker like any other.
     await db.update(issueRecoveryActions).set({ outcome: "restored" }).where(eq(issueRecoveryActions.id, action.id));
     expect(await retryGate(replacement)).toMatchObject({ allowed: false, errorCode: "issue_dependencies_blocked" });
+
+  });
+
+  it("cancels a queued diagnosis and its retry after the dependency resolves", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const dependentId = randomUUID();
+    const blockerId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Proprio", issuePrefix: "DIAG" });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+      adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: dependentId, companyId, title: "Waiting task", status: "in_progress", assigneeAgentId: agentId },
+      { id: blockerId, companyId, title: "Resolved dependency", status: "done" },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
+
+    const contextSnapshot = {
+      issueId: dependentId,
+      wakeReason: "issue_blocker_stalled",
+      dependencyDiagnosis: { idempotencyKey: "superseded-diagnosis" },
+    };
+    const [queued] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "queued", invocationSource: "automation", contextSnapshot,
+    }).returning();
+    const [retry] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "scheduled_retry", invocationSource: "automation", contextSnapshot,
+      scheduledRetryAt: new Date(), scheduledRetryReason: "transient_failure", retryOfRunId: queued!.id,
+    }).returning();
+
+    const dispatch = createPostgresRunDispatchAdapter(db);
+    expect(await dispatch.evaluateScheduledRetryGate({ companyId, runId: retry!.id, now: new Date() }))
+      .toMatchObject({ allowed: false, errorCode: "issue_dependency_diagnosis_superseded" });
+    expect(await dispatch.cancelStaleQueuedRun({ companyId, runId: queued!.id, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "cancelled", errorCode: "issue_dependency_diagnosis_superseded" });
+    const [persisted] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, queued!.id));
+    expect(persisted?.status).toBe("cancelled");
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
   it("defers issue_blockers_resolved as a follow-up when the same issue is already running", async () => {

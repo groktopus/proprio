@@ -4461,31 +4461,40 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // A stalled child or blocker (issue_blocker_stalled, once per stall)
           // is the other exception: the assignee must be able to re-delegate,
           // escalate or block with a reason while that dependency is stuck.
+          const diagnosisWake = Boolean(enrichedContextSnapshot.dependencyDiagnosis);
+          const stallVerified = (diagnosisWake || dependencyReadiness?.isDependencyReady === false)
+            && await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
+              contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType });
+          // A diagnostic request is bound to the stall that was observed.
+          // Resolution does not turn a stale request into an ordinary wake.
+          if (diagnosisWake && !stallVerified) return { kind: "skipped" as const };
+
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
             allowsDependencyBlockedWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-              await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
-                contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType }),
+              stallVerified,
               await isVerifiedDependencyInteractionResponse(tx, { companyId: issue.companyId,
                 issueId: issue.id, agentId, context: enrichedContextSnapshot }),
             );
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;
-            enrichedContextSnapshot.unresolvedBlockerIssueIds =
-              dependencyReadiness.unresolvedBlockerIssueIds;
-            enrichedContextSnapshot.unresolvedBlockerCount =
-              dependencyReadiness.unresolvedBlockerCount;
-            enrichedContextSnapshot.unresolvedBlockerSummaries =
-              await listUnresolvedBlockerSummaries(
-                tx,
-                issue.companyId,
-                issue.id,
-                dependencyReadiness.unresolvedBlockerIssueIds,
+            if (diagnosisWake) {
+              // The diagnosis already contains the path the recipient can read.
+              // The ordinary blocker summaries include restricted issue details.
+              delete enrichedContextSnapshot.unresolvedBlockerIssueIds;
+              delete enrichedContextSnapshot.unresolvedBlockerSummaries;
+              delete enrichedContextSnapshot.unresolvedBlockerCount;
+            } else {
+              enrichedContextSnapshot.unresolvedBlockerIssueIds = dependencyReadiness.unresolvedBlockerIssueIds;
+              enrichedContextSnapshot.unresolvedBlockerCount = dependencyReadiness.unresolvedBlockerCount;
+              enrichedContextSnapshot.unresolvedBlockerSummaries = await listUnresolvedBlockerSummaries(
+                tx, issue.companyId, issue.id, dependencyReadiness.unresolvedBlockerIssueIds,
               );
+            }
           }
 
           if (
