@@ -31,7 +31,7 @@ import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle }
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { QueryErrorState, QueryPlaceholder, useQueryView, type QueryViewKind } from "../components/QueryView";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { InlineBanner } from "../components/InlineBanner";
@@ -69,6 +69,15 @@ export function withTaskSummaries(rows: readonly CompactIssue[], summaries: read
       } : {}),
     } as Issue;
   });
+}
+
+export type DashboardTaskDataState = "loading" | "unavailable" | "stale" | "empty" | "ready";
+
+export function dashboardTaskDataState(viewKind: QueryViewKind, rowCount: number): DashboardTaskDataState {
+  if (viewKind === "loading" || viewKind === "reconnecting") return "loading";
+  if (viewKind === "error") return "unavailable";
+  if (viewKind === "stale") return "stale";
+  return rowCount === 0 ? "empty" : "ready";
 }
 
 
@@ -178,11 +187,14 @@ export function Dashboard() {
   });
   usePublishSharedQueryData(sharedActivity, activity, activityUpdatedAt);
 
-  const { data: issues } = useQuery({
+  const issuesQuery = useQuery({
     queryKey: queryKeys.issues.listIndex(selectedCompanyId!),
     queryFn: ({ signal }) => issuesApi.listCompact(selectedCompanyId!, { projection: "index" }, { signal }),
     enabled: !!selectedCompanyId,
   });
+  const issuesView = useQueryView(issuesQuery);
+  const issues = issuesQuery.data;
+  const taskDataState = dashboardTaskDataState(issuesView.kind, issues?.length ?? 0);
   const { userId: accountUserId, settled: accountSettled } = useAccountIdentity();
   const recentIndexRows = useMemo(() => recentTaskIndexRows(issues ?? []), [issues]);
   const recentIds = useMemo(() => recentIndexRows.map((issue) => issue.id).sort(), [recentIndexRows]);
@@ -455,7 +467,7 @@ export function Dashboard() {
             <MetricCard
               appearance={designSandbox ? "card" : "plain"}
               icon={ShieldCheck}
-              value={data.pendingApprovals + data.budgets.pendingApprovals}
+              value={data.pendingApprovals}
               label="Pending Approvals"
               to="/approvals"
               description={
@@ -477,11 +489,23 @@ export function Dashboard() {
             {/* PAP-411: "Tasks by Priority" chart hidden behind SHOW_TASK_PRIORITY_UI. */}
             {SHOW_TASK_PRIORITY_UI && (
               <ChartCard title="Tasks by Priority" subtitle="Last 14 days">
-                <PriorityChart issues={issues ?? []} />
+                {taskDataState === "loading" ? (
+                  <QueryPlaceholder label="Loading task priority" />
+                ) : taskDataState === "unavailable" ? (
+                  <QueryErrorState size="inline" error={issuesView.error} action="load task priority" onRetry={issuesView.retry} retrying={issuesView.isFetching} />
+                ) : (
+                  <PriorityChart issues={issues ?? []} />
+                )}
               </ChartCard>
             )}
             <ChartCard title="Tasks by Status" subtitle="Last 14 days">
-              <IssueStatusChart issues={issues ?? []} />
+              {taskDataState === "loading" ? (
+                <QueryPlaceholder label="Loading task status" />
+              ) : taskDataState === "unavailable" ? (
+                <QueryErrorState size="inline" error={issuesView.error} action="load task status" onRetry={issuesView.retry} retrying={issuesView.isFetching} />
+              ) : (
+                <IssueStatusChart issues={issues ?? []} />
+              )}
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
               <SuccessRateChart activity={data.runActivity} />
@@ -522,9 +546,15 @@ export function Dashboard() {
             {/* Recent Tasks */}
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
-                Recent Tasks
+                Recent Tasks {taskDataState === "stale" ? <span className="font-normal normal-case">(updating…)</span> : null}
               </h3>
-              {recentIssues.length === 0 ? (
+              {taskDataState === "loading" ? (
+                <QueryPlaceholder label="Loading recent tasks" />
+              ) : taskDataState === "unavailable" ? (
+                <Card className="block p-4">
+                  <QueryErrorState size="inline" error={issuesView.error} action="load recent tasks" onRetry={issuesView.retry} retrying={issuesView.isFetching} />
+                </Card>
+              ) : recentIssues.length === 0 ? (
                 <Card className="block p-4">
                   <p className="text-sm text-muted-foreground">No tasks yet.</p>
                 </Card>

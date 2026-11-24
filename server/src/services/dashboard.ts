@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@groktopus/db";
 import { notFound } from "../errors.js";
@@ -53,7 +53,9 @@ export function dashboardService(db: Db) {
       const pendingApprovals = await retryIdempotentDatabaseOperation(() => db
         .select({ count: sql<number>`count(*)` })
         .from(approvals)
-        .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending")))
+        // Keep this definition aligned with the Approvals Pending view:
+        // revision requests still need reviewer action.
+        .where(and(eq(approvals.companyId, companyId), inArray(approvals.status, ["pending", "revision_requested"])))
         .then((rows) => Number(rows[0]?.count ?? 0)));
 
       const agentCounts: Record<string, number> = {

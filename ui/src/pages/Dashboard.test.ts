@@ -1,6 +1,6 @@
 import type { Agent, CompactIssue, IssueSummary } from "@groktopus/shared";
 import { describe, expect, it } from "vitest";
-import { derivePausedAgentBanner, recentTaskIndexRows, withTaskSummaries } from "./Dashboard";
+import { dashboardTaskDataState, derivePausedAgentBanner, recentTaskIndexRows, withTaskSummaries } from "./Dashboard";
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -74,5 +74,18 @@ describe("dashboard recent tasks from the task index", () => {
       externalConversationState: "waiting", blockerAttention: { state: "covered" } });
     const [plain] = withTaskSummaries([row("t2", "2026-11-01T00:00:00.000Z")], undefined);
     expect(plain).not.toHaveProperty("displayStatus");
+  });
+});
+
+describe("dashboard task index state", () => {
+  it.each([
+    ["loading", 0, "loading"],
+    ["reconnecting", 0, "loading"],
+    ["error", 0, "unavailable"],
+    ["stale", 2, "stale"],
+    ["ready", 0, "empty"],
+    ["ready", 2, "ready"],
+  ] as const)("maps %s with %s rows to %s", (kind, rows, expected) => {
+    expect(dashboardTaskDataState(kind, rows)).toBe(expected);
   });
 });

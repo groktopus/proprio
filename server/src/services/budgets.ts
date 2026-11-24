@@ -1039,7 +1039,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         activeIncidents,
         pausedAgentCount: new Set(policies.filter((policy) => policy.scopeType === "agent" && policy.paused).map((policy) => policy.scopeId)).size,
         pausedProjectCount: new Set(policies.filter((policy) => policy.scopeType === "project" && policy.paused).map((policy) => policy.scopeId)).size,
-        pendingApprovalCount: activeIncidents.filter((incident) => incident.approvalStatus === "pending").length,
+        // Revision requests remain pending reviewer action in the Approvals view.
+        pendingApprovalCount: activeIncidents.filter((incident) =>
+          incident.approvalStatus === "pending" || incident.approvalStatus === "revision_requested").length,
       };
     },
 
