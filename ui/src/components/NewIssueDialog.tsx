@@ -1494,7 +1494,15 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     };
     if (focusEditor()) return;
     const observer = new MutationObserver(() => {
-      if (focusEditor()) observer.disconnect();
+      if (!body.querySelector('[contenteditable="true"]')) return;
+      // MDXEditor may apply its final Lexical focus state in a later frame.
+      // Run after that commit so Radix/MDXEditor cannot immediately overwrite
+      // the handoff from the dialog container.
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (focusEditor()) observer.disconnect();
+        });
+      });
     });
     observer.observe(body, { subtree: true, attributes: true, attributeFilter: ["contenteditable"] });
     return () => observer.disconnect();
