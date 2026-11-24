@@ -2,7 +2,9 @@ interface SessionRun {
   id: string;
   taskId: string;
   sessionDigest: string;
-  runnerGeneration: number;
+  runnerDigest: string;
+  runnerGenerations: number[];
+  compactionRequestId: string | null;
   startedAt: number;
   finishedAt: number;
   status: string;
@@ -52,17 +54,20 @@ function outputFields(body: string) {
 function gradeLane(lane: CompactionObservation, mode: "control" | "treatment", fixture: CompactionFixtureRequirements, requirementRevisionId: string) {
   const { initial, waiting, final, compactRequest, prerequisite, actions, artifact } = lane;
   const runs = [initial, ...(compactRequest ? [compactRequest.run] : []), waiting, final];
-  const continuingSession = Boolean(initial.sessionDigest)
+  const continuingSession = Boolean(initial.sessionDigest && initial.runnerDigest)
     && new Set(runs.map(run => run.id)).size === runs.length
     && runs.every((run, index) => Boolean(run.id) && run.taskId === lane.taskId && run.status === "succeeded"
-      && run.sessionDigest === initial.sessionDigest && Number.isSafeInteger(run.runnerGeneration) && run.runnerGeneration >= 0
+      && run.sessionDigest === initial.sessionDigest && run.runnerDigest === initial.runnerDigest
       && Number.isFinite(run.startedAt) && run.finishedAt >= run.startedAt
       && (index === 0 || run.startedAt >= runs[index - 1]!.finishedAt));
   const compaction = mode === "control"
-    ? compactRequest === null && lane.compactionEvents.length === 0
+    ? compactRequest === null && runs.every(run => run.compactionRequestId === null) && lane.compactionEvents.length === 0
     : Boolean(compactRequest?.requestId) && lane.compactionEvents.length === 1
+      && compactRequest?.run.compactionRequestId === compactRequest?.requestId
+      && [initial, waiting, final].every(run => run.compactionRequestId === null)
       && lane.compactionEvents[0]?.runId === compactRequest?.run.id
-      && lane.compactionEvents[0]?.reason === "manual" && lane.compactionEvents[0]?.sameSession === true
+      // Codex emits its provider notification in response to the admitted manual request.
+      && lane.compactionEvents[0]?.reason === "provider" && lane.compactionEvents[0]?.sameSession === true
       && Number.isSafeInteger(lane.compactionEvents[0]?.sequence) && lane.compactionEvents[0]!.sequence > 0;
   const fields = outputFields(artifact?.body ?? "");
   const requests = actions.filter(action => action.kind === "request_prerequisite");

@@ -10,7 +10,8 @@ function lane(mode: "control" | "treatment"): CompactionObservation {
   const taskId = `${mode}-task`;
   const sessionDigest = `${mode}-digest`;
   const run = (kind: string, startedAt: number, finishedAt: number) => ({ id: `${mode}-${kind}`, taskId,
-    sessionDigest, runnerGeneration: 1, startedAt, finishedAt, status: "succeeded" });
+    sessionDigest, runnerDigest: `${mode}-runner`, runnerGenerations: [1],
+    compactionRequestId: kind === "compact" ? "manual-compact" : null, startedAt, finishedAt, status: "succeeded" });
   const initial = run("initial", 1, 5);
   const compact = run("compact", 6, 8);
   const waiting = run("waiting", 10, 15);
@@ -18,7 +19,7 @@ function lane(mode: "control" | "treatment"): CompactionObservation {
   return { sourceRevision: "tested-revision", profileId: "runner-codex", provider: "codex", model: "fixture-model",
     fixtureDigest: "same-fixture", taskId, initial, waiting, final,
     compactRequest: mode === "treatment" ? { requestId: "manual-compact", run: compact } : null,
-    compactionEvents: mode === "treatment" ? [{ runId: compact.id, reason: "manual", sameSession: true, sequence: 3 }] : [],
+    compactionEvents: mode === "treatment" ? [{ runId: compact.id, reason: "provider", sameSession: true, sequence: 3 }] : [],
     prerequisite: { receiptId: `${mode}-prerequisite`, publishedAt: 18 },
     actions: [{ runId: waiting.id, kind: "request_prerequisite", at: 12 }, { runId: final.id, kind: "write_artifact", at: 22 }],
     artifact: { taskId, revisionId: `${mode}-artifact`, writtenByRunId: final.id,
@@ -53,7 +54,7 @@ describe("paired Codex context compaction oracle", () => {
     ]);
     for (const cell of cells) expect(cell).toMatchObject({
       suite: { manualOnly: true, definitionMetadata: { maximumAttemptsPerCell: 1, providerTurns: 6, compactionOperations: 1 } },
-      task: { expectedRunCount: 7 } });
+      task: { expectedRunCount: 7, automaticRetryPolicy: "single_attempt" } });
   });
 
   it("accepts a continuing treatment and matched control with independently retained constraints", () => {
@@ -85,6 +86,21 @@ describe("paired Codex context compaction oracle", () => {
     const result = gradeContextCompactionPair(input);
     expect(result.treatment).toMatchObject({ compaction: false, continuingSession: false });
     expect(result.control.compaction).toBe(false);
+  });
+
+  it("rejects a provider notification when the run lacks the accepted manual request", () => {
+    const input = pair();
+    input.treatment.compactRequest!.run.compactionRequestId = null;
+    expect(gradeContextCompactionPair(input).treatment.compaction).toBe(false);
+  });
+
+  it("requires a session-bound runner identity even if the session digest matches", () => {
+    const input = pair();
+    input.control.waiting.runnerDigest = "";
+    input.treatment.final.runnerDigest = "other-runner";
+    const result = gradeContextCompactionPair(input);
+    expect(result.control.continuingSession).toBe(false);
+    expect(result.treatment.continuingSession).toBe(false);
   });
 
   it("fails missing evidence and rejects a model change between the two observations", () => {

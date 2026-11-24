@@ -1430,6 +1430,7 @@ for (const execution of executions) {
         });
         issue = pair.issue as IssueRecord; selectedRuns = pair.runs as RunRecord[];
         matcherResults = pair.checks.map(check => ({ matcher: { kind: "json_path" as const, path: `contextCompaction.${check.id}`, expected: true }, passed: check.passed, detail: check.id }));
+        expect(pair.checks.filter(check => !check.passed).map(check => check.id)).toEqual([]);
       } else if (execution.task.flow === "context_integrity") {
         const contextIntegrity = await runContextIntegrityFlow({
           page, api, fixtures, execution, nonce, deadlineAt: startedAtMs + deadlineMs,

@@ -45,6 +45,7 @@ export const contextCompactionTask: RunnerTaskFixture = {
   workMode: "standard",
   flow: "context_compaction",
   expectedRunCount: 7,
+  automaticRetryPolicy: "single_attempt",
   attemptTimeoutMs: { local: 12 * 60_000, daytona: 12 * 60_000 },
   expectedTerminalState: { issue: "done", run: "succeeded" },
   buildTitle: (nonce) => `Synthetic release receipt ${nonce}`,

@@ -30,7 +30,7 @@ export async function runContextCompactionFlow(input: {
 
   async function checkpoint(stage: string, lane: Lane, data: Record<string, unknown> = {}) {
     checkpoints.push({ stage, lane, taskId: issue?.id, status: issue?.status, ...data });
-    await input.evidence("context-compaction.json", { schema: "proprio.runner-e2e.context-compaction.v1",
+    await input.evidence("context-compaction.json", { schema: "proprio.runner-e2e.context-compaction.v2",
       sourceRevision: input.sourceRevision, profileId: execution.profile.id, model: execution.profile.model,
       fixtureDigest: COMPACTION_FIXTURE_DIGEST, budgetCents: COMPACTION_BUDGET_CENTS, checkpoints, requirementRevisionIds,
       observed: Object.fromEntries(observed) });
@@ -111,9 +111,10 @@ export async function runContextCompactionFlow(input: {
     const sessions = new Map<string, CompactionObservation["initial"]>();
     for (const run of final.runs) {
       const events = await collectRunEvents<Row>((afterSeq, limit) => api.get(`/api/heartbeat-runs/${run.id}/events?afterSeq=${afterSeq}&limit=${limit}`));
-      const valid = events.filter(event => isBoundNativePrpEventRow(event, {
+      const valid = events.filter(event => run.nativeSessionId && run.runnerInstanceId && isBoundNativePrpEventRow(event, {
         runId: run.id, companyId: fixtures.company.id, agentId: fixtures.agent.id,
-      })).map(event => ({ event, envelope: event.payload.prpEvent }));
+      }, run.runnerInstanceId) && event.payload.prpEvent.normalizedSessionId === run.nativeSessionId)
+        .map(event => ({ event, envelope: event.payload.prpEvent }));
       for (const { event, envelope } of valid) {
         const payload = envelope.payload;
         if (event.eventType === "context.compacted") compactionEvents.push({ runId: run.id,
@@ -123,9 +124,13 @@ export async function runContextCompactionFlow(input: {
           actions.push({ runId: run.id, kind: "write_artifact", at: Date.parse(event.createdAt) });
         }
       }
-      const session = typeof run.nativeSessionId === "string" && run.nativeSessionId
-        ? createHash("sha256").update(run.nativeSessionId).digest("hex") : "";
-      sessions.set(run.id, { id: run.id, taskId, sessionDigest: session, runnerGeneration: Number(valid.at(-1)?.envelope.generation),
+      const runnerGenerations = [...new Set(valid.map(({ envelope }) => envelope.generation)
+        .filter((value): value is number => Number.isSafeInteger(value) && value >= 0))].sort((left, right) => left - right);
+      const requestId = run.contextSnapshot?.contextCompactionRequestId;
+      sessions.set(run.id, { id: run.id, taskId,
+        sessionDigest: valid.length ? createHash("sha256").update(run.nativeSessionId).digest("hex") : "",
+        runnerDigest: valid.length ? createHash("sha256").update(run.runnerInstanceId).digest("hex") : "",
+        runnerGenerations, compactionRequestId: typeof requestId === "string" ? requestId : null,
         startedAt: Date.parse(run.startedAt), finishedAt: Date.parse(run.finishedAt), status: run.status });
     }
     observed.set(lane, { sourceRevision: input.sourceRevision, profileId: execution.profile.id, provider: execution.profile.provider,
