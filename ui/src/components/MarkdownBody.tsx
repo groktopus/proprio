@@ -397,6 +397,25 @@ function remarkDropHtmlComments() {
   };
 }
 
+type RenderedMarkdownNode = {
+  tagName?: string;
+  children?: RenderedMarkdownNode[];
+};
+
+const linkedImageNodes = new WeakSet<object>();
+
+function rehypeMarkLinkedImages() {
+  return (tree: RenderedMarkdownNode) => {
+    function visit(node: RenderedMarkdownNode, insideLink: boolean) {
+      if (insideLink && node.tagName === "img") linkedImageNodes.add(node);
+      for (const child of node.children ?? []) {
+        visit(child, insideLink || node.tagName === "a");
+      }
+    }
+    visit(tree, false);
+  };
+}
+
 function mergeWrapStyle(style?: React.CSSProperties): React.CSSProperties {
   return {
     ...wrapAnywhereStyle,
@@ -819,6 +838,12 @@ function MarkdownBodyImpl({
   // scroll position and text selection and causes visible flashing when a
   // parent re-renders frequently (see PAP-10767). Memoize both so re-renders
   // that don't change the inputs are cheap and non-destructive.
+  const galleryEnabled = Boolean(onImageClick);
+  const rehypePlugins = useMemo<NonNullable<Options["rehypePlugins"]>>(() => [
+    ...(galleryEnabled ? [rehypeMarkLinkedImages] : []),
+    ...(streamWords ? [rehypeStreamingWords] : []),
+  ], [galleryEnabled, streamWords]);
+
   const remarkPlugins = useMemo<NonNullable<Options["remarkPlugins"]>>(() => {
     const plugins: NonNullable<Options["remarkPlugins"]> = [remarkGfm, remarkDropHtmlComments];
     if (enableWikiLinks) {
@@ -1001,30 +1026,31 @@ function MarkdownBodyImpl({
         </span>
       );
     } else if (resolveImageSrc || onImageClick) {
-      map.img = ({ node: _node, src, alt, ...imgProps }) => {
+      map.img = ({ node, src, alt, ...imgProps }) => {
         const resolved = resolveImageSrc && src ? resolveImageSrc(src) : null;
         const finalSrc = resolved ?? src;
+        const openImage = node && linkedImageNodes.has(node) ? undefined : onImageClick;
         return (
           // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Gallery images use a button role, tab stop, and keyboard activation.
           <img
             {...imgProps}
             src={finalSrc}
             alt={alt ?? ""}
-            role={onImageClick && finalSrc ? "button" : undefined}
-            tabIndex={onImageClick && finalSrc ? 0 : undefined}
-            aria-label={onImageClick && finalSrc ? `Open image: ${alt || "Untitled image"}` : undefined}
-            onClick={onImageClick && finalSrc ? (e) => {
+            role={openImage && finalSrc ? "button" : undefined}
+            tabIndex={openImage && finalSrc ? 0 : undefined}
+            aria-label={openImage && finalSrc ? `Open image: ${alt || "Untitled image"}` : undefined}
+            onClick={openImage && finalSrc ? (e) => {
               e.preventDefault();
               e.stopPropagation();
-              onImageClick(finalSrc, e.currentTarget);
+              openImage(finalSrc, e.currentTarget);
             } : undefined}
-            onKeyDown={onImageClick && finalSrc ? (e) => {
+            onKeyDown={openImage && finalSrc ? (e) => {
               if (e.key !== "Enter" && e.key !== " ") return;
               e.preventDefault();
               e.stopPropagation();
-              onImageClick(finalSrc, e.currentTarget);
+              openImage(finalSrc, e.currentTarget);
             } : undefined}
-            className={cn(imgProps.className, onImageClick && "cursor-pointer")}
+            className={cn(imgProps.className, openImage && "cursor-pointer")}
           />
         );
       };
@@ -1045,7 +1071,7 @@ function MarkdownBodyImpl({
     >
       <Markdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={streamWords ? [rehypeStreamingWords] : undefined}
+        rehypePlugins={rehypePlugins}
         components={components}
         urlTransform={documentIssueId ? scopedUrlTransform : safeMarkdownUrlTransform}
       >

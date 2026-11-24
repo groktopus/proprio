@@ -317,7 +317,7 @@ export function FileTree({
   }
 
   function handleRowKeyDown(event: KeyboardEvent<HTMLDivElement>, index: number, node: FileTreeNode) {
-    if (disabled) return;
+    if (disabled || event.target !== event.currentTarget) return;
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();

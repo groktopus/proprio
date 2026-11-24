@@ -507,6 +507,8 @@ function EnvironmentCustomImageBrowserTerminal({
   const [connectionState, setConnectionState] = useState<CustomImageTerminalConnectionState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const terminalElementRef = useRef<HTMLDivElement | null>(null);
+  const terminalExitRef = useRef<HTMLParagraphElement>(null);
+  const keyboardExitedTerminal = useRef(false);
   const xtermRef = useRef<XTermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalInputDisposableRef = useRef<{ dispose: () => void } | null>(null);
@@ -678,6 +680,7 @@ function EnvironmentCustomImageBrowserTerminal({
     }
 
     closeSocket("reconnect");
+    keyboardExitedTerminal.current = false;
     setConnectionState("connecting");
     lastSentResizeRef.current = null;
     setErrorMessage(null);
@@ -697,7 +700,7 @@ function EnvironmentCustomImageBrowserTerminal({
 
       socket.onopen = () => {
         if (socketRef.current !== socket) return;
-        xtermRef.current?.focus();
+        if (!keyboardExitedTerminal.current) xtermRef.current?.focus();
         socket.send(JSON.stringify({ type: "auth", token: terminalToken.token }));
         sendTerminalResize(true);
       };
@@ -710,7 +713,7 @@ function EnvironmentCustomImageBrowserTerminal({
 
         if (frame.type === "ready") {
           setConnectionState("connected");
-          xtermRef.current?.focus();
+          if (!keyboardExitedTerminal.current) xtermRef.current?.focus();
           return;
         }
 
@@ -797,13 +800,29 @@ function EnvironmentCustomImageBrowserTerminal({
           ref={terminalElementRef}
           data-testid={`custom-image-terminal-screen-${sessionId}`}
           aria-label="Custom image browser terminal"
+          aria-describedby={`terminal-keyboard-help-${sessionId}`}
           role="application"
           tabIndex={0}
+          onKeyDownCapture={(event) => {
+            if (event.key !== "Escape" || !event.shiftKey) return;
+            event.preventDefault();
+            event.stopPropagation();
+            keyboardExitedTerminal.current = true;
+            terminalExitRef.current?.focus();
+          }}
           onFocus={() => xtermRef.current?.focus()}
           onClick={() => xtermRef.current?.focus()}
           className="h-(--sz-18rem) w-full overflow-hidden bg-neutral-950 outline-none sm:h-(--sz-22rem) [&_.xterm-cursor-bar]:!border-l-2 [&_.xterm-cursor-bar]:!border-l-cyan-300 [&_.xterm-cursor-layer_.xterm-cursor]:!bg-cyan-300 [&_.xterm-helper-textarea]:!opacity-0 [&_.xterm-screen]:focus:outline-none [&_.xterm-viewport]:!overflow-y-auto [&_.xterm]:h-full"
         />
       </div>
+      <p
+        id={`terminal-keyboard-help-${sessionId}`}
+        ref={terminalExitRef}
+        tabIndex={-1}
+        className="px-3 py-2 text-xs text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
+      >
+        Press Shift+Escape to leave the terminal and return to the setup controls.
+      </p>
       {errorMessage ? (
         <div className="border-t border-border/60 px-3 py-2 text-xs text-destructive">
           {errorMessage}
