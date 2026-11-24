@@ -505,7 +505,7 @@ for (const journey of [
           health.serverInfo.git.branchName,
         );
         expect((await api("/companies"))[0].id).toBe(company.id);
-        await page.goto(base + prefix + `/issues/${task.id}`);
+        await page.goto(base + prefix + `/issues/${task.id}`, { waitUntil: "domcontentloaded" });
       }
       const composer = page.getByRole("textbox").last();
       await composer.fill("An unsent draft stays available during recovery.");
