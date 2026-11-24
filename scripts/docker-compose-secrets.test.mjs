@@ -98,10 +98,10 @@ test("full-stack database requires its own password and stays private by default
 });
 
 test("both application health probes wait for a ready body", async (t) => {
-  const quick = services(renderCompose(t, [quickstart], testValues)).proprio.healthcheck.test;
-  const full = services(renderCompose(t, [fullStack], testValues)).server.healthcheck.test;
+  const quick = services(renderCompose(t, [quickstart], testValues)).proprio.healthcheck;
+  const full = services(renderCompose(t, [fullStack], testValues)).server.healthcheck;
   assert.deepEqual(quick, full);
-  const [mode, executable, ...args] = quick;
+  const [mode, executable, ...args] = quick.test;
   assert.equal(mode, "CMD");
   assert.equal(executable, "node");
 

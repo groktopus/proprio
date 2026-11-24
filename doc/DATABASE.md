@@ -41,16 +41,19 @@ Docker note: the Docker quickstart image also uses embedded PostgreSQL by defaul
 For host-side development against the Compose PostgreSQL service, follow the
 [Docker Compose setup](DOCKER.md#docker-compose) to create `docker/.env` and
 set an independent `PROPRIO_POSTGRES_PASSWORD`. From the repository root,
-include the loopback-only override and start the database service:
+include the loopback-only override and start the database service. If you reuse
+a volume initialized with the old password, follow [the role rotation steps](DOCKER.md#full-stack-with-postgresql-17)
+before connecting with the new value.
 
 ```sh
 docker compose --env-file docker/.env -f docker/docker-compose.yml \
   -f docker/docker-compose.local-postgres.yml up -d --wait db
 ```
 
-Set `DATABASE_URL` in the root checkout's private `.env` with the same hex
-password. Use `postgres://proprio:<hex-password>@127.0.0.1:5432/proprio`. If
-you set `PROPRIO_POSTGRES_PORT` in `docker/.env`, use that port in the URL.
+Export `DATABASE_URL` in the shell where you run both commands below.
+Use `postgres://proprio:<hex-password>@127.0.0.1:5432/proprio` with the same hex
+password. If you set `PROPRIO_POSTGRES_PORT` in `docker/.env`, use that port
+in the URL. The checkout's `.env` alone does not export the URL to these commands.
 
 ```sh
 pnpm db:migrate

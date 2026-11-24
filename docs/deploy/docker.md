@@ -8,7 +8,7 @@ Run Proprio in Docker without installing Node or pnpm locally.
 ## Compose quickstart
 
 Clone the repository and run these commands from its root. Install Docker
-Engine, Docker Compose, and OpenSSL on the host. For a fresh checkout, copy
+Engine 28.0.0 or later, Docker Compose, and OpenSSL on the host. For a fresh checkout, copy
 the environment template:
 
 ```sh

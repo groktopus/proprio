@@ -48,8 +48,8 @@ checkout, and do not substitute a container image from a different project.
 
 ## Docker Compose
 
-Run these commands from the repository root with Docker Engine, Docker Compose,
-and OpenSSL. For a new instance, copy the example once:
+Run these commands from the repository root with Docker Engine 28.0.0 or later,
+Docker Compose, and OpenSSL. For a new instance, copy the example once:
 
 ```sh
 test ! -e docker/.env && install -m 600 docker/.env.compose.example docker/.env
@@ -121,7 +121,8 @@ role password in an existing volume.
 
 ### Network access
 
-Both stacks publish the web port on `127.0.0.1` by default. Keep it there for
+Both stacks publish the web port on `127.0.0.1` by default. Use Docker Engine
+28.0.0 or later for host-only publication. See [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/). Keep it there for
 a reverse proxy on the same host and set `PROPRIO_PUBLIC_URL` to the external
 HTTPS origin. To bind directly to a LAN or tailnet IP, set `PROPRIO_BIND_IP`
 to that interface's address and `PROPRIO_PUBLIC_URL` to the URL clients use.
