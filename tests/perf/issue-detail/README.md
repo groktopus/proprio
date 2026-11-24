@@ -56,6 +56,51 @@ harness validates the task identity before measuring. Network spans in the trace
 use recorded request start/end timestamps relative to task navigation; they
 include completed requests observed during the sample, even after content paint.
 
+## Cold mobile board and task loads
+
+Build the production board with `pnpm --filter @groktopus/ui build --manifest`.
+Serve those assets from a disposable loopback instance with
+`PROPRIO_UI_DEV_MIDDLEWARE=false`. Run the focused comparison against
+each build in turn.
+
+```sh
+PROPRIO_ISSUE_PERF_BASE_URL=http://127.0.0.1:3287 \
+  pnpm exec playwright test --config tests/perf/issue-detail/playwright.config.ts \
+  issue-detail.perf.spec.ts -g 'cold board and direct task mobile loads'
+```
+
+Save `test-results/issue-detail-perf/cold-mobile.json` after each run. The
+harness uses five fresh Chromium contexts per route, a 390 × 844 CSS viewport,
+50 ms latency, 9 Mibit/s downstream, 1.5 Mibit/s upstream, and 4× CPU slowdown.
+It blocks service workers and disables the HTTP cache. The board is ready when
+the seeded task row appears. Task readiness requires the latest saved comment
+and an editable composer. The recorded transfer includes completed network
+responses by readiness. The largest-contentful-paint sample reflects the
+latest value at readiness.
+
+The required build check runs `node scripts/ci/board-asset-budget.mjs`.
+It counts each JavaScript file once across static imports of the HTML entry,
+then across the entry plus the direct Task Detail chunk. The ceilings are
+rounded up from a production build at `fd37ee361ea4` with the Agent Detail
+typecheck fix applied to both builds. The browser measurements include
+additional dynamic requests. The byte ceilings apply to build assets.
+
+The first paired run used macOS arm64 and the pinned Chromium. The candidate
+was `168157585212` with the same Agent Detail prerequisite. All five samples
+per route and build reached readiness.
+
+| Route | Median FCP, before → after | Median ready time, before → after | Transferred bytes, before → after | Transferred JavaScript bytes, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Task List | 1,664 → 1,644 ms | 2,659 → 2,638 ms | 1,737,828 → 1,733,975 | 1,214,116 → 1,209,448 |
+| Direct Task Detail | 2,428 → 2,408 ms | 3,510 → 3,464 ms | 2,616,149 → 2,594,274 | 2,071,779 → 2,048,521 |
+
+React DOM, CodeMirror, and Lexical were the largest startup dependencies.
+The largest direct-task modules were Task Detail, the chat thread, and the
+interaction card. The changes defer less frequently used controls. The
+static Task Detail chain went from 7,181,527 to 7,091,529 raw JavaScript
+bytes and from 2,113,834 to 2,088,382 gzip bytes. The small timing differences
+describe this fixture and runner.
+
 ## Cold direct task load (chat bootstrap)
 
 A hard load of a task URL starts `GET /api/issues/:ref/chat-bootstrap` from the
