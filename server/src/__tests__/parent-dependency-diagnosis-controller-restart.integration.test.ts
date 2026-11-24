@@ -1,12 +1,17 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
+import express from "express";
+import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, issueRelations, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
+import type { Request } from "express";
+import { errorHandler } from "../middleware/index.js";
+import { issueRoutes } from "../routes/issues.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { startMaintenancePostgresProxy } from "./helpers/maintenance/postgres-proxy.js";
@@ -16,6 +21,15 @@ const crashPoint = "issue.dependency_diagnosis.after_claim_before_wake";
 const childEntry = path.join(import.meta.dirname, "helpers/maintenance/server-child.ts");
 const tsxLoader = path.resolve(import.meta.dirname, "../../node_modules/tsx/dist/loader.mjs");
 const children = new Set<ChildProcess>();
+
+function issueActorApi(db: ReturnType<typeof createDb>, actor: Request["actor"]) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { req.actor = actor; next(); });
+  app.use("/api", issueRoutes(db, {} as Parameters<typeof issueRoutes>[1]));
+  app.use(errorHandler);
+  return app;
+}
 
 async function reservePort() {
   const server = createServer();
@@ -110,7 +124,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(!support.supported)("dependency diagnosis in a restarted full controller", () => {
-  it("replays the durable claim into one wake after a real server boot", async () => {
+  it.each(["retained agent", "reassigned to board"] as const)("reconciles one claim after restart with %s", async (ownership) => {
     const database = await startEmbeddedPostgresTestDatabase("dependency-diagnosis-controller-");
     const db = createDb(database.connectionString, { maxConnections: 4 });
     const proxy = await startMaintenancePostgresProxy(database.connectionString);
@@ -119,6 +133,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
     const config = path.join(home, "config.json");
     const control = path.join(home, "crash-point-control.txt");
     const receipt = path.join(home, "crash-point-receipt.jsonl");
+    const effectFile = path.join(home, "diagnosis-effect.txt");
     const companyId = randomUUID();
     const agentId = randomUUID();
     const parentId = randomUUID();
@@ -146,7 +161,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", membershipRole: "owner" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Process fixture", role: "engineer", status: "idle",
         lifecycleState: "ready", adapterType: "process", adapterConfig: { command: process.execPath,
-          args: ["-e", "console.log('dependency-diagnosis-controller-effect')"], cwd: process.cwd() },
+          args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'invoked')", effectFile], cwd: process.cwd() },
         runtimeConfig: { heartbeat: { enabled: true, intervalSec: 0, wakeOnDemand: true } }, permissions: {} });
       const old = new Date(Date.now() - 10 * 60_000);
       await db.insert(issues).values([
@@ -167,10 +182,56 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         return row ?? null;
       }, row => (row.details as Record<string, unknown>).outcome === "pending", "The controller did not persist the diagnosis claim");
 
+      let eligibleParentId: string | null = null;
+      if (ownership === "reassigned to board") {
+        // Reassign through the production task PATCH route while the old worker
+        // is dead, then send that old actor's late completion through the same
+        // route. The human owner remains durable and the old agent is refused.
+        const boardApi = issueActorApi(db, { type: "board", userId: "local-board", companyIds: [companyId],
+          isInstanceAdmin: true, source: "local_implicit" });
+        const reassigned = await request(boardApi).patch(`/api/issues/${parentId}`).send({ assigneeAgentId: null, assigneeUserId: "local-board" });
+        expect(reassigned.status, JSON.stringify(reassigned.body)).toBe(200);
+        const afterReassignment = (await db.select().from(issues).where(eq(issues.id, parentId)))[0];
+        expect(afterReassignment).toMatchObject({ status: "in_progress", assigneeAgentId: null, assigneeUserId: "local-board" });
+
+        const staleAgentApi = issueActorApi(db, { type: "agent", agentId, companyId, source: "agent_jwt" });
+        const staleCompletion = await request(staleAgentApi).patch(`/api/issues/${parentId}`).send({ status: "done" });
+        expect(staleCompletion.status, JSON.stringify(staleCompletion.body)).toBe(403);
+        expect((await db.select().from(issues).where(eq(issues.id, parentId)))[0]).toMatchObject({
+          status: "in_progress", assigneeAgentId: null, assigneeUserId: "local-board",
+        });
+
+        // A second parent gives the test a positive signal that the restarted
+        // controller ran its diagnosis sweep.
+        const eligibleAgentId = randomUUID();
+        eligibleParentId = randomUUID();
+        await db.insert(agents).values({ id: eligibleAgentId, companyId, name: "Eligible fixture", role: "engineer",
+          status: "idle", lifecycleState: "ready", adapterType: "process",
+          adapterConfig: { command: process.execPath, args: ["-e", "console.log('eligible diagnosis')"], cwd: process.cwd() },
+          runtimeConfig: { heartbeat: { enabled: true, intervalSec: 0, wakeOnDemand: true } }, permissions: {} });
+        await db.insert(issues).values({ id: eligibleParentId, companyId, identifier: `${prefix}-3`, issueNumber: 3,
+          title: "Other eligible parent", status: "in_progress", assigneeAgentId: eligibleAgentId, createdAt: old, updatedAt: old });
+        await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: eligibleParentId, type: "blocks" });
+      }
+
       // Reuse the same config, PostgreSQL proxy, database and runtime control
       // file. Startup recovery must finish the committed claim with one wake.
       await writeFile(control, "");
       restarted = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
+      if (eligibleParentId) {
+        await waitFor(async () => {
+          const rows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+          return rows.find(row => (row.payload as Record<string, unknown>).issueId === eligibleParentId) ?? null;
+        }, row => row.reason === "issue_blocker_stalled", "The restarted controller did not diagnose the eligible parent");
+        const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string }> }>(
+          "GET", `/issues/${parentId}/diagnostics/wakes`);
+        expect(diagnostics.events.some(event => event.kind === "wake_request" && event.reason === "issue_blocker_stalled")).toBe(false);
+        expect((await db.select().from(issues).where(eq(issues.id, parentId)))[0]).toMatchObject({
+          status: "in_progress", assigneeAgentId: null, assigneeUserId: "local-board",
+        });
+        await expect(access(effectFile)).rejects.toMatchObject({ code: "ENOENT" });
+        return;
+      }
       const wake = await waitFor(async () => {
         const rows = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
           eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
