@@ -399,7 +399,6 @@ export const queryKeys = {
     summaryBatch: (companyId: string, userId: string | null | undefined, sortedIds: readonly string[]) =>
       ["issues", companyId, "summaries", userId ?? "__local_board__", sortedIds] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
-    executionReviewEvidence: (id: string) => ["issues", "detail", id, "execution-review-evidence"] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
     acknowledgedComments: (issueId: string) => ["issues", "comments", issueId, "acknowledged"] as const,
     earlierComments: (issueId: string) => ["issues", "comments", issueId, "earlier"] as const,
@@ -417,6 +416,7 @@ export const queryKeys = {
       options.excludeRoot
         ? (["issues", "cost-summary", issueId, "exclude-root"] as const)
         : (["issues", "cost-summary", issueId] as const),
+    executionReviewEvidence: (id: string) => ["issues", "detail", id, "execution-review-evidence"] as const,
     privacyConstraints: (issueId: string) => ["issues", "privacy-constraints", issueId] as const,
     accessGrants: (issueId: string) => ["issues", "access-grants", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
