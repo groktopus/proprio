@@ -81,7 +81,9 @@ test.describe("self-hosted browser tracing on Linux", () => {
     await page.goto(`/${fixture.company.issuePrefix}/issues/${fixture.task.identifier}`);
     await expect(page.getByRole("button", { name: "Open account menu" })).toBeVisible();
     await expect(page.getByText("PRIVATE_BROWSER_TRACE_TASK_CONTENT", { exact: true }).first()).toBeVisible();
-    await page.waitForTimeout(2_000);
+    // BatchSpanProcessor flushes on its interval while the page remains visible;
+    // allow that flush to complete before asserting collector traffic.
+    await page.waitForTimeout(7_000);
 
     if (mode === "disabled" || mode === "unsampled") {
       expect(sdkLoads).toHaveLength(0);
