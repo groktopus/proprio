@@ -611,6 +611,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         passLog.record(check);
         return check;
       }
+      if (diagnosis.retryAt) scope.onDeferredDeadline?.(diagnosis.retryAt.getTime(), { unchanged: false });
     }
     const check = await act(issue, facts, verdict, at);
     if (check.retryAt) scope.onDeferredDeadline?.(check.retryAt.getTime(), { unchanged: check.outcome === "waiting_unchanged" });
