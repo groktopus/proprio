@@ -94,7 +94,7 @@ import {
   selectProprioPromptSections,
   resolveLegacyProprioDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
-  removeUnselectedProprioSkillSymlinks,
+  PROPRIO_FEEDBACK_SKILL_KEYS,
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapeProprioWorkspaceEnvForExecution,
   type ProprioSkillEntry,
@@ -1292,19 +1292,26 @@ async function reconcileManagedCodexSkills(input: {
   selectedSkills: ProprioSkillEntry[];
   onLog: AdapterExecutionContext["onLog"];
 }): Promise<void> {
-  const desired = new Set(input.selectedSkills.map((entry) => entry.runtimeName));
+  const preserved = new Set(input.selectedSkills.map((entry) => entry.runtimeName));
+  // Existing commentary authority is checked per run. Deselecting it must
+  // not remove a skill that a different run may still use in this home.
+  const feedbackKeys = new Set<string>(PROPRIO_FEEDBACK_SKILL_KEYS);
+  for (const key of feedbackKeys) preserved.add(key.slice(key.lastIndexOf("/") + 1));
+  for (const entry of input.allSkills) {
+    if (feedbackKeys.has(entry.key.trim().toLowerCase())) preserved.add(entry.runtimeName);
+  }
   const managed = await readManagedCodexSkillsManifest(input.skillsHome);
   const availableByRuntimeName = new Map(input.allSkills.map((entry) => [entry.runtimeName, entry]));
 
   for (const name of managed) {
-    if (desired.has(name)) continue;
+    if (preserved.has(name)) continue;
     if (await removeSkillTarget(path.join(input.skillsHome, name))) {
       await input.onLog("stdout", `[proprio] Revoked ACPX Codex skill "${name}" from ${input.skillsHome}\n`);
     }
   }
 
   for (const entry of input.allSkills) {
-    if (desired.has(entry.runtimeName) || managed.has(entry.runtimeName)) continue;
+    if (preserved.has(entry.runtimeName) || managed.has(entry.runtimeName)) continue;
     const target = path.join(input.skillsHome, entry.runtimeName);
     const existing = await fs.lstat(target).catch(() => null);
     if (!existing?.isSymbolicLink()) continue;
@@ -1318,7 +1325,7 @@ async function reconcileManagedCodexSkills(input: {
   }
 
   for (const name of managed) {
-    if (desired.has(name) || availableByRuntimeName.has(name)) continue;
+    if (preserved.has(name) || availableByRuntimeName.has(name)) continue;
     if (await removeSkillTarget(path.join(input.skillsHome, name))) {
       await input.onLog("stdout", `[proprio] Revoked unavailable ACPX Codex skill "${name}" from ${input.skillsHome}\n`);
     }
@@ -1456,7 +1463,7 @@ async function prepareGeminiSkillRuntime(input: {
   moduleDir: string;
   onLog: AdapterExecutionContext["onLog"];
 }): Promise<{ identity: Record<string, unknown>; commandNotes: string[]; bundleDir: string | null }> {
-  const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
+  const { selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "gemini" });
   const skillsHome = resolveGeminiSkillsHome(input.config);
   await fs.mkdir(skillsHome, { recursive: true });
@@ -1478,7 +1485,6 @@ async function prepareGeminiSkillRuntime(input: {
   for (const skillName of removedSkills) {
     await input.onLog("stdout", `[proprio] Removed maintainer-only ACPX Gemini skill "${skillName}" from ${skillsHome}\n`);
   }
-  await removeUnselectedProprioSkillSymlinks(skillsHome, allSkills, allowedSkillNames);
 
   for (const entry of selectedSkills) {
     const target = path.join(skillsHome, entry.runtimeName);

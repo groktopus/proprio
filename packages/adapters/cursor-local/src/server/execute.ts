@@ -45,7 +45,6 @@ import {
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
-  removeUnselectedProprioSkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectProprioPromptSections,
@@ -133,7 +132,6 @@ async function buildCursorSkillsDir(config: Record<string, unknown>): Promise<st
 type EnsureCursorSkillsInjectedOptions = {
   skillsDir?: string | null;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
-  managedSkillEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: Iterable<string>;
   skillsHome?: string;
   linkSkill?: (source: string, target: string) => Promise<void>;
@@ -155,7 +153,6 @@ export async function ensureCursorSkillsInjected(
       : await readProprioRuntimeSkillEntries({}, __moduleDir));
   const selectedNames = new Set(options.desiredSkillNames ?? skillsEntries.map(entry => entry.key));
   const selectedEntries = skillsEntries.filter(entry => selectedNames.has(entry.key));
-  const managedSkillEntries = options.managedSkillEntries ?? skillsEntries;
 
   const skillsHome = options.skillsHome ?? resolveCursorSkillsHome({});
   try {
@@ -176,11 +173,6 @@ export async function ensureCursorSkillsInjected(
       "stderr",
       `[proprio] Removed maintainer-only Cursor skill "${skillName}" from ${skillsHome}\n`,
     );
-  }
-  for (const skillName of await removeUnselectedProprioSkillSymlinks(
-    skillsHome, managedSkillEntries, selectedEntries.map(entry => entry.runtimeName),
-  )) {
-    await onLog("stderr", `[proprio] Removed unselected Cursor skill "${skillName}" from ${skillsHome}\n`);
   }
   const linkSkill = options.linkSkill ?? ((source: string, target: string) => fs.symlink(source, target));
   for (const entry of selectedEntries) {
@@ -243,10 +235,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const cursorSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
   const desiredCursorSkillNames = resolveLegacyProprioDesiredSkillNames(config, cursorSkillEntries);
   if (!executionTargetIsRemote) {
-    const packagedSkillEntries = await readProprioRuntimeSkillEntries({}, __moduleDir);
     await ensureCursorSkillsInjected(onLog, {
       skillsEntries: cursorSkillEntries,
-      managedSkillEntries: [...cursorSkillEntries, ...packagedSkillEntries],
       desiredSkillNames: desiredCursorSkillNames,
       skillsHome: resolveCursorSkillsHome(config),
     });

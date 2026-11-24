@@ -40,7 +40,7 @@ describe("codex local adapter skill injection", () => {
     cleanupDirs.clear();
   });
 
-  it("repairs a Codex Proprio skill symlink that still points at another live checkout", async () => {
+  it("repairs a known live Codex skill link in an isolated home", async () => {
     const currentRepo = await makeTempDir("proprio-codex-current-");
     const oldRepo = await makeTempDir("proprio-codex-old-");
     const skillsHome = await makeTempDir("proprio-codex-home-");
@@ -60,6 +60,12 @@ describe("codex local adapter skill injection", () => {
       },
       {
         skillsHome,
+        reconcileUnselected: true,
+        managedSkillEntries: [{
+          key: proprioKey,
+          runtimeName: "proprio",
+          source: path.join(oldRepo, "skills", "proprio"),
+        }],
         skillsEntries: [
           {
             key: proprioKey,
@@ -161,7 +167,7 @@ describe("codex local adapter skill injection", () => {
     );
   });
 
-  it("prunes valid Proprio skill symlinks removed from the current selection", async () => {
+  it("prunes known unselected Codex links in an isolated home", async () => {
     const currentRepo = await makeTempDir("proprio-codex-current-");
     const skillsHome = await makeTempDir("proprio-codex-home-");
     cleanupDirs.add(currentRepo);
@@ -178,6 +184,12 @@ describe("codex local adapter skill injection", () => {
 
     await ensureCodexSkillsInjected(async () => {}, {
       skillsHome,
+      reconcileUnselected: true,
+      managedSkillEntries: ["agent-browser", "complain"].map(runtimeName => ({
+        key: `groktopus/proprio/${runtimeName}`,
+        runtimeName,
+        source: path.join(currentRepo, "skills", runtimeName),
+      })),
       skillsEntries: [{
         key: proprioKey,
         runtimeName: "proprio",
