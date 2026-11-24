@@ -7159,6 +7159,23 @@ it.each(["RPC failed: Private provider explanation.", "failed to start ACPX prov
   else expect((failure as Error).message).toContain('"message":"Provider request failed"');
 });
 
+it("reports only normalized provider classification for a failed startup command", async () => {
+  const providerFailure = { schema: "proprio.provider-failure.v1", provider: "openai", phase: "startup",
+    category: "authentication", httpStatus: 401, message: "Private token and response body", retryability: "requires_action" };
+  const diagnostics: string[] = [];
+  let failure: unknown;
+  try {
+    await waitForRunnerCommand({ type: "session.open", deadline: Date.now() + 1000, abortOnClose: true,
+      isClosed: () => false, throwIfFailed: () => {},
+      command: () => ({ status: "failed", result: { result: { code: "command_execution_failed", message: "Provider request failed", providerFailure } } }),
+      runnerHasExited: async () => false, failureCode: () => "startup_failed",
+      onProviderFailure: message => diagnostics.push(message) });
+  } catch (error) { failure = error; }
+  expect(diagnostics).toEqual(["provider_startup_rejected category=authentication http_status=401"]);
+  expect(diagnostics.join(" ")).not.toMatch(/Private|token|response body/);
+  expect((failure as Error).message).not.toContain("Private token");
+});
+
 it("reports a generic failure when an ACPX rejection does not match Runner's closed text", async () => {
   const providerFailure = { schema: "proprio.provider-failure.v1", provider: "anthropic", phase: "startup",
     category: "unknown", message: "Private provider explanation.", retryability: "unknown" };

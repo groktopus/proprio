@@ -46,6 +46,7 @@ import { lifecycleLiveTasks, lifecycleLiveDefinitionDigest } from "./lifecycle-l
 import { publicMcpTasks, publicMcpExpandedDigest, publicMcpSetupDigest, publicMcpWorkflowDigest, publicMcpWorkerInstructions, publicMcpWorkerSkillDigest } from "./public-mcp-cases.js";
 import { graderVersion as publicMcpGraderVersion } from "./public-mcp-grading.js";
 import { everydayTasks, productionStoryProfile } from "./everyday-cases.js";
+import { SESSION_GOAL_RECOVERY_BUDGET_CENTS, SESSION_GOAL_RECOVERY_SUITE, sessionGoalRecoveryDefinitionDigest, sessionGoalRecoveryTask } from "./session-goal-recovery-cases.js";
 import { EVERYDAY_RELIABILITY_GROUP, EVERYDAY_RELIABILITY_SLOW_GROUP, RELIABILITY_FACADE_PROFILE_IDS, RELIABILITY_PLAN_PROFILE_ID, everydayReliabilityExecutionIds, reliabilityPlanCells, everydayReliabilitySignatures, everydayReliabilityTasks } from "./everyday-reliability-cases.js";
 import { REMOTE_WORKSPACE_STORAGE_SUITE, remoteWorkspaceStoragePrompt } from "./remote-workspace-storage.js";
 import { CONNECTION_GUIDANCE_SUITE, CONNECTION_GUIDANCE_BUDGET_CENTS, connectionGuidanceTasks, connectionGuidanceDefinitionDigest } from "./connection-guidance-cases.js";
@@ -1792,6 +1793,23 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
       controllerDowntimeMs: 125_000,
       remoteCodexRestart: "bounded-main-server-outage-receipt-empty-cache-same-active-process-and-finalization",
       procedureCases: { ids: ["hire-reuse", "delegate-feedback"], maximumAttemptsPerCell: 1, companyAndLeadBudgetCents: 1_000 } },
+  },
+  {
+    id: SESSION_GOAL_RECOVERY_SUITE, label: "Structured session-goal recovery", manualOnly: true,
+    description: "Set a structured provider goal, preserve its first milestone through a controller fault, and independently qualify the recovered deliverable.",
+    groups: ["native", "local"],
+    profiles: [nativeProfile({
+      id: "runner-codex-subscription", label: "Native Codex subscription", provider: "codex",
+      model: DEFAULT_CODEX_LOCAL_MODEL, credential: "CODEX_AUTH_JSON", supportedEnvironments: ["local"],
+    })],
+    environments: [localEnvironment], tasks: [sessionGoalRecoveryTask], expectedMatrixSize: 1,
+    definitionMetadata: {
+      version: 1, definitionDigest: sessionGoalRecoveryDefinitionDigest(), scheduling: "explicit-only",
+      maximumAttemptsPerCell: 1, automaticRetries: 0, companyAndAgentBudgetCents: SESSION_GOAL_RECOVERY_BUDGET_CENTS,
+      expectedProviderTurnsPerCell: 2, maximumRunRecordsPerCell: sessionGoalRecoveryTask.expectedRunCount,
+      controllerDowntimeMs: 1_000, controllerOutage: { signal: "SIGKILL", holdMs: 1_000 },
+      grading: "checkpoint-fault-receipt-independent-executable-output-provider-goal-and-task-agreement",
+    },
   },
   {
     id: NATIVE_INSTRUCTION_SUITE, label: "Native completion instruction consolidation", manualOnly: true,

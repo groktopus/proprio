@@ -8443,6 +8443,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         return progressAt;
       },
       replayProgressAt: () => this.#core?.committedEventProgressAt() ?? null,
+      onProviderFailure: type === "session.open" ? message => this.#diagnostic(message) : undefined,
       describeStall: () => this.#core === null ? null : describeRunnerCommandStall({
         commands: this.#core.store.state.commands,
         commandId: commandId ?? this.#core.store.state.commands.find(candidate => candidate.type === type)?.commandId,
@@ -10116,6 +10117,8 @@ export async function waitForRunnerCommand(input: {
   command: () => { status: string; result?: unknown } | undefined;
   runnerHasExited: () => Promise<boolean>;
   failureCode: () => string;
+  /** Reports normalized provider classification without exposing provider text. */
+  onProviderFailure?: (diagnostic: string) => void;
   /** Bounded, content-free evidence of what the command waited behind. */
   describeStall?: () => string | null;
   answeredProgressAt?: () => number | null;
@@ -10138,7 +10141,12 @@ export async function waitForRunnerCommand(input: {
     if (command?.status === "completed") return true;
     if (command !== undefined && command.status !== "pending") {
       const detail = record(record(command.result).result);
-      const reportedResult = readProviderFailure(detail.providerFailure)
+      const providerFailure = readProviderFailure(detail.providerFailure);
+      if (providerFailure?.phase === "startup") {
+        input.onProviderFailure?.(`provider_startup_rejected category=${providerFailure.category}`
+          + (providerFailure.httpStatus === undefined ? "" : ` http_status=${providerFailure.httpStatus}`));
+      }
+      const reportedResult = providerFailure
         ? { ...record(command.result), result: { code: detail.code,
           message: closedAcpxRejection(detail.message) ?? "Provider request failed" } } : command.result;
       const error = new Error(`PRP command ${input.type} ${command.status}: ${JSON.stringify(reportedResult,

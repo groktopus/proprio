@@ -55,6 +55,14 @@ injection in the uncertain-retry case. Task/run/document REST reads own grading.
 The fixture catalog is executable production-contract data. Keep it small,
 typed, deterministic, and free of raw credentials.
 
+The explicit `session-goal-recovery` cell uses the existing local native Codex
+subscription fixture and only stages the selected `CODEX_AUTH_JSON` login in
+the disposable company's isolated Codex home. Its checkpoint, controller fault
+receipt and allowlisted grade are durable private attempt evidence. Auth bytes,
+provider transcripts, raw session identifiers, and downloaded archives stay
+out of public evidence. The artifact oracle runs the delivered verifier in the
+existing digest-pinned Python container with network access disabled.
+
 The explicit local `cursor-cloud` suite reuses the ordinary
 `plan_revision_acceptance` flow with three expected runs and one attempt. It
 checks the initial Plan, the requested revision and browser approval of that
