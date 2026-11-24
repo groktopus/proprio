@@ -62,6 +62,10 @@ export const heartbeatRuns = pgTable(
     accountingLastError: text("accounting_last_error"),
     accountingAttemptCount: integer("accounting_attempt_count").notNull().default(0),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
+    // Immutable parent-task ancestry captured when budget admission first
+    // reserves this run. Kept separate from provider usage so retry eligibility
+    // and usage receipt readers retain their existing exact-shape contracts.
+    taskLineageJson: jsonb("task_lineage_json").$type<{ version: 1; issueId: string; pathIssueIds: string[] }>(),
     resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
     runtimeMode: text("runtime_mode").notNull().default("legacy"),
     runtimeModeResolverVersion: text("runtime_mode_resolver_version"),

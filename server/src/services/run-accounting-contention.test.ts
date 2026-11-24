@@ -16,7 +16,7 @@ import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  agents, budgetEvaluationWork, budgetPolicies, budgetReservations, companies, createDb, heartbeatRuns, runUsageReceipts, type Db,
+  agents, budgetEvaluationWork, budgetPolicies, budgetReservations, companies, createDb, heartbeatRuns, issues, runUsageReceipts, type Db,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import {
@@ -138,6 +138,47 @@ describe.skipIf(!support.supported)("run accounting writers under concurrent run
         } finally { await writers.stop(); }
       }
     }, 60_000);
+
+    it("captures a stable task ancestry after a concurrent reparent and keeps it on the old run", async () => {
+      const f = await fixture({ limitCents: 10_000, reservationCents: "100" });
+      const [oldRoot] = await db.insert(issues).values({ companyId: f.companyId, title: "Old root" }).returning();
+      const [newRoot] = await db.insert(issues).values({ companyId: f.companyId, title: "New root" }).returning();
+      const [task] = await db.insert(issues).values({ companyId: f.companyId, title: "Task", parentId: oldRoot!.id }).returning();
+      const [run] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, issueId: task!.id,
+        invocationSource: "assignment", status: "queued" }).returning();
+
+      // Hold the same fence used by issue parent updates. Admission must wait
+      // until the move commits, then snapshot the complete new chain.
+      let releaseMove!: () => void;
+      let acquired!: () => void;
+      const held = new Promise<void>(resolve => { releaseMove = resolve; });
+      const locked = new Promise<void>(resolve => { acquired = resolve; });
+      const move = db.transaction(async tx => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${f.companyId}`}, 0))`);
+        acquired();
+        await held;
+        await tx.update(issues).set({ parentId: newRoot!.id }).where(eq(issues.id, task!.id));
+      });
+      await locked;
+      const reservation = reserveRunBudget(db, f.companyId, run!.id, null);
+      releaseMove();
+      await move;
+      await expect(reservation).resolves.toMatchObject({ reused: false });
+      const [reservedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      expect(reservedRun!.taskLineageJson).toEqual({ version: 1, issueId: task!.id, pathIssueIds: [task!.id, newRoot!.id] });
+
+      // A later reparent and release do not rewrite historical run context.
+      await db.update(issues).set({ parentId: oldRoot!.id }).where(eq(issues.id, task!.id));
+      await db.update(budgetReservations).set({ state: "released" }).where(eq(budgetReservations.runId, run!.id));
+      const [historicalRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      expect(historicalRun!.taskLineageJson).toEqual({ version: 1, issueId: task!.id, pathIssueIds: [task!.id, newRoot!.id] });
+
+      const [nextRun] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, issueId: task!.id,
+        invocationSource: "assignment", status: "queued" }).returning();
+      await reserveRunBudget(db, f.companyId, nextRun!.id, null);
+      const [newRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRun!.id));
+      expect(newRun!.taskLineageJson).toEqual({ version: 1, issueId: task!.id, pathIssueIds: [task!.id, oldRoot!.id] });
+    });
 
     it("never creates a second reservation for one run when two dispatches race", async () => {
       const f = await fixture({ limitCents: 1_000, reservationCents: "100" });
