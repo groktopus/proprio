@@ -22,6 +22,10 @@ on:
         default: enabled,disabled,unsampled,sink-failure
         required: true
         type: string
+      harness_ref:
+        description: Commit containing the acceptance harness (defaults to the workflow revision)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -51,6 +55,13 @@ jobs:
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
+      - name: Overlay the acceptance harness from the workflow revision
+        if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
+        env:
+          HARNESS_REF: ${{ inputs.harness_ref || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git fetch --depth=1 origin "$HARNESS_REF"
+          git archive "$HARNESS_REF" tests/perf/browser-tracing | tar -x
       - name: Install locked dependencies and Chromium
         if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
         run: |
