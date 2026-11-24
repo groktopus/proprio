@@ -8,10 +8,11 @@ function readRepoFile(path: string) {
 describe("release-content Cases contract", () => {
   it("keeps release-content skills wired to emit the required case tree", () => {
     const release = readRepoFile(".agents/skills/release/SKILL.md");
+    const releaseCases = readRepoFile(".agents/skills/release/references/historical-release-content-cases.md");
     const changelog = readRepoFile(".agents/skills/release-changelog/SKILL.md");
     const discord = readRepoFile(".agents/skills/release-changelog-discord-message/SKILL.md");
     const announcement = readRepoFile("packages/skills-catalog/catalog/optional/content/release-announcement/SKILL.md");
-    const combined = [release, changelog, discord, announcement].join("\n");
+    const combined = [release, releaseCases, changelog, discord, announcement].join("\n");
 
     for (const required of [
       "\"caseType\": \"release\"",
@@ -25,7 +26,8 @@ describe("release-content Cases contract", () => {
       expect(combined).toContain(required);
     }
 
-    expect(release).toContain("same three cases instead of duplicating them");
+    expect(release).toContain("references/historical-release-content-cases.md");
+    expect(releaseCases).toContain("same three cases instead of duplicating them");
     expect(changelog).toContain("\"release_patch\": 0");
     expect(changelog).toContain("\"stable\": true");
     expect(changelog).toContain("\"channels\": [\"changelog\", \"blog_post\", \"tweet_storm\"]");

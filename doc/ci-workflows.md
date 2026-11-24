@@ -127,31 +127,24 @@ publication, use the separately recorded dispatch described below.
 
 ### Source publication gate
 
-Before creating or editing a GitHub source release, `scripts/create-github-release.sh`
-compares the candidate with the previous stable tag using the same durable-work
-path classifier as PR routing. This applies to stable calendar releases and
-`0.0.x-alpha.N`, `0.0.x-beta.N`, and `0.0.x-rc.N` source prereleases. An
-unrelated candidate needs no durable-work evidence. A candidate that changes
-managed install/update, backup/restore, migration, or run recovery must have a
-successful `Linux source qualification` run for that exact SHA. The latest run
-must be a trusted dispatch from `main`; its `source-and-runner` job must pass on
-that same attempt, and its unexpired `durable-work-acceptance` artifact must
-contain one `durable-work-acceptance.json` report.
+For a `v0.0.x` source prerelease, use the
+[release runbook](RELEASING.md). Before tagging, the command verifies a trusted
+`main` dispatch for the exact candidate and previous published source tag.
+The `source-and-runner` job must pass on the same attempt and retain the
+unexpired `durable-work-acceptance` artifact. The source dry run also verifies
+the report and performs no remote writes.
 
-The report binds `sourceSha` and `baseSha` to the release candidate and prior
-stable release. It must include passed evidence for managed update/rollback,
-fresh-target backup/restore, interruption and restart/cancellation/disk
-pressure, and browser task readback. If the exact source diff contains a
-tracked migration SQL file, active-run migration recovery must also pass and
-record the prior release and schema candidate SHAs, elapsed recovery time, and
-observed data loss. Without a migration SQL change, that case must explicitly
-say `not_applicable` and link the same run attempt. Every case link must point
-to the validated `groktopus/proprio` Actions run attempt. Missing, skipped,
-stale, failed, expired, or incomplete evidence blocks `gh release create` and
-`gh release edit`. The source release command prints the qualification run and
-artifact URLs when the gate passes. `--dry-run` remains available without
-publication evidence. Use an authenticated GitHub CLI session with Actions read
-access when publishing locally.
+The report binds the exact source and base SHAs. It requires passed evidence
+for managed update and rollback, fresh-target backup and restore,
+interruption and restart/cancellation/disk pressure, and browser task
+readback. A tracked migration SQL change also requires active-run recovery
+evidence with recovery time and observed data loss. Without that change the
+migration case records `not_applicable`. Each case links to the validated
+`groktopus/proprio` run attempt.
+
+The legacy calendar and suffixed release paths use the durable-work diff
+classifier and check matching evidence before creating or editing the
+GitHub release.
 
 ### Workspace regression
 
