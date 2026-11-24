@@ -140,6 +140,7 @@ vi.mock("./IssueRow", () => ({
     externalObjectSummary,
     presentation,
     leadingControl,
+    mobileLeading,
     treeGuides,
     showIdentifier,
     trailingMeta,
@@ -155,6 +156,7 @@ vi.mock("./IssueRow", () => ({
     externalObjectSummary?: { total: number } | null;
     presentation?: "legacy" | "task";
     leadingControl?: ReactNode;
+    mobileLeading?: ReactNode;
     treeGuides?: number;
     showIdentifier?: boolean;
     trailingMeta?: ReactNode;
@@ -173,6 +175,7 @@ vi.mock("./IssueRow", () => ({
     >
       <span>{issue.title}</span>
       {leadingControl}
+      <span data-testid="mobile-leading">{mobileLeading}</span>
       {externalObjectSummary ? (
         <span data-testid="external-object-summary">{externalObjectSummary.total}</span>
       ) : null}
@@ -626,6 +629,47 @@ describe("IssuesList", () => {
     });
 
     act(() => root.unmount());
+  });
+
+  it("names the compact disclosure and exposes both subtask states", async () => {
+    const parent = createIssue({ id: "parent", title: "Parent task" });
+    const child = createIssue({ id: "child", parentId: parent.id, title: "Child task" });
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[parent, child]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="proprio:test-issues"
+        rowPresentation="legacy"
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+    const disclosure = () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-leading"] button');
+    try {
+      await waitForAssertion(() => {
+        expect(disclosure()?.getAttribute("aria-label")).toBe("Collapse sub-tasks");
+        expect(disclosure()?.getAttribute("aria-expanded")).toBe("true");
+      });
+      const selectRow = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+      await act(() => { document.body.dispatchEvent(selectRow); });
+      expect(selectRow.defaultPrevented).toBe(true);
+      disclosure()?.focus();
+      expect(document.activeElement).toBe(disclosure());
+      const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      await act(() => { disclosure()?.dispatchEvent(enter); });
+      expect(enter.defaultPrevented).toBe(false);
+      // jsdom does not synthesize a button click from the Enter key.
+      await act(() => disclosure()?.click());
+      expect(disclosure()?.getAttribute("aria-label")).toBe("Expand sub-tasks");
+      expect(disclosure()?.getAttribute("aria-expanded")).toBe("false");
+      expect(container.textContent).not.toContain("Child task");
+      await act(() => disclosure()?.click());
+      expect(disclosure()?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.textContent).toContain("Child task");
+    } finally {
+      await act(() => root.unmount());
+    }
   });
 
   it("keeps the shared collection toolbar opt in per surface", async () => {

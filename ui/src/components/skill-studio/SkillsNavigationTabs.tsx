@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Link } from "@/lib/router";
+import { RouteTabBar } from "../RouteTabBar";
 import { useStreamlinedUiEnabled } from "@/hooks/useStreamlinedUiEnabled";
 import { SKILLS_NAVIGATION_HREFS, type SkillsNavigationView } from "@/pages/skills/skills-navigation";
 
@@ -11,11 +11,8 @@ const views = [
 
 /** Route navigation with the canonical tab appearance. Sources stays in the actions menu. */
 export function SkillsNavigationTabs({ activeView }: { activeView: SkillsNavigationView }) {
-  return <nav aria-label="Skills views" data-canonical-tabs="standard" className="canonical-tab-list">
-    {views.map(view => <Link key={view.value} to={SKILLS_NAVIGATION_HREFS[view.value]}
-      className="canonical-tab" data-state={activeView === view.value ? "active" : "inactive"}
-      aria-current={activeView === view.value ? "page" : undefined}>{view.label}</Link>)}
-  </nav>;
+  return <RouteTabBar label="Skills views" current={SKILLS_NAVIGATION_HREFS[activeView]}
+    items={views.map((view) => ({ href: SKILLS_NAVIGATION_HREFS[view.value], label: view.label }))} />;
 }
 
 /** Standalone Skills pages share navigation beneath their own header controls. */
