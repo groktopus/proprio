@@ -15,8 +15,8 @@ async function openStory(page: Page, story: string, width: number, coordinator: 
 }
 
 for (const scenario of [
-  { name: "Classic desktop", story: "attention-queue-shells--classic-desktop", width: 1440, coordinator: false },
-  { name: "Coordinator desktop", story: "attention-queue-shells--coordinator-desktop", width: 1440, coordinator: true },
+  { name: "Classic desktop", story: "attention-queue-shells--classic-desktop", width: 1440, coordinator: false, label: "Needs You" },
+  { name: "Coordinator desktop", story: "attention-queue-shells--coordinator-desktop", width: 1440, coordinator: true, label: "Needs You" },
   { name: "Classic phone", story: "attention-queue-shells--classic-phone", width: 390, coordinator: false, label: "Inbox" },
   { name: "Coordinator phone", story: "attention-queue-shells--coordinator-phone", width: 390, coordinator: true, label: "Needs You" },
 ] as const) {
@@ -39,5 +39,5 @@ test("fixture-backed request exposes a followable source task and returns to the
   await expect(page.getByTestId("storybook-router-path")).toContainText("/issues/");
   await page.getByRole("button", { name: "Back to Needs You", exact: true }).click();
   await expect(page.getByTestId("storybook-router-path")).toHaveText(initialPath ?? "");
-  await expect(page.getByText(/Decide now|New today|Earlier/).first()).toBeVisible();
+  await expect(page.getByTestId("source-task-journey")).toBeVisible();
 });
