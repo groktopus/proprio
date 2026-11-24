@@ -42600,6 +42600,21 @@
                         ],
                         "additionalProperties": false
                       },
+                      "reviewTargetBinding": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "required_quality_review"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "source"
+                        ],
+                        "additionalProperties": false
+                      },
                       "mode": {
                         "type": "string",
                         "enum": [
