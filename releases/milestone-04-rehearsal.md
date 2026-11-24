@@ -1,6 +1,6 @@
 # Milestone 04 rehearsal evidence
 
-**Promotion decision: hold.** The local rehearsal combines open drafts.
+**Promotion is on hold.** The local rehearsal combines open drafts.
 Select a merged candidate and confirm the release, runtime, Board, QA, and
 operating owners in the release plan before candidate qualification. The
 previous published source release is v0.0.4. [Release plan #222](https://github.com/groktopus/proprio/issues/222) · [v0.0.4 qualification](v0.0.4-qualification.md)
