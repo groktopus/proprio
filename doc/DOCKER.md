@@ -142,13 +142,13 @@ storage, or other external artifact directories separately. The commands
 below cover the default storage layout.
 
 Run from the repository root. Use the same Compose project name and overrides
-you used when launching. Set `backup_dir` to a private destination outside
-the checkout and application volumes:
+you used when launching. For each backup of either layout, create a private
+directory outside the checkout and application volumes. The commands publish
+the recovery set as `backup` after all archive commands succeed.
 
 ```bash
 umask 077
-backup_dir="$(mktemp -d)"
-install -m 600 docker/.env "$backup_dir/compose.env"
+backup_dir="$(mktemp -d)/backup"
 ```
 
 #### Embedded PostgreSQL quickstart
@@ -158,26 +158,55 @@ the database, instance configuration, local keys, storage, and workspaces
 under the bind mount.
 
 ```bash
-quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
-"${quick[@]}" stop proprio
-"${quick[@]}" run --rm --no-deps -T --entrypoint tar proprio \
-  -C /proprio -czf - . > "$backup_dir/proprio.tar.gz"
-"${quick[@]}" up -d --wait
+(
+  set -euo pipefail
+  quick=(docker compose --env-file docker/.env -f docker/docker-compose.quickstart.yml)
+  staged="$backup_dir.partial"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${quick[@]}" stop proprio
+  "${quick[@]}" run --rm --no-deps -T --entrypoint tar proprio \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
 ```
 
-Check the archive and keep it off the host. To restore, use a clean checkout
-of the recorded revision, restore the environment values, and set
-`PROPRIO_DATA_DIR` to a new, empty path and `PROPRIO_PORT` to a free port.
-Use a new Compose project, for example `proprio-restore`. Supply a public
-URL that matches the restore port, or remove an explicit URL override to
-use the default for that port. Build the image if it is unavailable.
+Keep the archive off the host. After a routine backup, restart the same
+project with `up -d --wait`. For a pre-upgrade backup, keep the app and
+other writers stopped until the upgrade step below.
+
+To restore, use a clean checkout of the recorded revision and copy
+`compose.env` from the backup to a private `docker/restore.env`. Set
+`PROPRIO_DATA_DIR` to a new, empty path, `PROPRIO_PORT` to a free port, and
+`PROPRIO_PUBLIC_URL` to a matching URL if it was set explicitly. Use a new
+Compose project, for example `proprio-restore`. Build the image if needed.
+
+Before the first rehearsal boot, use a disposable host or enforce an
+outbound firewall policy for the restore network. Block access to production
+integrations and agent runtimes. Mount only copies of external workspaces,
+artifact storage, and other shared data. Save the following override as
+`docker/restore-only.yml`, using `server` in place of `proprio` for the full
+stack. This disables scheduled heartbeats during the rehearsal. Keep the
+external isolation in place because startup still performs recovery.
+
+```yaml
+services:
+  proprio:
+    environment:
+      HEARTBEAT_SCHEDULER_ENABLED: "false"
+```
 
 ```bash
-quick_restore=(docker compose -p proprio-restore --env-file docker/.env -f docker/docker-compose.quickstart.yml)
-"${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
-  -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
-  < "$backup_dir/proprio.tar.gz"
-"${quick_restore[@]}" up -d --wait
+(
+  set -euo pipefail
+  quick_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml)
+  "${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${quick_restore[@]}" up -d --wait
+)
 ```
 
 #### Separate PostgreSQL full stack
@@ -187,27 +216,48 @@ use its native logical backup, then save the Proprio volume separately.
 Do not copy a live PostgreSQL data directory.
 
 ```bash
-full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
-"${full[@]}" stop server
-"${full[@]}" exec -T db pg_dump -U proprio -d proprio -Fc > "$backup_dir/postgres.dump"
-"${full[@]}" run --rm --no-deps -T --entrypoint tar server \
-  -C /proprio -czf - . > "$backup_dir/proprio.tar.gz"
-"${full[@]}" up -d --wait
+(
+  set -euo pipefail
+  full=(docker compose --env-file docker/.env -f docker/docker-compose.yml)
+  staged="$backup_dir.partial"
+  mkdir -m 700 "$staged"
+  install -m 600 docker/.env "$staged/compose.env"
+  "${full[@]}" stop server
+  "${full[@]}" exec -T db sh -ec 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    > "$staged/postgres.dump"
+  "${full[@]}" exec -T db pg_restore --list < "$staged/postgres.dump" >/dev/null
+  "${full[@]}" run --rm --no-deps -T --entrypoint tar server \
+    -C /proprio -czf - . > "$staged/proprio.tar.gz"
+  tar -tzf "$staged/proprio.tar.gz" >/dev/null
+  mv -T "$staged" "$backup_dir"
+)
 ```
 
-Restore with a fresh Compose project and fresh named volumes on the recorded
-version. Configure a free port and the corresponding public URL. Keep the
-signing values and master key from the backup.
+Use the same restart guidance as for the embedded layout. Restore with a
+fresh Compose project and fresh named volumes on the recorded version.
+Use the restored environment, outbound isolation, and `server` override
+described above. Keep the signing values and master key from the backup.
 
 ```bash
-full_restore=(docker compose -p proprio-restore --env-file docker/.env -f docker/docker-compose.yml)
-"${full_restore[@]}" up -d --wait db
-"${full_restore[@]}" exec -T db pg_restore --exit-on-error --no-owner -U proprio -d proprio \
-  < "$backup_dir/postgres.dump"
-"${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
-  -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
-  < "$backup_dir/proprio.tar.gz"
-"${full_restore[@]}" up -d --wait
+(
+  set -euo pipefail
+  full_restore=(docker compose -p proprio-restore --env-file docker/restore.env
+    -f docker/docker-compose.yml -f docker/restore-only.yml)
+  "${full_restore[@]}" up -d --wait db
+  "${full_restore[@]}" exec -T db sh -ec '
+    for attempt in $(seq 1 30); do
+      pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" && exit 0
+      sleep 1
+    done
+    exit 1'
+  "${full_restore[@]}" exec -T db sh -ec '
+    pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$backup_dir/postgres.dump"
+  "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
+    -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
+    < "$backup_dir/proprio.tar.gz"
+  "${full_restore[@]}" up -d --wait
+)
 ```
 
 After either restore, check `/api/health` for `"status":"ok"`, sign in, and
@@ -219,7 +269,9 @@ host-loss recovery is tracked separately in
 ### Upgrade the Compose application
 
 1. Record the running revision or digest and back up the topology using the
-   commands above. Keep the original keys, configuration, and backup.
+   commands above. Keep the original keys, configuration, and backup. Keep
+   production traffic and other writers off the instance until the candidate
+   is verified.
 2. Check out the selected candidate. Use the same Compose project name, data
    path or volumes, and signing values. Review its release notes for database
    and credential changes.
