@@ -26,6 +26,10 @@ on:
         description: Commit containing the acceptance harness (defaults to the workflow revision)
         required: false
         type: string
+      ui_ref:
+        description: Optional exact commit or tag whose production UI is overlaid onto the server ref
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -62,6 +66,14 @@ jobs:
         run: |
           git fetch --depth=1 origin "$HARNESS_REF"
           git archive "$HARNESS_REF" tests/perf/browser-tracing | tar -x
+      - name: Overlay the requested production UI ref
+        if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) && inputs.ui_ref != '' }}
+        env:
+          UI_REF: ${{ inputs.ui_ref }}
+        run: |
+          git fetch --depth=1 origin "$UI_REF"
+          rm -rf ui
+          git archive "$UI_REF" ui | tar -x
       - name: Install locked dependencies and Chromium
         if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
         run: |
@@ -72,7 +84,7 @@ jobs:
         if: ${{ contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
         env:
           PROPRIO_BROWSER_TRACING_MODE: ${{ matrix.mode }}
-          PROPRIO_BROWSER_TRACING_BUILD_ID: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          PROPRIO_BROWSER_TRACING_BUILD_ID: server-${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}__ui-${{ inputs.ui_ref || inputs.ref || github.event.pull_request.head.sha || github.sha }}
         run: >-
           pnpm exec playwright test
           tests/perf/browser-tracing/self-hosted-acceptance.spec.ts
@@ -81,6 +93,6 @@ jobs:
         if: ${{ always() && contains(format(',{0},', inputs.modes || 'enabled,disabled,unsampled,sink-failure'), format(',{0},', matrix.mode)) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: browser-tracing-${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}-${{ matrix.mode }}
+          name: browser-tracing-server-${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}-ui-${{ inputs.ui_ref || inputs.ref || github.event.pull_request.head.sha || github.sha }}-${{ matrix.mode }}
           path: test-results/browser-tracing
           if-no-files-found: warn
