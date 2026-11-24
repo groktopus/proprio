@@ -16,7 +16,7 @@ import { prepareControllerDatabase } from "./controller-database.js";
 import { readUpgradeArtifacts, verifyUpgradeArtifact, assertServingArtifact, upgradeArtifactKey, type ServingArtifact } from "./upgrade-artifacts.js";
 import { createControllerRecoveryObserver } from "./controller-recovery-observer.js";
 import { readFinalizationCrashBoundary } from "./finalization-crash-boundary.js";
-import { replaceController, retireControllerCache, type ControllerOutageReceipt } from "./controller-outage.js";
+import { replaceController, retireControllerCache, retireControllerCachePreservingDurableSessions, type ControllerOutageReceipt } from "./controller-outage.js";
 import { recoverInterruptedFeedback } from "./feedback-recovery.js";
 import { normalizedSecrets } from "./redaction.js";
 import { CREDENTIAL_NAMES } from "./types.js";
@@ -389,14 +389,16 @@ async function writeRestartAck(
   await rename(temporaryAckPath, restartAckPath);
 }
 
-async function restartServer({ requestId, kimiCandidateAdmission: stagedKimiAdmission, preserveRunner, discardControllerCache, crashAfterResult, controllerOutage, recoveryBinding, controllerDowntimeMs = 0 }: RestartRequest) {
+async function restartServer({ requestId, kimiCandidateAdmission: stagedKimiAdmission, preserveRunner, discardControllerCache, crashAfterResult, controllerOutage, recoveryBinding, preserveDurableRunnerSessions, controllerDowntimeMs = 0 }: RestartRequest) {
   activeRestartRequestId = requestId;
   appendLog(`\nRestart request ${requestId}: stopping Proprio\n`);
   const previous = child;
   if (!previous) throw new Error("No Proprio server is available to restart");
   const discardCache = async () => {
     const cache = path.join(proprioHome, "instances", required("PROPRIO_INSTANCE_ID"), "runtime", "proprio-runner");
-    await retireControllerCache(cache, path.join(controlDirectory, `retired-controller-cache-${requestId}`));
+    const retired = path.join(controlDirectory, `retired-controller-cache-${requestId}`);
+    if (preserveDurableRunnerSessions) await retireControllerCachePreservingDurableSessions(cache, retired);
+    else await retireControllerCache(cache, retired);
     appendLog(`Restart request ${requestId}: old controller cache made unavailable\n`);
   };
   if (controllerOutage) {

@@ -1,4 +1,5 @@
-import { lstat, rename } from "node:fs/promises";
+import { lstat, mkdir, readdir, rename } from "node:fs/promises";
+import { join } from "node:path";
 import type { ServingArtifact } from "./upgrade-artifacts.js";
 import type { ControllerRecoveryReceipt } from "./controller-recovery-observer.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -179,5 +180,22 @@ export async function retireControllerCache(cache: string, retired: string): Pro
       throw missing;
     }
     throw error;
+  }
+}
+
+/** Retire volatile controller cache while retaining provider-owned durable
+ * session state across the replacement. Used only by structured goal recovery.
+ */
+export async function retireControllerCachePreservingDurableSessions(cache: string, retired: string): Promise<void> {
+  try {
+    await lstat(cache);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await mkdir(retired, { recursive: false });
+  for (const entry of await readdir(cache)) {
+    if (entry === "durable-sessions") continue;
+    await rename(join(cache, entry), join(retired, entry));
   }
 }
