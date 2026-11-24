@@ -16,8 +16,10 @@ database and these settings cannot tell an archive that an event was lost before
 it was first collected.
 
 Set `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER` to the earliest event time allowed by
-the deployment's data retention policy, if it has an expiry boundary. The API
-returns `retention_window_expired` for an export that overlaps an older interval.
+the deployment's data retention policy, if it has an expiry boundary. Set the
+same cutoff on every API instance that serves export creation or page reads.
+Use an ISO timestamp with an offset and at most three fractional-second digits.
+The API returns `retention_window_expired` for an export that overlaps an older interval.
 This also invalidates a cursor created before the retention boundary advanced.
 Keep this boundary outside the database rollback domain.
 

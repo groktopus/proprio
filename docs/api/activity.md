@@ -44,3 +44,17 @@ All mutations are recorded:
 - Company configuration changes
 
 The activity log is append-only and immutable.
+
+## Managed Audit Exports
+
+`POST /api/companies/{companyId}/audit/managed-exports` opens a snapshot for a
+half-open interval given by the `from` and `to` timestamps.
+
+`GET /api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page.
+Use the preceding page's `nextCursor` as the `cursor` query parameter to resume.
+
+Both endpoints require an authenticated board session with audit access. Either
+endpoint can return HTTP `409` with `details.reasonCode` set to
+`retention_window_expired`. If the requested interval begins before the
+configured retention cutoff, open a new snapshot with a start time at or after
+the cutoff. A cursor for an expired window cannot be resumed.

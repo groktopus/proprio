@@ -7,7 +7,7 @@ import { activityService, normalizeActivityLimit } from "../services/activity.js
 import { assertAuthenticated, assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { accessService, heartbeatService, issueService } from "../services/index.js";
 import { sanitizeRecord } from "../redaction.js";
-import { badRequest, conflict, forbidden } from "../errors.js";
+import { badRequest, forbidden } from "../errors.js";
 import { agentActionAuditService } from "../services/agent-action-audit.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueContextUsage } from "../services/issue-context-usage.js";
@@ -154,7 +154,8 @@ export function activityRoutes(db: Db) {
     const epoch = z.guid().safeParse(process.env.PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH);
     const boundary = z.iso.datetime({ offset: true });
     const captureFrom = boundary.safeParse(process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM);
-    const retainAfter = boundary.optional().safeParse(process.env.PROPRIO_MANAGED_AUDIT_RETAIN_AFTER);
+    const retainAfter = boundary.refine(value => !/\.\d{4}/.test(value)).optional()
+      .safeParse(process.env.PROPRIO_MANAGED_AUDIT_RETAIN_AFTER);
     if (!epoch.success || !captureFrom.success || !retainAfter.success) throw forbidden("Managed audit export is unavailable");
     return {
       companyId, userId: req.actor.userId, sourceEpoch: epoch.data, actor: req.actor,
@@ -317,12 +318,6 @@ export function activityRoutes(db: Db) {
     const from = new Date(window.data.from);
     const to = new Date(window.data.to);
     if (from >= to || to > new Date()) throw badRequest("Invalid managed audit export window");
-    if (scope.retainAfter && from < scope.retainAfter) {
-      throw conflict("The requested window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
-    }
-    if (from < scope.captureFrom) {
-      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
-    }
     res.set("Cache-Control", "no-store");
     res.status(201).json(await createManagedAuditExport(db, scope, { from, to }));
   });

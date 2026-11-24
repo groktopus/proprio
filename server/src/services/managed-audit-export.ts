@@ -53,7 +53,21 @@ function exportReceipt(snapshot: typeof managedAuditExports.$inferSelect) {
   };
 }
 
-export async function createManagedAuditExport(db: Db, scope: ExportScope, window: { from: Date; to: Date }) {
+function assertRetainedWindow(scope: ExportScope, from: Date) {
+  if (scope.retainAfter && from < scope.retainAfter) {
+    throw conflict("The export window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
+  }
+}
+
+export async function createManagedAuditExport(
+  db: Db,
+  scope: ExportScope & { captureFrom: Date },
+  window: { from: Date; to: Date },
+) {
+  assertRetainedWindow(scope, window.from);
+  if (window.from < scope.captureFrom) {
+    throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+  }
   const publications: ActivityPublication[] = [];
   const snapshot = await db.transaction(async tx => {
     const now = new Date();
@@ -127,9 +141,7 @@ export async function readManagedAuditExportPage(
     if (snapshot.expiresAt <= new Date()) {
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }
-    if (scope.retainAfter && snapshot.from < scope.retainAfter) {
-      throw conflict("The export window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
-    }
+    assertRetainedWindow(scope, snapshot.from);
     const offset = decodeCursor(snapshot, cursor);
     const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
     const visible = await visibleEvents(tx, scope);
