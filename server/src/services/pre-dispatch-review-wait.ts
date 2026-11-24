@@ -23,6 +23,7 @@ const staleDispatchReconciliationExemptions = {
   issue_review_participant_changed: true,
   issue_in_backlog: true,
   session_goal_recovery_superseded: true,
+  session_goal_reconciliation_superseded: true,
   // This code requires its own executionWait receipt in pre-dispatch-execution-wait.ts.
   execution_reconciliation_required: false,
 } satisfies Record<QueuedRunStalenessErrorCode, boolean>;

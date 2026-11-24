@@ -895,6 +895,7 @@ export type {
   IssueCreationSource,
   IssueParentAdjustment,
   IssueParentAdjustmentReason,
+  IssueGoalOrigin,
   IssueLabel,
   IssueWatchdog,
   IssueWatchdogStatus,

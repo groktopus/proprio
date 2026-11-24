@@ -40,6 +40,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
+import type { IssueGoalOrigin } from "@groktopus/shared";
 import {
   agents,
   assets,
@@ -5489,6 +5490,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
+        goalOrigin?: IssueGoalOrigin;
         status?: string;
       },
       interactionId: string,
@@ -5565,6 +5567,7 @@ export function issueThreadInteractionService(
         companyId: string;
         projectId: string | null;
         goalId: string | null;
+        goalOrigin?: IssueGoalOrigin;
         status?: string;
       },
       interactionId: string,
@@ -5724,6 +5727,7 @@ export function issueThreadInteractionService(
             ...resolveChatTaskAssignment(task, sourceConversation?.conversationAgentId),
             projectId: task.projectId ?? issue.projectId,
             goalId: task.goalId ?? issue.goalId,
+            goalOrigin: task.goalId ? "explicit" : issue.goalOrigin ?? "unknown",
             billingCode: task.billingCode ?? null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,

@@ -1,6 +1,6 @@
 {
-  "id": "51525362-c4bc-44be-b4a7-95cb4aae7748",
-  "prevId": "a80ac568-accd-4c40-b63a-82b870052e0a",
+  "id": "72d4f1fd-05d3-425a-8dfa-6d1a9e24e6bc",
+  "prevId": "789ff1b9-fa8c-418c-8c23-e5708d718611",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -35950,6 +35950,27 @@
           "method": "btree",
           "with": {}
         },
+        "heartbeat_runs_company_id_uq": {
+          "name": "heartbeat_runs_company_id_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
         "heartbeat_runs_company_wake_comment_idx": {
           "name": "heartbeat_runs_company_wake_comment_idx",
           "columns": [
@@ -43531,6 +43552,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "goal_origin": {
+          "name": "goal_origin",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'unknown'"
+        },
+        "goal_origin_goal_id": {
+          "name": "goal_origin_goal_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "parent_id": {
           "name": "parent_id",
           "type": "uuid",
@@ -44667,19 +44701,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_project_id_projects_id_fk": {
-          "name": "issues_project_id_projects_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_project_workspace_id_project_workspaces_id_fk": {
           "name": "issues_project_workspace_id_project_workspaces_id_fk",
           "tableFrom": "issues",
@@ -44706,19 +44727,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_parent_id_issues_id_fk": {
-          "name": "issues_parent_id_issues_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "issues",
-          "columnsFrom": [
-            "parent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_privacy_root_issue_id_issues_id_fk": {
           "name": "issues_privacy_root_issue_id_issues_id_fk",
           "tableFrom": "issues",
@@ -44738,45 +44746,6 @@
           "tableTo": "issues",
           "columnsFrom": [
             "privacy_parent_issue_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_assignee_agent_id_agents_id_fk": {
-          "name": "issues_assignee_agent_id_agents_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "assignee_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "issues_checkout_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_checkout_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "checkout_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_execution_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_execution_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "execution_run_id"
           ],
           "columnsTo": [
             "id"
@@ -44822,6 +44791,81 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "issues_project_company_fk": {
+          "name": "issues_project_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "company_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_parent_company_fk": {
+          "name": "issues_parent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "company_id",
+            "parent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_assignee_agent_company_fk": {
+          "name": "issues_assignee_agent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "company_id",
+            "assignee_agent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_checkout_run_company_fk": {
+          "name": "issues_checkout_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "checkout_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "issues_execution_run_company_fk": {
+          "name": "issues_execution_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "execution_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -44840,6 +44884,10 @@
         "issues_visibility_check": {
           "name": "issues_visibility_check",
           "value": "\"issues\".\"visibility\" in ('open', 'private')"
+        },
+        "issues_goal_origin_check": {
+          "name": "issues_goal_origin_check",
+          "value": "\"issues\".\"goal_origin\" in ('explicit', 'inherited', 'unknown')"
         },
         "issues_conversation_identity_check": {
           "name": "issues_conversation_identity_check",
@@ -54470,6 +54518,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "assignment_wake_pending": {
+          "name": "assignment_wake_pending",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "linked_issue_id": {
           "name": "linked_issue_id",

@@ -4,6 +4,7 @@ import { notifyIssueReviewState } from "../issue-review-state-notifications.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import {
   issues,
+  goals,
   issueComments,
   heartbeatRuns,
   nativeRunFinalizations,
@@ -68,6 +69,20 @@ import type { NativeSessionGoalControl } from "../../vendor/proprio-runner/index
 
 type HeartbeatQueue = ReturnType<typeof createHeartbeatQueue>;
 type RunPreparation = ReturnType<typeof createHeartbeatRunPreparation>;
+
+export interface PendingSessionGoalActionRecoveryScope {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  requestId: string;
+}
+
+export interface PendingSessionGoalActionRecoveryResult {
+  scanned: number;
+  enqueued: number;
+  alreadyQueued: number;
+  invalid: number;
+}
 
 export interface HeartbeatSchedulingDependencies
   extends Pick<HeartbeatRetryDependencies, "getRun" | "getAgent" | "getWorktreeExecutionCutoff">,
@@ -149,6 +164,11 @@ export function createHeartbeatScheduling(
     companyId: issues.companyId,
     projectId: issues.projectId,
     goalId: issues.goalId,
+    goalOrigin: sql<"explicit" | "inherited" | "unknown">`CASE
+      WHEN ${issues.goalOriginGoalId} IS NOT DISTINCT FROM ${issues.goalId}
+        THEN ${issues.goalOrigin}
+      ELSE 'unknown'
+    END`,
     identifier: issues.identifier,
     title: issues.title,
     status: issues.status,
@@ -165,12 +185,14 @@ export function createHeartbeatScheduling(
     monitorNotes: issues.monitorNotes,
     monitorScheduledBy: issues.monitorScheduledBy,
   };
+  const { goalOrigin: _discoveryGoalOrigin, ...issueMonitorDiscoveryColumns } = issueMonitorDispatchColumns;
 
   interface IssueMonitorDispatchRow {
     id: string;
     companyId: string;
     projectId: string | null;
     goalId: string | null;
+    goalOrigin: "explicit" | "inherited" | "unknown";
     identifier: string | null;
     title: string;
     status: string;
@@ -341,6 +363,7 @@ export function createHeartbeatScheduling(
           parentDepthPolicy: "allow_nested",
           projectId: input.claimed.projectId,
           goalId: input.claimed.goalId,
+          goalOrigin: input.claimed.goalOrigin,
           assigneeAgentId: input.claimed.assigneeAgentId,
           originKind: RECOVERY_ORIGIN_KINDS.strandedIssueRecovery,
           originId: input.claimed.id,
@@ -485,6 +508,21 @@ export function createHeartbeatScheduling(
     runId: string | null;
     activitySource: "manual" | "scheduled";
   }) {
+    if (input.claimed.goalId) {
+      const [companyGoal] = await db.select({ id: goals.id }).from(goals).where(and(
+        eq(goals.id, input.claimed.goalId),
+        eq(goals.companyId, input.claimed.companyId),
+      ));
+      if (!companyGoal) {
+        // An invalid legacy binding must not make recovery fail after this
+        // function consumes the monitor. Keep the claim and let normal project
+        // fallback resolution choose a company-valid goal for recovery work.
+        input = {
+          ...input,
+          claimed: { ...input.claimed, goalId: null, goalOrigin: "unknown" },
+        };
+      }
+    }
     const recover = () => performIssueMonitorRecovery(input);
     if (input.recoveryPolicy === "wake_owner") {
       try {
@@ -1030,7 +1068,7 @@ export function createHeartbeatScheduling(
   async function tickDueIssueMonitors(now: Date, canContinue: () => boolean) {
     const staleClaimThreshold = new Date(now.getTime() - 5 * 60 * 1000);
     const dueMonitors = await db
-      .select(issueMonitorDispatchColumns)
+      .select(issueMonitorDiscoveryColumns)
       .from(issues)
       .innerJoin(companies, eq(companies.id, issues.companyId))
       .where(
@@ -1188,7 +1226,9 @@ export function createHeartbeatScheduling(
     return { scanned: sessions.length, enqueued };
   }
 
-  async function recoverPendingSessionGoalActions() {
+  async function recoverPendingSessionGoalActions(
+    scope?: PendingSessionGoalActionRecoveryScope,
+  ): Promise<PendingSessionGoalActionRecoveryResult> {
     if ((await getSchedulingSuppression()).suppressed) {
       return { scanned: 0, enqueued: 0, alreadyQueued: 0, invalid: 0 };
     }
@@ -1197,7 +1237,16 @@ export function createHeartbeatScheduling(
         id: agentSessionGoalActions.id,
         requestId: agentSessionGoalActions.requestId,
         payload: agentSessionGoalActions.payloadJson,
+        result: agentSessionGoalActions.resultJson,
+        status: agentSessionGoalActions.status,
         companyId: agentTaskSessions.companyId,
+        sessionId: agentTaskSessions.id,
+        goalRevision: agentTaskSessions.goalRevision,
+        goalAuthorityRevision: agentTaskSessions.goalAuthorityRevision,
+        goalSourceId: agentTaskSessions.goalSourceId,
+        goalSourceCursor: agentTaskSessions.goalSourceCursor,
+        goalObservationSourceId: agentTaskSessions.goalObservationSourceId,
+        goalObservationCursor: agentTaskSessions.goalObservationCursor,
         agentId: agentTaskSessions.agentId,
         adapterType: agentTaskSessions.adapterType,
         issueId: agentTaskSessions.taskKey,
@@ -1216,11 +1265,18 @@ export function createHeartbeatScheduling(
         ),
       )
       .where(
-        inArray(agentSessionGoalActions.status, [
-          "pending",
-          "delivering",
-          "delivered",
-        ]),
+        and(
+          inArray(agentSessionGoalActions.status, [
+            "pending",
+            "delivering",
+            "delivered",
+            "reconciling",
+          ]),
+          scope ? eq(agentTaskSessions.companyId, scope.companyId) : undefined,
+          scope ? eq(agentTaskSessions.taskKey, scope.issueId) : undefined,
+          scope ? eq(agentTaskSessions.agentId, scope.agentId) : undefined,
+          scope ? eq(agentSessionGoalActions.requestId, scope.requestId) : undefined,
+        ),
       )
       .orderBy(asc(agentSessionGoalActions.createdAt));
 
@@ -1241,7 +1297,97 @@ export function createHeartbeatScheduling(
           },
           action.requestId,
           "session_goal_control_payload_invalid",
+          "confirmed_rejection",
         ).catch(() => undefined);
+        continue;
+      }
+
+      const reconciliation = parseObject(parseObject(action.result).reconciliation);
+      if (action.status === "reconciling") {
+        const authorityFence = typeof reconciliation.failureAuthorityRevision === "number";
+        const sourceId = typeof reconciliation.observationSourceId === "string"
+          ? reconciliation.observationSourceId : authorityFence ? null
+            : typeof reconciliation.sourceId === "string" ? reconciliation.sourceId : null;
+        const sourceCursor = typeof reconciliation.observationCursor === "number"
+          ? reconciliation.observationCursor : authorityFence ? null
+            : typeof reconciliation.sourceCursor === "number" ? reconciliation.sourceCursor : null;
+        const revision = authorityFence
+          ? reconciliation.failureAuthorityRevision as number
+          : typeof reconciliation.failureRevision === "number" ? reconciliation.failureRevision : null;
+        const attempts = typeof reconciliation.attempts === "number" ? reconciliation.attempts : 1;
+        if (
+          revision === null ||
+          (authorityFence
+            ? action.goalAuthorityRevision !== revision || action.goalObservationSourceId !== sourceId || action.goalObservationCursor !== sourceCursor
+            : action.goalRevision !== revision || action.goalSourceId !== sourceId || action.goalSourceCursor !== sourceCursor)
+        ) {
+          invalid += 1;
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            "session_goal_reconciliation_superseded",
+            "confirmed_rejection",
+          ).catch(() => undefined);
+          continue;
+        }
+        const inFlight = await db
+          .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.companyId, action.companyId),
+            eq(heartbeatRuns.agentId, action.agentId),
+            inArray(heartbeatRuns.status, ["queued", "scheduled_retry", "running"]),
+          ))
+          .then((runs) => runs.some((run) => {
+            const context = parseObject(run.contextSnapshot);
+            return readNonEmptyString(context.goalControlReconciliationRequestId) === action.requestId;
+          }));
+        if (inFlight) {
+          alreadyQueued += 1;
+          continue;
+        }
+        let run: Awaited<ReturnType<typeof enqueueWakeup>>;
+        try {
+          run = await enqueueWakeup(action.agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "goal_control",
+            payload: { issueId: action.issueId, requestId: action.requestId, intent: "goal_control_reconciliation" },
+            idempotencyKey: `goal_control_reconciliation:${action.id}:${attempts}`,
+            requestedByActorType: "system",
+            contextSnapshot: {
+              issueId: action.issueId,
+              taskKey: action.issueId,
+              resumeIntent: true,
+              goalControlReconciliationRequestId: action.requestId,
+              goalControlReconciliation: {
+                sessionId: action.sessionId,
+                revision,
+                sourceId,
+                sourceCursor,
+              },
+              skipIssueComment: true,
+            },
+          });
+        } catch (error) {
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            error instanceof Error ? error.message : "session_goal_reconciliation_wake_failed",
+          ).catch(() => undefined);
+          continue;
+        }
+        if (run) enqueued += 1;
+        else {
+          await failRunnerGoalAction(
+            db,
+            { companyId: action.companyId, issueId: action.issueId, agentId: action.agentId, adapterType: action.adapterType },
+            action.requestId,
+            "session_goal_reconciliation_wake_skipped",
+          ).catch(() => undefined);
+        }
         continue;
       }
 
