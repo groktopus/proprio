@@ -20,6 +20,8 @@ The trace restore rehearsal also passed on Node 24.22.1 with an isolated Postgre
 
 Both Compose layouts reached the reconciliation CLI before application startup. The quickstart test also verified that a missing cluster fails without initialization and an existing embedded PostgreSQL cluster listens on loopback and shuts down. The Compose tests used cached runtime images, the PR source, and empty manifests. Repeat the restore with the selected image and deployment configuration. [Compose evidence](https://github.com/groktopus/proprio/pull/361#issuecomment-7146200058)
 
+The export freezes the IDs and checksum of visible records in the declared capture window. It detects a missing or newly restricted member when it reads a page. The checksum cannot detect an event that was absent before the snapshot. Initial capture covers decisions recorded by the managed gateway policy transaction. Read-only virtual tool discovery is outside that capture path. The approval and dispatch slices add evidence for the documented remote MCP route. Record the deployed producer coverage alongside each archive checkpoint. [Capture boundary](https://github.com/groktopus/proprio/pull/359) [Export contract](https://github.com/groktopus/proprio/pull/360)
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
@@ -31,7 +33,7 @@ The release decision depends on the following checks.
 
 The reporting lock guard rejects the lock on `main` at `6e6ebf51`. The committed lock SHA-256 is `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`, while the report policy lists `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e` for both input and output. The intervening change pins `oxlint@1.94.0` and its platform packages. [Dependency change](https://github.com/groktopus/proprio/pull/125)
 
-The release maintainer must review the lock change and approve the reporting lock refresh. Then regenerate the public input pins, run the trusted SDK checks for #358 and #363, and record the results for the exact candidate. [Runner operations](https://github.com/groktopus/proprio/blob/6e6ebf51cb0cf214375523171f80f19d14da073f/tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
+The release maintainer must review the lock change and arrange the trusted reporting lock refresh. The workflow list for this repository exposed no active lock refresh workflow when checked on November 24, 2026. Then regenerate the public input pins, run the trusted SDK checks for #358 and #363, and record the results for the exact candidate. [Runner operations](https://github.com/groktopus/proprio/blob/6e6ebf51cb0cf214375523171f80f19d14da073f/tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
 
 ## Hold, recovery and resume
 
