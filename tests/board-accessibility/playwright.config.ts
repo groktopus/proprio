@@ -5,6 +5,8 @@ const results = resolve(import.meta.dirname, "../../test-results/board-accessibi
 const port = 6193;
 const host = "127.0.0.1";
 const baseURL = process.env.BOARD_A11Y_STORYBOOK_URL ?? `http://${host}:${port}`;
+const staticDir = process.env.BOARD_A11Y_STORYBOOK_DIR;
+const ui = resolve(import.meta.dirname, "../../ui");
 
 export default defineConfig({
   testDir: ".",
@@ -21,8 +23,10 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: process.env.BOARD_A11Y_STORYBOOK_URL ? undefined : {
-    cwd: resolve(import.meta.dirname, "../../ui"),
-    command: `pnpm exec storybook dev -c storybook/.storybook -p ${port} --host ${host} --ci`,
+    cwd: staticDir ? resolve(staticDir) : ui,
+    command: staticDir
+      ? `python3 -m http.server ${port} --bind ${host}`
+      : `pnpm exec storybook dev -c storybook/.storybook -p ${port} --host ${host} --ci`,
     url: `${baseURL}/index.json`,
     reuseExistingServer: false,
     timeout: 90_000,

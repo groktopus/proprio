@@ -543,7 +543,11 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
           pnpm exec playwright install --with-deps chromium
+      - name: Build the locked Storybook fixtures
+        run: pnpm build-storybook
       - name: Verify accessibility routing and run the board browser suite
+        env:
+          BOARD_A11Y_STORYBOOK_DIR: ${{ github.workspace }}/ui/storybook-static
         run: |
           node --test scripts/ci/board-accessibility-routing.test.mjs
           pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
