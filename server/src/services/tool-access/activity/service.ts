@@ -1,9 +1,9 @@
 import { connectionManagementService } from "../../connection-management.js";
 import type { ConnectionManagementContext } from "../../connection-management.js";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, connectionTokenIssuances, authUsers, heartbeatRuns, issues, toolActionRequests, toolConnections, toolCallEvents, toolInvocations } from "@groktopus/db";
-import type { ToolConnectionActivityResponse, ToolRunDecision, ToolRunDecisionLookup } from "@groktopus/shared";
+import type { ToolConnectionActivityResponse, ToolRunDecision, ToolRunDecisionLookup, ToolRunRuntimeProvenance } from "@groktopus/shared";
 import { notFound } from "../../../errors.js";
 import { listConnectionLifecycleEvents } from "../../tool-connection-activity.js";
 import { toToolInvocation, toToolActionRequest, toToolCallEvent, userFallbackName, denialReasonForDecision } from "./projection.js";
@@ -252,8 +252,38 @@ listConnectionActivity: async (
       companyId: string,
       runId: string,
     ): Promise<ToolRunDecisionLookup> => {
+      // The admitted execution descriptor owns the selected model and pinned
+      // assets. Project identifiers in SQL so no prompt, paths or provider
+      // configuration enter the audit read model.
+      const input = sql`(${heartbeatRuns.runnerProfileJson}->'nativeExecutionInput')`;
+      const context = sql`(${input}->'runtimeContext')`;
+      const skills = sql`(${context}->'skills')`;
       const [run] = await db
-        .select({ id: heartbeatRuns.id })
+        .select({
+          runtimeProvenance: sql<Exclude<ToolRunRuntimeProvenance, { source: "unknown" }> | null>`case
+            when ${heartbeatRuns.runtimeMode} = 'native'
+              and ${input}->'binding'->>'runId' = ${heartbeatRuns.id}::text
+              and ${input}->'binding'->>'companyId' = ${heartbeatRuns.companyId}::text
+              and jsonb_typeof(${input}->'provider'->'kind') = 'string'
+            then jsonb_build_object(
+              'source', 'native_admission',
+              'provider', ${input}->'provider'->>'kind',
+              'model', case when jsonb_typeof(${input}->'provider'->'model') = 'string' then ${input}->'provider'->>'model' end,
+              'driverKind', ${heartbeatRuns.driverKind},
+              'driverVersion', ${heartbeatRuns.driverVersion},
+              'runtimeContextDigest', case when ${context}->>'aggregateDigest' ~ '^[a-f0-9]{64}$' then ${context}->>'aggregateDigest' end,
+              'mcpAssignmentDigest', case when ${context}->'mcp'->>'digest' ~ '^[a-f0-9]{64}$' then ${context}->'mcp'->>'digest' end,
+              'skills', case when jsonb_typeof(${skills}) = 'array' then (
+                select coalesce(jsonb_agg(jsonb_build_object(
+                  'key', skill->>'key',
+                  'versionId', case when jsonb_typeof(skill->'versionId') = 'string' then skill->>'versionId' end,
+                  'bundleDigest', case when skill->'bundle'->>'digest' ~ '^[a-f0-9]{64}$' then skill->'bundle'->>'digest' end
+                ) order by ordinal), '[]'::jsonb)
+                from jsonb_array_elements(${skills}) with ordinality as skill_rows(skill, ordinal)
+                where jsonb_typeof(skill->'key') = 'string'
+              ) end
+            ) end`,
+        })
         .from(heartbeatRuns)
         .where(
           and(
@@ -352,7 +382,7 @@ listConnectionActivity: async (
         } satisfies ToolRunDecision;
       });
 
-      return { runId, decisions };
+      return { runId, runtimeProvenance: run.runtimeProvenance ?? { source: "unknown" }, decisions };
     }
   };
 }

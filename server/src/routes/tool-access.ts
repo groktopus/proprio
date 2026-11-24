@@ -2931,7 +2931,13 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string);
-    res.json({ ...result, decisions: await filterConnectionManagementRows(db, req, "connections:audit", result.decisions, row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId })) });
+    const decisions = await filterConnectionManagementRows(db, req, "connections:audit", result.decisions,
+      row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId }));
+    res.json({
+      ...result,
+      decisions,
+      runtimeProvenance: decisions.length > 0 ? result.runtimeProvenance : { source: "unknown" },
+    });
   });
 
   router.get("/companies/:companyId/tools/trust-rules", managementGuard("connections:profiles", "GET /companies/:companyId/tools/trust-rules", { personal: true }), async (req, res) => {

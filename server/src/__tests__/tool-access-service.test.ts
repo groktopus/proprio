@@ -19970,6 +19970,7 @@ describeEmbeddedPostgres("tool access service", () => {
 
     expect(lookup).toMatchObject({
       runId: run.id,
+      runtimeProvenance: { source: "unknown" },
       decisions: [
         {
           invocation: expect.objectContaining({
@@ -19995,6 +19996,53 @@ describeEmbeddedPostgres("tool access service", () => {
         },
       ],
     });
+  });
+
+  it("projects pinned native runtime evidence without returning the execution descriptor", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const runId = randomUUID();
+    const contextDigest = "a".repeat(64);
+    const assignmentDigest = "b".repeat(64);
+    const skillDigest = "c".repeat(64);
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: company.id,
+      agentId: agent.id,
+      runtimeMode: "native",
+      driverKind: "codex_app_server",
+      driverVersion: "fixture-driver",
+      status: "succeeded",
+      runnerProfileJson: {
+        nativeExecutionInput: {
+          binding: { runId, companyId: company.id },
+          provider: { kind: "codex", model: "fixture-compatible-model", credential: "fixture-secret" },
+          runtimeContext: {
+            aggregateDigest: contextDigest,
+            prompt: { text: "fixture-prompt" },
+            mcp: { digest: assignmentDigest, bindingId: "fixture-binding" },
+            skills: [{
+              key: "fixture/skill",
+              versionId: "fixture-version-1",
+              bundle: { digest: skillDigest, rootPath: "/fixture/private/path" },
+            }],
+          },
+        },
+      },
+    });
+
+    const lookup = await createTestToolAccessService(db).getRunDecisionLookup(company.id, runId);
+    expect(lookup.runtimeProvenance).toEqual({
+      source: "native_admission",
+      provider: "codex",
+      model: "fixture-compatible-model",
+      driverKind: "codex_app_server",
+      driverVersion: "fixture-driver",
+      runtimeContextDigest: contextDigest,
+      mcpAssignmentDigest: assignmentDigest,
+      skills: [{ key: "fixture/skill", versionId: "fixture-version-1", bundleDigest: skillDigest }],
+    });
+    expect(JSON.stringify(lookup)).not.toMatch(/fixture-secret|fixture-prompt|fixture-binding|private\/path/);
   });
 
   it("enriches connection activity with issue and approval resolver context", async () => {

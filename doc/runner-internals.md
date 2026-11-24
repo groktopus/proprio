@@ -313,6 +313,14 @@ stay unchanged. Update the image CLI to restore the requested model on later
 runs. Explicit `PROPRIO_RUNNER_REMOTE_CODEX_PATH` and
 `PROPRIO_RUNNER_REMOTE_CODEX_NPM_SPEC` settings take precedence.
 
+The [managed decision timeline](MCP-ACCESS-GOVERNANCE.md#audit-and-the-call-event-log)
+includes the admitted native provider and model, the recorded driver, and
+pinned skill and tool-assignment fingerprints when available for a visible
+decision. This model reflects Proprio's admission selection, including the
+Codex compatibility fallback above. Use provider evidence to verify changes
+made by a provider after admission. A run without a matching native descriptor
+has unknown runtime provenance.
+
 ### Sandbox ACP input delivery
 
 The legacy sandbox process bridge retries recognized Daytona and Cloudflare

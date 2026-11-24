@@ -1534,8 +1534,22 @@ export interface ToolRunDecision {
   } | null;
 }
 
+export type ToolRunRuntimeProvenance =
+  | { source: "unknown" }
+  | {
+      source: "native_admission";
+      provider: string;
+      model: string | null;
+      driverKind: string | null;
+      driverVersion: string | null;
+      runtimeContextDigest: string | null;
+      mcpAssignmentDigest: string | null;
+      skills: Array<{ key: string; versionId: string | null; bundleDigest: string | null }> | null;
+    };
+
 export interface ToolRunDecisionLookup {
   runId: string;
+  runtimeProvenance: ToolRunRuntimeProvenance;
   decisions: ToolRunDecision[];
 }
 
