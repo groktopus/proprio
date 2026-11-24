@@ -3,11 +3,15 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import express from "express";
+import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { activityLog, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, issueDocuments,
   issueRelations, issueTreeHolds, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { describe, expect, it } from "vitest";
+import { errorHandler } from "../middleware/index.js";
+import { issueRoutes } from "../routes/issues.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -170,6 +174,34 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       const wakesAfterReplay = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         eq(agentWakeupRequests.idempotencyKey, String(details.idempotencyKey))));
       expect(wakesAfterReplay).toHaveLength(1);
+
+      // A fresh route app and DB client model the board reload after the worker
+      // replacement. The wake and its diagnosis claim must be readable through
+      // the normal issue diagnostics API, not only through direct SQL checks.
+      const readDb = createDb(database.connectionString, { maxConnections: 2 });
+      try {
+        const app = express();
+        app.use(express.json());
+        app.use((req, _res, next) => {
+          req.actor = { type: "board", userId, companyIds: [companyId], memberships: [
+            { companyId, membershipRole: "owner", status: "active" },
+          ], isInstanceAdmin: true, source: "local_implicit" };
+          next();
+        });
+        app.use("/api", issueRoutes(readDb, {} as any));
+        app.use(errorHandler);
+        const parentRead = await request(app).get(`/api/issues/${parentId}?view=core`);
+        expect(parentRead.status, JSON.stringify(parentRead.body)).toBe(200);
+        expect(parentRead.body).toMatchObject({ id: parentId, title: "Resume independent parent work", status: "in_progress",
+          assigneeAgentId: agent!.id });
+        const wakeRead = await request(app).get(`/api/issues/${parentId}/diagnostics/wakes`);
+        expect(wakeRead.status, JSON.stringify(wakeRead.body)).toBe(200);
+        expect(wakeRead.body.events).toEqual([
+          expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled", status: "completed" }),
+        ]);
+      } finally {
+        await readDb.$client.end({ timeout: 0 });
+      }
     } finally {
       await db.$client.end({ timeout: 0 });
       await database.cleanup();
