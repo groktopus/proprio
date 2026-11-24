@@ -193,12 +193,6 @@ node "$REPO_ROOT/cli/node_modules/tsx/dist/cli.mjs" \
   --out "$catalog_file"
 
 if [ "$source_prerelease" = true ]; then
-  verified_notes="$catalog_dir/release-notes.md"
-  {
-    cat "$notes_file"
-    printf '\n\n## Verified source\n\n- Tag `%s`\n- Previous release tag `%s`\n%s\n' \
-      "$tag" "$previous_tag" "$qualification"
-  } > "$verified_notes"
   if [ "$dry_run" = true ]; then
     printf '[dry-run] Verified %s at %s from %s (%s). Would %s.\n%s\n' \
       "$tag" "$tag_commit" "$previous_tag" "$base_sha" "$release_state" "$qualification"
@@ -215,14 +209,14 @@ if [ "$source_prerelease" = true ]; then
 
   case "$release_state" in
     create)
-      gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$verified_notes"
+      gh release create "$tag" "$catalog_file" -R "$GITHUB_REPO" --verify-tag --prerelease --title "Proprio $tag" --notes-file "$notes_file"
       ;;
     "finish draft")
       gh release upload "$tag" "$catalog_file" -R "$GITHUB_REPO" --clobber
       safe_draft="$(gh release view "$tag" -R "$GITHUB_REPO" --json isDraft,assets \
         --jq '.isDraft and ([.assets[].name] == ["feature-catalog.json"])')"
       [ "$safe_draft" = true ] || release_fail "The draft contains an unverified asset or changed during upload."
-      gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$verified_notes"
+      gh release edit "$tag" -R "$GITHUB_REPO" --draft=false --prerelease --title "Proprio $tag" --notes-file "$notes_file"
       ;;
     "leave published release unchanged")
       printf 'Source prerelease %s is already published at %s.\n' "$tag" "$tag_commit"

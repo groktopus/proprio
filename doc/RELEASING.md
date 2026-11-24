@@ -19,12 +19,18 @@ run for those exact revisions. Publication requires that evidence even for a
 docs-only diff.
 
 Review the [release checklist](RELEASE-CHECKLIST.md) with the CI and Linux
-deployment owners. Summarize user-facing changes since the preceding tag.
-Include the candidate and predecessor SHAs, qualification run and artifact
-links, verified Linux architecture and database topology, install guide, and
-known gaps. If you describe an upgrade path, include its retained-record and
-rollback results, recovery time and observed data loss. Distinguish the
-coverage of a synthetic task from provider-backed runs.
+deployment owners. Record the exact candidate and predecessor SHAs, passing
+run and artifact links, verified architecture and database topology, and
+known gaps in the qualification record. For upgrade qualification, record the
+retained-record and rollback results, recovery time, and observed data loss.
+Identify which results use synthetic tasks and which cover provider-backed runs.
+
+Write the public notes for operators using the
+[release changelog skill](../.agents/skills/release-changelog/SKILL.md).
+Lead with what changed in the workflows they use. State supported scope and
+required upgrade or backup steps. Link the installation guide and the
+qualification record for technical evidence. The publisher uses the reviewed
+notes file as the public body. The dry run reports the verification evidence.
 
 ## Preview and publish
 

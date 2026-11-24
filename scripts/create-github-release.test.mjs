@@ -238,6 +238,7 @@ test("plain source version tags the qualified candidate before creating a prerel
   assert.ok(evidence >= 0 && evidence < push && push < publish, calls.join("\n"));
   assert.match(calls[push], new RegExp(`${fixture.sourceSha}:refs/tags/v0.0.2`));
   assert.match(calls[publish], /feature-catalog\.json .*--verify-tag --prerelease/);
+  assert.equal(readFileSync(join(fixture.bin, "notes"), "utf8"), "source prerelease notes\n");
 });
 
 test("source publication cannot skip a newer published source release", () => {
@@ -260,9 +261,8 @@ test("a source publication retry reuses the remote tag and safe draft", () => {
   assert.equal((calls.match(/^push /gm) ?? []).length, 1);
   assert.match(calls, /release edit .*--draft=false --prerelease/);
   const notes = readFileSync(join(fixture.bin, "notes"), "utf8");
-  assert.match(notes, /Verified source/);
-  assert.ok(notes.includes(fixture.sourceSha) && notes.includes(fixture.baseSha));
-  assert.match(notes, /actions\/runs\/55\/attempts\/1/);
+  assert.equal(notes, "source prerelease notes\n");
+  assert.match(preview.stdout, /actions\/runs\/55\/attempts\/1/);
 });
 
 test("an interrupted draft with an unexpected asset fails closed in preview", () => {
