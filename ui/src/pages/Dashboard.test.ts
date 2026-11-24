@@ -1,6 +1,7 @@
 import type { Agent, CompactIssue, IssueSummary } from "@groktopus/shared";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { derivePausedAgentBanner, recentTaskIndexRows, withTaskSummaries } from "./Dashboard";
+import { DashboardTaskIndexState, derivePausedAgentBanner, recentTaskIndexRows, withTaskSummaries } from "./Dashboard";
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -43,7 +44,6 @@ describe("derivePausedAgentBanner", () => {
     expect(banner).toBeNull();
   });
 });
-
 describe("dashboard recent tasks from the task index", () => {
   const row = (id: string, updatedAt: string): CompactIssue =>
     ({ id, identifier: id.toUpperCase(), title: id, status: "blocked", updatedAt, assigneeAgentId: "agent-1" }) as unknown as CompactIssue;
@@ -74,5 +74,18 @@ describe("dashboard recent tasks from the task index", () => {
       externalConversationState: "waiting", blockerAttention: { state: "covered" } });
     const [plain] = withTaskSummaries([row("t2", "2026-11-01T00:00:00.000Z")], undefined);
     expect(plain).not.toHaveProperty("displayStatus");
+  });
+
+  it("renders a retry when the initial task index fails", () => {
+    const markup = renderToStaticMarkup(DashboardTaskIndexState({
+      kind: "error", error: new Error("task index unavailable"), retry: () => {}, retrying: false, empty: true, children: "unused",
+    }));
+    expect(markup).toContain("Retry");
+    expect(markup).toContain("task index unavailable");
+  });
+
+  it("keeps indexed rows visible when the summary batch fails", () => {
+    const indexed = [row("t1", "2026-11-01T00:00:00.000Z")];
+    expect(withTaskSummaries(indexed, undefined)).toEqual(indexed);
   });
 });
