@@ -392,6 +392,11 @@ export const AccountPopover: Story = {
   },
 };
 
+export const AccountPopoverBrowser: Story = {
+  render: AccountPopover.render,
+  tags: ["!dev"],
+};
+
 async function exerciseOrganizationMenu(canvasElement: HTMLElement) {
   const trigger = await within(canvasElement).findByRole("button", { name: /Open .*(organization|company) switcher/ });
   await exerciseOverlay(canvasElement, trigger, "menu", async (overlay) => {

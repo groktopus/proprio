@@ -171,8 +171,24 @@ test("a task added after the initial Recents preload opens without first-frame r
   await page.waitForLoadState("networkidle");
   requests.length = 0;
   let release!: () => void;
-  const held = new Promise<void>(resolve => { release = resolve; });
-  await page.route(/\/api\/issues\//, async route => { await held; await route.continue(); });
+  let holding = true;
+  const held = new Promise<void>(resolve => {
+    release = () => {
+      holding = false;
+      resolve();
+    };
+  });
+  const pausedReads: Promise<unknown>[] = [];
+  await page.route(/\/api\/issues\//, async route => {
+    if (holding) {
+      pausedReads.push(route.request().response().then(response => response?.finished()));
+      await held;
+    }
+    await route.continue();
+  });
+  const afterPaint = () => page.evaluate(() =>
+    new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+  );
   try {
     await openRecent(page, added);
     expect(requests.map(classifyTaskRead).filter(kind => kind && FIRST_FRAME_READS.has(kind))).toEqual([]);
@@ -180,9 +196,12 @@ test("a task added after the initial Recents preload opens without first-frame r
     await editor.fill("Keep this draft during background refresh");
     const savedEditor = await editor.elementHandle();
     const message = page.getByText(added.marker, { exact: true }).first();
+    await afterPaint();
     const before = await message.boundingBox();
     release();
-    await page.waitForLoadState("networkidle");
+    // The document may already have reached networkidle before these reads resumed.
+    await Promise.all(pausedReads);
+    await afterPaint();
     await expect(editor).toContainText("Keep this draft during background refresh");
     expect(await savedEditor!.evaluate(element => element.isConnected)).toBe(true);
     const after = await message.boundingBox();
