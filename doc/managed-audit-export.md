@@ -35,7 +35,9 @@ Keep this boundary outside the database rollback domain.
    array of archived event IDs in lexicographic order.
 
 An export belongs to the creating operator and company. Company, audit and task
-access are checked for eligible events. Before releasing a page, the API checks
+access are checked for eligible events. For a missing task or run, snapshot
+creation reports an incomplete source unless the surviving binding proves the
+event is outside the operator's access. Before releasing a page, the API checks
 every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. Preserve the checkpoint and
