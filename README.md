@@ -4,6 +4,8 @@ Proprio is a self-hosted system for coordinating AI agents. A coordinator sets d
 
 The name comes from **proprioception**: knowing what your limbs are doing without having to watch every movement. That's the design goal for Proprio. You should be able to see what each agent is doing, what it's waiting on, and where it needs help without reading every transcript or routing every decision through one agent.
 
+Read the [Proprio vision](VISION.md) for how we want agents to work together and how we choose what to build.
+
 ## What we're building first
 
 We're starting with Linux self-hosting. The [stability sprint](STABILITY.md) focuses on three things:
