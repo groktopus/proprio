@@ -74,7 +74,7 @@ function humanStatus(status: string | null | undefined): string {
 function issueLabel(ref: DecisionIssueRef | null, fallbackId: string): string {
   if (ref?.identifier) return ref.identifier;
   if (ref?.title) return ref.title;
-  return `issue ${fallbackId.slice(0, 8)}`;
+  return `task ${fallbackId.slice(0, 8)}`;
 }
 
 function pluralize(count: number, singular: string): string {
@@ -135,6 +135,19 @@ interface ResultRow {
   status: DecisionEffectExecution["status"];
   summary: string;
   link: DecisionIssueRef | null;
+  diagnosticCode?: string;
+}
+
+function effectActionLabel(effectType: DecisionEffectExecution["effectType"]): string {
+  switch (effectType) {
+    case "comment_on_issue": return "comment action";
+    case "create_issue": return "issue-creation action";
+    case "update_issue_status": return "status-update action";
+    case "assign_issue": return "assignment action";
+    case "resolve_blocker": return "unblock action";
+    case "cancel_issue_tree": return "tree-cancellation action";
+    default: return "action";
+  }
 }
 
 function executionRow(
@@ -145,12 +158,22 @@ function executionRow(
   const target = issueLabel(targetRef, execution.targetIssueId);
   const result = execution.result ?? {};
   if (execution.status === "skipped") {
-    return { key: execution.id, status: "skipped", summary: `Skipped ${target} — target changed since proposal`, link: targetRef };
+    return {
+      key: execution.id,
+      status: "skipped",
+      summary: `The ${effectActionLabel(execution.effectType)} was not applied to ${target} because the target changed since this was proposed. Request a fresh proposal.`,
+      link: targetRef,
+    };
   }
   if (execution.status === "failed") {
     const cause = FAILURE_CAUSE[execution.error ?? ""] ?? execution.error ?? "the effect could not run";
-    const code = execution.error && FAILURE_CAUSE[execution.error] ? ` (code: ${execution.error})` : "";
-    return { key: execution.id, status: "failed", summary: `Could not complete the action on ${target} — ${cause}${code}`, link: targetRef };
+    return {
+      key: execution.id,
+      status: "failed",
+      summary: `Could not complete the ${effectActionLabel(execution.effectType)} on ${target} — ${cause}`,
+      diagnosticCode: execution.error && FAILURE_CAUSE[execution.error] ? execution.error : undefined,
+      link: targetRef,
+    };
   }
   if (execution.status === "claimed") {
     return { key: execution.id, status: "claimed", summary: `Running on ${target}…`, link: targetRef };
@@ -602,17 +625,25 @@ export function DecisionCard({
                   return (
                     <li key={row.key} className="flex items-start gap-2">
                       {RESULT_ICON[row.status]}
-                      <span className="min-w-0 flex-1 text-sm text-foreground/90">{row.summary}</span>
+                      <span className="min-w-0 flex-1 text-sm text-foreground/90">
+                        {row.summary}
+                        {row.diagnosticCode ? (
+                          <code className="ml-1 font-mono text-xs text-muted-foreground">code: {row.diagnosticCode}</code>
+                        ) : null}
+                      </span>
                       <IssueLink ref={row.link} />
                     </li>
                   );
                 })}
               </ul>
-              {decision.executionStatus !== "succeeded" && (
+              {decision.executionStatus === "partial" && (
                 <p className="text-xs text-muted-foreground">
-                  {decision.executionStatus === "partial"
-                    ? "Some actions completed and others did not. Review the results, then ask the proposer to revise only the actions that did not run."
-                    : "No actions completed. Review the failure before asking the proposer to try again."}
+                  Some actions completed and others did not. Review the results, then ask the proposer to revise only the actions that did not run.
+                </p>
+              )}
+              {decision.executionStatus === "failed" && (
+                <p className="text-xs text-muted-foreground">
+                  No actions completed. Review the failure before asking the proposer to try again. For issue creation, verify whether the issue already exists before retrying.
                 </p>
               )}
             </>
