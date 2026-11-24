@@ -74,7 +74,8 @@ test.describe("self-hosted browser tracing on Linux", () => {
     await expect(page.getByRole("button", { name: "New task" }).first()).toBeVisible();
     await page.getByRole("button", { name: "New task" }).first().click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByLabel("Task title")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "editable markdown" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create task" })).toBeVisible();
     await page.keyboard.press("Escape");
     await page.waitForTimeout(2_000);
     await page.goto(`/${fixture.company.issuePrefix}/issues/${fixture.task.identifier}`);
