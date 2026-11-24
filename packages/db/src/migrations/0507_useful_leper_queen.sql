@@ -1,10 +1,10 @@
-ALTER TABLE "case_events" DROP CONSTRAINT "case_events_kind_check";--> statement-breakpoint
-ALTER TABLE "case_handoffs" DROP CONSTRAINT "case_handoffs_state_check";--> statement-breakpoint
-ALTER TABLE "case_handoffs" DROP CONSTRAINT "case_handoffs_destination_state_check";--> statement-breakpoint
-DROP INDEX "case_handoffs_pending_case_uq";--> statement-breakpoint
-DROP INDEX "case_handoffs_pending_issue_uq";--> statement-breakpoint
-ALTER TABLE "case_handoffs" ADD COLUMN "offer_contract" jsonb;--> statement-breakpoint
-ALTER TABLE "case_handoffs" ADD COLUMN "recipient_decision" jsonb;--> statement-breakpoint
+ALTER TABLE "case_events" DROP CONSTRAINT IF EXISTS "case_events_kind_check";--> statement-breakpoint
+ALTER TABLE "case_handoffs" DROP CONSTRAINT IF EXISTS "case_handoffs_state_check";--> statement-breakpoint
+ALTER TABLE "case_handoffs" DROP CONSTRAINT IF EXISTS "case_handoffs_destination_state_check";--> statement-breakpoint
+DROP INDEX IF EXISTS "case_handoffs_pending_case_uq";--> statement-breakpoint
+DROP INDEX IF EXISTS "case_handoffs_pending_issue_uq";--> statement-breakpoint
+ALTER TABLE "case_handoffs" ADD COLUMN IF NOT EXISTS "offer_contract" jsonb;--> statement-breakpoint
+ALTER TABLE "case_handoffs" ADD COLUMN IF NOT EXISTS "recipient_decision" jsonb;--> statement-breakpoint
 CREATE UNIQUE INDEX "case_handoffs_pending_case_uq" ON "case_handoffs" USING btree ("case_id") WHERE "case_handoffs"."state" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion');--> statement-breakpoint
 CREATE UNIQUE INDEX "case_handoffs_pending_issue_uq" ON "case_handoffs" USING btree ("issue_id") WHERE "case_handoffs"."state" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion');--> statement-breakpoint
 ALTER TABLE "case_events" ADD CONSTRAINT "case_events_kind_check" CHECK ("case_events"."kind" in (
