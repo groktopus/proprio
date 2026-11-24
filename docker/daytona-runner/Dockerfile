@@ -3,7 +3,7 @@
 # Keep the Rust toolchain explicit so the runner artifact is reproducible and
 # is always built for the same platform as the final Daytona image. Base-image
 # digests are the reviewed linux/amd64 manifests; the tags are annotations.
-FROM rust:1.97-bookworm@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6 AS runnerd-build
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS runnerd-build
 
 WORKDIR /workspace/packages/proprio-runner/runner
 COPY packages/proprio-runner/runner/Cargo.toml packages/proprio-runner/runner/Cargo.lock ./
