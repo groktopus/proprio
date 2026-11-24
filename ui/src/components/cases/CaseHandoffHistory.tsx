@@ -9,6 +9,7 @@ import { IssueReferencePill } from "@/components/IssueReferencePill";
 import { Button } from "@/components/ui/button";
 import { formatDateTime, relativeTime } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import type { CaseAgentMap } from "./CaseWorkSummary";
 
 function HandoffActor({ id, name, fallback, agents }: {
@@ -94,10 +95,10 @@ function HandoffOffer({ handoff, agents }: { handoff: CaseHandoffView; agents?: 
   const titleCase = (value: string) => value.replace(/\b\w/g, character => character.toUpperCase());
   return <section className="space-y-2" aria-label="Versioned handoff offer">
     <h3 className="text-xs font-semibold">Agreed requirements</h3>
-    <p className="text-xs">Expected deliverable: {offer.expectedDeliverable}</p>
+    <p className="text-xs">Expected deliverable: <span className={ANALYTICS_MASK_CLASS}>{offer.expectedDeliverable}</span></p>
     <div className="text-xs">
       <span>Prerequisites:</span>
-      {offer.prerequisites.length ? <ul className="list-disc pl-5">{offer.prerequisites.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+      {offer.prerequisites.length ? <ul className="list-disc pl-5">{offer.prerequisites.map((item, index) => <li key={`${index}-${item}`} className={ANALYTICS_MASK_CLASS}>{item}</li>)}</ul>
         : <span className="ml-1 text-muted-foreground">None listed</span>}
     </div>
     <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
