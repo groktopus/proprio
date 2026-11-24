@@ -82,7 +82,7 @@ schema migration and its run and workspace recovery evidence remain tracked in
 ### Scheduled Linux source qualification
 
 GitHub Actions runs Linux source qualification on the default branch daily at
-05:43 UTC. The scheduled run uses the event's exact `main` SHA and the
+07:43 UTC, after the 06:23 workspace regression window starts. The scheduled run uses the event's exact `main` SHA and the
 `v0.0.1` upgrade baseline. Use **Run workflow** on `main` to repeat the
 current checkout. For a pinned candidate and predecessor, use the
 [paired SHA dispatch above](#durable-work-acceptance).

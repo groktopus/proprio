@@ -3,7 +3,7 @@ run-name: ${{ inputs.pr_number && format('PR {0} source qualification {1}', inpu
 
 on:
   schedule:
-    - cron: "43 5 * * *"
+    - cron: "43 7 * * *"
   workflow_dispatch:
     inputs:
       pr_number:
