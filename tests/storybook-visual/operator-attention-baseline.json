@@ -1,21 +1,26 @@
 {
   "version": 1,
   "baselineId": "operator-attention-test-baseline",
-  "sourceCommit": null,
-  "snapshotCount": 0,
+  "sourceCommit": "6fc0b5d18684fd99b8f532722f24e6c158f015a7",
+  "snapshotCount": 8,
   "testArtifact": {
-    "runId": null,
-    "name": null
+    "runId": 45401053926,
+    "artifactId": 14924184510,
+    "name": "operator-attention-baseline-candidate-1",
+    "retentionDays": 90
   },
   "archive": {
-    "sha256": "",
-    "byteSize": 0
+    "sha256": "5b2f4cfb4ff59ef607ba05ef0b7fa360bfdf85ed20b5df89355b5c383ebc1fd8",
+    "byteSize": 276098
   },
   "environment": {
     "platform": "ubuntu-24.04",
     "architecture": "amd64",
     "browser": "locked Playwright Chromium",
-    "viewports": ["1200x800", "390x844"],
+    "viewports": [
+      "1200x800",
+      "390x844"
+    ],
     "deviceScaleFactor": 1
   }
 }

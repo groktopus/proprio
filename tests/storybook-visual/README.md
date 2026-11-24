@@ -27,29 +27,12 @@ use the same Linux/Ubuntu capture platform as the baseline.
 
 macOS, Windows, and other non-matching local environments can produce
 false-positive diffs from font rasterization and subpixel rendering differences.
-Use the `Storybook Visual` GitHub Actions workflow on `ubuntu-latest` as the
-source of truth for cross-platform review, or run the suite locally in a matching
-Linux environment before accepting or updating baselines.
+Use the pinned Linux environment in the **Operator attention visual** workflow
+for the operator fixture set described below.
 
-## CI and Review Artifacts
-
-Storybook visual tests are opt-in while the suite stabilizes. Add the
-`storybook-visual` label to a pull request, or run the `Storybook Visual`
-workflow manually, to download the pinned baseline, build Storybook, and run the
-Playwright visual suite on GitHub Actions.
-
-The workflow uploads `tests/storybook-visual/playwright-report/` and
-`tests/storybook-visual/test-results/` as a `storybook-visual-report-*` artifact
-on every run. When screenshots differ, Playwright writes the actual, expected,
-and diff PNGs into `test-results`, so reviewers can inspect the failure without
-rerunning the suite locally.
-
-Normal PR visual runs use repository read-only permissions and never upload or
-modify baseline objects. To review intentional visual changes before updating
-`baseline-manifest.json`, run the workflow manually with `update_snapshots`
-enabled. That produces a `storybook-visual-baseline-review-*` artifact containing
-the packed candidate snapshot archive for review. Publishing that bundle to the
-baseline bucket still requires the explicit maintainer upload command below.
+The generic manifest and local commands at the top of this document support a
+separately configured archive. The repository does not ship a configured
+generic archive or a generic CI comparison workflow.
 
 ## Updating Baselines
 
@@ -71,16 +54,16 @@ The **Operator attention visual** workflow uses a fixture-backed Storybook test
 instance. It takes no production data or credentials. To capture a candidate,
 dispatch the workflow with `capture` enabled or apply the
 `storybook-baseline-capture` label to its pull request. Review the eight
-screenshots and record the exact source commit, run ID, artifact name, SHA-256,
+screenshots and record the exact source commit, run ID, artifact ID and name, SHA-256,
 byte size, and snapshot count in `operator-attention-baseline.json` through a PR.
 The candidate is retained in Actions test artifacts for 90 days. Recapture and
 review the reference before it expires.
 
-Compare using a regular dispatch or the `storybook-visual` PR label. The test
+Compare using a regular dispatch or the `operator-attention-visual` PR label. The test
 job downloads the pinned archive, verifies its checksum and count, and compares
 the four fixtures in both themes. The report retains actual, expected, and diff
-screenshots on failure. This path uses Actions test artifacts and does not
-publish to external storage.
+screenshots on failure. A deliberate reference mismatch checks that the report contains
+all three images. The reviewed reference stays in Actions test artifacts.
 
 For local reproduction on the pinned Linux environment, download the recorded
 artifact and unpack the verified archive from the repository root:

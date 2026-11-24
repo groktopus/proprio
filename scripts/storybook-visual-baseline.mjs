@@ -83,7 +83,7 @@ function usage() {
 Commands:
   download  Checksum and unpack the manifest archive. Use --archive PATH for a retained local test artifact.
   verify    Check the unpacked snapshot count and cached archive checksum.
-  pack      Create a deterministic snapshots.tgz from the snapshot dir.
+  pack      Create a deterministic snapshots.tgz. Use --test-artifact for checksum and count metadata alone.
   upload    Upload a packed archive to S3 with immutable overwrite checks.
 
 Environment:
@@ -198,6 +198,10 @@ async function pack() {
   }
   const sha256 = sha256File(out);
   const byteSize = statSync(out).size;
+  if (flags.has("test-artifact")) {
+    console.log(JSON.stringify({ snapshotCount: count, archive: { sha256, byteSize } }, null, 2));
+    return;
+  }
   const publicUrl = flags.get("public-url") ?? process.env.STORYBOOK_VISUAL_PUBLIC_URL ?? "";
   const objectKey = `baselines/storybook-visual/${sha256}/snapshots.tgz`;
   console.log(`Packed ${count} PNG snapshots into ${relative(repoRoot, out)}`);
