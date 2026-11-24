@@ -108,8 +108,9 @@ schema migration and its run and workspace recovery evidence remain tracked in
 ### Scheduled Linux source qualification
 
 GitHub Actions runs Linux source qualification on the default branch daily at
-07:43 UTC, after the 06:23 workspace regression window starts. The scheduled run uses the event's exact `main` SHA and the
-`v0.0.1` upgrade baseline. Use **Run workflow** on `main` to repeat the
+07:43 UTC. Workspace regression starts in its own 08:23 UTC window. The
+scheduled source run uses the event's exact `main` SHA and the `v0.0.1`
+upgrade baseline. Use **Run workflow** on `main` to repeat the
 current checkout. For a pinned candidate and predecessor, use the
 [paired SHA dispatch above](#durable-work-acceptance).
 
@@ -149,14 +150,16 @@ GitHub release.
 ### Workspace regression
 
 [Workspace regression](../.github/workflows/workspace-regression.yml) runs on
-the exact `main` revision selected by the daily 06:23 UTC schedule or manual
+the exact `main` revision selected by the daily 08:23 UTC schedule or manual
 dispatch. Each lane installs frozen dependencies on GitHub-hosted Ubuntu
 24.04. The workflow uses the stable test runner's existing general, chat,
-serialized, native Runner, and workspace groupings. A separate baseline job
-verifies that the CLI install, update, and server health files ran and passed.
+serialized, native Runner, and workspace groupings. The native lane builds the
+Runner package and test binaries before collecting tests. A separate baseline
+job verifies that the CLI install, update, and server health files ran and passed.
 
 Each lane retains its Vitest results, retry timings, and a summary with the
 tested SHA and counts for executed, failed, skipped, and unresolved cases.
+The summary names suites that failed before recording an assertion failure.
 A failed or incomplete required lane fails the workflow. A test that passes
 on retry is visible in the summary. Live provider journeys, real browser E2E,
 and non-Linux environments remain separate coverage. The CI maintainers

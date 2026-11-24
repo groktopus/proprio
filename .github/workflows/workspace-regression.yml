@@ -3,7 +3,7 @@ run-name: Workspace regression ${{ github.sha }}
 
 on:
   schedule:
-    - cron: "23 6 * * *"
+    - cron: "23 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -71,9 +71,11 @@ jobs:
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
           pnpm preflight:workspace-links
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps
-      - name: Build Runner test binaries
+      - name: Build the Runner package and test binaries
         if: matrix.lane == 'server-runner'
-        run: pnpm --filter @groktopus/proprio-runner run build:runner-binaries
+        run: |
+          pnpm --filter @groktopus/proprio-runner run build:typescript
+          pnpm --filter @groktopus/proprio-runner run build:runner-binaries
       - name: Execute deterministic workspace tests
         id: tests
         env:

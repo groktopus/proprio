@@ -56,3 +56,18 @@ test("records failing results without treating failed tests as skips", (t) => {
     executed: 2, failed: 1, skipped: 1, retryPasses: null, completePass: false,
   });
 });
+
+test("names suites that failed before collecting assertions", (t) => {
+  const setup = fixture(t);
+  mkdirSync(path.join(setup.root, "timings"));
+  writeFileSync(path.join(setup.root, "vitest-1.json"), JSON.stringify({
+    numTotalTests: 2, numPassedTests: 2, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0,
+    testResults: [
+      { name: path.join(setup.root, "packages/runner.test.ts"), status: "failed", assertionResults: [] },
+    ],
+  }));
+  const result = setup.run("server-runner", "success");
+  assert.equal(result.status, 1, result.stderr);
+  assert.deepEqual(setup.summary().incompleteSuites, ["packages/runner.test.ts"]);
+  assert.match(result.stdout, /Incomplete suite `packages\/runner\.test\.ts`/);
+});

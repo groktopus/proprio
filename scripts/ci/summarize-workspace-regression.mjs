@@ -8,6 +8,7 @@ if (!directory || !lane || !/^[0-9a-f]{40}$/.test(source ?? "") || !outcome) {
 mkdirSync(directory, { recursive: true });
 const reports = readdirSync(directory).filter((name) => /^vitest-\d+\.json$/.test(name));
 const counts = { passed: 0, failed: 0, skipped: 0, incomplete: 0 };
+const incompleteSuites = new Set();
 const requiredSuites = {
   "cli/src/__tests__/install-command.test.ts": null,
   "cli/src/__tests__/update-command.test.ts": null,
@@ -27,6 +28,9 @@ for (const reportName of reports) {
     counts.incomplete += Math.max(0, report.numTotalTests - values.slice(0, 4).reduce((a, b) => a + b, 0));
     for (const suite of report.testResults) {
       const name = path.relative(process.cwd(), suite.name).split(path.sep).join("/");
+      if (suite.status === "failed" && !suite.assertionResults.some(test => test.status === "failed")) {
+        incompleteSuites.add(name);
+      }
       if (!Object.hasOwn(requiredSuites, name)) continue;
       requiredSuites[name] = {
         status: suite.status,
@@ -55,10 +59,11 @@ const executed = counts.passed + counts.failed;
 const baselineIncomplete = lane === "cli-and-health-baseline" &&
   Object.values(requiredSuites).some(suite => suite?.status !== "passed" || suite.passed === 0);
 const incomplete = outcome !== "success" || executed === 0 || counts.incomplete > 0 ||
-  retryPasses === null || baselineIncomplete;
+  incompleteSuites.size > 0 || retryPasses === null || baselineIncomplete;
 const result = {
   source, lane, stepOutcome: outcome, reports: reports.length, executed,
-  ...counts, completePass: !incomplete && counts.failed === 0, retryPasses, requiredSuites,
+  ...counts, incompleteSuites: [...incompleteSuites].sort(),
+  completePass: !incomplete && counts.failed === 0, retryPasses, requiredSuites,
 };
 writeFileSync(path.join(directory, "summary.json"), JSON.stringify(result, null, 2) + "\n");
 const markdown = [
@@ -69,6 +74,7 @@ const markdown = [
   `| ${outcome} | ${executed} | ${counts.passed} | ${counts.failed} | ${counts.skipped} | ${counts.incomplete} | ${retryPasses ?? "unknown"} |`,
   "",
   ...Object.entries(requiredSuites).filter(([, result]) => result).map(([file, result]) => `- \`${file}\` · ${result.status} · ${result.passed} passed`),
+  ...result.incompleteSuites.map(file => `- Incomplete suite \`${file}\``),
   "",
   incomplete ? "Lane did not produce a complete passing result. Counts include only retained Vitest reports." : "All lane invocations completed.",
   "",
