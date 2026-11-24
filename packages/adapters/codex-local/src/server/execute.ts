@@ -292,6 +292,8 @@ type EnsureCodexSkillsInjectedOptions = {
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   managedSkillEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: string[];
+  /** Run stale-link cleanup only in the server-owned, selection-digested Codex home. */
+  reconcileUnselected?: boolean;
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
 
@@ -545,9 +547,12 @@ export async function ensureCodexSkillsInjected(
           : null;
         if (
           resolvedLinkedPath &&
-          resolvedLinkedPath !== entry.source &&
-          (await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))
+          resolvedLinkedPath !== path.resolve(entry.source)
         ) {
+          // A live symlink may belong to another active run or the operator.
+          // Repair only broken links that still have a verified Proprio path.
+          if (await pathExists(resolvedLinkedPath)) continue;
+          if (!(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))) continue;
           await fs.unlink(target);
           if (linkSkill) {
             await linkSkill(entry.source, target);
@@ -577,17 +582,19 @@ export async function ensureCodexSkillsInjected(
     }
   }
 
-  await removeUnselectedProprioSkillSymlinks(
-    skillsHome,
-    managedSkillEntries,
-    skillsEntries.map(entry => entry.runtimeName),
-  );
-  await pruneBrokenUnavailableProprioSkillSymlinks(
-    skillsHome,
-    allSkillsEntries,
-    skillsEntries.map((entry) => entry.runtimeName),
-    onLog,
-  );
+  if (options.reconcileUnselected) {
+    await removeUnselectedProprioSkillSymlinks(
+      skillsHome,
+      managedSkillEntries,
+      skillsEntries.map(entry => entry.runtimeName),
+    );
+    await pruneBrokenUnavailableProprioSkillSymlinks(
+      skillsHome,
+      allSkillsEntries,
+      skillsEntries.map((entry) => entry.runtimeName),
+      onLog,
+    );
+  }
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
@@ -874,6 +881,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(await readProprioRuntimeSkillEntries({}, __moduleDir)),
         ],
         desiredSkillNames,
+        reconcileUnselected: Boolean(runtimeSkillDigest && configuredHomeIsManaged),
       },
     );
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(

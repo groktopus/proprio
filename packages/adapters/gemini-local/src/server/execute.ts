@@ -46,8 +46,6 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
-  removeMaintainerOnlySkillSymlinks,
-  removeUnselectedProprioSkillSymlinks,
   parseObject,
   renderTemplate,
   hydrateFreshSessionHandoff,
@@ -149,7 +147,6 @@ async function ensureGeminiSkillsInjected(
   skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
   desiredSkillNames?: string[],
   skillsHome = resolveGeminiSkillsHome({}),
-  managedSkillEntries = skillsEntries,
 ): Promise<void> {
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
@@ -163,18 +160,6 @@ async function ensureGeminiSkillsInjected(
     );
     return;
   }
-  const removedSkills = await removeMaintainerOnlySkillSymlinks(
-    skillsHome,
-    selectedEntries.map((entry) => entry.runtimeName),
-  );
-  for (const skillName of removedSkills) {
-    await onLog(
-      "stderr",
-      `[proprio] Removed maintainer-only Gemini skill "${skillName}" from ${skillsHome}\n`,
-    );
-  }
-  await removeUnselectedProprioSkillSymlinks(skillsHome, managedSkillEntries, selectedEntries.map(entry => entry.runtimeName));
-
   for (const entry of selectedEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
@@ -272,7 +257,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       geminiSkillEntries.filter((entry) => !isProprioSkillSourceMissing(entry)),
       desiredGeminiSkillNames,
       resolveGeminiSkillsHome(config),
-      [...await readProprioRuntimeSkillEntries({}, __moduleDir), ...geminiSkillEntries],
     );
   }
 

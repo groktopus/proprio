@@ -93,8 +93,6 @@ import {
   selectInitialCommunicationGuidance,
   selectProprioPromptSections,
   resolveLegacyProprioDesiredSkillNames,
-  removeMaintainerOnlySkillSymlinks,
-  removeUnselectedProprioSkillSymlinks,
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapeProprioWorkspaceEnvForExecution,
   type ProprioSkillEntry,
@@ -188,7 +186,6 @@ import {
 } from "./startup-timing.js";
 
 const defaultModuleDir = path.dirname(fileURLToPath(import.meta.url));
-const PROPRIO_MANAGED_CODEX_SKILLS_MANIFEST = ".proprio-managed-skills.json";
 const BENIGN_NES_CLOSE_STDERR = /method: ['"]nes\/close['"].*-32601/;
 
 function routeChildStderr(state: ChildStderrState, chunk: string) {
@@ -1140,12 +1137,11 @@ async function buildSkillSetKey(input: {
 async function resolveSelectedRuntimeSkills(
   config: Record<string, unknown>,
   moduleDir: string,
-): Promise<{ allSkills: ProprioSkillEntry[]; selectedSkills: ProprioSkillEntry[]; desiredSkillNames: string[] }> {
+): Promise<{ selectedSkills: ProprioSkillEntry[]; desiredSkillNames: string[] }> {
   const allSkills = await readProprioRuntimeSkillEntries(config, moduleDir);
   const desiredSkillNames = resolveLegacyProprioDesiredSkillNames(config, allSkills);
   const desiredSet = new Set(desiredSkillNames);
   return {
-    allSkills,
     // Missing-source entries never mount: buildSkillSetKey hashes each
     // selected entry's path contents, and a nonexistent source would abort
     // runtime construction over one broken skill.
@@ -1175,7 +1171,7 @@ async function prepareClaudeSkillRuntime(input: {
    */
   bundleDir: string | null;
 }> {
-  const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
+  const { selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "claude" });
   const bundleRoot = path.join(input.stateDir, "runtime-skills", "claude", skillSetKey);
   const skillsHome = path.join(bundleRoot, ".claude", "skills");
@@ -1256,75 +1252,6 @@ async function prepareClaudeSkillRuntime(input: {
   };
 }
 
-async function readManagedCodexSkillsManifest(skillsHome: string): Promise<Set<string>> {
-  const manifestPath = path.join(skillsHome, PROPRIO_MANAGED_CODEX_SKILLS_MANIFEST);
-  try {
-    const raw = JSON.parse(await fs.readFile(manifestPath, "utf8")) as unknown;
-    const parsed = parseObject(raw);
-    const skills = Array.isArray(parsed.managedSkillNames)
-      ? parsed.managedSkillNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-      : [];
-    return new Set(skills);
-  } catch {
-    return new Set();
-  }
-}
-
-async function writeManagedCodexSkillsManifest(skillsHome: string, skillNames: Iterable<string>): Promise<void> {
-  const managedSkillNames = Array.from(new Set(skillNames)).sort();
-  await fs.writeFile(
-    path.join(skillsHome, PROPRIO_MANAGED_CODEX_SKILLS_MANIFEST),
-    `${JSON.stringify({ version: 1, managedSkillNames }, null, 2)}\n`,
-    "utf8",
-  );
-}
-
-async function removeSkillTarget(target: string): Promise<boolean> {
-  const existing = await fs.lstat(target).catch(() => null);
-  if (!existing) return false;
-  await fs.rm(target, { recursive: true, force: true });
-  return true;
-}
-
-async function reconcileManagedCodexSkills(input: {
-  skillsHome: string;
-  allSkills: ProprioSkillEntry[];
-  selectedSkills: ProprioSkillEntry[];
-  onLog: AdapterExecutionContext["onLog"];
-}): Promise<void> {
-  const desired = new Set(input.selectedSkills.map((entry) => entry.runtimeName));
-  const managed = await readManagedCodexSkillsManifest(input.skillsHome);
-  const availableByRuntimeName = new Map(input.allSkills.map((entry) => [entry.runtimeName, entry]));
-
-  for (const name of managed) {
-    if (desired.has(name)) continue;
-    if (await removeSkillTarget(path.join(input.skillsHome, name))) {
-      await input.onLog("stdout", `[proprio] Revoked ACPX Codex skill "${name}" from ${input.skillsHome}\n`);
-    }
-  }
-
-  for (const entry of input.allSkills) {
-    if (desired.has(entry.runtimeName) || managed.has(entry.runtimeName)) continue;
-    const target = path.join(input.skillsHome, entry.runtimeName);
-    const existing = await fs.lstat(target).catch(() => null);
-    if (!existing?.isSymbolicLink()) continue;
-    const linkedPath = await fs.readlink(target).catch(() => null);
-    if (!linkedPath) continue;
-    const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-    if (resolvedLinkedPath !== path.resolve(entry.source)) continue;
-    if (await removeSkillTarget(target)) {
-      await input.onLog("stdout", `[proprio] Revoked legacy ACPX Codex skill "${entry.runtimeName}" from ${input.skillsHome}\n`);
-    }
-  }
-
-  for (const name of managed) {
-    if (desired.has(name) || availableByRuntimeName.has(name)) continue;
-    if (await removeSkillTarget(path.join(input.skillsHome, name))) {
-      await input.onLog("stdout", `[proprio] Revoked unavailable ACPX Codex skill "${name}" from ${input.skillsHome}\n`);
-    }
-  }
-}
-
 async function prepareCodexSkillRuntime(input: {
   companyId: string;
   agentId: string;
@@ -1382,49 +1309,33 @@ async function prepareCodexSkillRuntime(input: {
       } catch { await input.onLog("stderr", "[proprio] Company observability configuration could not be prepared; execution continues without company export.\n"); }
     }
   }
-  const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
+  const { selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "codex" });
   const skillsHome = path.join(effectiveCodexHome, "skills");
   await fs.mkdir(skillsHome, { recursive: true });
-  // Step 3 — skills.reconcile: nested inside the codex-home seed (step 2), so it
-  // emits its own boundary event and span at this call-site. It must NOT add its
-  // wall time to the root work sum. The enclosing step 2 wall already covers this
-  // interval, so a second `onWallMs` call would count the same milliseconds
-  // twice. Drop `onWallMs` for the nested step; keep every other attribution
-  // field.
   const nestedStepMetrics: StartupStepMeasureOptions = {
     ...(input.stepMetrics ?? {}),
     onWallMs: undefined,
   };
-  await measureStartupStep({ onEvent: input.onEvent }, now, "skills.reconcile", () =>
-    reconcileManagedCodexSkills({
-      skillsHome,
-      allSkills,
-      selectedSkills,
-      onLog: input.onLog,
-    }),
-    nestedStepMetrics,
-  );
-
-  for (const entry of selectedSkills) {
-    const target = path.join(skillsHome, entry.runtimeName);
-    try {
-      const result = await materializeProprioSkillCopy(entry.source, target);
-      if (result.skippedSymlinks.length > 0) {
+  await measureStartupStep({ onEvent: input.onEvent }, now, "skills.reconcile", async () => {
+    for (const entry of selectedSkills) {
+      const target = path.join(skillsHome, entry.runtimeName);
+      try {
+        const result = await materializeProprioSkillCopy(entry.source, target);
+        if (result.skippedSymlinks.length > 0) {
+          await input.onLog(
+            "stdout",
+            `[proprio] Materialized ACPX Codex skill "${entry.runtimeName}" into ${skillsHome} and skipped ${result.skippedSymlinks.length} symlink(s).\n`,
+          );
+        }
+      } catch (err) {
         await input.onLog(
-          "stdout",
-          `[proprio] Materialized ACPX Codex skill "${entry.runtimeName}" into ${skillsHome} and skipped ${result.skippedSymlinks.length} symlink(s).\n`,
+          "stderr",
+          `[proprio] Failed to inject ACPX Codex skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
-    } catch (err) {
-      await input.onLog(
-        "stderr",
-        `[proprio] Failed to inject ACPX Codex skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
     }
-  }
-  await writeManagedCodexSkillsManifest(skillsHome, selectedSkills.map((entry) => entry.runtimeName));
-
+  }, nestedStepMetrics);
   input.env.CODEX_HOME = launchCodexHome;
 
   return {
@@ -1456,7 +1367,7 @@ async function prepareGeminiSkillRuntime(input: {
   moduleDir: string;
   onLog: AdapterExecutionContext["onLog"];
 }): Promise<{ identity: Record<string, unknown>; commandNotes: string[]; bundleDir: string | null }> {
-  const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
+  const { selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "gemini" });
   const skillsHome = resolveGeminiSkillsHome(input.config);
   await fs.mkdir(skillsHome, { recursive: true });
@@ -1472,13 +1383,6 @@ async function prepareGeminiSkillRuntime(input: {
       await materializeProprioSkillCopy(entry.source, path.join(bundleDir, entry.runtimeName));
     }
   }
-
-  const allowedSkillNames = selectedSkills.map((entry) => entry.runtimeName);
-  const removedSkills = await removeMaintainerOnlySkillSymlinks(skillsHome, allowedSkillNames);
-  for (const skillName of removedSkills) {
-    await input.onLog("stdout", `[proprio] Removed maintainer-only ACPX Gemini skill "${skillName}" from ${skillsHome}\n`);
-  }
-  await removeUnselectedProprioSkillSymlinks(skillsHome, allSkills, allowedSkillNames);
 
   for (const entry of selectedSkills) {
     const target = path.join(skillsHome, entry.runtimeName);

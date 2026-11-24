@@ -1814,7 +1814,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(String(meta[0]?.prompt ?? "")).toContain(`Skill root: ${skillsHome}`);
   });
 
-  it.skipIf(process.platform === "win32")("revokes removed ACPX Codex skills and skips symlinked descendants", async () => {
+  it.skipIf(process.platform === "win32")("keeps another ACPX Codex selection installed and skips symlinked descendants", async () => {
     const root = await makeTempRoot();
     const skillRoot = path.join(root, "skills");
     const outsideRoot = path.join(root, "outside");
@@ -1847,7 +1847,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(await pathExists(path.join(codexHome, "skills", keep.runtimeName, "SKILL.md"))).toBe(true);
     expect(await pathExists(path.join(codexHome, "skills", keep.runtimeName, "leak.txt"))).toBe(false);
     expect(await pathExists(path.join(codexHome, "skills", keep.runtimeName, "leak-dir"))).toBe(false);
-    expect(await pathExists(path.join(codexHome, "skills", remove.runtimeName))).toBe(false);
+    expect(await pathExists(path.join(codexHome, "skills", remove.runtimeName, "SKILL.md"))).toBe(true);
   });
 
   it.skipIf(process.platform === "win32")("keeps the operational skill in an ACPX Codex home after an empty replacement", async () => {
@@ -1893,7 +1893,7 @@ describe("shared ACPX engine runtime behavior", () => {
     }
   });
 
-  it.skipIf(process.platform === "win32")("removes legacy ACPX Codex skill symlinks when a skill is no longer desired", async () => {
+  it.skipIf(process.platform === "win32")("keeps a legacy ACPX Codex link when a later selection opts out", async () => {
     const root = await makeTempRoot();
     const skillRoot = path.join(root, "skills");
     const codexHome = path.join(root, "codex-home");
@@ -1910,7 +1910,7 @@ describe("shared ACPX engine runtime behavior", () => {
       proprioSkillSync: { desiredSkills: [] },
     });
 
-    expect(await pathExists(path.join(skillsHome, legacy.runtimeName))).toBe(false);
+    expect(await pathExists(path.join(skillsHome, legacy.runtimeName, "SKILL.md"))).toBe(true);
   });
 
   it.skipIf(process.platform === "win32")("replaces stale managed Codex auth files with source symlinks", async () => {

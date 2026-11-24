@@ -45,8 +45,6 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
-  removeMaintainerOnlySkillSymlinks,
-  removeUnselectedProprioSkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectProprioPromptSections,
@@ -97,22 +95,10 @@ async function ensurePiSkillsInjected(
   onLog: AdapterExecutionContext["onLog"],
   skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
   desiredSkillNames?: string[],
-  managedSkillEntries = skillsEntries,
 ) {
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
   await fs.mkdir(PI_AGENT_SKILLS_DIR, { recursive: true });
-  const removedSkills = await removeMaintainerOnlySkillSymlinks(
-    PI_AGENT_SKILLS_DIR,
-    selectedEntries.map((entry) => entry.runtimeName),
-  );
-  for (const skillName of removedSkills) {
-    await onLog(
-      "stderr",
-      `[proprio] Removed maintainer-only Pi skill "${skillName}" from ${PI_AGENT_SKILLS_DIR}\n`,
-    );
-  }
-  await removeUnselectedProprioSkillSymlinks(PI_AGENT_SKILLS_DIR, managedSkillEntries, selectedEntries.map(entry => entry.runtimeName));
 
   for (const entry of selectedEntries) {
     const target = path.join(PI_AGENT_SKILLS_DIR, entry.runtimeName);
@@ -279,8 +265,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const piSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
   const desiredPiSkillNames = resolveLegacyProprioDesiredSkillNames(config, piSkillEntries);
   if (!executionTargetIsRemote) {
-    await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames,
-      [...await readProprioRuntimeSkillEntries({}, __moduleDir), ...piSkillEntries]);
+    await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
   }
 
   // Build environment

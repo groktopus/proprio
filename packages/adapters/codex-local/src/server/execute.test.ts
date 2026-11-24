@@ -60,6 +60,33 @@ vi.mock("@groktopus/adapter-utils/execution-target", async () => {
 import { ensureCodexSkillsInjected, execute } from "./execute.js";
 
 describe("Codex skill reconciliation ownership", () => {
+  it("reconciles an unselected link only when the Codex home is isolated", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codex-skill-reconcile-"));
+    try {
+      const skillsHome = path.join(root, "codex", "skills");
+      const source = path.join(root, "runtime", "skills", "review");
+      await mkdir(skillsHome, { recursive: true });
+      await mkdir(source, { recursive: true });
+      await writeFile(path.join(source, "SKILL.md"), "private runtime skill\n");
+      const target = path.join(skillsHome, "review");
+      await symlink(source, target);
+      const common = {
+        skillsHome,
+        skillsEntries: [],
+        managedSkillEntries: [{ key: "review", runtimeName: "review", source }],
+        desiredSkillNames: [],
+      };
+
+      await ensureCodexSkillsInjected(async () => undefined, common);
+      expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toBe("private runtime skill\n");
+
+      await ensureCodexSkillsInjected(async () => undefined, { ...common, reconcileUnselected: true });
+      await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not unlink a live custom skill from another checkout", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "codex-skill-ownership-"));
     try {
