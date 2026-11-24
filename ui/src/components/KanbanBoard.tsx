@@ -6,7 +6,7 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
-  closestCenter,
+  rectIntersection,
   useSensor,
   useSensors,
   type DragStartEvent,
@@ -32,6 +32,7 @@ import { collectSubtreeLiveCounts } from "../lib/liveIssueIds";
 import { cn } from "../lib/utils";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { NativeSelect } from "@/components/ui/select";
 import { HorizontalScrollViewport } from "./HorizontalScrollViewport";
 
 export const KANBAN_BOARD_HIGH_VOLUME_THRESHOLD = 100;
@@ -52,6 +53,7 @@ export const boardStatuses = [
   "done",
   "cancelled",
 ] as const satisfies readonly IssueDisplayStatus[];
+const editableStatuses = boardStatuses.filter((status) => status !== "monitoring");
 
 const defaultKanbanColumnTone = {
   rail: "border-border bg-muted/20",
@@ -181,6 +183,8 @@ function KanbanColumn({
   onShowMore,
   onStatusChange,
   onKeyboardMove,
+  onKeyboardCancel,
+  onMoveActivate,
   moveButtonRef,
 }: {
   status: IssueDisplayStatus;
@@ -195,6 +199,8 @@ function KanbanColumn({
   onShowMore: () => void;
   onStatusChange: (id: string, status: IssueStatus) => void;
   onKeyboardMove: (event: KeyboardEvent<HTMLButtonElement>, issue: Issue) => void;
+  onKeyboardCancel?: (issue: Issue) => void;
+  onMoveActivate?: (issue: Issue) => void;
   moveButtonRef: (id: string, element: HTMLButtonElement | null) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status === "monitoring" });
@@ -261,6 +267,8 @@ function KanbanColumn({
               className={tone.card}
               onStatusChange={onStatusChange}
               onKeyboardMove={onKeyboardMove}
+              onKeyboardCancel={(issue) => onKeyboardCancel?.(issue)}
+              onMoveActivate={(issue) => onMoveActivate?.(issue)}
               moveButtonRef={(element) => moveButtonRef(issue.id, element)}
             />
           ))}
@@ -296,6 +304,8 @@ function KanbanCard({
   className,
   onStatusChange,
   onKeyboardMove,
+  onKeyboardCancel,
+  onMoveActivate,
   moveButtonRef,
 }: {
   issue: Issue;
@@ -307,6 +317,8 @@ function KanbanCard({
   className?: string;
   onStatusChange?: (id: string, status: IssueStatus) => void;
   onKeyboardMove?: (event: KeyboardEvent<HTMLButtonElement>, issue: Issue) => void;
+  onKeyboardCancel?: (issue: Issue) => void;
+  onMoveActivate?: (issue: Issue) => void;
   moveButtonRef?: (element: HTMLButtonElement | null) => void;
 }) {
   const {
@@ -322,6 +334,12 @@ function KanbanCard({
     transform: CSS.Transform.toString(transform),
     transition,
   };
+
+  if (isOverlay) {
+    return <Card className={cn("p-2.5 shadow-lg", className)} style={style} aria-hidden="true">
+      <p className="text-sm leading-snug line-clamp-2">{issue.title}</p>
+    </Card>;
+  }
 
   const agentName = (id: string | null) => {
     if (!id || !agents) return null;
@@ -348,6 +366,8 @@ function KanbanCard({
           {...attributes}
           {...listeners}
           onKeyDown={(event) => onKeyboardMove?.(event, issue)}
+          onClick={() => onMoveActivate?.(issue)}
+          onBlur={() => onKeyboardCancel?.(issue)}
           className="shrink-0 cursor-grab rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
           aria-label={`Move task ${issue.title}`}
           title="Move task with arrow keys"
@@ -413,15 +433,15 @@ function KanbanCard({
         </div>
       </Link>
       <label className="sr-only" htmlFor={`kanban-status-${issue.id}`}>Change status for {issue.title}</label>
-      <select
+      <NativeSelect
         id={`kanban-status-${issue.id}`}
         value={issue.status}
         aria-label={`Change status for ${issue.title}`}
         className="mt-2 min-h-9 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onChange={(event) => onStatusChange?.(issue.id, event.target.value as IssueStatus)}
       >
-        {boardStatuses.filter((status) => status !== "monitoring").map((status) => (
-          <option key={status} value={status}>{statusLabel(status)}</option>
+        {boardStatuses.map((status) => (
+          <option key={status} value={status} disabled={status === "monitoring"}>{statusLabel(status)}</option>
         ))}
       </select>
     </Card>
@@ -446,6 +466,8 @@ export function KanbanBoard({
   const moveButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [focusIssueId, setFocusIssueId] = useState<string | null>(null);
   const [keyboardMove, setKeyboardMove] = useState<{ issueId: string; targetIndex: number } | null>(null);
+  const pendingAnnouncement = useRef<{ issueId: string; targetStatus: IssueStatus; title: string } | null>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
   const paginationKey = `${initialVisibleCount}:${revealIncrement}`;
   const [visibleState, setVisibleState] = useState<{
     paginationKey: string;
@@ -501,8 +523,8 @@ export function KanbanBoard({
     const targetStatus = resolveKanbanTargetStatus(over.id as string, issues);
 
     if (targetStatus && targetStatus !== issue.status) {
+      pendingAnnouncement.current = { issueId, targetStatus, title: issue.title };
       onUpdateIssue(issueId, { status: targetStatus });
-      setMovementAnnouncement(`${issue.title} moved to ${statusLabel(targetStatus)}`);
       setFocusIssueId(issueId);
     }
   }
@@ -512,6 +534,7 @@ export function KanbanBoard({
     const issueId = focusIssueId;
     const frame = requestAnimationFrame(() => {
       moveButtonRefs.current[issueId]?.focus();
+      if (!moveButtonRefs.current[issueId]) boardRef.current?.focus();
       setFocusIssueId((current) => current === issueId ? null : current);
     });
     return () => cancelAnimationFrame(frame);
@@ -519,16 +542,17 @@ export function KanbanBoard({
 
   function handleStatusChange(id: string, status: IssueStatus) {
     const issue = issues.find((candidate) => candidate.id === id);
-    if (!issue || issue.status === status) return;
+    if (!issue || status === "monitoring" || issue.status === status) return;
+    pendingAnnouncement.current = { issueId: id, targetStatus: status, title: issue.title };
     onUpdateIssue(id, { status });
-    setMovementAnnouncement(`${issue.title} moved to ${statusLabel(status)}`);
+    setFocusIssueId(id);
   }
 
   function handleKeyboardMove(event: React.KeyboardEvent<HTMLButtonElement>, issue: Issue) {
     if (event.key !== " " && event.key !== "Enter" && event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
-    const statuses = boardStatuses.filter((status) => status !== "monitoring");
+    const statuses = editableStatuses;
     const currentIndex = statuses.indexOf(issue.status as typeof statuses[number]);
     if (currentIndex < 0) return;
     const activeMove = keyboardMove?.issueId === issue.id ? keyboardMove : null;
@@ -558,6 +582,22 @@ export function KanbanBoard({
     }
   }
 
+  function handleMoveActivate(issue: Issue) {
+    const currentIndex = editableStatuses.indexOf(issue.status as typeof editableStatuses[number]);
+    if (currentIndex < 0) return;
+    setKeyboardMove({ issueId: issue.id, targetIndex: currentIndex });
+    setMovementAnnouncement(`Use arrow keys to choose a column for ${issue.title}`);
+  }
+
+  useEffect(() => {
+    const pending = pendingAnnouncement.current;
+    if (!pending) return;
+    const issue = issues.find((candidate) => candidate.id === pending.issueId);
+    if (!issue || (issue.displayStatus ?? issue.status) !== pending.targetStatus) return;
+    pendingAnnouncement.current = null;
+    setMovementAnnouncement(`${pending.title} moved to ${statusLabel(pending.targetStatus)}`);
+  }, [issues]);
+
   function handleDragOver(_event: DragOverEvent) {
     // Could be used for visual feedback; keeping simple for now
   }
@@ -583,17 +623,20 @@ export function KanbanBoard({
       }}
       onStatusChange={handleStatusChange}
       onKeyboardMove={handleKeyboardMove}
+      onKeyboardCancel={(issue) => setKeyboardMove((current) => current?.issueId === issue.id ? null : current)}
+      onMoveActivate={handleMoveActivate}
       moveButtonRef={(id, element) => { moveButtonRefs.current[id] = element; }}
     />
   ));
 
   return (
+    <div ref={boardRef} tabIndex={-1} data-kanban-board>
     <DndContext
       sensors={sensors}
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
-      collisionDetection={closestCenter}
+      collisionDetection={rectIntersection}
     >
       {showOverflowFades
         ? <HorizontalScrollViewport label="Task board columns" contentClassName="flex gap-3 pb-4 px-2">{columns}</HorizontalScrollViewport>
@@ -605,5 +648,6 @@ export function KanbanBoard({
         ) : null}
       </DragOverlay>
     </DndContext>
+    </div>
   );
 }
