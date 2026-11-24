@@ -2931,7 +2931,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     assertBoardOrAgent(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string);
+    const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string, req.actor);
     const visible = await filterReadableDecisionTasks(db, req.actor, companyId, result.decisions);
     const decisions = await filterConnectionManagementRows(db, req, "connections:audit", visible,
       row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId }));

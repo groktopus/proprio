@@ -19998,7 +19998,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
-  it("projects pinned native runtime evidence without returning the execution descriptor", async () => {
+  it("fails closed for malformed native runtime evidence", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
     const runId = randomUUID();
@@ -20032,16 +20032,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
 
     const lookup = await createTestToolAccessService(db).getRunDecisionLookup(company.id, runId);
-    expect(lookup.runtimeProvenance).toEqual({
-      source: "native_admission",
-      provider: "codex",
-      model: "fixture-compatible-model",
-      driverKind: "codex_app_server",
-      driverVersion: "fixture-driver",
-      runtimeContextDigest: contextDigest,
-      mcpAssignmentDigest: assignmentDigest,
-      skills: [{ key: "fixture/skill", versionId: "fixture-version-1", bundleDigest: skillDigest }],
-    });
+    expect(lookup.runtimeProvenance).toEqual({ source: "unknown" });
     expect(JSON.stringify(lookup)).not.toMatch(/fixture-secret|fixture-prompt|fixture-binding|private\/path/);
   });
 
