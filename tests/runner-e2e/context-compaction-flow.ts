@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { expect, type Page } from "@playwright/test";
 import { pollUntil, type RunnerApi } from "./api.js";
 import { chatQuestionPresentation } from "./chat-flow.js";
-import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE, COMPACTION_FIXTURE_DIGEST, COMPACTION_PROMPT, compactionRequirements } from "./context-compaction-case.js";
+import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE, COMPACTION_FIXTURE_DIGEST, COMPACTION_PROMPT, compactionRequirements, configureContextCompactionBudgets } from "./context-compaction-case.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
 import type { LiveFixtureValues } from "./live-fixtures.js";
 import { isBoundNativePrpEventRow } from "./native-event-envelope.js";
@@ -141,8 +141,7 @@ export async function runContextCompactionFlow(input: {
   }
 
   await api.patch("/api/instance/settings/experimental", { enableClassicTaskInterface: false });
-  await api.patch(`${companyPath}/budgets`, { budgetMonthlyCents: COMPACTION_BUDGET_CENTS });
-  await api.patch(`/api/agents/${fixtures.agent.id}/budgets`, { budgetMonthlyCents: COMPACTION_BUDGET_CENTS });
+  await configureContextCompactionBudgets(api, fixtures.company.id, fixtures.agent.id, execution.profile.credential);
   await runLane("control");
   await runLane("treatment");
   const verdict = gradeContextCompactionPair({ control: observed.get("control")!, treatment: observed.get("treatment")!,

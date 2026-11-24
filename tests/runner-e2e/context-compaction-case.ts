@@ -1,7 +1,21 @@
 import { createHash } from "node:crypto";
-import type { RunnerTaskFixture } from "./types.js";
+import type { RunnerApi } from "./api.js";
+import type { RunnerProfileFixture, RunnerTaskFixture } from "./types.js";
 
 export const COMPACTION_BUDGET_CENTS = 1_000;
+
+export async function configureContextCompactionBudgets(
+  api: Pick<RunnerApi, "post">, companyId: string, agentId: string, credential: RunnerProfileFixture["credential"],
+) {
+  // Codex subscription turns may report usage without a reliable dollar price.
+  const unpricedUsagePolicy = credential === "CODEX_AUTH_JSON" ? "allow" : "block";
+  for (const scope of [{ scopeType: "company", scopeId: companyId }, { scopeType: "agent", scopeId: agentId }] as const) {
+    await api.post(`/api/companies/${companyId}/budgets/policies`, {
+      ...scope, amount: COMPACTION_BUDGET_CENTS, hardStopEnabled: true, isActive: true, unpricedUsagePolicy,
+    });
+  }
+}
+
 export const COMPACTION_FIXTURE = {
   retainedMarker: "keep-amber",
   supersededFormat: "obsolete-v1",

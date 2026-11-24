@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runnerMatrix } from "./catalog.js";
+import { configureContextCompactionBudgets } from "./context-compaction-case.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
 
 const fixture = { retainedMarker: "keep-amber", activeFormat: "current-v2", supersededFormat: "obsolete-v1", releaseCode: "EMBER-72" };
@@ -31,6 +32,19 @@ function pair() {
 }
 
 describe("paired Codex context compaction oracle", () => {
+  it.each([["OPENAI_API_KEY", "block"], ["CODEX_AUTH_JSON", "allow"]] as const)(
+    "keeps both priced-spend hard stops for %s and sets the unpriced usage policy to %s",
+    async (credential, unpricedUsagePolicy) => {
+      const post = vi.fn();
+      await configureContextCompactionBudgets({ post }, "fixture-company", "fixture-agent", credential);
+      const policy = { amount: 1_000, hardStopEnabled: true, isActive: true, unpricedUsagePolicy };
+      expect(post.mock.calls).toEqual([
+        ["/api/companies/fixture-company/budgets/policies", { ...policy, scopeType: "company", scopeId: "fixture-company" }],
+        ["/api/companies/fixture-company/budgets/policies", { ...policy, scopeType: "agent", scopeId: "fixture-agent" }],
+      ]);
+    },
+  );
+
   it("registers explicit local Codex pairs for API and subscription authentication", () => {
     const cells = runnerMatrix.filter(cell => cell.suite.id === "context-compaction");
     expect(cells.map(cell => [cell.id, cell.requiredCredentials])).toEqual([
