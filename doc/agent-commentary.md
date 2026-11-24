@@ -15,20 +15,29 @@ skill. The shared helper lives in that operational skill at
 existing `PROPRIO_API_URL`, `PROPRIO_API_KEY`, `PROPRIO_COMPANY_ID`, and
 `PROPRIO_RUN_ID`. The helper uses the existing Node.js runtime with no
 additional dependencies; custom runtimes can call HTTP directly. Sandboxed
-runs use the callback bridge.
+runs use the callback bridge. The legacy HTTP submission route accepts a new
+record only when the matching skill is selected in the saved agent config and
+was present in the run's pinned skill selection. Direct HTTP calls do not
+bypass agent opt-in or the legacy runtime skill policy. Replaying an existing
+idempotency receipt remains available after opt-in is removed.
 
 Earlier releases mounted both feedback skills for skill-capable legacy agents
 by default. After upgrading, agents need an explicit selection to receive them;
-existing commentary records remain available through the same company-scoped
-inspection API and Audit → Commentary page. The app continues to ship the skills
-and helper.
+the next legacy execution removes Proprio-managed feedback links or copies that
+are no longer selected. This does not delete saved commentary records, which
+remain available through the same company-scoped inspection API and Audit →
+Commentary page. The app continues to ship the skills and helper.
 
 Native runs expose `submit_complaint({body, idempotencyKey})` in standard, ask,
 and planning modes when `complain` is selected, and expose
 `submit_suggestion({body, idempotencyKey})` when `suggestion-box` is selected.
-Specialized completion-review runs retain their restricted tool set. Native
-submission uses the bound authority without a shell or API credential. Once
-enabled, agents may submit through the same company-scoped store.
+The saved agent selection and the pinned runtime context must both include the
+matching skill; task-scoped mentions cannot opt an agent in. Specialized
+completion-review runs retain their restricted tool set. Native submission
+uses the bound authority without a shell or API credential. Once enabled,
+agents may submit through the same company-scoped store. Native runs using
+`homeMode: "preconfigured"` do not stage assigned skill files, so these
+skill-backed commentary tools remain unavailable in that mode.
 
 Instructions closely adapt Warp's
 [complain](https://github.com/warpdotdev/common-skills/blob/main/.agents/skills/complain/SKILL.md)

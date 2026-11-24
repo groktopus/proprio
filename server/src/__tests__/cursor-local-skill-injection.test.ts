@@ -70,6 +70,28 @@ describe("cursor local adapter skill injection", () => {
     expect((await fs.lstat(path.join(skillsHome, "proprio-create-agent"))).isSymbolicLink()).toBe(true);
   });
 
+  it("removes only stale Proprio skill links after selection is revoked", async () => {
+    const skillsDir = await makeTempDir("proprio-cursor-revoke-src-");
+    const skillsHome = await makeTempDir("proprio-cursor-revoke-home-");
+    const external = await makeTempDir("proprio-cursor-external-");
+    cleanupDirs.add(skillsDir); cleanupDirs.add(skillsHome); cleanupDirs.add(external);
+    await createSkillDir(skillsDir, "proprio");
+    await createSkillDir(skillsDir, "complain");
+    await createSkillDir(external, "suggestion-box");
+    await fs.symlink(path.join(skillsDir, "complain"), path.join(skillsHome, "complain"));
+    await fs.symlink(path.join(external, "suggestion-box"), path.join(skillsHome, "suggestion-box"));
+
+    await ensureCursorSkillsInjected(async () => {}, {
+      skillsEntries: ["proprio", "complain"].map(name => ({ key: name, runtimeName: name, source: path.join(skillsDir, name) })),
+      desiredSkillNames: ["proprio"],
+      skillsHome,
+    });
+
+    await expect(fs.lstat(path.join(skillsHome, "complain"))).rejects.toThrow();
+    expect((await fs.lstat(path.join(skillsHome, "suggestion-box"))).isSymbolicLink()).toBe(true);
+    expect((await fs.lstat(path.join(skillsHome, "proprio"))).isSymbolicLink()).toBe(true);
+  });
+
   it("logs per-skill link failures and continues without throwing", async () => {
     const skillsDir = await makeTempDir("proprio-cursor-fail-src-");
     const skillsHome = await makeTempDir("proprio-cursor-fail-home-");

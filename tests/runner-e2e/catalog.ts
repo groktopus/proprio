@@ -4,6 +4,7 @@ import { CHAT_NATIVE_TIMEOUT_POLICY } from "./chat-native-timeout-policy.js";
 import { CHAT_SETUP_HEALTH_SUITE, chatSetupHealthTask, chatSetupHealthDigest } from "./chat-setup-health.js";
 import { CHAT_OPENCODE_MODEL, CHAT_OPENCODE_PROFILE } from "./chat-runtime-profile.js";
 import { FEEDBACK_PERSISTENCE_SUITE, feedbackPersistenceTask, feedbackPersistenceDigest } from "./feedback-persistence.js";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "../../packages/adapter-utils/src/server-utils.js";
 import { followupStopTask, followupStopDigest } from "./followup-stop-resume.js";
 import { finalizationRecoveryTask, finalizationRecoveryDigest } from "./finalization-recovery.js";
 import { necessaryQuestionTask, necessaryQuestionDigest } from "./necessary-question.js";
@@ -1065,6 +1066,13 @@ export const daytonaLargeJournalTask: RunnerTaskFixture = {
 };
 export const daytonaGitStreamingTask = createGitStreamingTask({ ...daytonaWarmContinuityTask, buildPrompt: nonce => warmTurnInstructions(1, nonce), buildFollowupMessages: nonce => [warmTurnInstructions(2, nonce), warmTurnInstructions(3, nonce)] });
 
+const feedbackPersistenceProfiles = runnerProfiles.filter(profile => ["runner-codex", "runner-acpx-claude"].includes(profile.id))
+  .map(profile => ({ ...profile, buildAgent(input: AgentFixtureBuildInput) {
+    const agent = profile.buildAgent(input);
+    return { ...agent, adapterConfig: { ...(agent.adapterConfig as Record<string, unknown> ?? {}),
+      proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } } };
+  } }));
+
 const codexContinuityProfiles = runnerProfiles.filter((profile) =>
   ["legacy-codex", "runner-codex"].includes(profile.id),
 );
@@ -2002,7 +2010,7 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     id: FEEDBACK_PERSISTENCE_SUITE, label: "Feedback Persistence", manualOnly: true,
     description: "Real complaint and suggestion submissions, durable bodies, and retained tool receipts.",
     groups: ["native"],
-    profiles: runnerProfiles.filter(profile => ["runner-codex", "runner-acpx-claude"].includes(profile.id)),
+    profiles: feedbackPersistenceProfiles,
     environments: runnerEnvironments, tasks: [feedbackPersistenceTask(runnerTasks.find(task => task.id === "message-marker")!)], expectedMatrixSize: 4,
     definitionMetadata: { version: 2, owner: "runner-e2e-maintainers", scheduling: "explicit-only",
       sourceDigest: feedbackPersistenceDigest(runnerTasks.find(task => task.id === "message-marker")!), expectedWorkRuns: 1, automaticRetryPolicy: "single_attempt",

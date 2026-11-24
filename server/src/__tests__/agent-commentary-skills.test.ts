@@ -22,7 +22,7 @@ describe("operator-selected feedback skill delivery", () => {
     for (const [adapterType, list] of [["codex_local", listCodexSkills], ["claude_local", listClaudeSkills]] as const) {
       const snapshot = await list({ agentId: "agent", companyId: "company", adapterType, config });
       expect(snapshot.desiredSkills).toContain(keys[0]);
-      expect(snapshot.desiredSkills).not.toEqual(expect.arrayContaining(keys.slice(1)));
+      for (const feedbackKey of keys.slice(1)) expect(snapshot.desiredSkills).not.toContain(feedbackKey);
     }
   });
 

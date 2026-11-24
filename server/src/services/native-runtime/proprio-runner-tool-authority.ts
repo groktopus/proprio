@@ -38,6 +38,7 @@ import { executeAgentInstructionTool } from "./agent-instruction-tools.js";
 import { createReadStream } from "node:fs";
 import { publicChatTaskUrl } from "../chat-task-url.js";
 import { agentCommentaryToolInputSchema } from "@groktopus/shared";
+import { PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY } from "@groktopus/adapter-utils/server-utils";
 import { submitAgentCommentary } from "../agent-commentary.js";
 import { sendAgentChatMessage } from "../agent-chat-messages.js";
 import type { createAssignedMcpTools } from "./assigned-mcp-tools.js";
@@ -152,8 +153,8 @@ import { logger } from "../../middleware/logger.js";
 const ARTIFACT_STORAGE_READ_TIMEOUT_MS = 60_000;
 const EXTERNAL_WORKSPACE_OPERATIONS = new Set(["get_workspace", "list_workspaces", "select_workspace", "prepare_repository", "register_deliverable"]);
 const PROACTIVE_COMMENTARY_SKILL_FOR_TOOL = {
-  submit_complaint: "groktopus/proprio/complain",
-  submit_suggestion: "groktopus/proprio/suggestion-box",
+  submit_complaint: PROPRIO_COMPLAIN_SKILL_KEY,
+  submit_suggestion: PROPRIO_SUGGESTION_BOX_SKILL_KEY,
 } as const;
 const IMPLEMENTED_OPERATIONS = new Set([
   "send_chat_message",
@@ -258,6 +259,8 @@ type Binding = {
   /** Operator-approved Dot attachment access, pinned when the turn opens. */
   taskAttachmentRead?: boolean;
   runtimeContext?: NativeRuntimeContextSnapshot;
+  /** Agent-level feedback opt-in captured before task-scoped skills are merged. */
+  proactiveCommentarySkillKeys?: string[];
   assertBridgeAuthority?: (database?: Db) => Promise<void>;
   executionTargetKind?: "local" | "remote";
   readRemoteWorkspaceFile?: RemoteWorkspaceFileReader;
@@ -423,8 +426,9 @@ export class ProprioRunnerToolAuthority {
         (descriptor) =>
           IMPLEMENTED_OPERATIONS.has(descriptor.operationId) &&
           (!(descriptor.operationId in PROACTIVE_COMMENTARY_SKILL_FOR_TOOL) ||
-            this.binding.runtimeContext?.skills.some(skill =>
-              skill.key === PROACTIVE_COMMENTARY_SKILL_FOR_TOOL[descriptor.operationId as keyof typeof PROACTIVE_COMMENTARY_SKILL_FOR_TOOL]) === true) &&
+            (this.binding.proactiveCommentarySkillKeys?.includes(PROACTIVE_COMMENTARY_SKILL_FOR_TOOL[descriptor.operationId as keyof typeof PROACTIVE_COMMENTARY_SKILL_FOR_TOOL]) === true
+              && this.binding.runtimeContext?.skills.some(skill =>
+                skill.key === PROACTIVE_COMMENTARY_SKILL_FOR_TOOL[descriptor.operationId as keyof typeof PROACTIVE_COMMENTARY_SKILL_FOR_TOOL]) === true)) &&
           (!(descriptor.operationId === "handoff_case" || NATIVE_CASE_OPERATIONS.has(descriptor.operationId)) || this.binding.casesEnabled === true) &&
           (!isResponsibilityTool(descriptor.operationId) || this.binding.responsibilitiesEnabled === true) &&
           (!this.binding.firstPartyOnly || !EXTERNAL_WORKSPACE_OPERATIONS.has(descriptor.operationId)) &&

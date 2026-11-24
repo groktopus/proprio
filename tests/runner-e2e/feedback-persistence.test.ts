@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { expectedFixtureFeedback, feedbackPersistenceDigest, gradeFeedbackPersistence } from "./feedback-persistence.js";
 import { runnerMatrix, runnerTasks, suiteDefinitionHash } from "./catalog.js";
 import { parseRunnerSelectors, selectRunnerExecutions } from "./selectors.js";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "../../packages/adapter-utils/src/server-utils.js";
 
 function fixture() {
   const nonce = "fixture-nonce", bodies = expectedFixtureFeedback(nonce);
@@ -65,6 +66,13 @@ describe("feedback persistence oracle", () => {
     ]);
     expect(selected.every(execution => execution.task.automaticRetryPolicy === "single_attempt")).toBe(true);
     expect(selected.every(execution => execution.task.attemptTimeoutMs.local === 5 * 60_000)).toBe(true);
+    for (const execution of selected) {
+      const agent = execution.profile.buildAgent({ environmentId: "environment", environmentFixtureId: execution.environment.id,
+        workspacePath: "/tmp/workspace", secretRefs: { [execution.profile.credential]: { type: "secret_ref",
+          secretId: "22222222-2222-4222-8222-222222222222", version: "latest" } }, executionId: execution.id });
+      expect((agent.adapterConfig as { proprioSkillSync: { desiredSkills: string[] } }).proprioSkillSync.desiredSkills)
+        .toEqual([...PROPRIO_FEEDBACK_SKILL_KEYS]);
+    }
     for (const execution of selected.filter(entry => entry.environment.id === "daytona")) {
       expect(execution.requiredCredentials).toEqual(expect.arrayContaining([execution.profile.credential, "DAYTONA_API_KEY"]));
       expect(execution.requiredCredentials).toHaveLength(2);

@@ -94,6 +94,7 @@ import {
   selectProprioPromptSections,
   resolveLegacyProprioDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
+  removeUnselectedProprioSkillSymlinks,
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapeProprioWorkspaceEnvForExecution,
   type ProprioSkillEntry,
@@ -1453,7 +1454,7 @@ async function prepareGeminiSkillRuntime(input: {
   moduleDir: string;
   onLog: AdapterExecutionContext["onLog"];
 }): Promise<{ identity: Record<string, unknown>; commandNotes: string[] }> {
-  const { selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
+  const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "gemini" });
   const skillsHome = resolveGeminiSkillsHome(input.config);
   await fs.mkdir(skillsHome, { recursive: true });
@@ -1463,6 +1464,7 @@ async function prepareGeminiSkillRuntime(input: {
   for (const skillName of removedSkills) {
     await input.onLog("stdout", `[proprio] Removed maintainer-only ACPX Gemini skill "${skillName}" from ${skillsHome}\n`);
   }
+  await removeUnselectedProprioSkillSymlinks(skillsHome, allSkills, allowedSkillNames);
 
   for (const entry of selectedSkills) {
     const target = path.join(skillsHome, entry.runtimeName);

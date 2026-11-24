@@ -4339,10 +4339,10 @@ export function resolveProprioDesiredSkillNames(
 export const PROPRIO_OPERATIONAL_SKILL_KEY =
   "groktopus/proprio/proprio";
 
-export const PROPRIO_FEEDBACK_SKILL_KEYS = [
-  "groktopus/proprio/complain",
-  "groktopus/proprio/suggestion-box",
-] as const;
+export const PROPRIO_COMPLAIN_SKILL_KEY = "groktopus/proprio/complain";
+export const PROPRIO_SUGGESTION_BOX_SKILL_KEY = "groktopus/proprio/suggestion-box";
+export const PROPRIO_FEEDBACK_SKILL_KEYS = [PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY] as const;
+export const PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY = "agentProactiveCommentarySkillKeys";
 
 /**
  * Native Proprio Runner sessions receive the control-plane contract through
@@ -4769,6 +4769,27 @@ export async function removeMaintainerOnlySkillSymlinks(
   } catch {
     return [];
   }
+}
+
+/** Remove only symlinks that still point at known Proprio skill sources. */
+export async function removeUnselectedProprioSkillSymlinks(
+  skillsHome: string,
+  availableEntries: Array<{ runtimeName: string; source: string }>,
+  selectedSkillNames: Iterable<string>,
+): Promise<string[]> {
+  const selected = new Set(selectedSkillNames);
+  const sources = new Map(availableEntries.map(entry => [entry.runtimeName, path.resolve(entry.source)]));
+  const entries = await fs.readdir(skillsHome, { withFileTypes: true }).catch(() => []);
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (selected.has(entry.name) || !entry.isSymbolicLink()) continue;
+    const target = path.join(skillsHome, entry.name);
+    const linkedPath = await fs.readlink(target).catch(() => null);
+    if (!linkedPath || path.resolve(path.dirname(target), linkedPath) !== sources.get(entry.name)) continue;
+    await fs.unlink(target);
+    removed.push(entry.name);
+  }
+  return removed;
 }
 
 export async function ensureCommandResolvable(

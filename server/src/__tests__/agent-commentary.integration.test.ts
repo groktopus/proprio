@@ -20,6 +20,7 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { agentService } from "../services/agents.js";
 import { companyService } from "../services/companies.js";
 import { NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS } from "../lib/agent-permissions.js";
+import { PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY, PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 
 describe("internal agent commentary through both transports", () => {
   let server: Awaited<ReturnType<typeof startRunnerApiTestServer>>;
@@ -41,10 +42,15 @@ describe("internal agent commentary through both transports", () => {
   type Fixture = Awaited<ReturnType<typeof server.fixture>>;
   const input = { body: "The tool returned success before the write finished. Please wait for persistence.", idempotencyKey: "one" };
   const rows = (f: Fixture) => server.db.select().from(agentCommentary).where(eq(agentCommentary.runId, f.runId));
-  async function legacy() {
+  async function legacy(options: { optIn?: boolean } = {}) {
     const f = await server.fixture();
     await server.db.update(heartbeatRuns).set({ runtimeMode: "legacy", nativeIssueId: null }).where(eq(heartbeatRuns.id, f.runId));
-    await server.db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+    await server.db.update(agents).set({ adapterType: "codex_local", adapterConfig: options.optIn === false ? {} : {
+      proprioSkillSync: { desiredSkills: [PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY] },
+    } }).where(eq(agents.id, f.agentId));
+    if (options.optIn !== false) await server.db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({
+      skillVersions: { [PROPRIO_COMPLAIN_SKILL_KEY]: randomUUID(), [PROPRIO_SUGGESTION_BOX_SKILL_KEY]: randomUUID() },
+    })}::jsonb` }).where(eq(heartbeatRuns.id, f.runId));
     return { ...f, token: createLocalAgentJwt(f.agentId, f.companyId, "codex_local", f.runId)! };
   }
   async function post(f: Fixture & { token: string }, value: unknown, companyId = f.companyId) {
@@ -63,8 +69,23 @@ describe("internal agent commentary through both transports", () => {
     expect(await rows(f)).toHaveLength(1);
   });
 
+  it("requires legacy agent opt-in for new writes while preserving prior receipt replay", async () => {
+    const f = await legacy();
+    const original = await post(f, { ...input, kind: "complaint" });
+    expect(original.status).toBe(201);
+    const [agent] = await server.db.select().from(agents).where(eq(agents.id, f.agentId));
+    await server.db.update(agents).set({ adapterConfig: { ...agent.adapterConfig, proprioSkillSync: { desiredSkills: [] } } })
+      .where(eq(agents.id, f.agentId));
+
+    const replay = await post(f, { ...input, kind: "complaint" });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ replayed: true });
+    expect((await post(f, { ...input, kind: "complaint", idempotencyKey: "disabled-new-write" })).status).toBe(403);
+    expect(await rows(f)).toHaveLength(1);
+  });
+
   it.each(["standard", "ask", "planning"] as const)("exposes native feedback in %s and persists only feedback plus a content-free audit", async (mode) => {
-    const f = await server.fixture({ mode });
+    const f = await server.fixture({ mode, proactiveCommentarySkills: [PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY] });
     const authority = new ProprioRunnerToolAuthority(server.db, { ...f, workMode: mode });
     expect(authority.definitions().map(t => t.name)).toEqual(expect.arrayContaining(["submit_complaint", "submit_suggestion"]));
     const before = await f.snapshot();
@@ -88,7 +109,7 @@ describe("internal agent commentary through both transports", () => {
   });
 
   it("deduplicates concurrent replay, rejects changed content, and imposes no suggestion quota", async () => {
-    const f = await server.fixture();
+    const f = await server.fixture({ proactiveCommentarySkills: [PROPRIO_SUGGESTION_BOX_SKILL_KEY] });
     const submit = (args = input) => f.authority.execute({ tool: "submit_suggestion", callId: randomUUID(), arguments: args });
     const results = await Promise.all([submit(), submit(), submit()]) as Array<{ id: string; replayed: boolean }>;
     expect(new Set(results.map(r => r.id)).size).toBe(1);
@@ -167,7 +188,7 @@ describe("internal agent commentary through both transports", () => {
   });
 
   it("rejects native spoofing and paused agents without changing task state", async () => {
-    const f = await server.fixture();
+    const f = await server.fixture({ proactiveCommentarySkills: [PROPRIO_COMPLAIN_SKILL_KEY] });
     await expect(f.authority.execute({ tool: "submit_complaint", callId: "spoof", arguments: { ...input, kind: "suggestion" } })).rejects.toThrow(/accepts only/);
     await server.db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
     await expect(f.authority.execute({ tool: "submit_complaint", callId: "paused", arguments: input })).rejects.toThrow(/not_authorized/);
@@ -201,7 +222,7 @@ describe("internal agent commentary through both transports", () => {
     const token = `pcp_${randomUUID()}`;
     await server.db.insert(agentApiKeys).values({ companyId: f.companyId, agentId: f.agentId, name: "revoked", keyHash: createHash("sha256").update(token).digest("hex"), revokedAt: new Date() });
     expect((await post({ ...f, token }, { ...input, kind: "complaint" })).status).toBe(401);
-    const native = await server.fixture();
+    const native = await server.fixture({ proactiveCommentarySkills: [PROPRIO_SUGGESTION_BOX_SKILL_KEY] });
     const replacementId = randomUUID();
     await server.db.insert(heartbeatRuns).values({ id: replacementId, companyId: native.companyId, agentId: native.agentId, status: "running", invocationSource: "on_demand" });
     await server.db.update(issues).set({ executionRunId: replacementId }).where(eq(issues.id, native.issueId));
@@ -215,7 +236,7 @@ describe("internal agent commentary through both transports", () => {
   });
 
   it("rejects native feedback after an accepted finish even while the provider is still running", async () => {
-    const f = await server.fixture();
+    const f = await server.fixture({ proactiveCommentarySkills: [PROPRIO_COMPLAIN_SKILL_KEY] });
     const { row: contract } = await ensureNativeCompletionContract({ db: server.db, companyId: f.companyId, issue: { id: f.issueId, title: "Test", description: null }, actorId: "test" });
     await server.db.update(heartbeatRuns).set({ completionContractId: contract.id }).where(eq(heartbeatRuns.id, f.runId));
     await server.db.insert(nativeRunResults).values({
@@ -241,8 +262,10 @@ describe("internal agent commentary through both transports", () => {
     // A taskless run also verifies optional issue attribution, without unrelated
     // fixture approval records that deliberately prevent deleting their author.
     const agentId = randomUUID(), runId = randomUUID();
-    await server.db.insert(agents).values({ id: agentId, companyId: f.companyId, name: "Feedback author", adapterType: "codex_local", status: "active" });
-    await server.db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId, status: "running", invocationSource: "on_demand" });
+    await server.db.insert(agents).values({ id: agentId, companyId: f.companyId, name: "Feedback author", adapterType: "codex_local", status: "active",
+      adapterConfig: { proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } } });
+    await server.db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId, status: "running", invocationSource: "on_demand",
+      contextSnapshot: { skillVersions: Object.fromEntries(PROPRIO_FEEDBACK_SKILL_KEYS.map(key => [key, { versionId: "fixture" }])) } });
     await submitAgentCommentary(server.db, { companyId: f.companyId, agentId, runId }, { ...input, kind: "complaint" });
     expect((await rows({ ...f, runId }))[0].issueId).toBeNull();
     if (owner === "agent") {

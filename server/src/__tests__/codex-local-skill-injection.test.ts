@@ -161,7 +161,7 @@ describe("codex local adapter skill injection", () => {
     );
   });
 
-  it("preserves other live Proprio skill symlinks in the shared workspace skill directory", async () => {
+  it("prunes valid Proprio skill symlinks removed from the current selection", async () => {
     const currentRepo = await makeTempDir("proprio-codex-current-");
     const skillsHome = await makeTempDir("proprio-codex-home-");
     cleanupDirs.add(currentRepo);
@@ -169,10 +169,12 @@ describe("codex local adapter skill injection", () => {
 
     await createProprioRepoSkill(currentRepo, "proprio");
     await createProprioRepoSkill(currentRepo, "agent-browser");
+    await createProprioRepoSkill(currentRepo, "complain");
     await fs.symlink(
       path.join(currentRepo, "skills", "agent-browser"),
       path.join(skillsHome, "agent-browser"),
     );
+    await fs.symlink(path.join(currentRepo, "skills", "complain"), path.join(skillsHome, "complain"));
 
     await ensureCodexSkillsInjected(async () => {}, {
       skillsHome,
@@ -184,9 +186,7 @@ describe("codex local adapter skill injection", () => {
     });
 
     expect((await fs.lstat(path.join(skillsHome, "proprio"))).isSymbolicLink()).toBe(true);
-    expect((await fs.lstat(path.join(skillsHome, "agent-browser"))).isSymbolicLink()).toBe(true);
-    expect(await fs.realpath(path.join(skillsHome, "agent-browser"))).toBe(
-      await fs.realpath(path.join(currentRepo, "skills", "agent-browser")),
-    );
+    await expect(fs.lstat(path.join(skillsHome, "agent-browser"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.lstat(path.join(skillsHome, "complain"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

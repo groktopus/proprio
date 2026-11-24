@@ -53,6 +53,8 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
+  removeMaintainerOnlySkillSymlinks,
+  removeUnselectedProprioSkillSymlinks,
 } from "@groktopus/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl, createOpenCodeJsonlParser } from "./parse.js";
 import {
@@ -61,7 +63,6 @@ import {
   parseOpenCodeModelsOutput,
   requireOpenCodeModelId,
 } from "./models.js";
-import { removeMaintainerOnlySkillSymlinks } from "@groktopus/adapter-utils/server-utils";
 import { apiKeyBillingType } from "@groktopus/adapter-utils/api-billing-type";
 import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -178,6 +179,7 @@ async function ensureOpenCodeSkillsInjected(
   skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
   desiredSkillNames?: string[],
   skillsHome = resolveOpenCodeSkillsHome({}),
+  managedSkillEntries = skillsEntries,
 ) {
   await fs.mkdir(skillsHome, { recursive: true });
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
@@ -192,6 +194,7 @@ async function ensureOpenCodeSkillsInjected(
       `[proprio] Removed maintainer-only OpenCode skill "${skillName}" from ${skillsHome}\n`,
     );
   }
+  await removeUnselectedProprioSkillSymlinks(skillsHome, managedSkillEntries, selectedEntries.map(entry => entry.runtimeName));
   for (const entry of selectedEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
@@ -270,6 +273,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       openCodeSkillEntries,
       desiredOpenCodeSkillNames,
       resolveOpenCodeSkillsHome(config),
+      [...await readProprioRuntimeSkillEntries({}, __moduleDir), ...openCodeSkillEntries],
     );
   }
 

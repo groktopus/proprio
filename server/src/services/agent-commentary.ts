@@ -7,6 +7,7 @@ import { redactSensitiveText } from "../redaction.js";
 import { persistActivity, publishActivity } from "./activity-log.js";
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
 import { agentRunWritesRevoked } from "../agent-run-cancellation.js";
+import { PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY, readProprioSkillSyncPreference } from "@groktopus/adapter-utils/server-utils";
 
 type CommentaryActor = { companyId: string; agentId: string; runId: string; agentApiKeyId?: string | null };
 
@@ -74,6 +75,17 @@ export async function submitAgentCommentary(
         return { result: { id: prior.id, kind: prior.kind, createdAt: prior.createdAt.toISOString(), replayed: true }, publication: null };
       }
       if (options?.receiptOnly) return { result: null, publication: null };
+      if (context.run.runtimeMode !== "native") {
+        const skillKey = input.kind === "complaint" ? PROPRIO_COMPLAIN_SKILL_KEY : PROPRIO_SUGGESTION_BOX_SKILL_KEY;
+        const configured = readProprioSkillSyncPreference(context.agent.adapterConfig ?? {}).desiredSkills.includes(skillKey);
+        const skillVersions = context.run.contextSnapshot?.skillVersions;
+        const hasSkillSnapshot = Object.hasOwn(context.run.contextSnapshot ?? {}, "skillVersions");
+        const delivered = Boolean(skillVersions && typeof skillVersions === "object" && !Array.isArray(skillVersions)
+          && Object.hasOwn(skillVersions, skillKey));
+        if (!configured || (hasSkillSnapshot && !delivered)) {
+          throw forbidden("Proactive commentary is not enabled for this agent run");
+        }
+      }
       const body = redactSensitiveText(await createRunSecretRedactionRegistry(scopedDb).redactForRun(actor.companyId, actor.runId, input.body));
       const [row] = await tx.insert(agentCommentary).values({
         companyId: actor.companyId, agentId: actor.agentId, runId: actor.runId,
