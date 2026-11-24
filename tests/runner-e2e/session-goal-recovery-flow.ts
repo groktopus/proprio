@@ -10,6 +10,7 @@ import type { ControllerReplacementReceipt } from "./controller-replacement.js";
 import { SESSION_GOAL_RECOVERY_TOKEN_BUDGET, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import { gradeSessionGoalRecovery, type SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 import { storyArtifactDownloadLink } from "./story-artifact.js";
+import { readRegisteredArtifacts } from "./registered-artifact.js";
 import type { StoryCheck } from "./everyday-observations.js";
 import { collectRunEvents } from "./run-observations.js";
 
@@ -67,6 +68,50 @@ export function normalizeIssueRunRows(rows: readonly Row[]): Array<Row & { id: s
     if (typeof id !== "string" || !id) throw new Error("issue_run_projection_missing_run_id");
     return { ...row, id };
   });
+}
+
+export function sessionGoalCompletionToolOrder(events: readonly Row[]) {
+  const completed = (name: string) => events.filter(row => {
+    const event = row.payload?.prpEvent;
+    const payload = event?.payload;
+    return event?.eventType === "tool.execution.completed" && payload?.name === name && payload?.status === "completed";
+  }).map(row => row.seq).filter((seq): seq is number => Number.isSafeInteger(seq));
+  const completeGoal = events.filter(row => {
+    const event = row.payload?.prpEvent;
+    const goal = event?.payload?.goal;
+    return event?.eventType === "session.goal.updated" && goal?.status === "complete";
+  }).map(row => row.seq).filter((seq): seq is number => Number.isSafeInteger(seq));
+  const registrationSeqs = completed("register_deliverable");
+  const finishSeqs = completed("proprio_finish");
+  const completeGoalSeq = completeGoal.length ? Math.max(...completeGoal) : undefined;
+  return {
+    registrationSeq: registrationSeqs[0] ?? null,
+    finishSeq: finishSeqs[0] ?? null,
+    completeGoalSeq: completeGoalSeq ?? null,
+    valid: registrationSeqs.length === 1 && finishSeqs.length === 1 && completeGoalSeq !== undefined
+      && registrationSeqs[0]! < finishSeqs[0]! && finishSeqs[0]! < completeGoalSeq,
+  };
+}
+
+export function hasRegisteredArtifactCompletionProof(nativeResult: Row | null | undefined, attachmentId: string): boolean {
+  const reference = `deliverable:${attachmentId}`;
+  const cites = (rows: unknown) => Array.isArray(rows) && rows.some(row => row?.ref === reference);
+  return cites(nativeResult?.evidence) && cites(nativeResult?.artifacts);
+}
+
+export function hasSuccessfulRegistrationReceipt(resultJson: Row | null | undefined, attachmentId: string, expected?: { byteSize: number; sha256: string }): boolean {
+  const receipts = resultJson?.semanticToolReceipts;
+  if (!receipts || typeof receipts !== "object" || Array.isArray(receipts)) return false;
+  const matches = Object.values(receipts as Row).filter((value: any) => value?.operationId === "register_deliverable"
+    && value?.input?.filename === "goal-recovery-deliverable.zip");
+  return matches.length === 1 && matches[0]?.input?.contentRef === "goal-recovery-deliverable.zip"
+    && matches[0]?.input?.contentType === "application/zip"
+    && matches[0]?.input?.title === "goal-recovery-deliverable.zip"
+    && (!expected || (matches[0]?.input?.byteSize === expected.byteSize && matches[0]?.input?.sha256 === expected.sha256))
+    && matches[0]?.result?.attachmentId === attachmentId
+    && matches[0]?.result?.disposition === "applied"
+    && matches[0]?.result?.commandId === `deliverable-prepared:${attachmentId}`
+    && Array.isArray(matches[0]?.result?.entityRefs) && matches[0].result.entityRefs.includes(attachmentId);
 }
 
 async function readIssueRuns(api: RunnerApi, issueId: string): Promise<Array<Row & { id: string }>> {
@@ -299,18 +344,54 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
   const latestRun = finalRuns.filter(run => run.agentId === input.agentId)
     .sort((a, b) => Date.parse(String(b.finishedAt ?? b.createdAt)) - Date.parse(String(a.finishedAt ?? a.createdAt)))[0];
   if (!latestRun) throw new Error("session_goal_final_run_missing");
+  const latestRunDetail = await input.api.get<Row>(`/api/heartbeat-runs/${latestRun.id}`);
+
+  const finalEvents = await collectRunEvents<Row>((afterSeq, limit) =>
+    input.api.get(`/api/heartbeat-runs/${latestRun.id}/events?afterSeq=${afterSeq}&limit=${limit}`));
+  const completionOrder = sessionGoalCompletionToolOrder(finalEvents);
+  if (!completionOrder.valid) throw new Error("session_goal_completion_tools_not_accepted_in_order");
+  await input.evidence("structured-goal-completion-order.json", {
+    schema: "proprio.e2e.session-goal-recovery-completion-order.v1",
+    runId: latestRun.id,
+    ...completionOrder,
+  });
 
   const finalCheckpointBytes = await readFile(checkpointPath);
   const checkpointAfter = createHash("sha256").update(finalCheckpointBytes).digest("hex");
   const milestones = (await readFile(path.join(input.workspacePath, "milestones.jsonl"), "utf8"))
     .split(/\r?\n/).filter(Boolean);
-  const attachments = await input.api.get<Row[]>(`/api/issues/${input.issue.id}/attachments`);
-  const attachment = attachments.find(row => String(row.originalFilename ?? row.filename) === "goal-recovery-deliverable.zip");
+  const [registeredArtifact] = await readRegisteredArtifacts(
+    input.api, input.issue.id, latestRun.id, ["goal-recovery-deliverable.zip"],
+  );
+  if (!registeredArtifact || registeredArtifact.title !== "goal-recovery-deliverable.zip"
+    || registeredArtifact.mimeType !== "application/zip") {
+    throw new Error("session_goal_registered_download_metadata_mismatch");
+  }
+  if (!hasSuccessfulRegistrationReceipt(latestRunDetail.resultJson, registeredArtifact.attachmentId,
+    { byteSize: registeredArtifact.byteSize, sha256: registeredArtifact.sha256 })) {
+    throw new Error("session_goal_registration_receipt_missing_or_mismatched");
+  }
+  if (!hasRegisteredArtifactCompletionProof(latestRunDetail.resultJson?.nativeResult, registeredArtifact.attachmentId)) {
+    throw new Error("session_goal_completion_did_not_cite_registered_artifact");
+  }
+  await input.evidence("structured-goal-registered-download.json", {
+    schema: "proprio.e2e.session-goal-recovery-registered-download.v1",
+    issueId: input.issue.id,
+    runId: latestRun.id,
+    title: registeredArtifact.title,
+    filename: registeredArtifact.name,
+    contentType: registeredArtifact.mimeType,
+    byteSize: registeredArtifact.byteSize,
+    sha256: registeredArtifact.sha256,
+    attachmentId: registeredArtifact.attachmentId,
+    workProductId: registeredArtifact.workProductId,
+    contentVerified: registeredArtifact.contentVerified,
+  });
   let artifactEvidence: SessionGoalRecoveryGradeInput["artifact"] = {
     downloaded: false, checkpointValid: false, checkpointSha256: null, milestonesValid: false, executablePassed: false, output: null,
   };
-  if (attachment) {
-    const link = storyArtifactDownloadLink(input.page, String(attachment.id));
+  if (registeredArtifact) {
+    const link = storyArtifactDownloadLink(input.page, registeredArtifact.attachmentId);
     await expect(link).toBeVisible({ timeout: 30_000 });
     await mkdir(input.privateDir, { recursive: true, mode: 0o700 });
     const archivePath = path.join(input.privateDir, "goal-recovery-deliverable.zip");

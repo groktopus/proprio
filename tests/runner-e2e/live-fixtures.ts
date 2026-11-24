@@ -12,7 +12,7 @@ import { FixtureRegistry } from "./fixture-registry.js";
 import { isImmutableDaytonaImage } from "./catalog.js";
 import { TASK_TITLE_BUDGET_CENTS } from "./task-titles.js";
 import { CHAT_FEATURE_SUITE, CHAT_FEATURE_BUDGET_CENTS } from "./chat-feature-cases.js";
-import { SESSION_GOAL_RECOVERY_BUDGET_CENTS, SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
+import { configureSessionGoalRecoveryBudget, SESSION_GOAL_RECOVERY_BUDGET_CENTS, SESSION_GOAL_RECOVERY_SUITE } from "./session-goal-recovery-cases.js";
 import { codexSubscriptionAgentConfig, stageCodexSubscriptionFixture } from "./codex-subscription-fixture.js";
 import { caseReceiptTask, CASE_RECEIPT_BUDGET_CENTS, CASE_RECEIPT_RUN_TIMEOUT_MS } from "./case-receipt-cases.js";
 import { stageGrokSubscriptionFixture } from "./grok-subscription-fixture.js";
@@ -455,6 +455,9 @@ export async function setupLiveFixtures(input: {
         `/api/companies/${company.id}/agents`,
         codexSubscription ? codexSubscriptionAgentConfig(agent, process.env, company.id) : agent,
       );
+      if (execution.suite.id === SESSION_GOAL_RECOVERY_SUITE) {
+        await configureSessionGoalRecoveryBudget(api, company.id, createdAgent.id);
+      }
       if (cursorCloudQualification) {
         qualificationBudget = await configureCursorCloudQualificationBudget({ api, companyId: company.id, agentId: createdAgent.id });
       }

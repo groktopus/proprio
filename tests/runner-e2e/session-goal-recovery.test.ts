@@ -1,13 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runnerMatrix, runnerSuites, suiteDefinitionHash } from "./catalog.js";
 import { controllerOutageForExecution, validControllerOutageReceipt } from "./controller-outage.js";
-import { initialGoalCheckpointRejection, isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
+import { hasRegisteredArtifactCompletionProof, hasSuccessfulRegistrationReceipt, initialGoalCheckpointRejection, isSessionGoalControllerReady, normalizeIssueRunRows, sessionGoalCompletionToolOrder, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
 import { setupGitStreamingWorkspace } from "./daytona-git-streaming.js";
 import { readWorkspaceGitSourceRoots } from "../../server/src/services/workspace-git-source-roots.js";
-import { SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
+import { configureSessionGoalRecoveryBudget, SESSION_GOAL_RECOVERY_BUDGET_CENTS, SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import type { SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 
 const nonce = "calibration-124";
@@ -31,6 +31,28 @@ function validEvidence(): SessionGoalRecoveryGradeInput {
 }
 
 describe("structured session-goal recovery Product E2E", () => {
+  it("requires a registered user download and successful task finish before goal completion", () => {
+    const register = objective.indexOf("register_deliverable");
+    const finish = objective.indexOf("proprio_finish");
+    const complete = objective.indexOf("mark this provider goal complete");
+    expect(register).toBeGreaterThan(-1);
+    expect(finish).toBeGreaterThan(register);
+    expect(complete).toBeGreaterThan(finish);
+    expect(objective).toContain("deliverable:<attachmentId>");
+    expect(objective).toContain("application/zip");
+  });
+
+  it("retains the $10 hard stop while allowing this subscription cell's unpriced usage", async () => {
+    const post = vi.fn(async () => ({}));
+    await configureSessionGoalRecoveryBudget({ post } as any, "company-1", "agent-1");
+    expect(post.mock.calls).toEqual([
+      ["/api/companies/company-1/budgets/policies", { scopeType: "company", scopeId: "company-1",
+        amount: SESSION_GOAL_RECOVERY_BUDGET_CENTS, hardStopEnabled: true, isActive: true, unpricedUsagePolicy: "allow" }],
+      ["/api/companies/company-1/budgets/policies", { scopeType: "agent", scopeId: "agent-1",
+        amount: SESSION_GOAL_RECOVERY_BUDGET_CENTS, hardStopEnabled: true, isActive: true, unpricedUsagePolicy: "allow" }],
+    ]);
+  });
+
   it("registers one explicit-only local native Codex subscription cell", () => {
     const suite = runnerSuites.find(row => row.id === SESSION_GOAL_RECOVERY_SUITE)!;
     const cell = runnerMatrix.find(row => row.id === `${SESSION_GOAL_RECOVERY_SUITE}.runner-codex-subscription.local.structured-goal-recovery`)!;
@@ -87,6 +109,31 @@ describe("structured session-goal recovery Product E2E", () => {
       ],
     };
     expect(isSessionGoalControllerReady(observation)).toBe(true);
+  });
+
+  it("requires registration and accepted completion before marking the provider goal complete", () => {
+    const events = [
+      { seq: 10, payload: { prpEvent: { eventType: "tool.execution.completed", payload: { name: "register_deliverable", status: "completed" } } } },
+      { seq: 12, payload: { prpEvent: { eventType: "tool.execution.completed", payload: { name: "proprio_finish", status: "completed" } } } },
+      { seq: 13, payload: { prpEvent: { eventType: "session.goal.updated", payload: { goal: { status: "complete" } } } } },
+    ];
+    expect(sessionGoalCompletionToolOrder(events)).toEqual({ registrationSeq: 10, finishSeq: 12, completeGoalSeq: 13, valid: true });
+    expect(sessionGoalCompletionToolOrder(events.map(event => ({ ...event, seq: 20 - event.seq }))).valid).toBe(false);
+    expect(sessionGoalCompletionToolOrder(events.filter(event => event.seq !== 12)).valid).toBe(false);
+  });
+
+  it("binds completion proof to the same durable registration receipt", () => {
+    const receipt = { operationId: "register_deliverable", input: { filename: "goal-recovery-deliverable.zip",
+      contentRef: "goal-recovery-deliverable.zip", contentType: "application/zip", title: "goal-recovery-deliverable.zip",
+      byteSize: 123, sha256: digest },
+    result: { attachmentId: "attachment-1", disposition: "applied", commandId: "deliverable-prepared:attachment-1",
+      entityRefs: ["attachment-1", "work-product-1"] } };
+    expect(hasSuccessfulRegistrationReceipt({ semanticToolReceipts: { publish: receipt } }, "attachment-1",
+      { byteSize: 123, sha256: digest })).toBe(true);
+    expect(hasSuccessfulRegistrationReceipt({ semanticToolReceipts: { publish: receipt } }, "attachment-2")).toBe(false);
+    expect(hasRegisteredArtifactCompletionProof({ evidence: [{ ref: "deliverable:attachment-1" }],
+      artifacts: [{ kind: "artifact", ref: "deliverable:attachment-1" }] }, "attachment-1")).toBe(true);
+    expect(hasRegisteredArtifactCompletionProof({ evidence: [{ ref: "deliverable:attachment-1" }], artifacts: [] }, "attachment-1")).toBe(false);
   });
 
   it.each(["blocked", "limited", "usage_limited", "budget_limited", "exhausted"])(

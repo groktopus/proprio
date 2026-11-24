@@ -2,14 +2,30 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { StoryCheck } from "./everyday-observations.js";
 import type { RunnerTaskFixture } from "./types.js";
+import type { RunnerApi } from "./api.js";
 
 export const SESSION_GOAL_RECOVERY_SUITE = "session-goal-recovery";
 export const SESSION_GOAL_RECOVERY_BUDGET_CENTS = 1_000;
 // A bounded native Codex turn consumed 34,017 uncached tokens before the
 // checkpoint. Leave room for several turns while the fixture stays capped at
-// one seven-minute execution and the existing ten-dollar issue budget.
+// one seven-minute execution and the existing ten-dollar hard-stop policy.
 export const SESSION_GOAL_RECOVERY_TOKEN_BUDGET = 120_000;
 export const SESSION_GOAL_RECOVERY_WAIT_SECONDS = 35;
+
+/** The qualified local Codex subscription reports usage but no reliable price.
+ * Keep the $10 hard stop for priced spend, while explicitly allowing unknown
+ * charges for this bounded one-run fixture. */
+export async function configureSessionGoalRecoveryBudget(api: Pick<RunnerApi, "post">, companyId: string, agentId: string) {
+  for (const scope of [{ scopeType: "company", scopeId: companyId }, { scopeType: "agent", scopeId: agentId }] as const) {
+    await api.post(`/api/companies/${companyId}/budgets/policies`, {
+      ...scope,
+      amount: SESSION_GOAL_RECOVERY_BUDGET_CENTS,
+      hardStopEnabled: true,
+      isActive: true,
+      unpricedUsagePolicy: "allow",
+    });
+  }
+}
 
 export function structuredGoalObjective(nonce: string): string {
   return [
@@ -18,6 +34,8 @@ export function structuredGoalObjective(nonce: string): string {
     `After that checkpoint, run one foreground Python sleep for ${SESSION_GOAL_RECOVERY_WAIT_SECONDS} seconds. Do not finish or replace the checkpoint during the wait. Continue in the same task after the wait and any controller restart.`,
     `Milestone 2 depends on milestone 1: create verify_goal.py that reads goal-checkpoint.json, validates the exact nonce and checkpoint milestone, and prints GOAL_OUTPUT:${nonce}. Append exactly one line verified:${nonce} to milestones.jsonl; never duplicate or rewrite milestone 1. Run the script and save its exact output as goal-output.txt.`,
     `Create goal-recovery-deliverable.zip containing exactly goal-checkpoint.json, milestones.jsonl, verify_goal.py, and goal-output.txt. Preserve the checkpoint bytes. Finish only after the script and output are verified.`,
+    `Publish goal-recovery-deliverable.zip as a user-downloadable Proprio deliverable with register_deliverable. Use filename and workspace-relative contentRef goal-recovery-deliverable.zip, contentType application/zip, the exact byteSize and SHA-256 of the archive, title goal-recovery-deliverable.zip, and a fresh idempotencyKey. Wait for the successful registration receipt; a workspace path is not a published download.`,
+    `Before marking this provider goal complete or ending the provider turn, call proprio_finish through its current native tool schema with reportedWorkDisposition done, the current completion contract revision, the satisfied objective criterion, no remaining work, validation evidence for the archive, and deliverable:<attachmentId> from the registration receipt as evidence and artifact. Wait until proprio_finish succeeds. If rejected, follow its feedback and retry while the turn remains active. Only after successful task completion recording, mark this provider goal complete and then give a concise final response.`,
   ].join("\n\n");
 }
 
@@ -36,7 +54,7 @@ export const sessionGoalRecoveryTask: RunnerTaskFixture = {
   turnTimeoutMs: 4 * 60_000,
   expectedTerminalState: { issue: "done", run: "succeeded" },
   buildTitle: nonce => `Structured goal recovery ${nonce}`,
-  buildPrompt: nonce => `Wait for the controller to install the structured session goal for this task before creating or changing any files. Once that goal is active, complete it exactly as specified: ${structuredGoalObjective(nonce)} Keep the first execution active through the checkpoint and wait so the qualification fixture can restart the controller. Do not claim success before the verified archive exists.`,
+  buildPrompt: nonce => `Wait for the controller to install the structured session goal for this task before creating or changing any files. Once that goal is active, complete it exactly as specified: ${structuredGoalObjective(nonce)} Keep the first execution active through the checkpoint and wait so the qualification fixture can restart the controller. Do not mark the provider goal complete or end the turn before Proprio has accepted proprio_finish and the downloadable artifact registration. After acceptance, make your final response include a Markdown download link to /api/attachments/<actual attachmentId>/content from the registration receipt.`,
   buildVisibleMarker: nonce => `GOAL_OUTPUT:${nonce}`,
   buildMatchers: () => [],
 };
@@ -44,9 +62,10 @@ export const sessionGoalRecoveryTask: RunnerTaskFixture = {
 export function sessionGoalRecoveryDefinitionDigest(): string {
   const hash = createHash("sha256");
   for (const file of [
-    "catalog.ts", "session-goal-recovery-cases.ts", "session-goal-recovery-flow.ts",
+    "catalog.ts", "session-goal-recovery-cases.ts", "session-goal-recovery-flow.ts", "registered-artifact.ts",
     "session-goal-recovery-artifact.py", "everyday-flow.ts", "runner.spec.ts",
     "live-fixtures.ts", "controller-outage.ts", "controller-replacement.ts",
+    "server-restart-request.ts", "server.ts",
   ]) hash.update(file).update(readFileSync(new URL(`./${file}`, import.meta.url)));
   return hash.digest("hex");
 }
