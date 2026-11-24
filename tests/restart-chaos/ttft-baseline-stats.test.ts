@@ -132,9 +132,24 @@ describe("ttft baseline statistics", () => {
       span("task.time_to_first_token", 0, 48_000, { anchor: "comment" }),
     ], "claude");
     expect(runMetrics(toolFirst)).toMatchObject({ inputWaitMs: 30_000, firstActivityAfterRunCreatedMs: 5_000,
-      ttftAfterRunCreatedMs: 18_000 });
+      ttftAfterRunCreatedMs: 18_000, submitToFirstActivityMs: 35_000, submitToFirstTextMs: 48_000 });
     expect(baselineRows([toolFirst])[0]).toMatchObject({ firstActivityAfterRunCreated: { p50: 5_000 },
-      ttftAfterRunCreated: { p50: 18_000 } });
+      ttftAfterRunCreated: { p50: 18_000 }, submitToFirstActivity: { p50: 35_000 }, submitToFirstText: { p50: 48_000 } });
+  });
+
+  it("keeps full submit-to-visible latency separate from the run-created budget", () => {
+    const measured = runMetrics(run("submit", "cold", [
+      span("comment.to_run_created", 0, 4_000),
+      span("heartbeat.queue", 4_000, 100),
+      span("task.time_to_first_agent_activity", 0, 35_000, { anchor: "comment" }),
+      span("task.time_to_first_token", 0, 18_000, { anchor: "comment" }),
+    ]));
+    expect(measured).toMatchObject({
+      inputWaitMs: 4_000,
+      firstActivityAfterRunCreatedMs: 35_000,
+      submitToFirstActivityMs: 39_000,
+      submitToFirstTextMs: 22_000,
+    });
   });
 
   it("measures first activity from run creation even when it is anchored at an earlier wake request", () => {

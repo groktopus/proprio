@@ -15,6 +15,8 @@ export interface BaselineRun {
   runId: string;
   adapter: string;
   environment: string;
+  /** Final server run status, retained for attempt accounting. */
+  status?: string;
   /** Driver intent: a new task, a follow-up comment on the same task, or a run crossed by a restart. */
   phase: "cold" | "warm" | "restart" | "midturn" | "verify" | "postfault";
   events: BaselineEvent[];
@@ -84,6 +86,12 @@ export interface RunMetrics {
    * from run creation (`task.time_to_first_agent_activity`): what the speed
    * budget judges. */
   firstActivityAfterRunCreatedMs: number | null;
+  /** Full accepted-input to first visible activity, including queue wait. */
+  submitToFirstActivityMs: number | null;
+  /** Full accepted-input to first text. Tool-first turns may be null. */
+  submitToFirstTextMs: number | null;
+  /** Turn submission to first visible activity, when both spans are present. */
+  providerFirstActivityMs: number | null;
 }
 
 /** Spans that wrap others (or the whole run); ranking them would double count. */
@@ -125,6 +133,15 @@ export function runMetrics(run: BaselineRun): RunMetrics {
     inputWaitMs,
     firstActivityAfterRunCreatedMs: activity ? afterRunCreated(activity) : null,
     ttftAfterRunCreatedMs: ttft ? afterRunCreated(ttft) : null,
+    submitToFirstActivityMs: activity
+      ? Math.max(0, (inputWaitMs ?? 0) + afterRunCreated(activity))
+      : null,
+    submitToFirstTextMs: ttft
+      ? Math.max(0, (inputWaitMs ?? 0) + afterRunCreated(ttft))
+      : null,
+    providerFirstActivityMs: activity && turnStartAt !== null
+      ? Math.max(0, activity.startOffsetMs + activity.durationMs - turnStartAt)
+      : null,
     ttftMs: ttft ? ttft.durationMs : null,
     ttftAnchor: ttft && typeof ttft.attributes.anchor === "string" ? ttft.attributes.anchor : null,
     bootMs: claimedAt !== null && turnStartAt !== null ? Math.max(0, turnStartAt - claimedAt) : null,
@@ -210,35 +227,49 @@ export function recoverySamples(runs: readonly BaselineRun[], faults: readonly B
   return samples;
 }
 
-export interface BaselineRow { adapter: string; environment: string; warmth: "cold" | "warm"; ttft: Distribution; boot: Distribution;
+export interface BaselineRow { adapter: string; environment: string; warmth: "cold" | "warm"; attempts: number; failedOrTimedOut: number; noVisibleActivity: number; ttft: Distribution; boot: Distribution;
   /** The wait behind a live turn (input accepted to run created), its own measured step. */
   inputWait: Distribution;
   /** TTFT (first text) from run creation: reported. */
   ttftAfterRunCreated: Distribution;
   /** First visible agent activity from run creation: the value the speed budget judges. */
   firstActivityAfterRunCreated: Distribution;
+  /** Full accepted-input to first visible activity. */
+  submitToFirstActivity: Distribution;
+  /** Full accepted-input to first text. */
+  submitToFirstText: Distribution;
+  /** Provider turn submission to first visible activity. */
+  providerFirstActivity: Distribution;
   anchors: Record<string, number> }
 
 export function baselineRows(runs: readonly BaselineRun[]): BaselineRow[] {
-  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; metrics: RunMetrics[] }>();
+  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; runs: BaselineRun[]; metrics: RunMetrics[] }>();
   for (const run of runs) {
     // Restart, post-restart and new-agent verification samples are reported on their own.
     if (run.phase === "restart" || run.phase === "verify" || run.phase === "postfault") continue;
     const warmth = runWarmth(run);
     const key = `${run.adapter}|${run.environment}|${warmth}`;
-    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, metrics: [] };
+    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, runs: [], metrics: [] };
+    group.runs.push(run);
     group.metrics.push(runMetrics(run));
     groups.set(key, group);
   }
   return [...groups.values()].sort((a, b) => `${a.adapter}${a.warmth}`.localeCompare(`${b.adapter}${b.warmth}`)).map(group => {
     const anchors: Record<string, number> = {};
     for (const metric of group.metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
-    return { adapter: group.adapter, environment: group.environment, warmth: group.warmth, anchors,
+    return { adapter: group.adapter, environment: group.environment, warmth: group.warmth,
+      attempts: group.runs.length,
+      failedOrTimedOut: group.runs.filter(run => run.status === "failed" || run.status === "timed_out").length,
+      noVisibleActivity: group.metrics.filter(metric => metric.firstActivityAfterRunCreatedMs === null).length,
+      anchors,
       ttft: distribution(group.metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),
       boot: distribution(group.metrics.flatMap(metric => metric.bootMs === null ? [] : [metric.bootMs])),
       inputWait: distribution(group.metrics.flatMap(metric => metric.inputWaitMs === null ? [] : [metric.inputWaitMs])),
       ttftAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.ttftAfterRunCreatedMs === null ? [] : [metric.ttftAfterRunCreatedMs])),
-      firstActivityAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])) };
+      firstActivityAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])),
+      submitToFirstActivity: distribution(group.metrics.flatMap(metric => metric.submitToFirstActivityMs === null ? [] : [metric.submitToFirstActivityMs])),
+      submitToFirstText: distribution(group.metrics.flatMap(metric => metric.submitToFirstTextMs === null ? [] : [metric.submitToFirstTextMs])),
+      providerFirstActivity: distribution(group.metrics.flatMap(metric => metric.providerFirstActivityMs === null ? [] : [metric.providerFirstActivityMs])) };
   });
 }
 

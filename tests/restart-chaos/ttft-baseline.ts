@@ -16,6 +16,7 @@
  *   node cli/node_modules/tsx/dist/cli.mjs tests/restart-chaos/ttft-baseline.ts --report <out>/baseline-data.json
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -195,16 +196,16 @@ async function readyAdapters(api: ChaosApi, lab: ChaosLab, adapters: AdapterId[]
   return ready;
 }
 
-function report(runs: BaselineRun[], faults: BaselineFault[]): string {
+function report(runs: BaselineRun[], faults: BaselineFault[], meta: { gitSha?: string | null; timedOutTasks?: number; timedOutAttempts?: Array<{ adapter: string; phase: string }> } = {}): string {
   const ms = (value: number | null) => value === null ? "—" : `${(value / 1000).toFixed(2)} s`;
-  const lines = ["| Adapter | Env | Start | n | TTFT p50 | TTFT p95 | Wait behind live turn p50 / p95 (n) | First activity from run created p50 / p95 (budget) | TTFT from run created p50 / p95 | Boot p50 | Boot p95 | TTFT anchors |", "|---|---|---|---|---|---|---|---|---|---|---|---|"];
-  const rowLine = (row: ReturnType<typeof baselineRows>[number]) => `| ${row.adapter} | ${row.environment} | ${row.warmth} | ${row.ttft.n}/${row.boot.n} | ${ms(row.ttft.p50)} | ${ms(row.ttft.p95)} | ${ms(row.inputWait.p50)} / ${ms(row.inputWait.p95)} (${row.inputWait.n}) | ${ms(row.firstActivityAfterRunCreated.p50)} / ${ms(row.firstActivityAfterRunCreated.p95)} | ${ms(row.ttftAfterRunCreated.p50)} / ${ms(row.ttftAfterRunCreated.p95)} | ${ms(row.boot.p50)} | ${ms(row.boot.p95)} | ${Object.entries(row.anchors).map(([k, v]) => `${k}×${v}`).join(", ") || "—"} |`;
+  const lines = [`# Submit-to-first-visible-activity baseline`, ``, `Exact build: ${meta.gitSha ?? "unknown"}`, ``, "| Adapter | Env | Start | Attempts | Failed/timeouts | No visible activity | Submit → activity p50 / p95 | Submit → first text p50 / p95 | Queue wait p50 / p95 (n) | Activity from run created p50 / p95 (budget) | Provider turn → activity p50 / p95 | Text from run created p50 / p95 | Boot p50 | Boot p95 | Anchors |", "|---|---|---|---:|---:|---:|---|---|---|---|---|---|---|---|---|"];
+  const rowLine = (row: ReturnType<typeof baselineRows>[number]) => `| ${row.adapter} | ${row.environment} | ${row.warmth} | ${row.attempts} | ${row.failedOrTimedOut} | ${row.noVisibleActivity} | ${ms(row.submitToFirstActivity.p50)} / ${ms(row.submitToFirstActivity.p95)} | ${ms(row.submitToFirstText.p50)} / ${ms(row.submitToFirstText.p95)} | ${ms(row.inputWait.p50)} / ${ms(row.inputWait.p95)} (${row.inputWait.n}) | ${ms(row.firstActivityAfterRunCreated.p50)} / ${ms(row.firstActivityAfterRunCreated.p95)} | ${ms(row.providerFirstActivity.p50)} / ${ms(row.providerFirstActivity.p95)} | ${ms(row.ttftAfterRunCreated.p50)} / ${ms(row.ttftAfterRunCreated.p95)} | ${ms(row.boot.p50)} | ${ms(row.boot.p95)} | ${Object.entries(row.anchors).map(([k, v]) => `${k}×${v}`).join(", ") || "—"} |`;
   for (const row of baselineRows(runs)) lines.push(rowLine(row));
   // New agents wait for harness verification before their run is created:
   // their own rows, so that wait never blends into ordinary cold starts.
   const verifyRuns = runs.filter(run => run.phase === "verify").map(run => ({ ...run, phase: "cold" as const }));
   if (verifyRuns.length) {
-    lines.push("", "New agent behind harness verification (TTFT counts from run creation; the verification wait precedes it):", "", lines[0]!, lines[1]!);
+    lines.push("", "New agent behind harness verification (submit-to metrics start at the accepted input; verification precedes run creation):", "", lines[0]!, lines[1]!);
     for (const row of baselineRows(verifyRuns)) lines.push(rowLine(row));
   }
   const postfault = runs.filter(run => run.phase === "postfault").map(run => ({ ...run, phase: "cold" as const }));
@@ -228,6 +229,18 @@ function report(runs: BaselineRun[], faults: BaselineFault[]): string {
     const control = distribution(group.flatMap(sample => sample.controlPlaneMs === null ? [] : [sample.controlPlaneMs]));
     lines.push(`| ${adapter} | ${kind} | ${disposition} | ${d.n} | ${ms(d.p50)} | ${ms(d.p95)} | ${ms(control.p50)} / ${ms(control.p95)} | ${group.length - d.n} |`);
   }
+  const failed = runs.filter(run => run.status === "failed" || run.status === "timed_out").length;
+  const noVisible = runs.filter(run => runMetrics(run).firstActivityAfterRunCreatedMs === null).length;
+  lines.push("", `Attempt accounting: ${runs.length} run records; ${failed} failed or timed out run records; ${noVisible} run records without visible activity; ${meta.timedOutTasks ?? 0} task attempts timed out before a stable run record and were excluded from latency distributions.`);
+  if (meta.timedOutAttempts?.length) {
+    const byGroup = new Map<string, number>();
+    for (const attempt of meta.timedOutAttempts) {
+      const key = `${attempt.adapter}|${attempt.phase}`;
+      byGroup.set(key, (byGroup.get(key) ?? 0) + 1);
+    }
+    lines.push(`Timed-out task attempts by adapter/phase: ${[...byGroup.entries()].sort().map(([key, count]) => `${key}×${count}`).join(", ")}.`);
+  }
+  lines.push("Queue is the accepted-input to run-created wait. The run-created activity metric remains the narrower diagnostic speed-budget measure. Submit-to-first-activity is the user-wait proxy; first text is reported separately for tool-first turns.");
   return `${lines.join("\n")}\n`;
 }
 
@@ -263,8 +276,8 @@ async function main() {
     "idle-ms": { type: "string", default: "600000" },
   } });
   if (values.report) {
-    const data = JSON.parse(await readFile(values.report, "utf8")) as { runs: BaselineRun[]; faults: BaselineFault[] };
-    process.stdout.write(report(data.runs, data.faults));
+    const data = JSON.parse(await readFile(values.report, "utf8")) as { runs: BaselineRun[]; faults: BaselineFault[]; gitSha?: string | null; timedOutTasks?: number; timedOutAttempts?: Array<{ adapter: string; phase: string }> };
+    process.stdout.write(report(data.runs, data.faults, data));
     return;
   }
   const phases = parseBaselinePhases(values.phases!);
@@ -585,7 +598,7 @@ async function main() {
       if (timedOutIssues.has(task.issueId)) continue;
       for (const run of await runsFor(api, task.issueId)) {
         const runId = runIdOf(run);
-        runs.push({ runId, adapter: task.adapter, environment: env,
+        runs.push({ runId, adapter: task.adapter, environment: env, status: String(run.status),
           phase: runPhase.get(runId) ?? task.phase, events: await allEvents(api, runId) });
         // Workspace commands (worktree, provision, sync) the run waited on, with their durations.
         const operations = await api.get<Json[]>(`/api/heartbeat-runs/${runId}/workspace-operations`, 10_000).catch((error: unknown) => {
@@ -601,11 +614,13 @@ async function main() {
           command: typeof operation.command === "string" ? operation.command.slice(0, 120) : null });
       }
     }
+    const gitSha = process.env.GIT_SHA ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+    const timedOutAttempts = tasks.filter(task => timedOutIssues.has(task.issueId)).map(task => ({ adapter: task.adapter, phase: task.phase }));
     const data = { workspaceOperations, waveId, lifecycle: lifecycle ?? "catalog", agentLifecycles, adapters, notReady: requested.filter(adapter => !adapters.includes(adapter)),
-      timedOutTasks: timedOutIssues.size, samples, restarts, midturn, gitSha: process.env.GIT_SHA ?? null, runs, faults };
+      timedOutTasks: timedOutIssues.size, timedOutAttempts, samples, restarts, midturn, gitSha, runs, faults };
     await writeFile(path.join(outDir, "baseline-data.json"), `${JSON.stringify(data)}\n`, { mode: 0o600 });
-    await writeFile(path.join(outDir, "baseline-report.md"), report(runs, faults), { mode: 0o600 });
-    process.stdout.write(report(runs, faults));
+    await writeFile(path.join(outDir, "baseline-report.md"), report(runs, faults, data), { mode: 0o600 });
+    process.stdout.write(report(runs, faults, data));
     if (workspaceOperations.length) {
       const table = ["", "| Run phase | Adapter | Workspace operation | Status | Duration | Command |", "|---|---|---|---|---|---|",
         ...workspaceOperations.slice().sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0))
