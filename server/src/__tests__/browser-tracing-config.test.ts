@@ -6,10 +6,35 @@ const cloud = { PROPRIO_CLOUD_TENANT_SERVER_TOKEN: "tenant-token" };
 const ingestKey = "hcaik_" + "0".repeat(58);
 
 describe("resolveBrowserTracingConfig", () => {
-  it("is off for a self-hosted instance even with every variable set", () => {
+  it("is off for a self-hosted instance unless the explicit opt-in is set", () => {
     expect(resolveBrowserTracingConfig({
       PROPRIO_BROWSER_TRACES_ENDPOINT: "https://api.honeycomb.io",
       PROPRIO_BROWSER_TRACES_INGEST_KEY: ingestKey,
+    })).toBeNull();
+  });
+
+  it("supports an explicitly opted-in self-hosted collector", () => {
+    const config = resolveBrowserTracingConfig({
+      PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED: "1",
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com/otlp",
+      PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "0.25",
+      PROPRIO_BROWSER_TRACES_SERVICE_NAME: "self-hosted-board",
+      PROPRIO_BROWSER_TRACES_ENVIRONMENT: "production",
+    });
+    expect(config).toEqual({
+      tracesUrl: "https://collector.example.com/otlp/v1/traces",
+      ingestKey: null,
+      serviceName: "self-hosted-board",
+      environment: "production",
+      sampleRate: 0.25,
+    });
+    expect(authSessionSchema.shape.browserTracing.parse(config)).toEqual(config);
+  });
+
+  it("does not treat other self-hosted flag values as opt-in", () => {
+    expect(resolveBrowserTracingConfig({
+      PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED: "true",
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com/otlp",
     })).toBeNull();
   });
 

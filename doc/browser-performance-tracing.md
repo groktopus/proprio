@@ -11,36 +11,63 @@ first-party Telemetry system and adds no Telemetry events.
 
 ## Who gets it
 
-Browser tracing runs **only on hosted Proprio Cloud instances** that an
-operator explicitly configures. It is off by default.
+Browser tracing runs only when an operator explicitly configures it. It is off
+by default. Managed Proprio Cloud instances keep their existing endpoint gate;
+self-hosted instances additionally require the exact opt-in flag documented
+below.
 
 The server decides, in `server/src/browser-tracing-config.ts`. It sends a
 `browserTracing` object in the authenticated `GET /api/auth/get-session`
-response only when both hold:
+response only when the deployment gate and endpoint settings are valid:
 
 1. The instance is cloud managed (`isCloudManagedInstance`: a
    `PROPRIO_CLOUD_TENANT_SERVER_TOKEN` or a `PROPRIO_MANAGED_CONFIG`
-   document is present).
+   document is present), or self-hosted instances set
+   `PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED=1`.
 2. `PROPRIO_BROWSER_TRACES_ENDPOINT` is set and every setting is valid.
 
-Otherwise the field is `null`. Self-hosted installs, local development, and
-tests never satisfy (1). With `null`, or with no session (signed out), the
-browser never downloads the tracing code: it lives in its own lazily loaded
-chunk (`ui/src/lib/browser-tracing/sdk.ts`). An invalid setting fails closed:
-the field is `null` and the server logs one warning naming the variable, never
-its value.
+Otherwise the field is `null`. With `null`, or with no session (signed out),
+the browser never downloads the tracing code: it lives in its own lazily
+loaded chunk (`ui/src/lib/browser-tracing/sdk.ts`). An invalid setting fails
+closed: the field is `null` and the server logs one warning naming the
+variable, never its value.
 
 ## Configuration
 
-Set these on the hosted server process:
+Set these on the server process. For self-hosted deployments, set the explicit
+opt-in flag and point the browser at an OTLP/HTTP collector owned by the
+operator. No external destination is selected by this flag.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
+| `PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED` | self-hosted only | unset/off | Must be exactly `1` to enable browser tracing on a self-hosted instance. Other values, including `true`, are ignored. Managed instances do not need this flag. |
 | `PROPRIO_BROWSER_TRACES_ENDPOINT` | yes | — | OTLP/HTTP base URL, for example `https://api.honeycomb.io` (US) or `https://api.eu1.honeycomb.io` (EU). `/v1/traces` is appended unless the path already ends with it. Must be `https` (plain `http` only for a loopback host). |
 | `PROPRIO_BROWSER_TRACES_INGEST_KEY` | for Honeycomb | — | A Honeycomb **ingest** key (prefix `hcaik_`). Sent as `x-honeycomb-team`. Required when the endpoint is a Honeycomb host; optional for a collector you run. Any other key format is refused. |
 | `PROPRIO_BROWSER_TRACES_SAMPLE_RATE` | no | `1` | Fraction of page sessions traced, `0`–`1`, rounded to an exact 1 in N (`0.3` becomes 1/3; `0.75` becomes 1). `0` turns tracing off. |
 | `PROPRIO_BROWSER_TRACES_SERVICE_NAME` | no | `proprio-web` | `service.name`; in Honeycomb this is the dataset name. |
 | `PROPRIO_BROWSER_TRACES_ENVIRONMENT` | no | `SENTRY_ENVIRONMENT` | `deployment.environment.name`, for example `staging`. |
+
+### Self-hosted setup and disable
+
+For a self-hosted collector, configure the server process and restart it:
+
+```sh
+PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED=1
+PROPRIO_BROWSER_TRACES_ENDPOINT=https://otel.example.internal
+PROPRIO_BROWSER_TRACES_SAMPLE_RATE=0.25
+```
+
+Leave `PROPRIO_BROWSER_TRACES_INGEST_KEY` unset when the collector adds its own
+credential. Configure the collector's CORS policy for `POST` from the Proprio
+origin with the `content-type` header. The browser receives only the
+ingest-scoped key when one is deliberately configured; it never receives
+collector credentials, task content, raw IDs, or arbitrary request URLs.
+
+To disable the path, remove the self-hosted flag (or set the sample rate to
+`0`) and restart the server. The next authenticated session response contains
+`browserTracing: null`; disabled and unsampled sessions do not download the
+tracing SDK chunk. Sink outages are contained to tracing export and do not
+change page or API behavior.
 
 ### Key handling
 
