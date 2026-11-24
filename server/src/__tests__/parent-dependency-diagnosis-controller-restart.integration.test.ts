@@ -150,11 +150,10 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         secrets: { provider: "local_encrypted", strictMode: false, localEncrypted: { keyFilePath: path.join(home, "master.key") } },
         telemetry: { enabled: false }, updates: { checkEnabled: false },
       }));
-      await writeFile(control, "");
+      await writeFile(control, `controller-crash ${crashPoint}\n`);
 
-      // First real server boot is empty. Seed only after the controller is
-      // listening, then arm the runtime crash point for the normal DB-driven
-      // assigned-work queue.
+      // First real server boot is empty. Arm before seeding because the
+      // relation write can wake the normal assigned-work queue immediately.
       controller = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
       const prefix = `D${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`;
       await db.insert(companies).values({ id: companyId, name: "Full controller diagnosis", issuePrefix: prefix, requireBoardApprovalForNewAgents: false });
@@ -171,7 +170,6 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
           status: "todo", createdAt: old, updatedAt: old },
       ]);
       await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
-      await writeFile(control, `controller-crash ${crashPoint}\n`);
 
       const crash = await controller.exited;
       expect(crash.signal, controller.output).toBe("SIGKILL");
