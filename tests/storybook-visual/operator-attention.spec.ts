@@ -28,13 +28,13 @@ for (const specimen of cases) for (const theme of ["light", "dark"]) {
     await expect(story).not.toBeEmpty({ timeout: 30_000 });
     await expect(page.locator(".sb-errordisplay")).not.toBeVisible();
     if (specimen.name === "find-pending-request") {
-      await expect(story.getByRole("heading", { name: "Decisions" })).toBeVisible();
+      await expect(story.getByRole("heading", { name: "Needs You" })).toBeVisible();
       await expect(story.getByText("Which rollout order should we use?")).toBeVisible();
     } else if (specimen.name === "read-request-context") {
       await expect(story.getByRole("textbox", { name: /Reassignment note/ })).toBeVisible();
     } else if (specimen.name === "partial-result") {
       await expect(story.getByText("Commented on PAP-456")).toBeVisible();
-      await expect(story.getByText(/Failed on PAP-456|blocked by the permission boundary/)).toBeVisible();
+      await expect(story.getByText(/Could not complete the status-update action on PAP-456/)).toBeVisible();
     } else {
       await expect(story.getByRole("radio", { name: /Only collapse hidden descendants/ })).toBeVisible();
       await expect(story.getByRole("button", { name: "Send answers" })).toBeVisible();
