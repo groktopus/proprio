@@ -153,9 +153,10 @@ GitHub release.
 the exact `main` revision selected by the daily 08:23 UTC schedule or manual
 dispatch. Each lane installs frozen dependencies on GitHub-hosted Ubuntu
 24.04. The workflow uses the stable test runner's existing general, chat,
-serialized, native Runner, and workspace groupings. The native lane builds the
-Runner package and test binaries before collecting tests. A separate baseline
-job verifies that the CLI install, update, and server health files ran and passed.
+serialized, native Runner, and workspace groupings. Server lanes build the
+Runner TypeScript package before collecting tests. The native Runner lane
+also builds its test binaries. A separate baseline job verifies that the
+CLI install, update, and server health files ran and passed.
 
 Each lane retains its Vitest results, retry timings, and a summary with the
 tested SHA and counts for executed, failed, skipped, and unresolved cases.
