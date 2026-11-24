@@ -249,10 +249,11 @@ describe("KanbanBoard", () => {
     expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
   });
 
-  it("moves Backlog to Todo with Space, ArrowRight, Space and restores focus", () => {
+  it("moves Backlog to Todo with Space, ArrowRight, Space and restores focus", async () => {
     const onUpdateIssue = vi.fn();
+    const issue = { ...createIssue(1, "backlog"), id: "issue-1" };
     const { container, render } = renderBoard({
-      issues: [createIssue(1, "backlog")],
+      issues: [issue],
       onUpdateIssue,
     });
     const moveButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task Issue 1"]')!;
@@ -263,9 +264,10 @@ describe("KanbanBoard", () => {
     act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
     act(() => moveButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true })));
 
-    expect(onUpdateIssue).toHaveBeenCalledWith("issue-backlog-1", { status: "todo" });
+    expect(onUpdateIssue).toHaveBeenCalledWith("issue-1", { status: "todo" });
+    render({ issues: [{ ...issue, status: "todo", displayStatus: "todo" }], onUpdateIssue });
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Todo");
-    render({ issues: [{ ...createIssue(1, "todo"), displayStatus: "todo" }], onUpdateIssue });
     expect(document.activeElement).toBe(container.querySelector('button[aria-label="Move task Issue 1"]'));
   });
 
