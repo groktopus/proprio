@@ -21,6 +21,7 @@ import {
   type ExecutionWorkspace,
   type Issue,
   type IssueLabel,
+  type IssueThreadInteraction,
 } from "@groktopus/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../../api/access";
@@ -122,6 +123,7 @@ import {
 import { PropertyPicker } from "./property-picker";
 import { PropertyChip, PropertyRow, PropertySection } from "./primitives";
 import { IssueContextUsageRow } from "./context-usage-row";
+import { ExecutionReviewEvidence } from "./ExecutionReviewEvidence";
 import {
   buildWorkspaceSelectionUpdate,
   currentWorkspaceSelection,
@@ -201,6 +203,7 @@ function TruncatedCopyable({ value, icon: Icon }: { value: string; icon: Compone
 
 interface IssuePropertiesProps {
   issue: Issue;
+  interactions?: IssueThreadInteraction[];
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
@@ -244,6 +247,7 @@ interface IssuePaneTabDescriptor {
 
 export function IssueProperties({
   issue,
+  interactions,
   childIssues = [],
   issueLinkState,
   onAddSubIssue,
@@ -260,6 +264,11 @@ export function IssueProperties({
   sidePanelContentOnly = false,
   contextUsage,
 }: IssuePropertiesProps) {
+  const reviewEvidence = useQuery({
+    queryKey: queryKeys.issues.executionReviewEvidence(issue.id),
+    queryFn: () => issuesApi.executionReviewEvidence(issue.id),
+    enabled: interactions !== undefined,
+  });
   const policyResult = useExecutionPolicy(issue.executionPolicy);
   const policyAvailable = policyResult.success;
   const executionPolicy = policyResult.success ? policyResult.data : null;
@@ -2673,6 +2682,8 @@ export function IssueProperties({
             <span role="status" className="text-sm text-muted-foreground">Execution policy unavailable. Refresh to try again.</span>
           </PropertyRow>
         ) : (<>
+        {reviewEvidence.isError && <p role="status" className="text-sm text-destructive">Could not load review evidence.</p>}
+        <ExecutionReviewEvidence issue={issue} evidence={reviewEvidence.data} interactions={interactions} />
         <PropertyPicker
           inline={inline}
           label="Reviewers"

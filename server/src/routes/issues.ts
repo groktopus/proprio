@@ -60,7 +60,7 @@ import { deferredWakeJoinsFirstTurn, firstTurnTakesAllQueuedComments, runAccepts
 import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
-import { captureRequiredQualityReviewDecisionBinding } from "../services/required-quality-review.js";
+import { captureRequiredQualityReviewDecisionBinding, readRequiredQualityReview } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
 import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
@@ -9790,6 +9790,28 @@ export function issueRoutes(
     );
 
     res.json(response);
+  });
+
+  router.get("/issues/:id/execution-review-evidence", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true, finalForAgents: true }))) return;
+
+    const [executionDecisions, requiredQualityReviewState] = await Promise.all([
+      db.select({
+        id: issueExecutionDecisions.id,
+        stageType: issueExecutionDecisions.stageType,
+        outcome: issueExecutionDecisions.outcome,
+        reviewTargetBinding: issueExecutionDecisions.reviewTargetBinding,
+        createdAt: issueExecutionDecisions.createdAt,
+      }).from(issueExecutionDecisions).where(and(
+        eq(issueExecutionDecisions.companyId, issue.companyId),
+        eq(issueExecutionDecisions.issueId, issue.id),
+      )).orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id)).limit(100),
+      readRequiredQualityReview(db, issue),
+    ]);
+    await recordAgentChildTaskRead(db, req, issue);
+    res.json({ executionDecisions, requiredQualityReviewState });
   });
 
   router.get("/issues/:id", async (req, res) => {

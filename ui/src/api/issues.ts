@@ -18,6 +18,7 @@ import type {
   FeedbackTrace,
   FeedbackVote,
   Issue,
+  IssueExecutionReviewEvidence,
   IssueAccessGrant,
   IssueAccessGrantSubjectType,
   IssueVisibility,
@@ -387,6 +388,7 @@ export const issuesApi = {
   createLabel: (companyId: string, data: { name: string; color: string }) =>
     api.post<IssueLabel>(`/companies/${companyId}/labels`, data),
   deleteLabel: (id: string) => api.delete<IssueLabel>(`/labels/${id}`),
+  executionReviewEvidence: (id: string) => api.get<IssueExecutionReviewEvidence>(`/issues/${id}/execution-review-evidence`),
   getCore: (id: string, options?: RequestOptions) => api.get<Issue>(`/issues/${id}?view=core`, options),
   recentComments: (id: string, options?: RequestOptions) => api.get<IssueRecentComments>(`/issues/${id}/recent-comments`, options),
   get: (id: string, options?: RequestOptions) =>

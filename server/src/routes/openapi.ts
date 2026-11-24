@@ -1486,6 +1486,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/approvals/{id}/reject",
   "GET /api/agents/{id}/project-access",
   "POST /api/agents/{id}/project-access",
+  "GET /api/issues/{id}/execution-review-evidence",
   "GET /api/issues/{id}/pending-questions",
   "GET /api/issues/{id}/decision-receipts",
   "GET /api/issues/{id}/chat-handoffs",
@@ -4560,6 +4561,16 @@ registry.registerPath({
     401: r.unauthorized,
     422: r.unprocessable,
   },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/execution-review-evidence",
+  tags: ["issues"],
+  summary: "Get execution review evidence for an issue",
+  description: "Returns recent execution decisions and required output review readiness. Decisions can include the immutable requirements digest and artifact revision or byte hash.",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
 });
 
 registry.registerPath({

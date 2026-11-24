@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { expect, it } from "vitest";
-import { authUsers, companies, companyMemberships, issueRelations, issues } from "@groktopus/db";
+import { authUsers, companies, companyMemberships, issueExecutionDecisions, issueRelations, issues } from "@groktopus/db";
 import { boardSessionApp, seedBoardRouteFixture } from "./helpers/route-census-fixture.js";
 import { describeEmbeddedPostgres, useEmbeddedPostgres } from "./helpers/route-test-harness.js";
 import { createStatementCensus, formatStatementCensus } from "./helpers/statement-census.js";
@@ -100,6 +100,36 @@ describeEmbeddedPostgres("GET /api/issues/:id statements per request", () => {
     const hiddenResponse = await request(memberApp).get(`/api/issues/${hidden!.id}`);
     expect(hiddenResponse.status).toBe(200);
     expect(hiddenResponse.body.hiddenAt).not.toBeNull();
+  }, 60_000);
+
+  it("returns only the readable task's execution review evidence after the policy is removed", async () => {
+    const fixture = await seed();
+    const outsider = await seedBoardRouteFixture(ctx.db, "ReviewOutsider");
+    const memberApp = boardSessionApp(ctx.db, () => fixture.userId);
+    const outsiderApp = boardSessionApp(ctx.db, () => outsider.userId);
+    const decisionId = randomUUID();
+    const binding = {
+      version: 1 as const,
+      requirementHash: "a".repeat(64),
+      deliverables: [{
+        key: "draft", label: "Draft",
+        target: { type: "issue_document" as const, key: "draft", revisionId: randomUUID() },
+      }],
+    };
+    const decision = { companyId: fixture.companyId, stageId: randomUUID(), stageType: "review",
+      outcome: "approved", body: "Approved draft", reviewTargetBinding: binding };
+    await ctx.db.insert(issueExecutionDecisions).values([
+      { ...decision, id: decisionId, issueId: fixture.issue.id },
+      { ...decision, issueId: fixture.parent.id },
+    ]);
+    const path = `/api/issues/${fixture.issue.id}/execution-review-evidence`;
+    const response = await request(memberApp).get(path).expect(200);
+    expect(response.body.executionDecisions).toEqual([{
+      id: decisionId, stageType: "review", outcome: "approved", reviewTargetBinding: binding,
+      createdAt: expect.any(String),
+    }]);
+    expect(response.body.requiredQualityReviewState).toEqual({ required: false, satisfied: true, missing: [] });
+    await request(outsiderApp).get(path).expect(404);
   }, 60_000);
 
   it("denies the very next request after the membership is removed", async () => {

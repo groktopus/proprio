@@ -6397,6 +6397,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     }
     const sharedProps = {
       issue: panelIssue,
+      interactions,
       childIssues: panelChildIssues,
       issueLinkState: streamlinedTaskDetailEnabled
         ? relationIssueLinkState
@@ -6479,6 +6480,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     handleSkillOpened,
     panelChildIssues,
     panelIssue,
+    interactions,
     persistedAgentChat,
     setPanelShowsArtifact,
     suppressPanelUntilPlan,
@@ -9160,6 +9162,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                     <div className="px-4 pb-4">
                       <IssueProperties
                         issue={issue}
+                        interactions={interactions}
                         childIssues={childIssues}
                         issueLinkState={
                           streamlinedTaskDetailEnabled

@@ -943,6 +943,15 @@ export type IssueSummary = Pick<
   unreadSubtaskCount?: number;
 };
 
+export interface IssueExecutionReviewEvidence {
+  executionDecisions: Array<Pick<IssueExecutionDecision, "id" | "stageType" | "outcome" | "reviewTargetBinding" | "createdAt">>;
+  requiredQualityReviewState: {
+    required: boolean;
+    satisfied: boolean;
+    missing: Array<{ key: string; label: string; reason: "missing" | "pending" | "not_approved" | "stale"; interactionId?: string }>;
+  };
+}
+
 export interface Issue {
   /** Read-only status for task presentation; never use it for execution admission. */
   displayStatus?: IssueDisplayStatus;

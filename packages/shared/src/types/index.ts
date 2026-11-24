@@ -799,6 +799,7 @@ export type {
   RequiredQualityReview,
   QualityReviewBinding,
   IssueExecutionReviewTargetBindingPolicy,
+  IssueExecutionReviewEvidence,
   IssueExecutionReviewTargetReference,
   IssueExecutionReviewTargetBinding,
   IssueExecutionState,
