@@ -2,7 +2,7 @@ import { devices, defineConfig } from "@playwright/test";
 import process from "node:process";
 import baseConfig from "./playwright.config";
 
-const baseWithoutProjects = { ...baseConfig, projects: undefined };
+const baseWithoutProjects = { ...baseConfig, projects: undefined, webServer: undefined };
 const webServerEnv = { ...process.env };
 delete webServerEnv.DATABASE_URL;
 delete webServerEnv.DATABASE_MIGRATION_URL;
