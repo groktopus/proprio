@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runnerMatrix, runnerSuites, suiteDefinitionHash } from "./catalog.js";
 import { controllerOutageForExecution, validControllerOutageReceipt } from "./controller-outage.js";
-import { isSessionGoalControllerReady } from "./session-goal-recovery-flow.js";
+import { isSessionGoalControllerReady, sessionGoalControllerReadinessTerms } from "./session-goal-recovery-flow.js";
 import { SESSION_GOAL_RECOVERY_SUITE, SESSION_GOAL_RECOVERY_TOKEN_BUDGET, gradeSessionGoalRecovery, structuredGoalObjective } from "./session-goal-recovery-cases.js";
 import type { SessionGoalRecoveryGradeInput } from "./session-goal-recovery-cases.js";
 
@@ -54,6 +54,25 @@ describe("structured session-goal recovery Product E2E", () => {
       ...event, payload: { prpEvent: { ...event.payload.prpEvent, runId: "another-run" } },
     })) })).toBe(false);
     expect(isSessionGoalControllerReady({ ...observation, events: observation.events.map(event => ({ eventType: event.payload.prpEvent.eventType })) })).toBe(false);
+  });
+
+  it("reports allowlisted startup readiness terms without exposing event payloads", () => {
+    const observation = {
+      goal: { activeRunId: "different-run", capability: { availability: "available", actions: ["set"] } },
+      activeRun: { id: "run-1", status: "running", runtimeMode: "native" },
+      events: [
+        { payload: { prpEvent: { runId: "run-1", sourceKind: "runner", eventType: "session.started" } } },
+        { payload: { prpEvent: { runId: "run-1", sourceKind: "runner", eventType: "turn.started" } } },
+      ],
+    };
+    expect(sessionGoalControllerReadinessTerms(observation)).toEqual({
+      runProjectionBound: false,
+      nativeMode: true,
+      supportsSet: true,
+      sessionReceipt: true,
+      turnReceipt: true,
+    });
+    expect(isSessionGoalControllerReady(observation)).toBe(false);
   });
 
   it.each([

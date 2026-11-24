@@ -66,17 +66,30 @@ export function isSessionGoalControllerReady(value: {
   activeRun: Row | null | undefined;
   events: readonly Row[];
 }): boolean {
-  const runId = value.activeRun?.id;
-  if (typeof runId !== "string" || value.activeRun.status !== "running"
-    || value.activeRun.runtimeMode !== "native" || value.goal.activeRunId !== runId
-    || value.goal.capability?.availability !== "available"
-    || !Array.isArray(value.goal.capability.actions) || !value.goal.capability.actions.includes("set")) return false;
+  const terms = sessionGoalControllerReadinessTerms(value);
+  return terms.runProjectionBound && terms.nativeMode && terms.supportsSet
+    && terms.sessionReceipt && terms.turnReceipt;
+}
 
-  const hasRunEvent = (eventType: string) => value.events.some(event => {
+export function sessionGoalControllerReadinessTerms(value: {
+  goal: Row;
+  activeRun: Row | null | undefined;
+  events: readonly Row[];
+}) {
+  const runId = value.activeRun?.id;
+  const hasRunEvent = (eventType: string) => typeof runId === "string" && value.events.some(event => {
     const envelope = event.payload?.prpEvent;
     return envelope?.runId === runId && envelope.sourceKind === "runner" && envelope.eventType === eventType;
   });
-  return (hasRunEvent("session.started") || hasRunEvent("session.resumed")) && hasRunEvent("turn.started");
+  return {
+    runProjectionBound: typeof runId === "string" && value.activeRun?.status === "running"
+      && value.goal.activeRunId === runId,
+    nativeMode: value.activeRun?.runtimeMode === "native",
+    supportsSet: value.goal.capability?.availability === "available"
+      && Array.isArray(value.goal.capability.actions) && value.goal.capability.actions.includes("set"),
+    sessionReceipt: hasRunEvent("session.started") || hasRunEvent("session.resumed"),
+    turnReceipt: hasRunEvent("turn.started"),
+  };
 }
 
 async function runArtifactOracle(archivePath: string, nonce: string, deadlineAt: number) {
@@ -113,6 +126,8 @@ async function runArtifactOracle(archivePath: string, nonce: string, deadlineAt:
 export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): Promise<StoryCheck[]> {
   const objective = structuredGoalObjective(input.nonce);
   const checkpointPath = path.join(input.workspacePath, "goal-checkpoint.json");
+  let lastReadinessKey: string | null = null;
+  let lastReadiness: ReturnType<typeof sessionGoalControllerReadinessTerms> | null = null;
   // Task creation starts the first native run immediately. Do not issue the
   // fixture's initial goal create while that run is still bootstrapping: before
   // its session is bound, the control action can be interpreted as a wake and
@@ -133,11 +148,19 @@ export async function runSessionGoalRecovery(input: SessionGoalRecoveryInput): P
             `/api/heartbeat-runs/${activeRun.id}/events?afterSeq=${afterSeq}&limit=${limit}`,
           )).catch(() => [])
         : [];
-      return { goal, runs, activeRun, events };
+      const value = { goal, runs, activeRun, events };
+      const terms = sessionGoalControllerReadinessTerms(value);
+      const key = JSON.stringify(terms);
+      if (key !== lastReadinessKey) {
+        lastReadinessKey = key;
+        lastReadiness = terms;
+        input.note("session-goal-readiness", terms);
+      }
+      return value;
     },
     accept: isSessionGoalControllerReady,
     reject: value => value.runs.some((run: Row) => ["failed", "timed_out", "cancelled", "succeeded"].includes(String(run.status)))
-      ? "Initial native run ended before its goal controller became available" : undefined,
+      ? `Initial native run ended before its goal controller became available (${JSON.stringify(lastReadiness)})` : undefined,
   });
   const beforeProjection = ready.goal;
   if (beforeProjection.capability?.availability !== "available"
