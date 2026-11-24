@@ -5,9 +5,35 @@ import type { Db } from "@groktopus/db";
 import { agents, connectionTokenIssuances, authUsers, heartbeatRuns, issues, toolActionRequests, toolConnections, toolCallEvents, toolInvocations } from "@groktopus/db";
 import type { ToolConnectionActivityResponse, ToolRunDecision, ToolRunDecisionLookup, ToolRunRuntimeProvenance } from "@groktopus/shared";
 import { notFound } from "../../../errors.js";
+import { issueReadSqlCondition, type AuthorizationActor } from "../../authorization.js";
 import { listConnectionLifecycleEvents } from "../../tool-connection-activity.js";
 import { toToolInvocation, toToolActionRequest, toToolCallEvent, userFallbackName, denialReasonForDecision } from "./projection.js";
 type ConnectionLookup = (idOrUid: string, companyId?: string) => Promise<typeof toolConnections.$inferSelect>;
+
+/** A timeline can link evidence to a task other than the run's own task. */
+export async function filterReadableDecisionTasks(
+  db: Db,
+  actor: AuthorizationActor,
+  companyId: string,
+  decisions: ToolRunDecision[],
+) {
+  const bindings = decisions.map(decision => [
+    decision.invocation.issueId,
+    decision.actionRequest?.issueId,
+    ...decision.auditEvents.map(event => event.issueId),
+  ].filter((id): id is string => Boolean(id)));
+  const taskIds = [...new Set(bindings.flat())];
+  if (!taskIds.length) return decisions;
+
+  const condition = await issueReadSqlCondition(db, actor);
+  const readable = new Set<string>();
+  for (let offset = 0; offset < taskIds.length; offset += 500) {
+    const rows = await db.select({ id: issues.id }).from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, taskIds.slice(offset, offset + 500)), condition));
+    for (const { id } of rows) readable.add(id);
+  }
+  return decisions.filter((_decision, index) => bindings[index].every(id => readable.has(id)));
+}
 
 export function createToolActivityService(db: Db, getConnectionRow: ConnectionLookup) {
   return {

@@ -1446,12 +1446,32 @@ describe("connection management with production default agents", () => {
     expect(hidden, JSON.stringify(hidden)).toMatchObject({ status: 404 });
     expect(await decisions(randomUUID())).toEqual(hidden);
 
+    const [companyRun] = await server.db.insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: f.agentId, status: "succeeded",
+    }).returning();
+    const [companyCall, privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
+      .values([null, privateIssue.id, null].map(issueId => ({
+        companyId: f.companyId, runId: companyRun.id, issueId, toolName: "fixture_read",
+      }))).returning();
+    await server.db.insert(toolCallEvents).values({
+      companyId: f.companyId, runId: companyRun.id, issueId: privateIssue.id,
+      invocationId: callWithPrivateEvidence.id, eventType: "call_completed",
+    });
+    const visible = await decisions(companyRun.id);
+    expect(visible).toMatchObject({ status: 200, body: {
+      decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: companyCall.id }) })],
+    } });
+
     await server.db.update(issues).set({ responsibleUserId: f.userId, assigneeAgentId: f.agentId })
       .where(eq(issues.id, privateIssue.id));
     expect(await decisions(run.id)).toMatchObject({
       status: 200,
       body: { decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: invocation.id }) })] },
     });
+    const afterAccess = await decisions(companyRun.id);
+    expect(afterAccess.status).toBe(200);
+    expect(afterAccess.body.decisions.map((decision: { invocation: { id: string } }) => decision.invocation.id).sort())
+      .toEqual([companyCall.id, privateCall.id, callWithPrivateEvidence.id].sort());
   });
 
   it("shares tool-activity authorization by task and reuses run identity within one page", async () => {

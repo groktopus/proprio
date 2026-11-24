@@ -8,7 +8,7 @@ import { badRequest, forbidden, notFound, HttpError } from "../errors.js";
 import { assertAuthenticated, assertCompanyAccess, hasCompanyAccess, getActorInfo } from "./authz.js";
 import { connectionManagementService, responsibleConnectionUser, type ConnectionManagementContext } from "../services/connection-management.js";
 import { authorizationService } from "../services/authorization.js";
-import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
+import { canActorReadHeartbeatRun, heartbeatRunReadAccessColumns } from "../services/heartbeat-run-privacy.js";
 import type { ConnectionManagementAction, ConnectionManagementResource } from "../services/connection-management-policy.js";
 
 const contexts = new WeakMap<Request, ConnectionManagementContext>();
@@ -199,9 +199,7 @@ export function connectionManagementGuard(db: Db, purpose: "tool" | "chat" | "ai
       }
       if (req.params.runId) {
         const [run] = await db.select({
-          companyId: heartbeatRuns.companyId,
-          scopeKind: heartbeatRuns.scopeKind,
-          issueId: heartbeatRuns.issueId,
+          ...heartbeatRunReadAccessColumns,
           contextIssueId: sql<string | null>`case
             when jsonb_typeof(${heartbeatRuns.contextSnapshot}->'issueId') = 'string'
             then ${heartbeatRuns.contextSnapshot}->>'issueId'
