@@ -905,7 +905,6 @@ export function AgentDetail() {
           companyId={resolvedCompanyId}
           assignLabel="New task"
           size="default"
-          assignIcon={Proprio}
           showChat
           showStatus={false}
           workActionsInMenu
