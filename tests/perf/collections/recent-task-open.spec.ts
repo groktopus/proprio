@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { getRecentTasksStorageKey } from "../../../ui/src/lib/recent-tasks";
 import { collectionFixture, type CollectionFixture } from "./fixture";
 
 const RECENT_COUNT = 8;
@@ -35,26 +36,26 @@ async function ensureRecentTasks(request: APIRequestContext): Promise<RecentTask
 async function seedRecents(page: Page, request: APIRequestContext, tasks = recents) {
   const session = await (await request.get("/api/auth/get-session")).json().catch(() => null);
   const userId: string | null = session?.user?.id ?? session?.session?.userId ?? null;
-  await page.addInitScript(({ companyId, userId, recents }) => {
+  const storageKeys = [...new Set([userId, null].map(owner => getRecentTasksStorageKey(fixture.company.id, owner)))];
+  await page.addInitScript(({ companyId, storageKeys, recents }) => {
     const entries = recents.map((task, index) => ({
       id: task.id, companyId, title: task.title, identifier: task.identifier, status: "backlog", recordedAt: Date.now() - index * 1000,
     }));
-    for (const owner of new Set([userId ?? "__local_board__", "__local_board__"])) {
-      localStorage.setItem(`proprio.recentTasks.v2:${companyId}:${owner}`, JSON.stringify(entries));
-    }
-  }, { companyId: fixture.company.id, userId, recents: tasks });
+    for (const key of storageKeys) localStorage.setItem(key, JSON.stringify(entries));
+  }, { companyId: fixture.company.id, storageKeys, recents: tasks });
+  return storageKeys;
 }
 
-async function addRecent(page: Page, task: RecentTask) {
-  await page.evaluate(({ companyId, task }) => {
-    for (const key of Object.keys(localStorage).filter(key => key.startsWith(`proprio.recentTasks.v2:${companyId}:`))) {
+async function addRecent(page: Page, task: RecentTask, storageKeys: string[]) {
+  await page.evaluate(({ companyId, task, storageKeys }) => {
+    for (const key of storageKeys) {
       const oldValue = localStorage.getItem(key);
       const entries = JSON.parse(oldValue ?? "[]").filter((entry: { id: string }) => entry.id !== task.id);
       const newValue = JSON.stringify([{ ...task, companyId, status: "backlog", recordedAt: Date.now() }, ...entries]);
       localStorage.setItem(key, newValue);
       window.dispatchEvent(new StorageEvent("storage", { key, oldValue, newValue, storageArea: localStorage }));
     }
-  }, { companyId: fixture.company.id, task });
+  }, { companyId: fixture.company.id, task, storageKeys });
   await expect(page.getByRole("link", { name: task.title }).first()).toBeVisible();
 }
 
@@ -161,10 +162,10 @@ test("clicking a preloaded recent task shows its chat without first-frame reads"
 
 test("a task added after the initial Recents preload opens without first-frame reads", async ({ page, request }) => {
   const added = recents.at(-1)!;
-  await seedRecents(page, request, recents.slice(0, -1));
+  const storageKeys = await seedRecents(page, request, recents.slice(0, -1));
   await loadIdle(page);
   const requests = recordRequests(page);
-  await addRecent(page, added);
+  await addRecent(page, added, storageKeys);
   await expect.poll(() => requests.some(url => url.pathname.endsWith("/issues/chat-bootstrap")
     && url.searchParams.get("ids")?.split(",").includes(added.id))).toBe(true);
   await page.waitForLoadState("networkidle");
@@ -211,11 +212,11 @@ for (const scenario of ["initial", "added"] as const) for (const apiDelayMs of [
           await route.fallback();
         });
       }
-      await seedRecents(page, request, scenario === "added" ? recents.slice(0, -1) : recents);
+      const storageKeys = await seedRecents(page, request, scenario === "added" ? recents.slice(0, -1) : recents);
       const requests = recordRequests(page);
       await loadIdle(page);
       if (scenario === "added") {
-        await addRecent(page, recents.at(-1)!);
+        await addRecent(page, recents.at(-1)!, storageKeys);
         await page.waitForLoadState("networkidle");
         await page.waitForTimeout(IDLE_SETTLE_MS);
       }
