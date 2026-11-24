@@ -3,7 +3,7 @@ import { useAccountIdentity } from "@/api/companies-query";
 import { AgentIdentity } from "../components/AgentIdentity";
 import { TaskSummaryList } from "../components/TaskSummaryList";
 import { useDesignSandbox } from "../context/DesignSandboxContext";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAgentlessOnboardingAutoOpen } from "../hooks/useAgentlessOnboardingAutoOpen";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -31,7 +31,7 @@ import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle }
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { QueryErrorState, QueryPlaceholder, QueryStaleHint, useQueryView, type QueryViewKind } from "../components/QueryView";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { InlineBanner } from "../components/InlineBanner";
@@ -71,7 +71,6 @@ export function withTaskSummaries(rows: readonly CompactIssue[], summaries: read
   });
 }
 
-
 export type PausedAgentBanner =
   | { kind: "imported"; pausedImportedAgentIds: string[] }
   | { kind: "all-paused" }
@@ -94,6 +93,42 @@ export function derivePausedAgentBanner(agents: Agent[] | undefined): PausedAgen
   }
   if (agents.every((agent) => agent.status === "paused")) return { kind: "all-paused" };
   return null;
+}
+
+export function DashboardTaskIndexState({
+  kind,
+  error,
+  retry,
+  retrying,
+  empty,
+  children,
+}: {
+  kind: QueryViewKind;
+  error: unknown;
+  retry: () => void;
+  retrying: boolean;
+  empty: boolean;
+  children: ReactNode;
+}) {
+  if (kind === "loading" || kind === "reconnecting") return <QueryPlaceholder label="Loading recent tasks" />;
+  if (kind === "error") {
+    return <Card className="block p-4"><QueryErrorState size="inline" error={error} action="load recent tasks" onRetry={retry} retrying={retrying} /></Card>;
+  }
+  if (kind === "stale" && empty) {
+    return (
+      <Card className="block p-4 space-y-2">
+        <QueryStaleHint />
+        <p className="text-sm text-muted-foreground">Recent tasks are unavailable until the task index refreshes.</p>
+        {!retrying ? <Button type="button" variant="outline" size="xs" onClick={retry}>Retry task index</Button> : null}
+      </Card>
+    );
+  }
+  return (
+    <>
+      {kind === "stale" ? <div className="mb-2 flex items-center gap-2"><QueryStaleHint />{!retrying ? <Button type="button" variant="ghost" size="xs" onClick={retry}>Retry task index</Button> : null}</div> : null}
+      {children}
+    </>
+  );
 }
 
 export function Dashboard() {
@@ -178,11 +213,16 @@ export function Dashboard() {
   });
   usePublishSharedQueryData(sharedActivity, activity, activityUpdatedAt);
 
-  const { data: issues } = useQuery({
+  const issuesQuery = useQuery({
     queryKey: queryKeys.issues.listIndex(selectedCompanyId!),
     queryFn: ({ signal }) => issuesApi.listCompact(selectedCompanyId!, { projection: "index" }, { signal }),
     enabled: !!selectedCompanyId,
   });
+  const issuesView = useQueryView(issuesQuery);
+  const issues = issuesQuery.data;
+  const taskIndexLoading = issuesView.kind === "loading" || issuesView.kind === "reconnecting";
+  const taskIndexUnavailable = issuesView.kind === "error";
+  const taskIndexStale = issuesView.kind === "stale";
   const { userId: accountUserId, settled: accountSettled } = useAccountIdentity();
   const recentIndexRows = useMemo(() => recentTaskIndexRows(issues ?? []), [issues]);
   const recentIds = useMemo(() => recentIndexRows.map((issue) => issue.id).sort(), [recentIndexRows]);
@@ -455,7 +495,7 @@ export function Dashboard() {
             <MetricCard
               appearance={designSandbox ? "card" : "plain"}
               icon={ShieldCheck}
-              value={data.pendingApprovals + data.budgets.pendingApprovals}
+              value={data.pendingApprovals}
               label="Pending Approvals"
               to="/approvals"
               description={
@@ -477,11 +517,29 @@ export function Dashboard() {
             {/* PAP-411: "Tasks by Priority" chart hidden behind SHOW_TASK_PRIORITY_UI. */}
             {SHOW_TASK_PRIORITY_UI && (
               <ChartCard title="Tasks by Priority" subtitle="Last 14 days">
-                <PriorityChart issues={issues ?? []} />
+                {taskIndexLoading ? (
+                  <QueryPlaceholder label="Loading task priority" />
+                ) : taskIndexUnavailable ? (
+                  <QueryErrorState size="inline" error={issuesView.error} action="load task priority" onRetry={issuesView.retry} retrying={issuesView.isFetching} />
+                ) : (
+                  <>
+                    {taskIndexStale ? <QueryStaleHint /> : null}
+                    <PriorityChart issues={issues ?? []} />
+                  </>
+                )}
               </ChartCard>
             )}
             <ChartCard title="Tasks by Status" subtitle="Last 14 days">
-              <IssueStatusChart issues={issues ?? []} />
+              {taskIndexLoading ? (
+                <QueryPlaceholder label="Loading task status" />
+              ) : taskIndexUnavailable ? (
+                <QueryErrorState size="inline" error={issuesView.error} action="load task status" onRetry={issuesView.retry} retrying={issuesView.isFetching} />
+              ) : (
+                <>
+                  {taskIndexStale ? <QueryStaleHint /> : null}
+                  <IssueStatusChart issues={issues ?? []} />
+                </>
+              )}
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
               <SuccessRateChart activity={data.runActivity} />
@@ -522,14 +580,14 @@ export function Dashboard() {
             {/* Recent Tasks */}
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
-                Recent Tasks
+                Recent Tasks {taskIndexStale ? <span className="font-normal normal-case">(updating…)</span> : null}
               </h3>
-              {recentIssues.length === 0 ? (
+              {recentIssues.length === 0 && !taskIndexStale && !taskIndexLoading && !taskIndexUnavailable ? (
                 <Card className="block p-4">
                   <p className="text-sm text-muted-foreground">No tasks yet.</p>
                 </Card>
-              ) : (
-                designSandbox ? <Card className="block overflow-hidden py-0">
+              ) : <DashboardTaskIndexState kind={issuesView.kind} error={issuesView.error} retry={issuesView.retry} retrying={issuesView.isFetching} empty={recentIssues.length === 0}>
+                {designSandbox ? <Card className="block overflow-hidden py-0">
                   <TaskSummaryList issues={recentIssues.slice(0, 10)} />
                 </Card> : <Card className="@container block py-0 divide-y divide-border overflow-hidden">
                   {recentIssues.slice(0, 10).map((issue) => (
@@ -568,8 +626,8 @@ export function Dashboard() {
                       </div>
                     </Link>
                   ))}
-                </Card>
-              )}
+                </Card>}
+              </DashboardTaskIndexState>}
             </div>
           </div>
 
