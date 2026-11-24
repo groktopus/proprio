@@ -1967,6 +1967,37 @@ impl CodexProviderState {
         };
     }
 
+    fn prepare_provider_started_turn(
+        &mut self,
+        provider_turn_id: &str,
+    ) -> Result<(), DurableRunnerError> {
+        if self.active_provider_turn_id.as_deref() == Some(provider_turn_id) {
+            return Ok(());
+        }
+        if settled_provider_turn_contains(
+            &self.settled_provider_turn_ids,
+            &self.settled_provider_turn_filter,
+            provider_turn_id,
+        ) {
+            return Err(DurableRunnerError::invalid(
+                "Codex turn-start notification reused a settled provider turn identity",
+            ));
+        }
+        if self.active_provider_turn_id.is_some() {
+            return Err(DurableRunnerError::invalid(
+                "Codex turn-start notification arrived while another provider turn is active",
+            ));
+        }
+        if self.tool_bridge.turn_closed() {
+            self.tool_bridge.prepare_turn().map_err(|error| {
+                DurableRunnerError::invalid(format!(
+                    "Codex semantic tool receipts could not prepare a recovered provider turn: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     fn settle_active_provider_turn_identity(&mut self) -> Result<(), DurableRunnerError> {
         let provider_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
             DurableRunnerError::invalid("Codex terminal omitted its active provider turn identity")
@@ -5658,6 +5689,7 @@ impl CodexCommandExecutor {
                                 "Codex turn start notification omitted active turn authority",
                             )
                         })?;
+                        state.prepare_provider_started_turn(&provider_turn_id)?;
                         state.reconcile_active_provider_turn(Some(provider_turn_id));
                         if let Some(goal) = state.goal.as_mut() {
                             goal.working_now = true;
