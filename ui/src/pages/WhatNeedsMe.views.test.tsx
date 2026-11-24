@@ -173,7 +173,7 @@ describe("classic Decisions views", () => {
     await act(async () => decided.click());
     await flush();
     expect(container.querySelector("[data-decision-card='decided-1']")).toBeNull();
-    expect(container.textContent).toContain("permission");
+    expect(container.textContent).toContain("Forbidden");
     expect(container.textContent).not.toContain("No decided decisions.");
   });
 
