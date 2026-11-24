@@ -2148,6 +2148,7 @@ export function Secrets() {
         <div role="cell">
           <UpdatedWithTooltip updatedAt={updatedAt} tooltip={updatedTooltip} />
         </div>
+        {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The cell prevents row activation during use of its own buttons. */}
         <div role="cell" className="text-right" onClick={(event) => event.stopPropagation()}>
           {renderRowActions(row)}
         </div>
