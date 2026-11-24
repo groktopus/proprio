@@ -281,7 +281,6 @@ import { IssueGalleryContext } from "../context/IssueGalleryContext";
 import { useIssuePlanDocument } from "../hooks/useIssuePlanDocument";
 import { isOutdatedPlanConfirmation } from "../components/task-chat/interaction-thread-order";
 import { useTaskArtifactArrival } from "../hooks/useTaskArtifactArrival";
-import { IssueRunLedger } from "../components/IssueRunLedger";
 import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import type { MentionOption } from "../components/MarkdownEditor";
 import {
@@ -292,7 +291,7 @@ import {
   FileViewerProvider,
   useRequiredFileViewer,
 } from "../context/FileViewerContext";
-import { FileViewerSheet } from "../components/FileViewerSheet";
+import { DeferredOverlay } from "../components/DeferredOverlay";
 import { ArtifactFileChip } from "../components/ArtifactFileChip";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { StatusIcon } from "../components/StatusIcon";
@@ -1387,6 +1386,12 @@ type IssueDetailChatTabProps = {
 };
 
 const DesignSandboxTaskThread = lazy(() => import("../components/design-sandbox/DesignSandboxTaskThread"));
+const IssueRunLedger = lazy(() =>
+  import("../components/IssueRunLedger").then((module) => ({ default: module.IssueRunLedger })),
+);
+const FileViewerSheet = lazy(() =>
+  import("../components/FileViewerSheet").then((module) => ({ default: module.FileViewerSheet })),
+);
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
   executionBlocked,
@@ -3135,88 +3140,90 @@ function IssueDetailActivityTab({
         </div>
       )}
       <div className="mb-3">
-        <IssueRunLedger
-          issueId={issueId}
-          companyId={companyId}
-          issueStatus={issueStatus}
-          childIssues={childIssues}
-          agentMap={agentMap}
-          hasLiveRuns={hasLiveRuns}
-          activityEvents={activity ?? []}
-          resolveUserLabel={(userId) =>
-            userProfileMap.get(userId)?.label ?? null
-          }
-          renderActivityEvent={(evt) => {
-            const tone = successfulRunHandoffActivityTone(evt.action);
-            const isHandoffWarning =
-              evt.action === SUCCESSFUL_RUN_HANDOFF_REQUIRED_ACTION ||
-              evt.action === SUCCESSFUL_RUN_HANDOFF_ESCALATED_ACTION;
-            return (
-              <div
-                className={cn(
-                  "space-y-1.5 rounded-lg border px-3 py-2 text-xs",
-                  tone.className,
-                )}
-              >
-                <div className="flex items-center gap-1.5">
-                  {isHandoffWarning ? (
-                    <AlertTriangle
-                      className={cn("h-3.5 w-3.5 shrink-0", tone.iconClassName)}
+        <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading runs…</p>}>
+          <IssueRunLedger
+            issueId={issueId}
+            companyId={companyId}
+            issueStatus={issueStatus}
+            childIssues={childIssues}
+            agentMap={agentMap}
+            hasLiveRuns={hasLiveRuns}
+            activityEvents={activity ?? []}
+            resolveUserLabel={(userId) =>
+              userProfileMap.get(userId)?.label ?? null
+            }
+            renderActivityEvent={(evt) => {
+              const tone = successfulRunHandoffActivityTone(evt.action);
+              const isHandoffWarning =
+                evt.action === SUCCESSFUL_RUN_HANDOFF_REQUIRED_ACTION ||
+                evt.action === SUCCESSFUL_RUN_HANDOFF_ESCALATED_ACTION;
+              return (
+                <div
+                  className={cn(
+                    "space-y-1.5 rounded-lg border px-3 py-2 text-xs",
+                    tone.className,
+                  )}
+                >
+                  <div className="flex items-center gap-1.5">
+                    {isHandoffWarning ? (
+                      <AlertTriangle
+                        className={cn("h-3.5 w-3.5 shrink-0", tone.iconClassName)}
+                      />
+                    ) : null}
+                    <ActorIdentity
+                      evt={evt}
+                      agentMap={agentMap}
+                      userProfileMap={userProfileMap}
                     />
-                  ) : null}
-                  <ActorIdentity
-                    evt={evt}
-                    agentMap={agentMap}
-                    userProfileMap={userProfileMap}
+                    <span>
+                      {formatIssueActivityAction(evt.action, evt.details, {
+                        agentMap,
+                        userProfileMap,
+                        currentUserId,
+                      })}
+                    </span>
+                    <span className="ml-auto shrink-0">
+                      {relativeTime(evt.createdAt)}
+                    </span>
+                  </div>
+                  <IssueReferenceActivitySummary event={evt} />
+                  {/* Field-level who/what/why receipt for agent and board edits alike. */}
+                  <IssueFieldChangeReceipt
+                    event={evt}
+                    resolveAgentLabel={(agentId) =>
+                      agentMap.get(agentId)?.name ?? null
+                    }
+                    resolveUserLabel={(userId) =>
+                      userProfileMap.get(userId)?.label ?? null
+                    }
                   />
-                  <span>
-                    {formatIssueActivityAction(evt.action, evt.details, {
-                      agentMap,
-                      userProfileMap,
-                      currentUserId,
-                    })}
-                  </span>
-                  <span className="ml-auto shrink-0">
-                    {relativeTime(evt.createdAt)}
-                  </span>
+                  {/* A refused write explains itself here, not just in the API error. */}
+                  {(() => {
+                    const denial = issueWriteDenialForActivity(
+                      evt.action,
+                      evt.details,
+                      {
+                        actorLabel: evt.agentId
+                          ? (agentMap.get(evt.agentId)?.name ?? null)
+                          : null,
+                        responsibleUserName: evt.responsibleUserId
+                          ? (userProfileMap.get(evt.responsibleUserId)?.label ??
+                            null)
+                          : null,
+                      },
+                    );
+                    return denial ? (
+                      <IssueWriteDenialNotice
+                        code={denial.code}
+                        context={denial.context}
+                      />
+                    ) : null;
+                  })()}
                 </div>
-                <IssueReferenceActivitySummary event={evt} />
-                {/* Field-level who/what/why receipt for agent and board edits alike. */}
-                <IssueFieldChangeReceipt
-                  event={evt}
-                  resolveAgentLabel={(agentId) =>
-                    agentMap.get(agentId)?.name ?? null
-                  }
-                  resolveUserLabel={(userId) =>
-                    userProfileMap.get(userId)?.label ?? null
-                  }
-                />
-                {/* A refused write explains itself here, not just in the API error. */}
-                {(() => {
-                  const denial = issueWriteDenialForActivity(
-                    evt.action,
-                    evt.details,
-                    {
-                      actorLabel: evt.agentId
-                        ? (agentMap.get(evt.agentId)?.name ?? null)
-                        : null,
-                      responsibleUserName: evt.responsibleUserId
-                        ? (userProfileMap.get(evt.responsibleUserId)?.label ??
-                          null)
-                        : null,
-                    },
-                  );
-                  return denial ? (
-                    <IssueWriteDenialNotice
-                      code={denial.code}
-                      context={denial.context}
-                    />
-                  ) : null;
-                })()}
-              </div>
-            );
-          }}
-        />
+              );
+            }}
+          />
+        </Suspense>
       </div>
       <IssueContinuationHandoff
         document={continuationHandoff}
@@ -9261,19 +9268,20 @@ function IssueFileViewer({
 
   if (useSidePanel) return null;
 
+  function closeViewer() {
+    onPromptOpenChange(false);
+    viewer.close();
+  }
+
   return (
-    <FileViewerSheet
-      issueId={issueId}
-      companyId={companyId}
-      open={open}
-      showPromptWhenEmpty={showPromptWhenEmpty}
-      onOpenChange={(next) => {
-        if (!next) {
-          onPromptOpenChange(false);
-          // Clears any file view and browse state from the URL.
-          viewer.close();
-        }
-      }}
-    />
+    <DeferredOverlay requested={open} title="File preview" onClose={closeViewer}>
+      <FileViewerSheet
+        issueId={issueId}
+        companyId={companyId}
+        open={open}
+        showPromptWhenEmpty={showPromptWhenEmpty}
+        onOpenChange={(next) => { if (!next) closeViewer(); }}
+      />
+    </DeferredOverlay>
   );
 }

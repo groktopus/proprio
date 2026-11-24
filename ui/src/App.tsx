@@ -1,5 +1,4 @@
 import { useCoordinatorWorkspaceEnabled } from "./hooks/useCoordinatorWorkspaceEnabled";
-import { AgentChats } from "./pages/AgentChats";
 import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import type { ToolConnectionCredentialSource } from "@groktopus/shared";
 import { Navigate, Outlet, Route, Routes, useActiveCompanyPrefix, useLocation, useParams } from "@/lib/router";
@@ -66,6 +65,7 @@ let issueDetailLoad: Promise<{ default: typeof import("./pages/IssueDetail").Iss
 const loadIssueDetail = () =>
   (issueDetailLoad ??= import("./pages/IssueDetail").then((module) => ({ default: module.IssueDetail })));
 const IssueDetail = lazy(loadIssueDetail);
+const AgentChats = lazy(() => import("./pages/AgentChats").then((module) => ({ default: module.AgentChats })));
 const AgentChat = lazy(() => import("./pages/AgentChat").then((module) => ({ default: module.AgentChat })));
 const IssueChatLongThreadPerf = lazy(() => import("./pages/IssueChatLongThreadPerf").then((module) => ({ default: module.IssueChatLongThreadPerf })));
 const loadInbox = () => import("./pages/Inbox").then((module) => ({ default: module.Inbox }));

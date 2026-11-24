@@ -56,6 +56,35 @@ harness validates the task identity before measuring. Network spans in the trace
 use recorded request start/end timestamps relative to task navigation; they
 include completed requests observed during the sample, even after content paint.
 
+## Cold mobile board and task loads
+
+Build the production board with `pnpm --filter @groktopus/ui build --manifest`.
+Serve those assets from a disposable loopback instance with
+`PROPRIO_UI_DEV_MIDDLEWARE=false`. Run the focused comparison against
+each build in turn.
+
+```sh
+PROPRIO_ISSUE_PERF_BASE_URL=http://127.0.0.1:3287 \
+  pnpm exec playwright test --config tests/perf/issue-detail/playwright.config.ts \
+  issue-detail.perf.spec.ts -g 'cold board and direct task mobile loads'
+```
+
+Save `test-results/issue-detail-perf/cold-mobile.json` after each run. The
+harness uses five fresh Chromium contexts per route, a 390 × 844 CSS viewport,
+50 ms latency, 9 Mibit/s downstream, 1.5 Mibit/s upstream, and 4× CPU slowdown.
+It blocks service workers and disables the HTTP cache. The board is ready when
+the seeded task row appears. Task readiness requires the latest saved comment
+and an editable composer. The recorded transfer includes completed network
+responses by readiness. The largest-contentful-paint sample reflects the
+latest value at readiness.
+
+The required build check runs `node scripts/ci/board-asset-budget.mjs`.
+It counts each JavaScript file once across static imports of the HTML entry,
+then across the entry plus the direct Task Detail chunk. The ceilings are
+rounded up from a production build at `98914d7c` with the Agent Detail
+typecheck fix applied. The browser measurements include any additional dynamic
+requests. The byte ceilings apply to build assets and are independent of timing.
+
 ## Cold direct task load (chat bootstrap)
 
 A hard load of a task URL starts `GET /api/issues/:ref/chat-bootstrap` from the
