@@ -20,7 +20,7 @@ RUN cargo build --locked --release -j 2 -p proprio-runner-core --bin proprio-run
     && install -m 0755 target/release/proprio-runnerd /usr/local/bin/proprio-runnerd \
     && rm -rf target /usr/local/cargo/registry /usr/local/cargo/git
 
-FROM node:24.21.0-bookworm@sha256:5a750d3be5e5c80275f8c9a5367c3aed99c2875656590c8d0701c7ee687f5f0a AS provider-pack-build
+FROM node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb7e2592e41b8bab8d49 AS provider-pack-build
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 # Bound build-time memory on hosts that expose many CPUs but little RAM.
 # These settings belong only to this build stage, never the runtime image.
