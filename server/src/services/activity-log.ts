@@ -169,8 +169,7 @@ export function publishActivity(publication: ActivityPublication) {
       companyId: publication.companyId,
       type: "activity.logged",
       payload: taskTreeBudget
-        ? { action: "budgets.changed", entityType: "budget", entityId: "budget", issueId: null,
-          actorType: publication.payload.actorType, actorId: publication.payload.actorId }
+        ? { action: "budgets.changed", entityType: "budget_policy" }
         : publication.payload,
     });
     if (publication.pluginEvent && !taskTreeBudget) publishPluginDomainEvent(publication.pluginEvent);

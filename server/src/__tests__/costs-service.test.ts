@@ -322,7 +322,7 @@ describe("cost routes", () => {
     const visibleRootId = "22222222-2222-4222-8222-222222222222";
     mockBudgetScopeVisibility.visibleBudgetTaskTreeScopeIds.mockResolvedValue([visibleRootId]);
     await request(createApp()).get("/api/companies/company-1/budgets/overview").expect(200);
-    expect(mockBudgetService.overview).toHaveBeenCalledExactlyOnceWith("company-1", [visibleRootId]);
+    expect(mockBudgetService.overview).toHaveBeenCalledExactlyOnceWith("company-1", { visibleTaskTreeScopeIds: [visibleRootId] });
   });
 
   it("rejects company budget updates for board users outside the company", async () => {

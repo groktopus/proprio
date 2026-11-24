@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { activityLog, agents, budgetIncidents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, issues, type Db } from "@groktopus/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { activityLog, agents, approvals, budgetIncidents, budgetPolicies, budgetReservations, companies, costEvents, createDb, heartbeatRuns, issues, type Db } from "@groktopus/db";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { reserveRunBudget } from "./budget-reservations.js";
 import { computeObservedSpend } from "./budget-exposure.js";
 import { budgetService, flushBudgetEvaluationWork } from "./budgets.js";
 import { activityService } from "./activity.js";
+import { canActorReadApproval } from "./authorization.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 
@@ -105,6 +106,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const f = await fixture();
     const agent = await f.makeAgent("Worker");
     const root = await f.makeIssue("Shared outcome"), task = await f.makeIssue("Build", root.id);
+    await db.update(issues).set({ visibility: "private", assigneeAgentId: agent.id }).where(eq(issues.id, root.id));
     const run = await f.makeRun(agent.id, task.id, "running");
     const policy = await f.makePolicy(root.id, { amount: 50, reservationCents: "0" });
     await reserveRunBudget(db, f.companyId, run.id, null);
@@ -120,6 +122,18 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const [company] = await db.select().from(companies).where(eq(companies.id, f.companyId));
     expect(updatedPolicy!.enforcementVersion).toBeGreaterThan(0);
     expect(company!.status).toBe("active");
+    const [approval] = await db.select().from(approvals).where(eq(approvals.companyId, f.companyId));
+    expect(approval?.payload).toMatchObject({ issueId: root.id, scopeId: root.id, scopeType: "task_tree" });
+    vi.stubEnv("PROPRIO_ISSUE_PRIVACY_MODE", "enforce");
+    try {
+      const owner = { type: "agent" as const, companyId: f.companyId, agentId: agent.id };
+      const outsider = { ...owner, agentId: randomUUID() };
+      await expect(canActorReadApproval(db, owner, approval!.id)).resolves.toBe(true);
+      await expect(canActorReadApproval(db, outsider, approval!.id)).resolves.toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
   });
 
   it("filters company-wide budget listings and incidents by readable task roots", async () => {
@@ -139,7 +153,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
       details: { scopeType: "task_tree", scopeId: policy.scopeId },
     })));
 
-    const overview = await budgetService(db).overview(f.companyId, [visibleRoot.id]);
+    const overview = await budgetService(db).overview(f.companyId, { visibleTaskTreeScopeIds: [visibleRoot.id] });
     const activity = await activityService(db).list({ companyId: f.companyId, visibleBudgetTaskTreeScopeIds: [visibleRoot.id] });
 
     expect(overview.policies.map(policy => policy.scopeId)).toEqual([visibleRoot.id]);

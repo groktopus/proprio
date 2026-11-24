@@ -350,7 +350,7 @@ export function costRoutes(
     assertCompanyAccess(req, companyId);
     if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
     const visibleTaskTreeScopeIds = await visibleBudgetTaskTreeScopeIds(db, companyId, req.actor);
-    const overview = await budgets.overview(companyId, visibleTaskTreeScopeIds);
+    const overview = await budgets.overview(companyId, { visibleTaskTreeScopeIds });
     res.json(overview);
   });
 
@@ -363,7 +363,10 @@ export function costRoutes(
       assertCompanyAccess(req, companyId);
       if (req.body.scopeType === "task_tree"
         && !await canReadBudgetTaskTreeRoot(db, companyId, req.body.scopeId, req.actor)) throw notFound("Task tree root not found");
-      const summary = await budgets.upsertPolicy(companyId, req.body, req.actor.userId ?? "board");
+      const actorUserId = req.actor.userId ?? "board";
+      const summary = req.body.scopeType === "task_tree"
+        ? await budgets.upsertPolicy(companyId, req.body, actorUserId, req.actor)
+        : await budgets.upsertPolicy(companyId, req.body, actorUserId);
       res.json(summary);
     },
   );
@@ -389,6 +392,7 @@ export function costRoutes(
       );
       const incident = await budgets.resolveIncident(companyId, incidentId, req.body, actorUserId, req.actor.source ?? null, {
         activityDetails: attentionHandledDetails(handledFor, req.body.action === "keep_paused" ? "kept_paused" : "limit_raised"),
+        ...(incidentScope?.scopeType === "task_tree" ? { actor: req.actor } : {}),
       });
       res.json(incident);
     },

@@ -25,8 +25,7 @@ describe("task-tree budget activity privacy", () => {
 
     expect(publishLiveEvent).toHaveBeenCalledExactlyOnceWith({
       companyId: "company-id", type: "activity.logged", payload: {
-        action: "budgets.changed", entityType: "budget", entityId: "budget", issueId: null,
-        actorType: "user", actorId: "operator-id",
+        action: "budgets.changed", entityType: "budget_policy",
       },
     });
     expect(emit).not.toHaveBeenCalled();

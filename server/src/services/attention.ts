@@ -2530,8 +2530,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const visibleBudgetRoots = options.actor
         ? await visibleBudgetTaskTreeScopeIds(db, companyId, options.actor) : undefined;
       const openBudgetIncidents = summaryOnly
-        ? await budgetService(db).openIncidents(companyId, visibleBudgetRoots)
-        : (await budgetService(db).overview(companyId, visibleBudgetRoots)).activeIncidents;
+        ? await budgetService(db).openIncidents(companyId, { visibleTaskTreeScopeIds: visibleBudgetRoots })
+        : (await budgetService(db).overview(companyId, { visibleTaskTreeScopeIds: visibleBudgetRoots })).activeIncidents;
       for (const incident of openBudgetIncidents) {
         const observedPercent = budgetObservedPercent(incident.amountObserved, incident.amountLimit);
         if (incident.thresholdType !== "hard" && observedPercent < ATTENTION_BUDGET_WARNING_PERCENT) continue;

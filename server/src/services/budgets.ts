@@ -10,6 +10,8 @@ import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./rete
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
 import { and, desc, eq, inArray, sql, or, isNull, lte, exists, ne, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
+import type { AuthorizationActor } from "./authorization.js";
+import { canReadBudgetTaskTreeRoot } from "./budget-scope-visibility.js";
 
 import {
   agents,
@@ -597,7 +599,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           requestedByUserId: null,
           requestedByAgentId: null,
           status: "pending",
-          payload,
+          payload: policy.scopeType === "task_tree" ? { ...payload, issueId: policy.scopeId } : payload,
         })
         .returning()
         .then((rows) => rows[0] ?? null)
@@ -1468,14 +1470,21 @@ export async function reconcileDueBudgetPolicies(db: Db, options: { startup?: bo
 
 export function budgetService(db: Db, _hooks: BudgetServiceHooks = {}) {
   const mutate = <T>(companyId: string, work: (service: ReturnType<typeof budgetServiceInTransaction>) => Promise<T>,
-    scope?: { scopeType: string; scopeId: string }) => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
+    scope?: { scopeType: string; scopeId: string }, taskTreeAccess?: { actor: AuthorizationActor; errorMessage: string },
+  ) => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
+      if (taskTreeAccess && scope?.scopeType === "task_tree") {
+        await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+        if (!await canReadBudgetTaskTreeRoot(tx, companyId, scope.scopeId, taskTreeAccess.actor)) {
+          throw notFound(taskTreeAccess.errorMessage);
+        }
+      }
       const now = new Date();
       const policies = await fenceBudgetPolicies(tx, companyId, scope);
       const result = await work(budgetServiceInTransaction(tx, publications, { evaluate: true, now }));
       if ((policies.some(policy => policy.windowKind === "calendar_month_utc") || scope) && Date.now() >= currentUtcMonthWindow(now).end.getTime())
         throw Object.assign(new Error("Budget window changed during publication"), { code: "40001" });
       return result;
-    });
+    }, taskTreeAccess ? { isolationLevel: "read committed" } : undefined);
   return {
     listPolicies: (companyId: string, visibleTaskTreeScopeIds?: readonly string[]) => withAccountingReadSnapshot(db, companyId,
       tx => budgetServiceInTransaction(tx).listPolicies(companyId, visibleTaskTreeScopeIds)),
@@ -1495,18 +1504,20 @@ export function budgetService(db: Db, _hooks: BudgetServiceHooks = {}) {
         .from(budgetIncidents).where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.id, incidentId))).limit(1);
       return scope ?? null;
     },
-    upsertPolicy: (companyId: string, input: BudgetPolicyUpsertInput, actorUserId: string | null) =>
-      mutate(companyId, service => service.upsertPolicy(companyId, input, actorUserId), input),
+    upsertPolicy: (companyId: string, input: BudgetPolicyUpsertInput, actorUserId: string | null, actor?: AuthorizationActor) =>
+      mutate(companyId, service => service.upsertPolicy(companyId, input, actorUserId), input,
+        actor && input.scopeType === "task_tree" ? { actor, errorMessage: "Task tree root not found" } : undefined),
     evaluateCostEvent: (event: typeof costEvents.$inferSelect) => withOperationAccountingTransaction(db, event.companyId, tx => queueBudgetEvaluation(tx, { companyId: event.companyId, agentId: event.agentId, projectId: event.projectId })),
     getInvocationBlock: (companyId: string, agentId: string | null, context?: AdmissionContext) =>
       withBudgetSpan("budget.admission.inspect", () => withAccountingReadSnapshot(db, companyId,
         tx => budgetServiceInTransaction(tx).getInvocationBlock(companyId, agentId, context))),
     resolveIncident: async (companyId: string, incidentId: string, input: BudgetIncidentResolutionInput, actorUserId: string,
-      actorSource?: string | null, options: { activityDetails?: Record<string, unknown> } = {}) => {
+      actorSource?: string | null, options: { activityDetails?: Record<string, unknown>; actor?: AuthorizationActor } = {}) => {
       const [scope] = await db.select({ scopeType: budgetIncidents.scopeType, scopeId: budgetIncidents.scopeId }).from(budgetIncidents)
         .where(and(eq(budgetIncidents.id, incidentId), eq(budgetIncidents.companyId, companyId)));
       if (!scope) throw notFound("Budget incident not found");
-      return mutate(companyId, service => service.resolveIncident(companyId, incidentId, input, actorUserId, actorSource, options), scope);
+      return mutate(companyId, service => service.resolveIncident(companyId, incidentId, input, actorUserId, actorSource, options), scope,
+        options.actor && scope.scopeType === "task_tree" ? { actor: options.actor, errorMessage: "Budget incident not found" } : undefined);
     },
   };
 }
