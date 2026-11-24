@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Link } from "react-router-dom";
 
 function centsInputValue(value: number) {
   return (value / 100).toFixed(2);
@@ -30,11 +31,13 @@ export function BudgetIncidentCard({
   onRaiseAndResume,
   onKeepPaused,
   isMutating,
+  canResolve = true,
 }: {
   incident: BudgetIncident;
   onRaiseAndResume: (amountCents: number) => void;
   onKeepPaused: () => void;
   isMutating?: boolean;
+  canResolve?: boolean;
 }) {
   const isWarning = incident.thresholdType === "soft";
   const [draftAmount, setDraftAmount] = useState(
@@ -60,13 +63,16 @@ export function BudgetIncidentCard({
                 {stateLabel}
               </Badge>
             </div>
-            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>{incident.scopeName}</CardTitle>
+            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>
+              {incident.scopeType === "task_tree" ? <Link to={`/issues/${incident.scopeId}`} className="hover:underline">{incident.scopeName}</Link> : incident.scopeName}
+            </CardTitle>
             <CardDescription className={isWarning ? "mt-1" : "mt-1 text-red-900/75 dark:text-red-100/70"}>
               {incident.thresholdType === "hard" && incident.amountObserved < incident.amountLimit
                 ? `Accounting is incomplete. Known spend is ${formatCents(incident.amountObserved)}; review pending or unpriced usage in the budget policy.`
                 : `Spending reached ${formatCents(incident.amountObserved)} against a limit of ${formatCents(incident.amountLimit)}.`}
             </CardDescription>
           </div>
+          {incident.scopeType === "task_tree" && <p className="mt-2 text-xs text-muted-foreground">A board operator who can view this root task can resolve its budget stop.</p>}
           {isWarning ? (
             <div className="rounded-full border border-amber-500/30 bg-amber-500/10 p-2 text-amber-600 dark:text-amber-200">
               <AlertTriangle className="h-4 w-4" />
@@ -110,7 +116,7 @@ export function BudgetIncidentCard({
             />
             <Button
               className="gap-2"
-              disabled={isMutating || parsed === null || parsed <= incident.amountObserved}
+              disabled={!canResolve || isMutating || parsed === null || parsed <= incident.amountObserved}
               onClick={() => {
                 if (typeof parsed === "number") onRaiseAndResume(parsed);
               }}
@@ -127,7 +133,7 @@ export function BudgetIncidentCard({
         </div>
 
         <div className="flex justify-end">
-          <Button variant="ghost" className="text-muted-foreground" disabled={isMutating} onClick={onKeepPaused}>
+          <Button variant="ghost" className="text-muted-foreground" disabled={!canResolve || isMutating} onClick={onKeepPaused}>
             {isWarning ? "Dismiss warning" : "Keep paused"}
           </Button>
         </div>

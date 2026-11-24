@@ -3,6 +3,7 @@ import { DecisionHistory } from "../components/decision-models/DecisionHistory";
 import { SubscriptionCostCard, SubscriptionTokenUsage } from "../components/SubscriptionCostCard";
 import { subscriptionsApi } from "../api/subscriptions";
 import { useSearchParams } from "@/lib/router";
+import { Link } from "react-router-dom";
 import { CostEstimateLabel } from "../components/CostEstimateLabel";
 import { CostAmount } from "../components/CostAmount";
 import { CostByUserTable } from "../components/CostByUserTable";
@@ -22,6 +23,7 @@ import type {
 } from "@groktopus/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
+import { accessApi } from "../api/access";
 import { costsApi } from "../api/costs";
 import { agentsApi } from "../api/agents";
 import { BillerSpendCard } from "../components/BillerSpendCard";
@@ -41,6 +43,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useDateRange, PRESET_KEYS, PRESET_LABELS } from "../hooks/useDateRange";
 import { retainQuotaWindows } from "../lib/quota-refresh";
 import { queryKeys } from "../lib/queryKeys";
+import { canBoardManageRuntime } from "../lib/recovery-reconcile";
 import { billingTypeDisplayName, cn, formatCents, formatTokens, providerDisplayName } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -265,6 +268,13 @@ export function Costs({
     refetchInterval: 30_000,
     staleTime: 5_000,
   });
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    enabled: Boolean(selectedCompanyId),
+    staleTime: 60_000,
+  });
+  const canManageTaskTreeBudgets = canBoardManageRuntime(selectedCompanyId, boardAccess);
 
   const invalidateBudgetViews = () => {
     if (!selectedCompanyId) return;
@@ -595,6 +605,7 @@ export function Costs({
     company: budgetPolicies.filter((policy) => policy.scopeType === "company"),
     agent: budgetPolicies.filter((policy) => policy.scopeType === "agent"),
     project: budgetPolicies.filter((policy) => policy.scopeType === "project"),
+    task_tree: budgetPolicies.filter((policy) => policy.scopeType === "task_tree"),
   }), [budgetPolicies]);
 
   if (!selectedCompanyId) {
@@ -893,6 +904,7 @@ export function Costs({
                       key={incident.id}
                       incident={incident}
                       isMutating={incidentMutation.isPending}
+                      canResolve={incident.scopeType !== "task_tree" || canManageTaskTreeBudgets}
                       onKeepPaused={() => incidentMutation.mutate({ incidentId: incident.id, action: "keep_paused" })}
                       onRaiseAndResume={(amount) =>
                         incidentMutation.mutate({
@@ -977,6 +989,7 @@ export function Costs({
                         key={incident.id}
                         incident={incident}
                         isMutating={incidentMutation.isPending}
+                        canResolve={incident.scopeType !== "task_tree" || canManageTaskTreeBudgets}
                         onKeepPaused={() => incidentMutation.mutate({ incidentId: incident.id, action: "keep_paused" })}
                         onRaiseAndResume={(amount) =>
                           incidentMutation.mutate({
@@ -1022,6 +1035,31 @@ export function Costs({
                     </section>
                   );
                 })}
+
+                {budgetPoliciesByScope.task_tree.length > 0 ? (
+                  <section className="space-y-3">
+                    <div>
+                      <h2 className="text-lg font-semibold">Task budgets</h2>
+                      <p className="text-sm text-muted-foreground">Each limit is shared by the root task and its descendants. Board operators who can view the root task can update its limit or resolve its budget stop.</p>
+                    </div>
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      {budgetPoliciesByScope.task_tree.map((summary) => (
+                        <div key={summary.policyId}>
+                          <Link to={`/issues/${summary.scopeId}`} className="mb-2 inline-block text-sm font-medium text-primary hover:underline">
+                            Open root task: {summary.scopeName}
+                          </Link>
+                          <BudgetPolicyCard
+                            summary={summary}
+                            onReservationChange={canManageTaskTreeBudgets ? (reservationCents) => policyMutation.mutate({ summary, changes: { reservationCents } }) : undefined}
+                            onUnpricedUsagePolicyChange={canManageTaskTreeBudgets ? (unpricedUsagePolicy) => policyMutation.mutate({ summary, changes: { unpricedUsagePolicy } }) : undefined}
+                            isSaving={policyMutation.isPending || !canManageTaskTreeBudgets}
+                            onSave={canManageTaskTreeBudgets ? (amount) => policyMutation.mutate({ summary, changes: { amount } }) : undefined}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
 
                 {budgetPolicies.length === 0 ? (
                   <Card>

@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import type { BudgetIncident } from "@groktopus/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BudgetIncidentCard } from "./BudgetIncidentCard";
+import { MemoryRouter } from "react-router-dom";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,7 +40,7 @@ async function renderCard(value: BudgetIncident) {
   const onKeepPaused = vi.fn();
   const onRaiseAndResume = vi.fn();
   await act(async () => root.render(
-    <BudgetIncidentCard incident={value} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} />,
+    <MemoryRouter><BudgetIncidentCard incident={value} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} /></MemoryRouter>,
   ));
   const buttons = () => Array.from(div.querySelectorAll("button"), (button) => button.textContent?.trim());
   return {
@@ -63,6 +64,23 @@ describe("BudgetIncidentCard", () => {
     expect(buttons()).toEqual(["Raise budget & resume", "Keep paused"]);
     expect(div.querySelector("input")?.value).toBe("1010.00");
     await cleanup();
+  });
+
+  it("links task-tree stops to their root and disables resolution without board authority", async () => {
+    const { div, buttons, cleanup } = await renderCard(incident({ scopeType: "task_tree", scopeId: "root-task" }));
+    expect(div.querySelector('a[href="/issues/root-task"]')?.textContent).toBe("Budget Demo");
+    expect(div.textContent).toContain("board operator who can view this root task can resolve");
+    const { div: viewerDiv, cleanup: cleanupViewer } = await (async () => {
+      const viewer = document.createElement("div");
+      document.body.append(viewer);
+      const viewerRoot = createRoot(viewer);
+      await act(async () => viewerRoot.render(<MemoryRouter><BudgetIncidentCard incident={incident({ scopeType: "task_tree" })} canResolve={false} onKeepPaused={vi.fn()} onRaiseAndResume={vi.fn()} /></MemoryRouter>));
+      return { div: viewer, cleanup: async () => { await act(async () => viewerRoot.unmount()); viewer.remove(); } };
+    })();
+    expect(Array.from(viewerDiv.querySelectorAll("button")).every(button => button.disabled)).toBe(true);
+    expect(buttons()).toContain("Raise budget & resume");
+    await cleanup();
+    await cleanupViewer();
   });
 
   it("labels a soft-threshold incident as a warning that does not pause the scope", async () => {

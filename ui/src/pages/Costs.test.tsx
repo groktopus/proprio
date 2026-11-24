@@ -13,6 +13,7 @@ vi.mock("../api/agents", () => ({ agentsApi: { get: scopedAgentMock } }));
 
 const resolveIncidentMock = vi.hoisted(() => vi.fn());
 const upsertPolicyMock = vi.hoisted(() => vi.fn());
+const boardAccessMock = vi.hoisted(() => vi.fn());
 const budgetOverviewMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
 const decisionHistoryMock = vi.hoisted(() => vi.fn());
@@ -43,6 +44,7 @@ vi.mock("../api/budgets", () => ({
     resolveIncident: resolveIncidentMock,
   },
 }));
+vi.mock("../api/access", () => ({ accessApi: { getCurrentBoardAccess: (...args: unknown[]) => boardAccessMock(...args) } }));
 
 vi.mock("../api/costs", () => ({ costsApi: costsApiMocks }));
 vi.mock("../api/decision-models", () => ({ decisionModelsApi: { history: decisionHistoryMock } }));
@@ -73,6 +75,7 @@ describe("Shared Costs surfaces", () => {
 
   beforeEach(() => {
     scopedAgentMock.mockReset();
+    boardAccessMock.mockResolvedValue({ userId: "operator", companyIds: ["company-1"], memberships: [{ companyId: "company-1", status: "active", membershipRole: "operator" }], source: "session", isInstanceAdmin: false });
     const usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costCents: "0", eventCount: 0, estimatedEventCount: 0, unpricedEventCount: 0 };
     subscriptionsMocks.report.mockResolvedValue({ canRefresh: false, asOf: "2026-10-08T00:00:00Z", accounts: [], monthlyTotals: [], activeCount: 0, unknownPriceCount: 0, unidentifiedAccountCount: 0, api: usage, subscription: usage, unknown: usage, unattributedSubscription: usage });
     decisionHistoryMock.mockResolvedValue([]);
@@ -86,6 +89,33 @@ describe("Shared Costs surfaces", () => {
       pausedAgentCount: 0,
       pausedProjectCount: 0,
     });
+  });
+
+  it("shows readable task-tree policies with task links and hides mutations from viewers", async () => {
+    const summary = {
+      policyId: "tree-policy", companyId: "company-1", scopeType: "task_tree", scopeId: "root-task", scopeName: "Root task", metric: "billed_cents", windowKind: "lifetime",
+      amount: 500, warnPercent: 65, hardStopEnabled: true, notifyEnabled: true, isActive: true, unpricedUsagePolicy: "block", reservationCents: "0.0000000",
+      observedAmount: 0, remainingAmount: 500, utilizationPercent: 0, unpricedEventCount: 0, pendingRunCount: 0, status: "ok", paused: false, pauseReason: null,
+    };
+    budgetOverviewMock.mockResolvedValue({ policies: [summary], activeIncidents: [], pendingApprovalCount: 0, pausedAgentCount: 0, pausedProjectCount: 0 });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
+    expect(container.textContent).toContain("shared by the root task and its descendants");
+    expect(container.querySelector('a[href="/issues/root-task"]')?.textContent).toContain("Root task");
+    expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent?.trim() === "Update budget")).toBe(true);
+    queryClient.clear();
+    await act(async () => root.unmount());
+
+    boardAccessMock.mockResolvedValue({ userId: "viewer", companyIds: ["company-1"], memberships: [{ companyId: "company-1", status: "active", membershipRole: "viewer" }], source: "session", isInstanceAdmin: false });
+    const viewerClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={viewerClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
+    expect(container.textContent).toContain("Board operators who can view the root task");
+    expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent?.trim() === "Update budget")).toBe(false);
+    viewerClient.clear();
   });
 
   afterEach(() => {
