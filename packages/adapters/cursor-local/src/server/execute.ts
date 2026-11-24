@@ -44,6 +44,7 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
+  removeMaintainerOnlySkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectProprioPromptSections,
@@ -162,6 +163,16 @@ export async function ensureCursorSkillsInjected(
       `[proprio] Failed to prepare Cursor skills directory ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     return;
+  }
+  const removedSkills = await removeMaintainerOnlySkillSymlinks(
+    skillsHome,
+    selectedEntries.map((entry) => entry.runtimeName),
+  );
+  for (const skillName of removedSkills) {
+    await onLog(
+      "stderr",
+      `[proprio] Removed maintainer-only Cursor skill "${skillName}" from ${skillsHome}\n`,
+    );
   }
   const linkSkill = options.linkSkill ?? ((source: string, target: string) => fs.symlink(source, target));
   for (const entry of selectedEntries) {

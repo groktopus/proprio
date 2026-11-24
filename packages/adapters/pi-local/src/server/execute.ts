@@ -45,6 +45,7 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
+  removeMaintainerOnlySkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectProprioPromptSections,
@@ -98,7 +99,18 @@ async function ensurePiSkillsInjected(
 ) {
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
+  if (selectedEntries.length === 0) return;
   await fs.mkdir(PI_AGENT_SKILLS_DIR, { recursive: true });
+  const removedSkills = await removeMaintainerOnlySkillSymlinks(
+    PI_AGENT_SKILLS_DIR,
+    selectedEntries.map((entry) => entry.runtimeName),
+  );
+  for (const skillName of removedSkills) {
+    await onLog(
+      "stderr",
+      `[proprio] Removed maintainer-only Pi skill "${skillName}" from ${PI_AGENT_SKILLS_DIR}\n`,
+    );
+  }
 
   for (const entry of selectedEntries) {
     const target = path.join(PI_AGENT_SKILLS_DIR, entry.runtimeName);

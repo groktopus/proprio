@@ -249,7 +249,6 @@ async function isLikelyProprioRuntimeSkillPath(
 
 async function pruneBrokenUnavailableProprioSkillSymlinks(
   skillsHome: string,
-  availableEntries: Array<{ key: string; runtimeName: string; source: string }>,
   allowedSkillNames: Iterable<string>,
   onLog: AdapterExecutionContext["onLog"],
 ) {
@@ -264,15 +263,13 @@ async function pruneBrokenUnavailableProprioSkillSymlinks(
     if (!linkedPath) continue;
 
     const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-    const knownProprioSource = availableEntries.some(candidate => candidate.runtimeName === entry.name
-      && path.resolve(candidate.source) === resolvedLinkedPath);
-    if (!knownProprioSource) {
-      // A live link outside this run's inventory can be an operator-managed
-      // skill in another checkout. The heuristic is safe only for broken links.
-      if (await pathExists(resolvedLinkedPath)) continue;
-      if (!(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
+    if (await pathExists(resolvedLinkedPath)) continue;
+    if (
+      !(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.name, {
         requireSkillMarkdown: false,
-      }))) continue;
+      }))
+    ) {
+      continue;
     }
 
     await fs.unlink(target).catch(() => {});
@@ -549,10 +546,10 @@ export async function ensureCodexSkillsInjected(
           resolvedLinkedPath &&
           resolvedLinkedPath !== path.resolve(entry.source)
         ) {
-          // A live symlink may belong to another active run or the operator.
-          // Repair only broken links that still have a verified Proprio path.
-          if (await pathExists(resolvedLinkedPath)) continue;
-          if (!(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))) continue;
+          const ownsLiveLink = options.reconcileUnselected && managedSkillEntries.some(candidate =>
+            candidate.runtimeName === entry.runtimeName && path.resolve(candidate.source) === resolvedLinkedPath);
+          if (!ownsLiveLink && await pathExists(resolvedLinkedPath)) continue;
+          if (!ownsLiveLink && !(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))) continue;
           await fs.unlink(target);
           if (linkSkill) {
             await linkSkill(entry.source, target);
@@ -588,13 +585,12 @@ export async function ensureCodexSkillsInjected(
       managedSkillEntries,
       skillsEntries.map(entry => entry.runtimeName),
     );
-    await pruneBrokenUnavailableProprioSkillSymlinks(
-      skillsHome,
-      allSkillsEntries,
-      skillsEntries.map((entry) => entry.runtimeName),
-      onLog,
-    );
   }
+  await pruneBrokenUnavailableProprioSkillSymlinks(
+    skillsHome,
+    skillsEntries.map((entry) => entry.runtimeName),
+    onLog,
+  );
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
@@ -876,10 +872,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       {
         skillsHome: codexSkillsDir,
         skillsEntries: codexSkillEntries,
-        managedSkillEntries: [
-          ...codexSkillEntries,
-          ...(await readProprioRuntimeSkillEntries({}, __moduleDir)),
-        ],
+        managedSkillEntries: runtimeSkillDigest && configuredHomeIsManaged
+          ? [...codexSkillEntries, ...await readProprioRuntimeSkillEntries({}, __moduleDir)]
+          : undefined,
         desiredSkillNames,
         reconcileUnselected: Boolean(runtimeSkillDigest && configuredHomeIsManaged),
       },

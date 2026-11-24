@@ -61,6 +61,7 @@ import {
   parseOpenCodeModelsOutput,
   requireOpenCodeModelId,
 } from "./models.js";
+import { removeMaintainerOnlySkillSymlinks } from "@groktopus/adapter-utils/server-utils";
 import { apiKeyBillingType } from "@groktopus/adapter-utils/api-billing-type";
 import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -181,6 +182,16 @@ async function ensureOpenCodeSkillsInjected(
   await fs.mkdir(skillsHome, { recursive: true });
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
+  const removedSkills = await removeMaintainerOnlySkillSymlinks(
+    skillsHome,
+    selectedEntries.map((entry) => entry.runtimeName),
+  );
+  for (const skillName of removedSkills) {
+    await onLog(
+      "stderr",
+      `[proprio] Removed maintainer-only OpenCode skill "${skillName}" from ${skillsHome}\n`,
+    );
+  }
   for (const entry of selectedEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 

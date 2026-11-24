@@ -46,6 +46,7 @@ import {
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
+  removeMaintainerOnlySkillSymlinks,
   parseObject,
   renderTemplate,
   hydrateFreshSessionHandoff,
@@ -150,6 +151,7 @@ async function ensureGeminiSkillsInjected(
 ): Promise<void> {
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
+  if (selectedEntries.length === 0) return;
 
   try {
     await fs.mkdir(skillsHome, { recursive: true });
@@ -160,6 +162,17 @@ async function ensureGeminiSkillsInjected(
     );
     return;
   }
+  const removedSkills = await removeMaintainerOnlySkillSymlinks(
+    skillsHome,
+    selectedEntries.map((entry) => entry.runtimeName),
+  );
+  for (const skillName of removedSkills) {
+    await onLog(
+      "stderr",
+      `[proprio] Removed maintainer-only Gemini skill "${skillName}" from ${skillsHome}\n`,
+    );
+  }
+
   for (const entry of selectedEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
