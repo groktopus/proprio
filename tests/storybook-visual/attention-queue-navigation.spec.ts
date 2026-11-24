@@ -33,10 +33,12 @@ test("fixture-backed request exposes a followable source task and returns to the
   await openStory(page, queueStory, 1440, true);
   const sourceTask = page.locator('a[href^="/issues/"]').first();
   await expect(sourceTask).toBeVisible();
+  const initialPath = await page.getByTestId("storybook-router-path").textContent();
   const href = await sourceTask.getAttribute("href");
   expect(href).toMatch(/^\/issues\//);
   await sourceTask.click();
-  await expect.poll(() => page.evaluate(() => window.location.pathname)).toContain("/issues/");
-  await page.goBack();
+  await expect(page.getByTestId("storybook-router-path")).toContainText("/issues/");
+  await page.getByRole("button", { name: "Back to Needs You", exact: true }).click();
+  await expect(page.getByTestId("storybook-router-path")).toHaveText(initialPath ?? "");
   await expect(page.getByText(/Decide now|New today|Earlier/).first()).toBeVisible();
 });

@@ -4,10 +4,14 @@ on:
   pull_request:
     paths:
       - "ui/src/components/Sidebar.tsx"
+      - "ui/src/components/Sidebar.production.tsx"
       - "ui/src/components/CoordinatorSidebar.tsx"
+      - "ui/src/components/AttentionTasksHint.tsx"
       - "ui/src/components/MobileBottomNav.tsx"
       - "ui/src/components/**/CoordinatorNeedsYou.tsx"
       - "ui/src/pages/WhatNeedsMe.tsx"
+      - "ui/src/pages/DecisionQueuePage.tsx"
+      - "ui/src/storybook/stories/inbox-search/decisions-desk.stories.tsx"
       - "ui/storybook/**"
       - "tests/storybook-visual/attention-queue-navigation.*"
       - ".github/workflows/attention-queue-browser.yml"
