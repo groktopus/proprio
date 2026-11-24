@@ -87,8 +87,7 @@ export const Empty: Story = {
 export const Loading: Story = { parameters: { fixtureState: "loading" } };
 export const Failed: Story = { parameters: { fixtureState: "failure" } };
 export const Recoverable: Story = {
-  args: { tab: "unread" },
-  parameters: { recoveryFixture: true },
+  parameters: { initialEntries: ["/PAP/inbox/unread"], recoveryFixture: true },
 };
 export const PermissionDenied: Story = {
   parameters: { fixtureState: "permission" },

@@ -108,4 +108,7 @@ test("Inbox marks its current link and exposes retry after a failed read", async
   await retry.press("Enter");
   await expect(retry).toBeHidden();
   await expect(page.locator("[data-inbox-item]").first()).toBeVisible();
+  const recent = nav.getByRole("link", { name: "Recent", exact: true });
+  await recent.press("Enter");
+  await expect(recent).toHaveAttribute("aria-current", "page");
 });
