@@ -1351,12 +1351,12 @@ export async function flushBudgetEvaluationWorkPage(db: Db, options: { companyId
         const projects = new Set(inputs.map(input => input.projectId));
         const affectedAgents = [...agents].filter((id): id is string => id !== null);
         const affectedTaskTrees = affectedAgents.length
-          ? await tx.select({ id: budgetPolicies.id }).from(budgetPolicies).where(and(
+          ? await tx.select({ scopeId: budgetPolicies.scopeId }).from(budgetPolicies).where(and(
             eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, "task_tree"),
             sql`exists (select 1 from ${heartbeatRuns} r where r.company_id = ${budgetPolicies.companyId}
               and r.agent_id in (${sql.join(affectedAgents.map(id => sql`${id}::uuid`), sql`, `)})
               and r.task_lineage_json->'pathIssueIds' @> jsonb_build_array(${budgetPolicies.scopeId}::text))`,
-          )).then(rows => new Set(rows.map(row => row.id)))
+          )).then(rows => new Set(rows.map(row => row.scopeId)))
           : new Set<string>();
         const agentsForInput = agents;
         const policies = (await fenceBudgetPolicies(tx, companyId)).filter(policy => policy.scopeType === "company"

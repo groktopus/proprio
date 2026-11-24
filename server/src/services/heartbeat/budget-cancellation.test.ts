@@ -441,9 +441,13 @@ describe.skipIf(!runControlPostgresSupport.supported)("scoped budget cancellatio
     });
 
     const stopped = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, [inside.id, historical.id, outside.id]));
-    expect(stopped.map(run => run.status)).toEqual(["cancelled", "cancelled", "queued"]);
+    expect(Object.fromEntries(stopped.map(run => [run.id, run.status]))).toEqual({
+      [inside.id]: "cancelled", [historical.id]: "cancelled", [outside.id]: "queued",
+    });
     const persistedWakes = await db.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakes.map(wake => wake.id)));
-    expect(persistedWakes.map(wake => wake.status)).toEqual(["cancelled", "queued"]);
+    expect(Object.fromEntries(persistedWakes.map(wake => [wake.id, wake.status]))).toEqual({
+      [wakes[0]!.id]: "cancelled", [wakes[1]!.id]: "queued",
+    });
   });
 
   it("fences detached browsers after their parent run finishes using admitted project scope and cutoff", async () => {

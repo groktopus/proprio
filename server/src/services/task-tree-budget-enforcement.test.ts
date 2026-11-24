@@ -110,9 +110,10 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     await db.insert(costEvents).values({ companyId: f.companyId, agentId: agent.id, issueId: task.id,
       heartbeatRunId: run.id, provider: "test", biller: "test", billingType: "metered_api", costStatus: "priced",
       model: "test-model", costCents: 60, occurredAt: new Date() });
+    await expect(computeObservedSpend(db, policy)).resolves.toMatchObject({ totalExact: "60.0000000" });
 
     await budgetService(db).evaluateAffectedScopes(f.companyId, agent.id, null);
-    await flushBudgetEvaluationWork(db, { companyId: f.companyId });
+    await expect(flushBudgetEvaluationWork(db, { companyId: f.companyId })).resolves.toBe(2);
 
     const [updatedPolicy] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id));
     const [company] = await db.select().from(companies).where(eq(companies.id, f.companyId));
