@@ -630,6 +630,7 @@ export function KanbanBoard({
   ));
 
   return (
+    <div ref={boardRef} tabIndex={-1} data-kanban-board>
     <DndContext
       sensors={sensors}
       onDragStart={handleDragStart}
@@ -639,7 +640,7 @@ export function KanbanBoard({
     >
       {showOverflowFades
         ? <HorizontalScrollViewport label="Task board columns" contentClassName="flex gap-3 pb-4 px-2">{columns}</HorizontalScrollViewport>
-        : <div ref={boardRef} tabIndex={-1} data-kanban-board className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">{columns}</div>}
+        : <div className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">{columns}</div>}
       <p className="sr-only" role="status" aria-live="polite">{movementAnnouncement}</p>
       <DragOverlay>
         {activeIssue ? (
@@ -647,5 +648,6 @@ export function KanbanBoard({
         ) : null}
       </DragOverlay>
     </DndContext>
+    </div>
   );
 }
