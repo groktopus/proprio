@@ -1,11 +1,15 @@
 // The installed Codex dependency takes precedence over PATH. The disposable
 // test controller must use the protocol fixture, even during source startup.
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
 
-const command = process.env.PROPRIO_TEST_CODEX_FIXTURE
-  ?? fileURLToPath(new URL("./codex", import.meta.url));
+// The mixed Case test copies this module next to its generated provider.
+// Recovery loads it from the source tree next to the checked-in recovery-bin.
+const generatedCommand = new URL("./codex", import.meta.url);
+const command = fileURLToPath(existsSync(generatedCommand)
+  ? generatedCommand
+  : new URL("./recovery-bin/codex", import.meta.url));
 accessSync(command, constants.X_OK);
 registerHooks({
   load(url, context, nextLoad) {

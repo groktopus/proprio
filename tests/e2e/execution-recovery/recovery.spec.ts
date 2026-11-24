@@ -126,7 +126,6 @@ for (const journey of [
       await mkdir(codexHome, { recursive: true });
       const env: NodeJS.ProcessEnv = {
         ...process.env,
-        PROPRIO_TEST_CODEX_FIXTURE: resolve(root, "tests/e2e/fixtures/recovery-bin/codex"),
         PROPRIO_RECOVERY_CEO_LINEAGE: journey === "ceo_lineage" ? "1" : "0",
         IN_FEED_FIXTURE_KEY: "not-a-real-model-key",
         CODEX_HOME: codexHome,
