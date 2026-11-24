@@ -179,6 +179,122 @@ retries it. Tombstones remain after object removal. Historical backups and
 object-version retention need a separate operator policy; an ordinary DELETE
 must not be mistaken for erasure of historical versions.
 
+### Restoring across a trace deletion
+
+The database tombstone is inside the database backup boundary. A restore from a
+point before a trace deletion can therefore make that trace readable again until
+the deletion is replayed. Before enabling users, runners, or cleanup workers on a
+restored instance, reconcile every deletion since the selected recovery point.
+Proprio does not provide an independent deletion journal or guarantee that an
+instance's ordinary database backup contains these later deletions.
+This trace-specific step complements the [full-instance restore](https://github.com/groktopus/proprio/issues/134)
+and [hosted PostgreSQL recovery](https://github.com/groktopus/proprio/issues/187).
+In the [Compose restore sequence](https://github.com/groktopus/proprio/pull/272),
+run it after the database and configured storage are restored and before
+starting the application.
+
+The deployment owner must retain deletion events outside the database and object
+store rollback boundary, with access limited to recovery operators and retention
+long enough to cover the oldest restorable backup. The existing
+`provider_trace.deleted` activity event contains `traceId` and the run ID; an
+external audit sink can export those fields with `companyId` and the event time.
+An audit sink or append-only export is a deployment responsibility. If the
+deletion events after the recovery point are unavailable or incomplete, keep the
+restored instance isolated and do not resume normal access.
+
+The recovery owner accounts for these copies separately:
+
+| Copy | What may remain after DELETE | Owner and control |
+| --- | --- | --- |
+| Database backup | Trace metadata from before deletion, with no tombstone | Deployment backup owner restricts restore access and applies the database backup retention policy |
+| Active local or S3 payload namespace | Payload until scoped cleanup completes | Proprio cleanup removes it; the restore operator retries any target reported pending |
+| S3 object versions or provider snapshots | Older payload versions after active-key deletion | Storage owner sets version access and lifecycle expiry; Proprio does not erase historical versions |
+| Host, volume, or external artifact backup | Local trace files or object copies included by deployment backup | Deployment recovery owner inventories these paths and applies their independent retention and access policy |
+| Deletion manifest | The obligation needed to reconcile an older database recovery point | Recovery operator retains it outside the rollback domain, permissioned for restore use |
+
+For an isolated restore, convert the external audit export into this manifest:
+
+```json
+{
+  "schema": "proprio.run_evidence_deletions.v1",
+  "recoveryPoint": "2026-11-23T12:00:00.000Z",
+  "coversThrough": "2026-11-23T13:30:00.000Z",
+  "coverageComplete": true,
+  "source": "deployment audit sink export 2026-11-23T13:30:00Z",
+  "records": [
+    {
+      "traceId": "00000000-0000-4000-8000-000000000001",
+      "runId": "00000000-0000-4000-8000-000000000002",
+      "companyId": "00000000-0000-4000-8000-000000000003",
+      "deletedAt": "2026-11-23T13:00:00.000Z"
+    }
+  ]
+}
+```
+
+Keep the manifest outside the restore target. With the intended storage profile,
+secrets, and isolated restored database configured, run
+`pnpm --filter @groktopus/server exec tsx scripts/reconcile-run-evidence-deletions.ts <manifest.json>`
+from the repository root, setting `DATABASE_URL` to that restored database. The
+manifest must identify the exact database recovery point, the deletion feed
+cutoff, and the external source, and assert complete coverage. The deployment
+operator verifies those claims against the backup timestamp and audit sink. If
+the source instance can still record deletions during recovery, export and apply
+the final interval again immediately before cutover; the operation is
+idempotent. Keep the target isolated until the feed is confirmed current through
+the cutover boundary.
+
+The command processes each trace independently through the trace store. A
+successful result means the restored trace is tombstoned and its active payload
+namespace was removed. It does not run global retention cleanup. A
+`reconciliationPending` entry identifies a trace whose operation did not
+complete. The tombstone transaction may or may not have committed; inspect that
+exact restored row, keep the instance isolated, and retry the manifest. The
+command exits unsuccessfully if any pending, missing, or mismatched records
+remain. It validates UUID identities and requires each deletion timestamp to be
+after `recoveryPoint` and at or before `coversThrough`.
+
+`missing` means the restored database has no trace row for the recorded run;
+this is not counted as success. A trace can have been created after the backup
+and deleted before the cutover. In that case, use the independent run/trace
+creation and deletion evidence plus a scoped storage inventory for the run to
+prove that no active payload copy remains. Apply the storage provider's cleanup
+procedure to any located copy and account separately for retained versions and
+backups. The command cannot create a tombstone without a matching restored row,
+so do not claim CLI reconciliation succeeded for this case. If the mapping,
+payload copies, or retention state cannot be proved, keep recovery isolated and
+leave the obligation unresolved. A mismatched row likewise requires operator
+investigation rather than an inferred success.
+
+After a clean command result, verify deleted traces are unreadable, recapture is
+denied for their run IDs, unrelated traces remain readable, and the active
+payload cleanup is observable before routing traffic or resuming runners.
+
+The real backup/restore fixture is an opt-in server integration test. It takes a
+logical database backup and a local sidecar copy, deletes one trace after that
+backup, restores the older database into a fresh database, runs the reconciliation
+CLI as a separate process, and asserts deletion, recapture denial, unrelated
+trace access, and local-file cleanup:
+
+```sh
+PROPRIO_RUN_EVIDENCE_RESTORE_QUALIFICATION=true \
+  pnpm --filter @groktopus/server exec vitest run \
+  src/__tests__/run-evidence-restore-reconciliation.integration.test.ts
+```
+
+This qualification needs the embedded PostgreSQL test support and a Docker
+daemon with the `postgres:17-alpine` client image available for `psql` restore.
+It uses disposable databases and temporary local files; it does not qualify a
+deployment's external object-version or backup-retention policy.
+
+Reconciliation removes the active payload namespace. It does not purge provider
+object versions or copies retained in older database backups. Deployment owners
+must define and verify their object-version lifecycle and backup access controls;
+the trace's existing retention/expiry and provider lifecycle policy determine
+when those historical copies expire. The restore rehearsal should record the
+manifest source, recovery point, cleanup result, and object-version expiry
+evidence.
+
 The shared coordinator restores expiry/cleanup work on startup and registers
 actual deadlines for local and external captures. New local inserts also wake it;
 expired backlogs drain in bounded pages. No completed-history polling is added. Trace expiry
