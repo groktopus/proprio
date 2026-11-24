@@ -1,29 +1,32 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { authUsers, companies, principalPermissionGrants } from "@groktopus/db";
+import { authUsers, companies, toolActionRequests } from "@groktopus/db";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import type { ToolActionRequestListItem, ToolRunDecision } from "@groktopus/shared";
 import { accessService } from "../services/access.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
-import { startRecoveryPostgres } from "./helpers/recovery-postgres.js";
+import { recoveryPostgresSupport, startRecoveryPostgres } from "./helpers/recovery-postgres.js";
 import { startRunnerApiTestServer } from "./helpers/runner-api-server.js";
+import { createIsolatedTestHome } from "./helpers/isolated-test-home.js";
 
 const markers = ["approved", "denied", "interrupted"] as const;
 
 const runner = `
-const [connectionId, marker] = process.argv.slice(1);
+const [connectionId, marker, attemptFile] = process.argv.slice(1);
+const fs = await import("node:fs");
+try { fs.writeFileSync(attemptFile, "attempted", { flag: "wx" }); }
+catch (error) { if (error.code === "EEXIST") process.exit(0); throw error; }
 const base = process.env.PROPRIO_API_URL.replace(/\\/api\\/?$/, "");
 const api = (path, init) => fetch(base + "/api" + path, init);
 const session = await api("/tool-gateway/sessions", {
   method: "POST",
   headers: { authorization: "Bearer " + process.env.PROPRIO_API_KEY, "content-type": "application/json" },
-  body: JSON.stringify({ runId: process.env.PROPRIO_RUN_ID, ttlMs: 60000 }),
+  body: JSON.stringify({ ttlMs: 60000 }),
 });
 if (!session.ok) throw new Error("Gateway session failed: " + session.status);
 const headers = { "x-proprio-tool-gateway-token": (await session.json()).token, "content-type": "application/json" };
@@ -39,13 +42,15 @@ console.log(JSON.stringify({ runId: process.env.PROPRIO_RUN_ID, status: call.sta
 if (call.status !== 200 && (call.status !== 409 || result.reasonCode !== "approval_required")) throw new Error("Expected a governed action");
 `;
 
-it("reconstructs managed effects from an authenticated process run and an independent target", async () => {
-  const home = await mkdtemp(join(tmpdir(), "proprio-audit-reconstruction-"));
+it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from an authenticated process run and an independent target", async () => {
+  const isolatedHome = createIsolatedTestHome();
+  const home = isolatedHome.home;
   const ledger = join(home, "target-effects.jsonl");
   const origin = "https://audit.fixture.invalid";
   let server: Awaited<ReturnType<typeof startRunnerApiTestServer>> | undefined;
   let database: Awaited<ReturnType<typeof startRecoveryPostgres>> | undefined;
   let lifecycle: ReturnType<typeof configureAgentLifecycle> | undefined;
+  let cleanupRuns: (() => Promise<void>) | undefined;
   const target = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const part of req) chunks.push(Buffer.from(part));
@@ -116,9 +121,6 @@ it("reconstructs managed effects from an authenticated process run and an indepe
     });
     await access.ensureMembership(f.companyId, "user", reviewerId, "operator", "active");
     await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "operator", reviewerId);
-    await server.db.insert(principalPermissionGrants).values({
-      companyId: f.companyId, principalType: "user", principalId: reviewerId, permissionKey: "tools:view_audit",
-    }).onConflictDoNothing();
     const reviewerCookie = await server.humanSession(reviewerId);
     const api = async (method: string, path: string, data?: unknown, session = cookie) => {
       const url = server!.apiUrl;
@@ -127,6 +129,16 @@ it("reconstructs managed effects from an authenticated process run and an indepe
         ...(data === undefined ? {} : { body: JSON.stringify(data) }),
       });
       return { status: response.status, body: await response.json() };
+    };
+    cleanupRuns = async () => {
+      for (const issueId of fixtureIssueIds) {
+        const runs = await api("GET", `/issues/${issueId}/runs`);
+        if (runs.status !== 200) continue;
+        for (const run of runs.body as Array<{ runId: string; status: string }>) {
+          if (run.status === "queued" || run.status === "running") await api("POST", `/heartbeat-runs/${run.runId}/cancel`, {});
+        }
+      }
+      await heartbeatService(server!.db).drainActiveRunExecutions();
     };
     lifecycle = configureAgentLifecycle(server.db, {
       requiredPluginIds: async () => [], runPlugin: async () => "complete", runHost: async () => "complete",
@@ -167,11 +179,12 @@ it("reconstructs managed effects from an authenticated process run and an indepe
     expect(createdPolicy).toMatchObject({ status: 201 });
     const policyId = createdPolicy.body.id;
 
-    const cases = new Map<string, { issueId: string; runId: string; invocationId: string; requestId: string }>();
+    const cases = new Map<string, { issueId: string; runId: string; invocationId: string; requestId: string; fingerprint: string; priority: number }>();
+    const fixtureIssueIds: string[] = [];
     for (const [index, marker] of markers.entries()) {
       const agentId = agentIds[index];
       const configured = await api("PATCH", `/agents/${agentId}`, {
-        adapterConfig: { command: process.execPath, args: ["--input-type=module", "-e", runner, connectionId, marker], cwd: workspace },
+        adapterConfig: { command: process.execPath, args: ["--input-type=module", "-e", runner, connectionId, marker, join(home, `${marker}.attempted`)], cwd: workspace },
         replaceAdapterConfig: true,
       });
       expect(configured, JSON.stringify(configured)).toMatchObject({ status: 200 });
@@ -179,6 +192,7 @@ it("reconstructs managed effects from an authenticated process run and an indepe
         title: `Audit action ${marker}`, assigneeAgentId: agentId, status: "in_progress",
       });
       expect(issue, JSON.stringify(issue)).toMatchObject({ status: 201 });
+      fixtureIssueIds.push(issue.body.id);
 
       let pending: ToolActionRequestListItem | undefined;
       await vi.waitFor(async () => {
@@ -202,9 +216,15 @@ it("reconstructs managed effects from an authenticated process run and an indepe
         }));
       const runId = candidates.find((candidate): candidate is string => candidate !== null);
       if (!runId) throw new Error("The request did not correlate with a visible task run");
+      const beforeDecision = await api("GET", `${companyPath}/tools/runs/${runId}/decisions`, undefined, reviewerCookie);
+      expect(beforeDecision.status).toBe(200);
+      const beforeRecord = (beforeDecision.body.decisions as ToolRunDecision[]).find(item => item.invocation.id === invocationId);
+      const beforePolicy = beforeRecord?.policyProvenance.policies.find(policy => policy.policyId === policyId);
+      expect(beforePolicy).toMatchObject({ priority: index === 0 ? 1 : 2 });
+      if (!beforePolicy) throw new Error("The evaluated policy snapshot was not available before decision");
       const decision = await api("POST", `/tool-gateway/action-requests/${requestId}/${marker === "denied" ? "decline" : "approve"}`, { companyId: f.companyId });
       expect(decision, JSON.stringify(decision)).toMatchObject({ status: 200 });
-      cases.set(marker, { issueId: issue.body.id, runId, invocationId, requestId });
+      cases.set(marker, { issueId: issue.body.id, runId, invocationId, requestId, fingerprint: beforePolicy.revisionFingerprint, priority: beforePolicy.priority });
       if (marker !== "denied") await vi.waitFor(async () => expect(await effects()).toContain(marker), { timeout: 5_000 });
       if (index === 0) {
         expect(await api("PATCH", `${companyPath}/tools/policies/${policyId}`, { priority: 2 })).toMatchObject({ status: 200 });
@@ -230,6 +250,18 @@ it("reconstructs managed effects from an authenticated process run and an indepe
     cookie = reviewerCookie;
     const fingerprints = new Map<string, string>();
     for (const [marker, ids] of cases) {
+      const reviewerRuns = await api("GET", `/issues/${ids.issueId}/runs`);
+      expect(reviewerRuns.status, JSON.stringify(reviewerRuns.body)).toBe(200);
+      const reviewerRunIds = (reviewerRuns.body as Array<{ runId: string; adapterType: string }>)
+        .filter(run => run.adapterType === "process").map(run => run.runId);
+      expect(reviewerRunIds).toContain(ids.runId);
+      const matchingRunIds: string[] = [];
+      for (const runId of reviewerRunIds) {
+        const timeline = await api("GET", `${companyPath}/tools/runs/${runId}/decisions`);
+        expect(timeline.status, JSON.stringify(timeline.body)).toBe(200);
+        if ((timeline.body.decisions as ToolRunDecision[]).some(row => row.invocation.id === ids.invocationId)) matchingRunIds.push(runId);
+      }
+      expect(matchingRunIds).toEqual([ids.runId]);
       const response = await api("GET", `${companyPath}/tools/runs/${ids.runId}/decisions`);
       expect(response, JSON.stringify(response)).toMatchObject({ status: 200 });
       const record = (response.body.decisions as ToolRunDecision[]).find(item => item.invocation.id === ids.invocationId);
@@ -240,10 +272,15 @@ it("reconstructs managed effects from an authenticated process run and an indepe
       });
       const fingerprint = record?.policyProvenance.policies.find(policy => policy.policyId === policyId)?.revisionFingerprint;
       if (!record || !fingerprint) throw new Error("The historical policy revision did not survive restart");
+      expect(record.policyProvenance.policies.find(policy => policy.policyId === policyId)).toMatchObject({
+        revisionFingerprint: ids.fingerprint, priority: ids.priority,
+      });
       fingerprints.set(marker, fingerprint);
-      expect(record.auditEvents.some(event => event.invocationId === ids.invocationId && event.id)).toBe(true);
       if (marker === "denied") expect(record.invocation.status).toBe("denied");
-      if (marker === "approved") expect(record.invocation.status).toBe("succeeded");
+      if (marker === "approved") {
+        expect(record.invocation.status).toBe("succeeded");
+        expect(record.auditEvents.some(event => event.invocationId === ids.invocationId && event.actionRequestId === ids.requestId && event.eventType === "call_completed" && event.outcome === "success")).toBe(true);
+      }
       if (marker === "interrupted") {
         expect(["failed", "timed_out"]).toContain(record.invocation.status);
         expect(record.auditEvents.some(event => event.eventType === "call_failed")).toBe(true);
@@ -252,12 +289,42 @@ it("reconstructs managed effects from an authenticated process run and an indepe
     expect(fingerprints.get("approved")).not.toBe(fingerprints.get("denied"));
     expect(fingerprints.get("denied")).toBe(fingerprints.get("interrupted"));
     expect(await effects()).toEqual(["approved", "interrupted"]);
+    const pending = await api("GET", `${companyPath}/tools/action-requests?status=pending`);
+    expect(pending.status).toBe(200);
+    expect((pending.body.actionRequests as ToolActionRequestListItem[]).filter(item => [...cases.values()].some(ids => ids.issueId === item.request.issueId))).toHaveLength(0);
+    const durableRequests = await server.db.select({ issueId: toolActionRequests.issueId })
+      .from(toolActionRequests).where(eq(toolActionRequests.companyId, f.companyId));
+    for (const issueId of fixtureIssueIds) {
+      expect(durableRequests.filter(request => request.issueId === issueId)).toHaveLength(1);
+    }
+    const evidencePath = process.env.PROPRIO_AUDIT_RECONSTRUCTION_EVIDENCE_PATH;
+    if (evidencePath) {
+      await mkdir(join(evidencePath, ".."), { recursive: true });
+      await writeFile(evidencePath, JSON.stringify({
+        schemaVersion: 1,
+        testedRevision: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        node: process.version,
+        platform: `${process.platform}/${process.arch}`,
+        runnerProfile: "local process adapter; no model account",
+        connectorProfile: "synthetic localhost HTTP MCP target",
+        reviewer: "separate company operator with default audit role grants",
+        companyId: f.companyId,
+        cases: Object.fromEntries([...cases].map(([marker, ids]) => [marker, {
+          issueId: ids.issueId, runId: ids.runId, invocationId: ids.invocationId,
+          actionRequestId: ids.requestId, policyFingerprint: ids.fingerprint, policyPriority: ids.priority,
+          targetEffects: marker === "denied" ? [] : [marker],
+        }])),
+        outcomes: { approved: "success receipt and one target effect", denied: "denied with zero target effects", interrupted: "target effect durable; response lost; no retry submitted" },
+        scope: "same-PostgreSQL test-server recreation in one Vitest process; not production index startup or independent database restore",
+      }, null, 2) + "\n", { mode: 0o600 });
+    }
   } finally {
+    try { await cleanupRuns?.(); } catch { /* Preserve the original fixture failure while attempting shutdown. */ }
     await lifecycle?.stop();
     await server?.close();
     await database?.cleanup();
     if (target.listening) await new Promise<void>(resolve => target.close(() => resolve()));
-    await rm(home, { recursive: true, force: true });
+    isolatedHome.cleanup();
     vi.unstubAllEnvs();
   }
 }, 90_000);
