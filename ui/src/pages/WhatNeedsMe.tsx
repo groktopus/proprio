@@ -8,7 +8,7 @@ import { useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
-import { decisionsApi, type DecisionListItem } from "../api/decisions";
+import { decisionsApi, type DecisionListItem, type DecisionOutcome } from "../api/decisions";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, useClaimAttentionItem, useDismissAttentionReceipt } from "../hooks/useAttentionViews";
@@ -72,12 +72,16 @@ const ATTENTION_SCROLL_LOAD_THRESHOLD_PX = 480;
 const DECISION_HISTORY_VISIBLE_LIMIT = 50;
 const DECISION_HISTORY_QUERY_LIMIT = DECISION_HISTORY_VISIBLE_LIMIT + 1;
 
+function selectHistoryOutcomes(decisions: DecisionListItem[]): DecisionOutcome[] {
+  return decisions.map((decision) => ({ ...decision, executions: decision.executions ?? [] }));
+}
+
 function DecisionHistoryBody({
   view,
   emptyCopy,
   children,
 }: {
-  view: QueryViewState<DecisionListItem[]>;
+  view: QueryViewState<DecisionOutcome[]>;
   emptyCopy: string;
   children: ReactNode;
 }) {
@@ -258,6 +262,7 @@ function ClassicWhatNeedsMe() {
   const decidedDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "decided"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "decided", limit: DECISION_HISTORY_QUERY_LIMIT }),
+    select: selectHistoryOutcomes,
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, decidedOpen),
   });
   const decidedDecisionsView = useQueryView(decidedDecisionsQuery);
@@ -265,6 +270,7 @@ function ClassicWhatNeedsMe() {
   const expiredDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "expired"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "expired", limit: DECISION_HISTORY_QUERY_LIMIT }),
+    select: selectHistoryOutcomes,
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, expiredOpen),
   });
   const expiredDecisionsView = useQueryView(expiredDecisionsQuery);
@@ -897,19 +903,16 @@ function ClassicWhatNeedsMe() {
           onToggle={() => setDecidedOpen((prev) => !prev)}
         >
           <DecisionHistoryBody view={decidedDecisionsView} emptyCopy="No decided decisions.">
-            {decidedDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => {
-              const historyDecision = { ...decision, executions: decision.executions ?? [] };
-              return (
-                <DecisionResolver
-                  key={decision.id}
-                  companyId={selectedCompanyId}
-                  decisionId={decision.id}
-                  agentMap={agentMap}
-                  initialDecision={historyDecision}
-                  recordedDecision={historyDecision}
-                />
-              );
-            })}
+            {decidedDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+              <DecisionResolver
+                key={decision.id}
+                companyId={selectedCompanyId}
+                decisionId={decision.id}
+                agentMap={agentMap}
+                initialDecision={decision}
+                recordedDecision={decision}
+              />
+            ))}
           </DecisionHistoryBody>
         </Curtain>
 
@@ -920,19 +923,16 @@ function ClassicWhatNeedsMe() {
           onToggle={() => setExpiredOpen((prev) => !prev)}
         >
           <DecisionHistoryBody view={expiredDecisionsView} emptyCopy="No expired decisions.">
-            {expiredDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => {
-              const historyDecision = { ...decision, executions: decision.executions ?? [] };
-              return (
-                <DecisionResolver
-                  key={decision.id}
-                  companyId={selectedCompanyId}
-                  decisionId={decision.id}
-                  agentMap={agentMap}
-                  initialDecision={historyDecision}
-                  recordedDecision={historyDecision}
-                />
-              );
-            })}
+            {expiredDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+              <DecisionResolver
+                key={decision.id}
+                companyId={selectedCompanyId}
+                decisionId={decision.id}
+                agentMap={agentMap}
+                initialDecision={decision}
+                recordedDecision={decision}
+              />
+            ))}
           </DecisionHistoryBody>
         </Curtain>
       </div>
