@@ -333,9 +333,15 @@ export function ThreadCard(props: {
 
   return (
     <li>
+      {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The named excerpt button supplies keyboard activation for the card's pointer shortcut. */}
       <article
         role="article"
         data-thread-id={thread.id}
+        onClick={(event) => {
+          if (!(event.target instanceof Element)) return;
+          if (event.target.closest("button, a, label, textarea, input, select, [role=button]")) return;
+          props.onFocus();
+        }}
         data-anchor-state={thread.anchorState}
         data-status={thread.status}
         data-focused={props.expanded || undefined}

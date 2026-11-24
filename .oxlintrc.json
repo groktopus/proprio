@@ -26,6 +26,10 @@
       }
     },
     {
+      "files": ["ui/src/components/EntityRow.tsx"],
+      "rules": { "jsx-a11y/click-events-have-key-events": "deny" }
+    },
+    {
       "files": [
         "**/*.test.ts",
         "**/*.test.tsx",

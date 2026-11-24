@@ -32,7 +32,10 @@ platform rules and applicable CI typecheck, build, and test gates still apply.
 Run `pnpm lint` for changed board JSX. Prefer native controls for actions and
 use valid ARIA roles and properties for custom controls. If an existing handler
 needs a lint exception, scope the exception to that element and explain the
-keyboard behavior or why the handler does not activate an action.
+keyboard behavior or why the handler does not activate an action. The shared
+`EntityRow` also rejects pointer-only activation on generic containers.
+Other board JSX reports generic static element interaction warnings. The
+browser checks cover interaction behavior that markup rules cannot determine.
 
 For changed navigation, dialogs, forms, and custom controls, describe how to
 reach and activate the controls with a keyboard. Record where focus moves when
