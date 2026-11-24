@@ -1,5 +1,5 @@
 import { AgentIdentity } from "@/components/AgentIdentity";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/lib/router";
 import {
   DndContext,
@@ -180,6 +180,7 @@ function KanbanColumn({
   revealIncrement,
   onShowMore,
   onStatusChange,
+  moveButtonRef,
 }: {
   status: IssueDisplayStatus;
   issues: Issue[];
@@ -192,6 +193,7 @@ function KanbanColumn({
   revealIncrement: number;
   onShowMore: () => void;
   onStatusChange: (id: string, status: IssueStatus) => void;
+  moveButtonRef: (id: string, element: HTMLButtonElement | null) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status === "monitoring" });
 
@@ -256,6 +258,7 @@ function KanbanColumn({
               compact={compactCards}
               className={tone.card}
               onStatusChange={onStatusChange}
+              moveButtonRef={(element) => moveButtonRef(issue.id, element)}
             />
           ))}
         </SortableContext>
@@ -289,6 +292,7 @@ function KanbanCard({
   compact = false,
   className,
   onStatusChange,
+  moveButtonRef,
 }: {
   issue: Issue;
   agents?: Agent[];
@@ -298,6 +302,7 @@ function KanbanCard({
   compact?: boolean;
   className?: string;
   onStatusChange?: (id: string, status: IssueStatus) => void;
+  moveButtonRef?: (element: HTMLButtonElement | null) => void;
 }) {
   const {
     attributes,
@@ -334,6 +339,7 @@ function KanbanCard({
       <div className={`flex items-start gap-1.5 ${compact ? "mb-1" : "mb-1.5"}`}>
         <button
           type="button"
+          ref={moveButtonRef}
           {...attributes}
           {...listeners}
           className="shrink-0 cursor-grab rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
@@ -431,6 +437,8 @@ export function KanbanBoard({
 }: KanbanBoardProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [movementAnnouncement, setMovementAnnouncement] = useState("");
+  const moveButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [focusIssueId, setFocusIssueId] = useState<string | null>(null);
   const paginationKey = `${initialVisibleCount}:${revealIncrement}`;
   const [visibleState, setVisibleState] = useState<{
     paginationKey: string;
@@ -488,8 +496,19 @@ export function KanbanBoard({
     if (targetStatus && targetStatus !== issue.status) {
       onUpdateIssue(issueId, { status: targetStatus });
       setMovementAnnouncement(`${issue.title} moved to ${statusLabel(targetStatus)}`);
+      setFocusIssueId(issueId);
     }
   }
+
+  useEffect(() => {
+    if (!focusIssueId) return;
+    const issueId = focusIssueId;
+    const frame = requestAnimationFrame(() => {
+      moveButtonRefs.current[issueId]?.focus();
+      setFocusIssueId((current) => current === issueId ? null : current);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusIssueId, issues]);
 
   function handleStatusChange(id: string, status: IssueStatus) {
     const issue = issues.find((candidate) => candidate.id === id);
@@ -522,6 +541,7 @@ export function KanbanBoard({
         });
       }}
       onStatusChange={handleStatusChange}
+      moveButtonRef={(id, element) => { moveButtonRefs.current[id] = element; }}
     />
   ));
 
@@ -536,7 +556,7 @@ export function KanbanBoard({
       {showOverflowFades
         ? <HorizontalScrollViewport label="Task board columns" contentClassName="flex gap-3 pb-4 px-2">{columns}</HorizontalScrollViewport>
         : <div className="flex gap-3 overflow-x-auto pb-4 -mx-2 px-2">{columns}</div>}
-      <p className="sr-only" aria-live="polite">{movementAnnouncement}</p>
+      <p className="sr-only" role="status" aria-live="polite">{movementAnnouncement}</p>
       <DragOverlay>
         {activeIssue ? (
           <KanbanCard issue={activeIssue} agents={agents} isOverlay compact={compactCards} />

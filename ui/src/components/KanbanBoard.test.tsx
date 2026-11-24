@@ -236,6 +236,7 @@ describe("KanbanBoard", () => {
 
     expect(moveButton).toBeTruthy();
     expect(statusSelect).toBeTruthy();
+    expect(container.querySelector('[role="status"][aria-live="polite"]')).toBeTruthy();
     expect(moveButton?.querySelector("a")).toBeNull();
     expect(taskLink?.closest("button")).toBeNull();
 
