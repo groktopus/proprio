@@ -205,13 +205,25 @@ describe("durable same-task case handoffs", () => {
     const wakeCount = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
     const input = { expectedHandoffVersion: delivered!.version, stoppedRunId };
     await withdrawalRequest(board, f).send({ ...input, stoppedRunId: randomUUID() }).expect(409);
+    await withdrawalRequest(recipient, f).send(input).expect(403);
+    const newerRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: newerRunId, companyId: f.companyId, issueId: f.first.taskId,
+      agentId: f.engineer, status: "succeeded", invocationSource: "assignment", triggerDetail: "system",
+      createdAt: new Date(Date.now() + 1_000) });
+    const superseded = await withdrawalRequest(board, f).send(input).expect(409);
+    expect(superseded.body.details).toMatchObject({ code: "case_handoff_withdrawal_run_changed", runId: newerRunId });
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, newerRunId));
     const withdrawn = await withdrawalRequest(board, f).send(input).expect(200);
     expect(withdrawn.body).toMatchObject({ state: "cancelled", lastErrorCode: "operator_withdrawn_after_stop",
       recipientDecision: { outcome: "accepted", actorId: f.engineer, requirementRevisionId: f.contract.id } });
     const [persisted] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.receipt.handoffId));
     expect(persisted?.recipientDecision).toEqual(delivered!.recipientDecision);
     expect(persisted).toMatchObject({ state: "cancelled", lastErrorCode: "operator_withdrawn_after_stop" });
-    const [eventRow] = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.first.caseId), eq(caseEvents.kind, "handoff_cancelled")));
+    const replay = await withdrawalRequest(board, f).send(input).expect(200);
+    expect(replay.body).toEqual(withdrawn.body);
+    const events = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.first.caseId), eq(caseEvents.kind, "handoff_cancelled")));
+    expect(events).toHaveLength(1);
+    const [eventRow] = events;
     expect(eventRow?.payload).toMatchObject({ disposition: "delivered_proposal_withdrawn", stoppedRunId,
       stopProof: "acknowledged_operator_stop", nextOwner: "board" });
     const task = (await db.select().from(issues).where(eq(issues.id, f.first.taskId)))[0]!;
