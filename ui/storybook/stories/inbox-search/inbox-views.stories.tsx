@@ -1,8 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { ComponentProps } from "react";
-import { useEffect, useRef } from "react";
 import { Inbox } from "@/pages/Inbox";
-import { useNavigate } from "@/lib/router";
 import { instanceExperimentalSettingsSchema } from "@groktopus/shared";
 import { storybookIssues } from "../../fixtures/proprioData";
 import {
@@ -10,28 +8,14 @@ import {
   type FixtureState,
 } from "../../support/capability-gaps/api";
 function InboxHost(props: NonNullable<ComponentProps<typeof Inbox>>) {
-  const { tab: initialTab = "mine", ...inboxProps } = props;
-  const navigate = useNavigate();
-  const seeded = useRef(false);
-
-  useEffect(() => {
-    if (seeded.current) return;
-    seeded.current = true;
-    navigate(`/inbox/${initialTab}`, { replace: true });
-  }, [initialTab, navigate]);
-
-  // Route changes are the source of truth after the initial story seed. Do not
-  // pass the story arg back as an Inbox override, or links appear to navigate
-  // while the rendered view remains on the original story tab.
-  return <Inbox {...inboxProps} />;
+  return <Inbox {...props} />;
 }
 const meta = {
   id: "feature-inbox-views",
   title:
     "Tasks and conversations/Inbox, decisions, and search/Personal task views",
   component: InboxHost,
-  args: { tab: "mine" },
-  parameters: { layout: "padded",
+  parameters: { layout: "padded", initialEntries: ["/PAP/inbox/mine"],
     proprio: {
       "capabilities": [
         "inbox-search/views"
@@ -45,6 +29,16 @@ const meta = {
   beforeEach: ({ parameters }) => {
     const api = prepareFixtureApi(
       [
+        {
+          path: "/api/companies/company-storybook/inbox/mine",
+          read: () => ({
+            userId: "user-board",
+            issues: storybookIssues,
+            contextIssues: [],
+            failureRuns: [],
+            failureIssueIds: [],
+          }),
+        },
         {
           path: "/api/companies/company-storybook/issues",
           read: () =>
@@ -75,13 +69,12 @@ const meta = {
 } satisfies Meta<typeof InboxHost>;
 export default meta;
 type Story = StoryObj<typeof meta>;
-export const Mine: Story = { args: { tab: "mine" } };
-export const Recent: Story = { args: { tab: "recent" } };
-export const Unread: Story = { args: { tab: "unread" } };
-export const Blocked: Story = { args: { tab: "blocked" } };
+export const Mine: Story = { parameters: { initialEntries: ["/PAP/inbox/mine"] } };
+export const Recent: Story = { parameters: { initialEntries: ["/PAP/inbox/recent"] } };
+export const Unread: Story = { parameters: { initialEntries: ["/PAP/inbox/unread"] } };
+export const Blocked: Story = { parameters: { initialEntries: ["/PAP/inbox/blocked"] } };
 export const Empty: Story = {
-  args: { tab: "mine" },
-  parameters: { fixtureState: "empty" },
+  parameters: { initialEntries: ["/PAP/inbox/mine"], fixtureState: "empty" },
 };
 export const Loading: Story = { parameters: { fixtureState: "loading" } };
 export const Failed: Story = { parameters: { fixtureState: "failure" } };
