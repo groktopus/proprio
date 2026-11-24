@@ -9,7 +9,7 @@ previous published source release is v0.0.4. [Release plan #222](https://github.
 
 On November 24, 2026, all 43 draft heads matched GitHub and composed without
 conflicts on main `6e6ebf51cb0cf214375523171f80f19d14da073f`. The unpublished
-rehearsal revision is `acefc3add06d130d3eca819b863ee466cd0f00b3`. The pull
+rehearsal revision is `137113d261fe1b5d047ada9a2cd6668d65360e12`. The pull
 requests record the exact heads and test scope for the individual results
 below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
@@ -40,9 +40,9 @@ below. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
   app-server, then back to a legacy verifier. Restart and revocation tests
   checked retained dispatch and restored authority. All three variants
   passed on the rehearsal tree after the static fixture loader and Task
-  Detail render fixes. A separate native
-  uncertainty case counted one external effect in a synthetic fixture and
-  observed the hold after restart.
+  Detail render fixes. A separate native uncertainty case counted one
+  synthetic external effect and verified the hold and effect count again
+  after restart and the retry delay.
   [Mixed handoff #319](https://github.com/groktopus/proprio/pull/319) · [Restart #323](https://github.com/groktopus/proprio/pull/323) · [Authority #332](https://github.com/groktopus/proprio/pull/332) · [Uncertain effect #341](https://github.com/groktopus/proprio/pull/341)
 - **Context compaction.** The explicit paired Codex case is discoverable.
   Deterministic fixtures check retention, dropped requirements, superseded
