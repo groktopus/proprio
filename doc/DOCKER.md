@@ -18,15 +18,10 @@ Build arguments:
 |-----|---------|---------|
 | `USER_UID` | `1000` | UID for the container `node` user (match your host UID to avoid permission issues on bind mounts) |
 | `USER_GID` | `1000` | GID for the container `node` group |
-| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh the CLI-install layer; CI supplies the current ISO week |
+| `CLI_TOOLS_CACHE_EPOCH` | empty | Refresh OS package and transitive npm resolution |
 | `PROPRIO_BUILD_VERSION` | empty | Runtime version when Git metadata is unavailable |
 | `PROPRIO_BUILD_COMMIT` | empty | Source commit written into the server build stamp and runtime environment |
 | `PROPRIO_RUNNER_EXPECT_INPUTS_DIGEST` | empty | Inputs digest of the published Runner image a build was given as `runner-artifacts`; the build fails on any other Runner. Leave it empty for a build that makes its own Runner |
-
-Changing the build version or commit preserves the CLI-install cache. The
-tool layer refreshes when its weekly epoch, base image, installation command,
-or earlier build inputs change. Local builds can set a new epoch explicitly
-to refresh tools without clearing the entire build cache.
 
 ```sh
 docker build --target production -t proprio-local \
@@ -40,6 +35,30 @@ compiling in the workspace packages that otherwise load as TypeScript source.
 This avoids transpiling them through the tsx loader on every boot. To check a
 build boots, run `scripts/server-boot-smoke.sh node server/dist-runtime/index.mjs`;
 PR CI runs the same check after `pnpm build`.
+
+### Refresh pinned image inputs
+
+The production build pins the external Node image indexes by digest and the
+five top-level harness CLIs by exact npm version. The full-stack Compose file
+also pins PostgreSQL. For the Linux amd64 profile, record the resolved platform
+manifest with `docker buildx imagetools inspect --raw` and retain it with the
+build evidence. The index digest fixes its platform manifests.
+
+To refresh the pins, resolve the new image index and CLI versions, update
+`Dockerfile` and the full-stack Compose file in a PR, and run:
+
+```sh
+node scripts/check-self-hosted-image-pins.mjs
+docker build --pull --no-cache --platform linux/amd64 --target production -t proprio-local .
+docker run --rm --entrypoint npm proprio-local ls --global --depth=0 --json \
+  | node scripts/check-self-hosted-image-pins.mjs --installed
+```
+
+Run both Compose readiness and state retention checks before qualifying the
+new build. The checks cover base-image identity and exact top-level harness
+versions. OS packages and npm transitive dependencies can still change on a
+clean rebuild. Promote by tested artifact digest when distributing an image.
+The CLI layer can be refreshed with `CLI_TOOLS_CACHE_EPOCH`.
 
 ## Image source
 
