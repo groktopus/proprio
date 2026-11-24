@@ -2437,7 +2437,7 @@ describe("IssueDetail", () => {
     await waitForAssertion(() => {
       expect(mockActivityApi.forIssue).toHaveBeenCalledWith("PAP-1");
       expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("PAP-1");
-      expect(mockIssuesApi.getCostSummary).toHaveBeenCalledWith("PAP-1");
+      expect(mockIssuesApi.getCostSummary).toHaveBeenCalledWith("issue-1");
     });
     activity.resolve([]);
     runs.resolve([{
