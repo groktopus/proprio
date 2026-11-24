@@ -5,15 +5,17 @@ import { issuesApi } from "../../api/issues";
 import { queryKeys } from "../../lib/queryKeys";
 import { keepPreviousDataForSameQueryTail } from "../../lib/query-placeholder-data";
 import {
+  asObject,
   formatDurationMs,
   formatTokens,
+  readUsageNumber,
   visibleRunCostUsd,
   visibleRunTokenTotal,
 } from "../../lib/utils";
 
 type TaskExecutionCostSummaryProps = {
-  issueId: string;
   linkedRuns: RunForIssue[] | undefined;
+  issueTreeCostSummary: Awaited<ReturnType<typeof issuesApi.getCostSummary>> | undefined;
 };
 
 type RunCostSummary = {
@@ -22,33 +24,15 @@ type RunCostSummary = {
   cached: number;
   cost: number;
   totalTokens: number;
-  hasCost: boolean;
   hasTokens: boolean;
   runtimeMs: number;
   runCount: number;
-  hasRuntime: boolean;
 };
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function usageNumber(usage: Record<string, unknown> | null, ...keys: string[]) {
-  if (!usage) return 0;
-  for (const key of keys) {
-    const value = usage[key];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
-}
 
 export function calculateTaskRunCostSummary(
   linkedRuns: readonly RunForIssue[] | undefined,
-  nowMs = Date.now(),
 ): RunCostSummary {
+  const nowMs = Date.now();
   let input = 0;
   let output = 0;
   let cached = 0;
@@ -56,22 +40,20 @@ export function calculateTaskRunCostSummary(
   let cost = 0;
   let runtimeMs = 0;
   let runCount = 0;
-  let hasCost = false;
   let hasTokens = false;
 
   for (const run of linkedRuns ?? []) {
-    const usage = asRecord(run.usageJson);
-    const result = asRecord(run.resultJson);
-    const runInput = usageNumber(usage, "inputTokens", "input_tokens");
-    const runOutput = usageNumber(usage, "outputTokens", "output_tokens");
-    const runCached = usageNumber(
+    const usage = asObject(run.usageJson);
+    const result = asObject(run.resultJson);
+    const runInput = readUsageNumber(usage, "inputTokens", "input_tokens");
+    const runOutput = readUsageNumber(usage, "outputTokens", "output_tokens");
+    const runCached = readUsageNumber(
       usage,
       "cachedInputTokens",
       "cached_input_tokens",
       "cache_read_input_tokens",
     );
     const runCost = visibleRunCostUsd(usage, result);
-    if (runCost > 0) hasCost = true;
     if (runInput + runOutput + runCached > 0) hasTokens = true;
     input += runInput;
     output += runOutput;
@@ -95,25 +77,27 @@ export function calculateTaskRunCostSummary(
     cached,
     cost,
     totalTokens,
-    hasCost,
     hasTokens,
     runtimeMs,
     runCount,
-    hasRuntime: runtimeMs > 0,
   };
 }
 
-export function TaskExecutionCostSummary({
-  issueId,
-  linkedRuns,
-}: TaskExecutionCostSummaryProps) {
-  const { data: issueTreeCostSummary } = useQuery({
+/** Starts the subtree cost read with Activity history, before the loading shell. */
+export function useTaskExecutionCostSummary(issueId: string) {
+  return useQuery({
     queryKey: queryKeys.issues.costSummary(issueId),
     queryFn: () => issuesApi.getCostSummary(issueId),
     placeholderData: keepPreviousDataForSameQueryTail<
       Awaited<ReturnType<typeof issuesApi.getCostSummary>>
     >(issueId),
   });
+}
+
+export function TaskExecutionCostSummary({
+  linkedRuns,
+  issueTreeCostSummary,
+}: TaskExecutionCostSummaryProps) {
   const issueCostSummary = useMemo(
     () => calculateTaskRunCostSummary(linkedRuns),
     [linkedRuns],
@@ -139,7 +123,7 @@ export function TaskExecutionCostSummary({
       <div className="text-sm font-medium text-muted-foreground mb-1">
         Cost Summary
       </div>
-      {!issueCostSummary.hasCost &&
+      {!(issueCostSummary.cost > 0) &&
       !issueCostSummary.hasTokens &&
       !hasIssueTreeCost ? (
         <div className="text-xs text-muted-foreground">No cost data yet.</div>
@@ -147,7 +131,7 @@ export function TaskExecutionCostSummary({
         <div className="space-y-1 text-xs text-muted-foreground tabular-nums">
           <div className="flex flex-wrap gap-3">
             <span className="font-medium text-foreground">This task</span>
-            {issueCostSummary.hasCost ? (
+            {issueCostSummary.cost > 0 ? (
               <span className="font-medium text-foreground">
                 ${issueCostSummary.cost.toFixed(4)}
               </span>
@@ -160,15 +144,15 @@ export function TaskExecutionCostSummary({
                   : ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)})`}
               </span>
             ) : null}
-            {issueCostSummary.hasRuntime ? (
+            {issueCostSummary.runtimeMs > 0 ? (
               <span>
                 Runtime {formatDurationMs(issueCostSummary.runtimeMs)}
                 {` (${issueCostSummary.runCount} run${issueCostSummary.runCount === 1 ? "" : "s"})`}
               </span>
             ) : null}
-            {!issueCostSummary.hasCost &&
+            {!(issueCostSummary.cost > 0) &&
             !issueCostSummary.hasTokens &&
-            !issueCostSummary.hasRuntime ? (
+            !(issueCostSummary.runtimeMs > 0) ? (
               <span>No direct cost data.</span>
             ) : null}
           </div>

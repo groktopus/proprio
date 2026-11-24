@@ -21,25 +21,24 @@ describe("calculateTaskRunCostSummary", () => {
     expect(
       calculateTaskRunCostSummary(
         [run(), run({ runId: "run-2", startedAt: null, finishedAt: null })],
-        Date.parse("2026-01-01T00:00:10.000Z"),
       ),
     ).toMatchObject({
       input: 200,
       output: 80,
       cached: 20,
       totalTokens: 280,
+      cost: 0,
       hasTokens: true,
       runtimeMs: 2500,
       runCount: 1,
-      hasRuntime: true,
     });
   });
 
   it("keeps an empty task free of a cost-summary signal", () => {
     expect(calculateTaskRunCostSummary(undefined)).toMatchObject({
-      hasCost: false,
+      cost: 0,
       hasTokens: false,
-      hasRuntime: false,
+      runtimeMs: 0,
       runCount: 0,
     });
   });

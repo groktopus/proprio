@@ -35,7 +35,7 @@ import { trackRecentProject } from "@/lib/recent-projects";
 import { ExecutionBlockerNotice } from "../components/ExecutionBlockerNotice";
 import type { TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
-import { TaskExecutionCostSummary } from "@/components/task-detail/TaskExecutionCostSummary";
+import { TaskExecutionCostSummary, useTaskExecutionCostSummary } from "@/components/task-detail/TaskExecutionCostSummary";
 import { useTaskExecutionHistory } from "@/components/task-detail/useTaskExecutionHistory";
 import { IssueCreatedFromNote } from "@/components/task-detail/IssueCreatedFromNote";
 import { EmailThreadProvider } from "../components/EmailMessageCard";
@@ -2925,7 +2925,8 @@ function IssueDetailActivityTab({
   const {
     data: linkedRuns,
     isLoading: linkedRunsLoading,
-  } = useTaskExecutionHistory(issueId);
+  } = useTaskExecutionHistory(issueId, { hasLiveRuns, issueStatus });
+  const { data: issueTreeCostSummary } = useTaskExecutionCostSummary(issueId);
   const { data: linkedApprovals } = useQuery({
     queryKey: queryKeys.issues.approvals(issueId),
     queryFn: () => issuesApi.listApprovals(issueId),
@@ -2964,7 +2965,10 @@ function IssueDetailActivityTab({
 
   return (
     <>
-      <TaskExecutionCostSummary issueId={issueId} linkedRuns={linkedRuns} />
+      <TaskExecutionCostSummary
+        linkedRuns={linkedRuns}
+        issueTreeCostSummary={issueTreeCostSummary}
+      />
       <div className="mb-3">
         <IssueRunLedger
           issueId={issueId}
@@ -2973,6 +2977,7 @@ function IssueDetailActivityTab({
           childIssues={childIssues}
           agentMap={agentMap}
           hasLiveRuns={hasLiveRuns}
+          runs={linkedRuns}
           activityEvents={activity ?? []}
           resolveUserLabel={(userId) =>
             userProfileMap.get(userId)?.label ?? null
