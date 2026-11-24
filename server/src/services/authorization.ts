@@ -718,7 +718,7 @@ function issuePrivacyPrincipalCondition(actor: AuthorizationActor): SQL<boolean>
   ))`;
 }
 
-function issuePrivacyCondition(actor: AuthorizationActor): SQL<boolean> {
+export function issuePrivacySqlCondition(actor: AuthorizationActor): SQL<boolean> {
   const own = issuePrivacyPrincipalCondition(actor);
   const userIds = actor.type === "agent"
     ? [...new Set([actor.onBehalfOfUserId, actor.authorizingUserId].filter((id): id is string => !!id))] : [];
@@ -730,7 +730,7 @@ function issuePrivacyCondition(actor: AuthorizationActor): SQL<boolean> {
 }
 export async function canActorReadIssuePrivacy(db: Db | DbTransaction, actor: AuthorizationActor, issue: IssuePrivacyRow) {
   return db.select({ id: issues.id }).from(issues)
-    .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId), issuePrivacyCondition(actor)))
+    .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId), issuePrivacySqlCondition(actor)))
     .limit(1).then(rows => rows.length > 0);
 }
 
@@ -747,15 +747,14 @@ export async function readInstanceAdmin(db: Db | DbTransaction, userId: string):
 export async function issueReadSqlCondition(
   db: Db | DbTransaction,
   actor: AuthorizationActor,
-  { enforcePrivacy = false }: { enforcePrivacy?: boolean } = {},
 ): Promise<SQL<boolean>> {
   const personal = dashboardConversationCondition(actor);
-  if (enforcePrivacy || actor.authorizingUserId) return sql<boolean>`(${personal} and ${issuePrivacyCondition(actor)})`;
+  if (actor.authorizingUserId) return sql<boolean>`(${personal} and ${issuePrivacySqlCondition(actor)})`;
   if (issuePrivacyMode() !== "enforce") return personal;
   if (actor.source === "local_implicit" || actor.isInstanceAdmin) return personal;
   if (actor.type === "board" && !actor.ignoreInstanceAdmin && actor.source !== "cloud_tenant"
     && await readOncePerRequest(`admin:${actor.userId ?? ""}`, () => readInstanceAdmin(db, actor.userId ?? ""))) return personal;
-  return sql<boolean>`(${personal} and ${issuePrivacyCondition(actor)})`;
+  return sql<boolean>`(${personal} and ${issuePrivacySqlCondition(actor)})`;
 }
 
 /** SQL equivalent used for project list/search pushdown. */
@@ -909,7 +908,7 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
         status: issues.status, executionPolicy: issues.executionPolicy, originKind: issues.originKind, originId: issues.originId,
         visibility: issues.visibility, privacyRootIssueId: issues.privacyRootIssueId,
         responsibleUserId: issues.responsibleUserId, createdByUserId: issues.createdByUserId,
-        readable: sql<boolean[]>`ARRAY[${sql.join(privacyActors.map(actor => issuePrivacyCondition(actor)), sql`, `)}]`,
+        readable: sql<boolean[]>`ARRAY[${sql.join(privacyActors.map(actor => issuePrivacySqlCondition(actor)), sql`, `)}]`,
       }).from(issues).where(inArray(issues.id, issueIds.slice(offset, offset + 500)));
       for (const row of rows) {
         for (let index = 0; index < snapshots.length; index++) snapshots[index].issues.set(row.id, { ...row, readable: row.readable[privacyIndexes[index]] });
