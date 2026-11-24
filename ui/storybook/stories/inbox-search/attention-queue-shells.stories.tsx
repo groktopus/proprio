@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CoordinatorSidebar } from "@/components/CoordinatorSidebar";
 import { MobileBottomNav } from "@/components/MobileBottomNav";
 import { Sidebar as ClassicSidebar } from "@/components/Sidebar.production";
+import { PluginLauncherProvider } from "@/plugins/launchers";
 import { queryKeys } from "@/lib/queryKeys";
 import { storybookAuthSession } from "../../fixtures/proprioData";
 
@@ -29,7 +30,7 @@ function AttentionQueueShell({ mode }: { mode: ShellMode }) {
   const shell: ReactNode = phone
     ? <MobileBottomNav visible />
     : coordinator ? <CoordinatorSidebar /> : <ClassicSidebar />;
-  return <div className={phone ? "min-h-24 bg-background" : "h-[620px] w-72 overflow-hidden bg-background"}>{shell}</div>;
+  return <PluginLauncherProvider><div className={phone ? "min-h-24 bg-background" : "h-[620px] w-72 overflow-hidden bg-background"}>{shell}</div></PluginLauncherProvider>;
 }
 
 const meta = {
