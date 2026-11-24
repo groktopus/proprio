@@ -1,5 +1,8 @@
 import type { NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { activityApi } from "@/api/activity";
+import { queryKeys } from "@/lib/queryKeys";
 
 function label(value: string | null | undefined): string {
   if (!value) return "Not recorded";
@@ -136,15 +139,16 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
   );
 }
 
-export function NativeCompletionHistory({ entries, isLoading, error, onRetry }: {
+export function NativeCompletionHistory({ entries, isLoading, error, onRetry, showHeading = true }: {
   entries: NativeCompletionHistoryEntry[] | undefined;
   isLoading: boolean;
   error: boolean;
   onRetry: () => void;
+  showHeading?: boolean;
 }) {
   return (
     <section aria-label="Native completion history" className="mb-4 space-y-3">
-      <h2 className="text-base font-medium text-foreground">Native completion history</h2>
+      {showHeading && <h2 className="text-base font-medium text-foreground">Native completion history</h2>}
       {isLoading && !entries ? <p role="status" className="text-sm text-muted-foreground">Loading completion history…</p> : null}
       {error ? (
         <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
@@ -155,5 +159,29 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry }: 
       {!isLoading && !error && entries?.length === 0 ? <p className="text-sm text-muted-foreground">No native completion history recorded.</p> : null}
       {entries?.length ? <div className="space-y-4">{entries.map(entry => <CompletionEntry key={entry.id} entry={entry} />)}</div> : null}
     </section>
+  );
+}
+
+
+export function TaskCompletionHistoryDisclosure({ issueId }: { issueId: string }) {
+  const [open, setOpen] = useState(false);
+  const history = useQuery({
+    queryKey: queryKeys.issues.completionHistory(issueId),
+    queryFn: () => activityApi.completionHistoryForIssue(issueId),
+    enabled: open,
+  });
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer rounded-sm text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        Completion history
+      </summary>
+      {open && <NativeCompletionHistory
+        entries={history.data}
+        isLoading={history.isLoading}
+        error={history.isError}
+        onRetry={() => { void history.refetch(); }}
+        showHeading={false}
+      />}
+    </details>
   );
 }

@@ -9,7 +9,7 @@ async function json(response: APIResponse) {
   return response.json();
 }
 
-test("Activity distinguishes a completion claim from evidence assessment and redacts another task's artifact", async ({ page, request }) => {
+test("Task properties distinguish a completion claim from evidence assessment and redact another task's artifact", async ({ page, request }) => {
   test.setTimeout(90_000);
   const config = JSON.parse(await readFile(process.env.PROPRIO_E2E_SERVER_CONFIG!, "utf8"));
   const databaseUrl = config.database.mode === "postgres" ? config.database.connectionString
@@ -21,9 +21,13 @@ test("Activity distinguishes a completion claim from evidence assessment and red
     const company = await json(await request.post("/api/companies", {
       data: { name: `Completion history browser ${Date.now()}` },
     }));
-    const [agent] = await json(await request.get(`/api/companies/${company.id}/agents`));
+    const agent = await json(await request.post(`/api/companies/${company.id}/agents`, {
+      data: { name: "Completion history fixture", role: "engineer", adapterType: "process",
+        adapterConfig: { command: process.execPath, args: ["-e", ""] },
+        runtimeConfig: { heartbeat: { enabled: false } } },
+    }));
     const task = await json(await request.post(`/api/companies/${company.id}/issues`, {
-      data: { title: "Review completion evidence", description: "Inspect the recorded native completion decision.", status: "in_progress" },
+      data: { title: "Review completion evidence", description: "Inspect the recorded native completion decision.", status: "in_progress", assigneeAgentId: agent.id },
     }));
     const otherTask = await json(await request.post(`/api/companies/${company.id}/issues`, {
       data: { title: "Separate task evidence", description: "This artifact is outside the reviewed task.", status: "todo" },
@@ -79,11 +83,6 @@ test("Activity distinguishes a completion claim from evidence assessment and red
         reasonCode: "completion_evidence_incomplete" }, decisionDigest: `browser-decision-${decisionId}`,
       applicationState: "proposed" });
 
-    const experimental = await json(await request.get("/api/instance/settings/experimental"));
-    if (!experimental.enableClassicTaskInterface) {
-      await json(await request.patch("/api/instance/settings/experimental", { data: { enableClassicTaskInterface: true } }));
-    }
-
     const historyResponse = await request.get(`/api/issues/${task.identifier}/completion-history`);
     const history = await json(historyResponse);
     expect(history).toHaveLength(1);
@@ -105,9 +104,12 @@ test("Activity distinguishes a completion claim from evidence assessment and red
     expect(await json(await request.get(`/api/issues/${task.id}`))).toMatchObject({ status: "in_progress" });
 
     await page.goto(`/${company.issuePrefix}/issues/${task.identifier}`);
-    const activityTab = page.getByRole("tab", { name: "Activity", exact: true });
-    await expect(activityTab).toBeVisible();
-    await activityTab.click();
+    await page.getByRole("button", { name: "Show properties" }).click();
+    await page.getByRole("option", { name: "Properties", exact: true }).click();
+    const historyDisclosure = page.getByText("Completion history", { exact: true });
+    await expect(historyDisclosure).toBeVisible();
+    await historyDisclosure.focus();
+    await page.keyboard.press("Enter");
 
     const completionHistory = page.getByRole("region", { name: "Native completion history" });
     await expect(completionHistory).toBeVisible();
@@ -115,7 +117,7 @@ test("Activity distinguishes a completion claim from evidence assessment and red
     await expect(completionHistory.getByText("Policy assessment missing")).toBeVisible();
     await expect(completionHistory.getByText("Evidence verification failed")).toBeVisible();
     await expect(completionHistory.getByRole("region", { name: "Status decision" })
-      .getByText(/proposed · in progress → done · completion evidence incomplete · policy browser assessor v1/)).toBeVisible();
+      .getByText(/proposed · in progress → done · completion evidence incomplete · policy browser-assessor-v1/)).toBeVisible();
     await expect(completionHistory.getByText("Work product: Accepted same-task artifact")).toBeVisible();
     await expect(completionHistory.getByText("Supporting record is outside this task's readable scope.")).toBeVisible();
     await expect(page.locator("body")).not.toContainText(restrictedProduct.id);
