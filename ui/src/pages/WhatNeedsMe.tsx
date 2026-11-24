@@ -8,7 +8,7 @@ import { useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
-import { decisionsApi } from "../api/decisions";
+import { decisionsApi, type DecisionOutcome } from "../api/decisions";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, useClaimAttentionItem, useDismissAttentionReceipt } from "../hooks/useAttentionViews";
@@ -50,7 +50,7 @@ import {
 } from "../lib/attention";
 import { hasBlockingShortcutDialog, resolveAttentionQueueKeyAction } from "../lib/keyboardShortcuts";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { QueryErrorState, QueryPlaceholder, QueryStaleHint, useQueryView, type QueryViewState } from "../components/QueryView";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
 import { DecisionsToolbar } from "../components/DecisionsToolbar";
 import { Curtain, AgingItemRow } from "../components/DecisionShelf";
@@ -69,6 +69,41 @@ const ATTENTION_ROW_RENDER_BATCH_SIZE = 100;
 const ATTENTION_SCROLL_LOAD_THRESHOLD_PX = 480;
 const DECISION_HISTORY_VISIBLE_LIMIT = 50;
 const DECISION_HISTORY_QUERY_LIMIT = DECISION_HISTORY_VISIBLE_LIMIT + 1;
+
+function DecisionHistoryBody({
+  view,
+  emptyCopy,
+  children,
+}: {
+  view: QueryViewState<DecisionOutcome[] | undefined>;
+  emptyCopy: string;
+  children: ReactNode;
+}) {
+  const focusTarget = useRef<HTMLElement>(null);
+  const retry = useCallback(() => {
+    view.retry();
+    requestAnimationFrame(() => focusTarget.current?.focus());
+  }, [view.retry]);
+  const hasSavedRows = view.data !== undefined;
+  if (view.kind === "loading" || view.kind === "reconnecting") {
+    return <section ref={focusTarget} tabIndex={-1}><QueryPlaceholder size="inline" label="Loading decision history" /></section>;
+  }
+  if (view.kind === "error" && !hasSavedRows) {
+    return <section ref={focusTarget} tabIndex={-1}><QueryErrorState size="inline" error={view.error} action="load decision history" onRetry={retry} retrying={view.isFetching} /></section>;
+  }
+  return (
+    <section ref={focusTarget} tabIndex={-1}>
+      {view.kind === "stale" || view.kind === "error" ? (
+        <div className="mb-2 space-y-1">
+          <QueryStaleHint />
+          <QueryErrorState size="inline" error={view.error} action="refresh decision history" onRetry={retry} retrying={view.isFetching} />
+        </div>
+      ) : null}
+      {children}
+      {hasSavedRows && (view.data?.length ?? 0) === 0 ? <p className="text-xs text-muted-foreground">{emptyCopy}</p> : null}
+    </section>
+  );
+}
 
 export function decisionHistoryQueryEnabled(companyId: string | null | undefined, open: boolean) {
   return Boolean(companyId && open);
@@ -849,36 +884,20 @@ function ClassicWhatNeedsMe() {
           open={decidedOpen}
           onToggle={() => setDecidedOpen((prev) => !prev)}
         >
-          {decidedDecisionsView.kind === "loading" || decidedDecisionsView.kind === "reconnecting" ? (
-            <p className="text-xs text-muted-foreground">Loading decided decisions…</p>
-          ) : decidedDecisionsView.kind === "error" && !decidedDecisions ? (
-            <QueryErrorState
-              size="inline"
-              error={decidedDecisionsView.error}
-              action="load decided decisions"
-              onRetry={decidedDecisionsView.retry}
-              retrying={decidedDecisionsView.isFetching}
-            />
-          ) : (
-            <>
-              {decidedDecisionsView.kind === "stale" ? (
-                <p className="text-xs text-muted-foreground">Could not refresh. Showing the last saved decided results.</p>
-              ) : null}
-              {(decidedDecisions?.length ?? 0) > 0 ? (
-                decidedDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+          <DecisionHistoryBody view={decidedDecisionsView} emptyCopy="No decided decisions.">
+            {(decidedDecisions ?? []).length > 0 ? (
+                (decidedDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
                   <DecisionResolver
                     key={decision.id}
                     companyId={selectedCompanyId}
                     decisionId={decision.id}
                     agentMap={agentMap}
                     initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                    recordedDecision={decision}
                   />
                 ))
-              ) : (
-                <p className="text-xs text-muted-foreground">No decided decisions.</p>
-              )}
-            </>
-          )}
+              ) : null}
+          </DecisionHistoryBody>
         </Curtain>
 
         <Curtain
@@ -887,36 +906,20 @@ function ClassicWhatNeedsMe() {
           open={expiredOpen}
           onToggle={() => setExpiredOpen((prev) => !prev)}
         >
-          {expiredDecisionsView.kind === "loading" || expiredDecisionsView.kind === "reconnecting" ? (
-            <p className="text-xs text-muted-foreground">Loading expired decisions…</p>
-          ) : expiredDecisionsView.kind === "error" && !expiredDecisions ? (
-            <QueryErrorState
-              size="inline"
-              error={expiredDecisionsView.error}
-              action="load expired decisions"
-              onRetry={expiredDecisionsView.retry}
-              retrying={expiredDecisionsView.isFetching}
-            />
-          ) : (
-            <>
-              {expiredDecisionsView.kind === "stale" ? (
-                <p className="text-xs text-muted-foreground">Could not refresh. Showing the last saved expired results.</p>
-              ) : null}
-              {(expiredDecisions?.length ?? 0) > 0 ? (
-                expiredDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+          <DecisionHistoryBody view={expiredDecisionsView} emptyCopy="No expired decisions.">
+            {(expiredDecisions ?? []).length > 0 ? (
+                (expiredDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
                   <DecisionResolver
                     key={decision.id}
                     companyId={selectedCompanyId}
                     decisionId={decision.id}
                     agentMap={agentMap}
                     initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                    recordedDecision={decision}
                   />
                 ))
-              ) : (
-                <p className="text-xs text-muted-foreground">No expired decisions.</p>
-              )}
-            </>
-          )}
+              ) : null}
+          </DecisionHistoryBody>
         </Curtain>
       </div>
     </div>

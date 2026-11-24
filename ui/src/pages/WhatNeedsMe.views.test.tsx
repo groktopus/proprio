@@ -117,7 +117,7 @@ describe("classic Decisions views", () => {
     await act(async () => decided?.click());
     await flush();
     expect(container.textContent).not.toContain("No decided decisions.");
-    expect(container.textContent).toContain("load decided decisions");
+    expect(container.textContent).toContain("history unavailable");
     expect(container.textContent).toContain("Retry");
   });
 
@@ -129,7 +129,7 @@ describe("classic Decisions views", () => {
     await act(async () => expired?.click());
     await flush();
     expect(container.textContent).not.toContain("No expired decisions.");
-    expect(container.textContent).toContain("load expired decisions");
+    expect(container.textContent).toContain("history unavailable");
     expect(container.textContent).toContain("Retry");
   });
 

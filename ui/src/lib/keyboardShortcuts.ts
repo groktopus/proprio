@@ -107,6 +107,7 @@ export function resolveAttentionQueueKeyAction({
 }): AttentionQueueKeyAction {
   if (defaultPrevented || metaKey || ctrlKey || altKey || isModifierOnlyKey(key)) return "ignore";
   if (hasOpenDialog || isKeyboardShortcutTextInputTarget(target)) return "ignore";
+  if (target instanceof HTMLElement && target.closest("button, [role='button'], a[href], summary")) return "ignore";
 
   switch (key) {
     case "j":
