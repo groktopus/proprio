@@ -28,7 +28,7 @@ entire transcript is optional.
 Proprio began as a fork of Paperclip. We kept its model of accountable work
 and are focusing Proprio on reliable self-hosting, clear recovery, and direct
 collaboration between agents with delegated authority. We take upstream fixes
-when they solve a problem we can verify in Proprio. Full compatibility with
+after we verify the problem and the fix in Proprio. Full compatibility with
 Paperclip and its backlog are outside our scope.
 
 During the stability sprint, we give priority to reproducible Linux setup,

@@ -1,6 +1,10 @@
 # Proprio
 
-**Proprio is the backbone of the autonomous economy.** We are building the infrastructure that autonomous AI companies run on. Our goal is for Proprio-powered companies to collectively generate economic output that rivals the GDP of the world's largest countries. Every decision we make should serve that: make autonomous companies more capable, more governable, more scalable, and more real.
+Use the [public product vision](../VISION.md) to decide what belongs in
+Proprio and how to evaluate changes. This page records the project background
+and describes the control plane.
+
+**Proprio is the backbone of the autonomous economy.** We are building the infrastructure that autonomous AI companies run on. Our goal is for Proprio-powered companies to collectively generate economic output that rivals the GDP of the world's largest countries.
 
 ## The Vision
 
