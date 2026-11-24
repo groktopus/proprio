@@ -14,8 +14,10 @@ diagnostic. This plan records the metric boundary and the evidence limits.
 - First visible activity is the end of
   `task.time_to_first_agent_activity`. It includes text deltas, tool-call
   starts, and reasoning activity that the board can render.
-- Submit-to-first-visible-activity is queue wait plus the existing
-  run-created-to-activity metric. It is the user-wait proxy.
+- Submit-to-first-visible-activity uses the duration of the accepted-input-
+  anchored activity span when present. Spans anchored only to run creation or
+  an earlier wake remain run-created diagnostics and are not promoted into the
+  submit distribution.
 - First text is the end of `task.time_to_first_token`, reported separately.
   Tool-first turns can have first activity but no first text.
 - The run-created activity value remains the speed-budget diagnostic. It must
@@ -34,11 +36,13 @@ attempt accounting even when it has no stable run record. Missing activity is
 never converted to a latency value.
 
 For a browser cross-check, run the opt-in Playwright spec
-`tests/perf/agent-activity/submit-to-first-visible.spec.ts` against an
-authenticated seeded checkout. It records the time from the browser submit to
-the first new task-chat row. This is a UI visibility proxy, not provider proof.
-Join it to the run trace by run ID and report any mismatch. The spec is not a
-replacement for the native trace.
+`tests/perf/agent-activity/submit-to-first-visible.spec.ts` with
+`--config tests/perf/agent-activity/playwright.config.ts` against an
+authenticated seeded checkout. Set `PROPRIO_PERF_BASE_URL`,
+`PROPRIO_PERF_STORAGE_STATE`, and `PROPRIO_PERF_ISSUE_PATH`. It records the
+time from browser submit to the first new agent conversation message. This is
+a UI visibility proxy, not provider proof. Join it to the run trace by run ID
+and report any mismatch. The spec is not a replacement for the native trace.
 
 ## Baseline and follow-up
 

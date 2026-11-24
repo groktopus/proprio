@@ -32,7 +32,7 @@ import { DaytonaWaveSweeper } from "./daytona-sweep.js";
 import { Timeline } from "./timeline.js";
 import type { AdapterId, FaultKind } from "./types.js";
 import {
-  baselineRows, rankPreTurnSteps, recoverySamples, distribution, openShellExecutions, daytonaBaselineHolders, daytonaRetainsSandboxes, parseBaselineEnvironment, parseBaselinePhases,
+  baselineRows, rankPreTurnSteps, recoverySamples, distribution, runMetrics, openShellExecutions, daytonaBaselineHolders, daytonaRetainsSandboxes, parseBaselineEnvironment, parseBaselinePhases,
   type BaselineEvent, type BaselineFault, type BaselineRun,
 } from "./ttft-baseline-stats.js";
 
@@ -198,19 +198,22 @@ async function readyAdapters(api: ChaosApi, lab: ChaosLab, adapters: AdapterId[]
 
 function report(runs: BaselineRun[], faults: BaselineFault[], meta: { gitSha?: string | null; timedOutTasks?: number; timedOutAttempts?: Array<{ adapter: string; phase: string }> } = {}): string {
   const ms = (value: number | null) => value === null ? "—" : `${(value / 1000).toFixed(2)} s`;
-  const lines = [`# Submit-to-first-visible-activity baseline`, ``, `Exact build: ${meta.gitSha ?? "unknown"}`, ``, "| Adapter | Env | Start | Attempts | Failed/timeouts | No visible activity | Submit → activity p50 / p95 | Submit → first text p50 / p95 | Queue wait p50 / p95 (n) | Activity from run created p50 / p95 (budget) | Provider turn → activity p50 / p95 | Text from run created p50 / p95 | Boot p50 | Boot p95 | Anchors |", "|---|---|---|---:|---:|---:|---|---|---|---|---|---|---|---|---|"];
-  const rowLine = (row: ReturnType<typeof baselineRows>[number]) => `| ${row.adapter} | ${row.environment} | ${row.warmth} | ${row.attempts} | ${row.failedOrTimedOut} | ${row.noVisibleActivity} | ${ms(row.submitToFirstActivity.p50)} / ${ms(row.submitToFirstActivity.p95)} | ${ms(row.submitToFirstText.p50)} / ${ms(row.submitToFirstText.p95)} | ${ms(row.inputWait.p50)} / ${ms(row.inputWait.p95)} (${row.inputWait.n}) | ${ms(row.firstActivityAfterRunCreated.p50)} / ${ms(row.firstActivityAfterRunCreated.p95)} | ${ms(row.providerFirstActivity.p50)} / ${ms(row.providerFirstActivity.p95)} | ${ms(row.ttftAfterRunCreated.p50)} / ${ms(row.ttftAfterRunCreated.p95)} | ${ms(row.boot.p50)} | ${ms(row.boot.p95)} | ${Object.entries(row.anchors).map(([k, v]) => `${k}×${v}`).join(", ") || "—"} |`;
+  const heading = `# Submit-to-first-visible-activity baseline`;
+  const header = "| Adapter | Env | Start | Attempts | Failed/timeouts | No visible activity | Submit → activity p50 / p95 (n) | Submit → first text p50 / p95 (n) | Queue wait p50 / p95 (n) | Activity from run created p50 / p95 (budget) | Provider turn → activity p50 / p95 | Text from run created p50 / p95 | Boot p50 | Boot p95 | Anchors |";
+  const separator = "|---|---|---|---:|---:|---:|---|---|---|---|---|---|---|---|---|";
+  const lines = [heading, ``, `Exact build: ${meta.gitSha ?? "unknown"}`, ``, header, separator];
+  const rowLine = (row: ReturnType<typeof baselineRows>[number]) => `| ${row.adapter} | ${row.environment} | ${row.warmth} | ${row.attempts} | ${row.failedOrTimedOut} | ${row.noVisibleActivity} | ${ms(row.submitToFirstActivity.p50)} / ${ms(row.submitToFirstActivity.p95)} (${row.submitToFirstActivity.n}) | ${ms(row.submitToFirstText.p50)} / ${ms(row.submitToFirstText.p95)} (${row.submitToFirstText.n}) | ${ms(row.inputWait.p50)} / ${ms(row.inputWait.p95)} (${row.inputWait.n}) | ${ms(row.firstActivityAfterRunCreated.p50)} / ${ms(row.firstActivityAfterRunCreated.p95)} | ${ms(row.providerFirstActivity.p50)} / ${ms(row.providerFirstActivity.p95)} | ${ms(row.ttftAfterRunCreated.p50)} / ${ms(row.ttftAfterRunCreated.p95)} | ${ms(row.boot.p50)} | ${ms(row.boot.p95)} | ${Object.entries(row.anchors).map(([k, v]) => `${k}×${v}`).join(", ") || "—"} |`;
   for (const row of baselineRows(runs)) lines.push(rowLine(row));
   // New agents wait for harness verification before their run is created:
   // their own rows, so that wait never blends into ordinary cold starts.
   const verifyRuns = runs.filter(run => run.phase === "verify").map(run => ({ ...run, phase: "cold" as const }));
   if (verifyRuns.length) {
-    lines.push("", "New agent behind harness verification (submit-to metrics start at the accepted input; verification precedes run creation):", "", lines[0]!, lines[1]!);
+    lines.push("", "New agent behind harness verification (submit-to metrics start at the accepted input; verification precedes run creation):", "", heading, header, separator);
     for (const row of baselineRows(verifyRuns)) lines.push(rowLine(row));
   }
   const postfault = runs.filter(run => run.phase === "postfault").map(run => ({ ...run, phase: "cold" as const }));
   if (postfault.length) {
-    lines.push("", "First follow-up after an idle control-plane restart (K1):", "", lines[0]!, lines[1]!);
+    lines.push("", "First follow-up after an idle control-plane restart (K1):", "", heading, header, separator);
     for (const row of baselineRows(postfault)) lines.push(rowLine(row));
   }
 
@@ -229,7 +232,7 @@ function report(runs: BaselineRun[], faults: BaselineFault[], meta: { gitSha?: s
     const control = distribution(group.flatMap(sample => sample.controlPlaneMs === null ? [] : [sample.controlPlaneMs]));
     lines.push(`| ${adapter} | ${kind} | ${disposition} | ${d.n} | ${ms(d.p50)} | ${ms(d.p95)} | ${ms(control.p50)} / ${ms(control.p95)} | ${group.length - d.n} |`);
   }
-  const failed = runs.filter(run => run.status === "failed" || run.status === "timed_out").length;
+  const failed = runs.filter(run => run.status === "failed" || run.status === "timed_out" || run.status === "interrupted").length;
   const noVisible = runs.filter(run => runMetrics(run).firstActivityAfterRunCreatedMs === null).length;
   lines.push("", `Attempt accounting: ${runs.length} run records; ${failed} failed or timed out run records; ${noVisible} run records without visible activity; ${meta.timedOutTasks ?? 0} task attempts timed out before a stable run record and were excluded from latency distributions.`);
   if (meta.timedOutAttempts?.length) {
@@ -326,6 +329,13 @@ async function main() {
   const agentLifecycles: Record<string, string> = {};
   const midturn: Json[] = [];
   const timedOutIssues = new Set<string>();
+  const timedOutAttempts: Array<{ issueId: string; adapter: string; phase: string }> = [];
+  const markTimedOut = (issueId: string, adapter: string, phase: string) => {
+    timedOutIssues.add(issueId);
+    if (!timedOutAttempts.some(attempt => attempt.issueId === issueId && attempt.phase === phase)) {
+      timedOutAttempts.push({ issueId, adapter, phase });
+    }
+  };
   let sweeper: DaytonaWaveSweeper | null = null;
   const workspaceOperations: Array<{ runId: string; adapter: string; phase: string; operation: string; status: string;
     durationMs: number | null; command: string | null }> = [];
@@ -399,7 +409,7 @@ async function main() {
         for (const run of cold.runs) runPhase.set(runIdOf(run), "cold");
         if (cold.timedOut) {
           // Never send the follow-up into an active turn; drop the whole sample.
-          timedOutIssues.add(issueId);
+          markTimedOut(issueId, adapter, "cold");
           timeline.add("baseline_sample_timeout", { adapter, issueId, phase: "cold" });
           continue;
         }
@@ -408,7 +418,7 @@ async function main() {
         const warm = await waitForRest(api, supervisor, issueId, cold.runs.length + 1);
         for (const run of warm.runs) if (!runPhase.has(runIdOf(run))) runPhase.set(runIdOf(run), "warm");
         if (warm.timedOut) {
-          timedOutIssues.add(issueId);
+          markTimedOut(issueId, adapter, "warm");
           timeline.add("baseline_sample_timeout", { adapter, issueId, phase: "warm" });
           continue;
         }
@@ -459,7 +469,7 @@ async function main() {
         }
         const settled = await waitForRest(api, supervisor, issueId, 1);
         if (settled.timedOut) {
-          timedOutIssues.add(issueId);
+          markTimedOut(issueId, adapter, "verify");
           timeline.add("baseline_sample_timeout", { adapter, issueId, phase: "verify" });
           continue;
         }
@@ -497,7 +507,7 @@ async function main() {
           for (const run of after.runs) if (!runPhase.has(runIdOf(run))) runPhase.set(runIdOf(run), "postfault");
           if (after.timedOut) {
             timedOut = true;
-            timedOutIssues.add(entry.issueId);
+            markTimedOut(entry.issueId, adapter, "postfault");
             timeline.add("baseline_sample_timeout", { adapter, issueId: entry.issueId, phase: "postfault" });
           }
           else timeline.add("baseline_postfault_done", { adapter, issueId: entry.issueId, round });
@@ -531,7 +541,7 @@ async function main() {
         // A steered comment is answered inside the same run; a queued one needs a second run.
         const settled = await waitForRest(api, supervisor, issueId, steer?.acknowledgedAt ? 1 : 2);
         if (settled.timedOut) {
-          timedOutIssues.add(issueId);
+          markTimedOut(issueId, adapter, "midturn");
           timeline.add("baseline_sample_timeout", { adapter, issueId, phase: "midturn" });
           continue;
         }
@@ -586,7 +596,7 @@ async function main() {
       const settled = await Promise.all(inFlight.map(entry => waitForRest(api, supervisor, entry.issueId, 1)));
       for (const [position, entry] of inFlight.entries()) {
         if (settled[position]!.timedOut) {
-          timedOutIssues.add(entry.issueId);
+          markTimedOut(entry.issueId, entry.adapter, "restart");
           timeline.add("baseline_sample_timeout", { adapter: entry.adapter, issueId: entry.issueId, phase: "restart" });
         }
       }
@@ -594,12 +604,14 @@ async function main() {
 
     const runs: BaselineRun[] = [];
     for (const task of tasks) {
-      // A sample that never came to rest is reported, not measured.
-      if (timedOutIssues.has(task.issueId)) continue;
       for (const run of await runsFor(api, task.issueId)) {
         const runId = runIdOf(run);
+        const phase = runPhase.get(runId) ?? task.phase;
+        // Keep settled phases from an issue whose later phase timed out; only
+        // the unfinished phase is excluded from latency distributions.
+        if (timedOutAttempts.some(attempt => attempt.issueId === task.issueId && attempt.phase === phase)) continue;
         runs.push({ runId, adapter: task.adapter, environment: env, status: String(run.status),
-          phase: runPhase.get(runId) ?? task.phase, events: await allEvents(api, runId) });
+          phase, events: await allEvents(api, runId) });
         // Workspace commands (worktree, provision, sync) the run waited on, with their durations.
         const operations = await api.get<Json[]>(`/api/heartbeat-runs/${runId}/workspace-operations`, 10_000).catch((error: unknown) => {
           // A failed read is recorded as such, never as "no workspace operations".
@@ -614,10 +626,13 @@ async function main() {
           command: typeof operation.command === "string" ? operation.command.slice(0, 120) : null });
       }
     }
-    const gitSha = process.env.GIT_SHA ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
-    const timedOutAttempts = tasks.filter(task => timedOutIssues.has(task.issueId)).map(task => ({ adapter: task.adapter, phase: task.phase }));
+    const measuredGitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+    if (process.env.GIT_SHA && process.env.GIT_SHA !== measuredGitSha) {
+      throw new Error(`GIT_SHA ${process.env.GIT_SHA} does not match measured checkout ${measuredGitSha}`);
+    }
+    const gitSha = measuredGitSha;
     const data = { workspaceOperations, waveId, lifecycle: lifecycle ?? "catalog", agentLifecycles, adapters, notReady: requested.filter(adapter => !adapters.includes(adapter)),
-      timedOutTasks: timedOutIssues.size, timedOutAttempts, samples, restarts, midturn, gitSha, runs, faults };
+      timedOutTasks: timedOutIssues.size, timedOutAttempts: timedOutAttempts.map(({ adapter, phase }) => ({ adapter, phase })), samples, restarts, midturn, gitSha, runs, faults };
     await writeFile(path.join(outDir, "baseline-data.json"), `${JSON.stringify(data)}\n`, { mode: 0o600 });
     await writeFile(path.join(outDir, "baseline-report.md"), report(runs, faults, data), { mode: 0o600 });
     process.stdout.write(report(runs, faults, data));

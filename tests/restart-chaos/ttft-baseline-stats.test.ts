@@ -184,14 +184,14 @@ describe("ttft baseline statistics", () => {
     const measured = runMetrics(run("submit", "cold", [
       span("comment.to_run_created", 0, 4_000),
       span("heartbeat.queue", 4_000, 100),
-      span("task.time_to_first_agent_activity", 0, 35_000, { anchor: "comment" }),
-      span("task.time_to_first_token", 0, 18_000, { anchor: "comment" }),
+      span("task.time_to_first_agent_activity", 0, 18_000, { anchor: "comment" }),
+      span("task.time_to_first_token", 0, 35_000, { anchor: "comment" }),
     ]));
     expect(measured).toMatchObject({
       inputWaitMs: 4_000,
-      firstActivityAfterRunCreatedMs: 35_000,
-      submitToFirstActivityMs: 39_000,
-      submitToFirstTextMs: 22_000,
+      firstActivityAfterRunCreatedMs: 14_000,
+      submitToFirstActivityMs: 18_000,
+      submitToFirstTextMs: 35_000,
     });
   });
 

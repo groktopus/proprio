@@ -120,7 +120,6 @@ export function runMetrics(run: BaselineRun): RunMetrics {
   }
   const ingress = FIRST_SPAN(spans, "comment.to_run_created") ?? FIRST_SPAN(spans, "question_response.to_run_created");
   // Only an ingress that starts the TTFT span waited for its run to exist.
-  const anchor = ttft ?? activity;
   // From run creation, as the runtime budget judges it: the start of
   // heartbeat.queue, else the end of the ingress span. Independent of the
   // span's own anchor (an earlier wake request or comment is not counted).
@@ -128,17 +127,15 @@ export function runMetrics(run: BaselineRun): RunMetrics {
   const afterRunCreated = (span: RunSpan) => runCreatedAt === null
     ? Math.max(0, span.durationMs - (inputWaitMs ?? 0))
     : Math.max(0, span.startOffsetMs + span.durationMs - runCreatedAt);
-  const inputWaitMs = ingress && anchor && ingress.startOffsetMs <= anchor.startOffsetMs ? ingress.durationMs : null;
+  const acceptedInputAnchor = (span: RunSpan | null) => typeof span?.attributes.anchor === "string"
+    && ["comment", "question_response"].includes(span.attributes.anchor);
+  const inputWaitMs = ingress && (acceptedInputAnchor(ttft) || acceptedInputAnchor(activity)) ? ingress.durationMs : null;
   return {
     inputWaitMs,
     firstActivityAfterRunCreatedMs: activity ? afterRunCreated(activity) : null,
     ttftAfterRunCreatedMs: ttft ? afterRunCreated(ttft) : null,
-    submitToFirstActivityMs: activity
-      ? Math.max(0, (inputWaitMs ?? 0) + afterRunCreated(activity))
-      : null,
-    submitToFirstTextMs: ttft
-      ? Math.max(0, (inputWaitMs ?? 0) + afterRunCreated(ttft))
-      : null,
+    submitToFirstActivityMs: acceptedInputAnchor(activity) ? activity.durationMs : null,
+    submitToFirstTextMs: acceptedInputAnchor(ttft) ? ttft.durationMs : null,
     providerFirstActivityMs: activity && turnStartAt !== null
       ? Math.max(0, activity.startOffsetMs + activity.durationMs - turnStartAt)
       : null,
@@ -259,7 +256,7 @@ export function baselineRows(runs: readonly BaselineRun[]): BaselineRow[] {
     for (const metric of group.metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
     return { adapter: group.adapter, environment: group.environment, warmth: group.warmth,
       attempts: group.runs.length,
-      failedOrTimedOut: group.runs.filter(run => run.status === "failed" || run.status === "timed_out").length,
+      failedOrTimedOut: group.runs.filter(run => run.status === "failed" || run.status === "timed_out" || run.status === "interrupted").length,
       noVisibleActivity: group.metrics.filter(metric => metric.firstActivityAfterRunCreatedMs === null).length,
       anchors,
       ttft: distribution(group.metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),

@@ -314,10 +314,8 @@ function runDetail(environment: EnvironmentKind, run: BaselineRun): SpeedRunDeta
   const queue = spans.find(span => span.name === "heartbeat.queue") ?? null;
   const submitted = spans.find(span => span.name === "runner.turn.submit") ?? spans.find(span => span.name === "runner.session.resume") ?? null;
   const activity = spans.find(span => span.name === "task.time_to_first_agent_activity") ?? null;
-  const turnAt = submitted ? submitted.startOffsetMs + submitted.durationMs : null;
-  const activityAt = activity ? activity.startOffsetMs + activity.durationMs : null;
   return { runId: run.runId, adapter: run.adapter, start, firstActivityMs: firstActivityMs(run), bootMs: bootWithoutProvisionMs(run), queueMs: queue?.durationMs ?? null,
-    providerFirstActivityMs: turnAt !== null && activityAt !== null ? Math.max(0, activityAt - turnAt) : null,
+    providerFirstActivityMs: metrics.providerFirstActivityMs,
     preTurnSteps: metrics.preTurnSteps,
     breach: runOverBudget(environment, run) };
 }
