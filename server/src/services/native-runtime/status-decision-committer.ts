@@ -96,6 +96,7 @@ import { NATIVE_AGENT_BLOCKER_CONTINUATION_CODE, NATIVE_AGENT_BLOCKER_HANDOFF_CO
 import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
 import { NATIVE_TOOL_RECEIPT_LIMIT_CODE } from "./native-tool-receipt-limit.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
+import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
 
 export class NativeStatusRaceError extends Error {
   readonly code = "native_status_race" as const;
@@ -953,6 +954,16 @@ async function materializeDecisionEffect(input: {
   }
   if (effect.kind === "record_finalization_error") {
     failAt("recovery_materialization", input.failpoint);
+    const handoffCompletionEvidence = effect.cause === "completion_evidence_incomplete"
+      ? await readAcceptedCaseHandoffCompletionEvidence({
+        db: input.tx as unknown as Db,
+        companyId: input.companyId,
+        issueId: input.issue.id,
+        runId: input.runId,
+        decisionId: input.decisionId,
+        reasonCode: effect.cause,
+      })
+      : null;
     const recovery = await issueRecoveryActionService(
       input.tx,
     ).upsertSourceScoped({
@@ -967,7 +978,11 @@ async function materializeDecisionEffect(input: {
         decisionId: input.decisionId,
         cause: effect.cause,
       }),
-      evidence: { runId: input.runId, decisionId: input.decisionId },
+      evidence: {
+        runId: input.runId,
+        decisionId: input.decisionId,
+        ...(handoffCompletionEvidence ? { caseHandoffCompletion: handoffCompletionEvidence } : {}),
+      },
       nextAction: effect.nextAction,
       wakePolicy: null,
       maxAttempts: 3,

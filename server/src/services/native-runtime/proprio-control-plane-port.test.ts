@@ -3,7 +3,7 @@ import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external
 import { plugins } from "@groktopus/db";
 import { readTaskPanelActivations } from "../plugin-task-panels.js";
 import { startServerMetrics, stopServerMetrics } from "../server-metrics.js";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -18,6 +18,8 @@ import {
   agents,
   assets,
   authUsers,
+  caseHandoffs,
+  cases,
   companies,
   companyMemberships,
   completionContracts,
@@ -87,6 +89,8 @@ describe("ProprioControlPlanePort conformance", () => {
   let temporary: Awaited<ReturnType<typeof startRecoveryPostgres>> | null = null;
   let outputStorageRoot: string;
   let db: ReturnType<typeof createDb>;
+  let recoveryEvidenceCaseId: string | null = null;
+  let recoveryEvidenceHandoffId: string | null = null;
   const contractId = "00000000-0000-4000-8000-000000000004";
   const contractSha = "phase6-conformance-contract";
   const taskIssueId = "00000000-0000-4000-8000-000000000008";
@@ -327,6 +331,13 @@ describe("ProprioControlPlanePort conformance", () => {
       await temporary.cleanup();
     }
     await rm(outputStorageRoot, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    if (recoveryEvidenceHandoffId) await db.delete(caseHandoffs).where(eq(caseHandoffs.id, recoveryEvidenceHandoffId));
+    if (recoveryEvidenceCaseId) await db.delete(cases).where(eq(cases.id, recoveryEvidenceCaseId));
+    recoveryEvidenceCaseId = null;
+    recoveryEvidenceHandoffId = null;
   });
 
   it.each(["settles", "checkpoint timeout", "unscoped terminal", "verified shutdown"] as const)("settles a durable governed wait through its recorded terminal or shutdown: %s", async mode => {
@@ -2755,9 +2766,32 @@ describe("ProprioControlPlanePort conformance", () => {
 
   it("keeps synthetic provider completion open until the requested task document is published", async () => {
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
+    const [sourceRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const [acceptedContract] = await db.select().from(completionContracts).where(and(
+      eq(completionContracts.id, sourceRun!.completionContractId!), eq(completionContracts.companyId, companyId),
+      eq(completionContracts.issueId, issueId),
+    ));
+    const caseId = randomUUID(), handoffId = randomUUID();
+    recoveryEvidenceCaseId = caseId;
+    recoveryEvidenceHandoffId = handoffId;
+    const requirementsDigest = "d".repeat(64);
+    await db.insert(cases).values({ id: caseId, companyId, caseNumber: 700000 + Math.floor(Math.random() * 100000),
+      identifier: `C-${caseId}`, caseType: "native-completion", title: "Native completion handoff", workIssueId: issueId, handoffVersion: 1 });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { ...sourceRun!.contextSnapshot, caseHandoffId: handoffId } })
+      .where(eq(heartbeatRuns.id, runId));
+    await db.insert(caseHandoffs).values({ id: handoffId, companyId, caseId, issueId, version: 1,
+      fromAgentId: agentId, destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Deliver the result",
+      actorType: "agent", actorId: agentId, wakeupRequestId: randomUUID(), idempotencyKey: `native-completion-${handoffId}`,
+      inputFingerprint: `native-completion-${handoffId}`,
+      offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Complete task", prerequisites: [],
+        requirementRevision: { id: acceptedContract!.id, revision: acceptedContract!.revision, canonicalSha256: acceptedContract!.canonicalSha256 },
+        requirementsDigest, workflowTransition: null, decisionOwner: { type: "agent", id: agentId }, accountableOwner: { type: "agent", id: agentId } },
+      recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
+        requirementRevisionId: acceptedContract!.id, requirementsDigest, decidedAt: new Date().toISOString() }, state: "delivered" });
     const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
-    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, caseHandoffId: handoffId,
+      executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));
     const synthetic: PrpStructuredRunResult = { ...result, summary: "Created briefing.md with the returned page titles and service receipt.",
       evidence: [{ ref: "provider:opencode:agent-message" }], artifacts: [] };
     await port.completeRun({ result: synthetic, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
@@ -2792,8 +2826,15 @@ describe("ProprioControlPlanePort conformance", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_progress");
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
       .toHaveLength(wakes.length);
-    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
-      .toContainEqual(expect.objectContaining({ ownerAgentId: agentId, cause: "completion_evidence_incomplete", nextAction: expect.stringContaining("write_document") }));
+    const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toContainEqual(expect.objectContaining({ ownerAgentId: agentId, cause: "completion_evidence_incomplete", nextAction: expect.stringContaining("write_document") }));
+    const completionRecovery = recoveryActions.find(action => action.cause === "completion_evidence_incomplete");
+    expect(completionRecovery?.evidence.caseHandoffCompletion).toMatchObject({
+      caseHandoff: { id: handoffId, acceptedRequirementRevision: { id: acceptedContract!.id } },
+      decision: { recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "prior_status_preserved_no_live_path" },
+      assessment: { resultId: expect.any(String), assessedContractId: acceptedContract!.id },
+    });
+    expect(JSON.stringify(completionRecovery?.evidence)).not.toContain("provider:opencode:agent-message");
     expect((await db.select().from(nativeRunResults).where(eq(nativeRunResults.runId, runId)))[0]!.resultJson)
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });
   });
