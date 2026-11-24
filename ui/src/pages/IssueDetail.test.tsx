@@ -1872,7 +1872,7 @@ describe("IssueDetail", () => {
     queryClient.setQueryData(queryKeys.auth.session, { user: { id: "title-editor-user" } });
     await act(async () => renderIssueView());
     await waitForAssertion(() => expect(container.querySelector('[data-testid="issue-detail-header"] h2')).not.toBeNull());
-    await act(async () => (container.querySelector('[data-testid="issue-detail-header"] h2') as HTMLElement).click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="issue-detail-header"] h2 button')!.click());
     const input = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     expect(input).not.toBeNull();
     expect(document.activeElement).toBe(input);
@@ -1945,7 +1945,7 @@ describe("IssueDetail", () => {
     };
     await act(async () => renderIssueView());
     await waitForAssertion(() => expect(container.querySelector('[data-testid="issue-detail-header"] h2')).not.toBeNull());
-    await act(async () => (container.querySelector('[data-testid="issue-detail-header"] h2') as HTMLElement).click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="issue-detail-header"] h2 button')!.click());
     const firstInput = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     await act(async () => type(firstInput, "Only the first task's draft"));
     mockRouteParams.issueId = "PAP-2";
@@ -1955,7 +1955,7 @@ describe("IssueDetail", () => {
     expect(container.querySelector('[data-testid="issue-detail-header"] textarea')).toBeNull();
     const secondHeading = container.querySelector<HTMLElement>('[data-testid="issue-detail-header"] h2')!;
     expect(secondHeading.textContent).toBe(second.title);
-    await act(async () => secondHeading.click());
+    await act(async () => secondHeading.querySelector("button")!.click());
     const secondInput = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     expect(secondInput.value).toBe(second.title);
     await act(async () => type(secondInput, "Only the second task's draft"));
