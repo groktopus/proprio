@@ -36,7 +36,7 @@ const meta = {
       "status": "current",
       "implementation": "production",
       "boundary": "fixtures",
-      "notes": "CaseDetail hierarchy, compact monospace CaseFieldsTable with dotted nested paths, Audit navigation, CaseFieldsPanel arbitrary/empty data and IssueCasesPanel reverse links. Original ActivityHistory story ID retained for the Audit link scenario. Fixture relations and handoffs; Audit delivery, document revision history and persisted links remain production obligations."
+      "notes": "CaseDetail hierarchy, compact monospace CaseFieldsTable with dotted nested paths, Audit navigation, CaseFieldsPanel arbitrary/empty data and IssueCasesPanel reverse links with lazy versioned handoff decisions on the primary task Case. Original ActivityHistory story ID retained for the Audit link scenario. Fixture relations and handoffs; Audit delivery, document revision history and persisted links remain production obligations."
     },
   },
   beforeEach: ({ parameters }) => {
@@ -120,7 +120,7 @@ export const EmptyFields: Story = {
   },
 };
 export const LinkedFromTask: Story = {
-  render: () => <IssueCasesPanel issueId="task-gap" />,
+  render: () => <IssueCasesPanel task={{ id: "task-gap", identifier: "PAP-42", title: "Qualify the release", status: "in_progress" }} />,
   play: async ({ canvasElement }) => {
     await expect(
       await within(canvasElement).findByRole("link", {

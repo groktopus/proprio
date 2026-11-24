@@ -20,7 +20,9 @@ function HandoffActor({ id, name, fallback, agents }: {
   return id ? <AgentIdentity agent={agents?.get(id) ?? { id, name: name ?? "Agent" }} size="xs" /> : <Identity name={name ?? fallback} size="xs" />;
 }
 
-export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; task?: CaseWorkIssue | null; agents?: CaseAgentMap }) {
+type HandoffTaskIdentity = Pick<CaseWorkIssue, "id" | "identifier" | "title" | "status">;
+
+export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; task?: HandoffTaskIdentity | null; agents?: CaseAgentMap }) {
   const history = useInfiniteQuery({
     queryKey: queryKeys.cases.handoffs(caseId),
     initialPageParam: null as string | null,
@@ -40,7 +42,7 @@ export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; t
   </section>;
 }
 
-function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?: CaseWorkIssue | null; agents?: CaseAgentMap }) {
+function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?: HandoffTaskIdentity | null; agents?: CaseAgentMap }) {
   const createdAt = new Date(handoff.createdAt).toISOString();
   const terminal = handoff.destinationKind === "done";
   const settled = handoff.state === "delivered" || handoff.state === "completed";
