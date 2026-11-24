@@ -29,8 +29,10 @@ only the failed promotion job after changing it. Reusing the same tested
 digest avoids generating a new candidate. If a version tag already points
 to a different digest, investigate before starting another promotion.
 
-Record the source SHA, immutable image digest, version tag, Actions attempt,
-and qualification result in the release record. Retain published image
+Record the source SHA, immutable image digest, Actions attempt, and
+qualification result in the release record. Include the version tag when
+promotion assigns one. A release can identify a publicly accessible
+qualified image by its immutable digest. Retain published image
 manifests, signed attestations, and release records for the latest two
 qualified versions and any digest still deployed. Candidate tags can be
 removed after their disposition is recorded. Do not delete a manifest
@@ -50,6 +52,44 @@ gh attestation verify "oci://$image" "${verify[@]}"
 gh attestation verify "oci://$image" "${verify[@]}" --predicate-type https://spdx.dev/Document
 docker pull --platform linux/amd64 "$image"
 ```
+
+### First qualified public digest
+
+Use source revision `4e3525fd8381bc813f1fd9e54b8753e6bd6cd49e` and image
+`ghcr.io/groktopus/proprio@sha256:e480ac4cb84299a23d81880e13ce620d524b03f1eba99ba7daa469ed073d66d9`.
+This is the signed OCI index. Its Linux amd64 child manifest is
+`sha256:a96fa61d6914cf86fc71875e951431a03fc9bb4faa315a044bdce81318cc5a6c`.
+Use the index for attestation verification. Docker selects the amd64 child
+when pulling with `--platform linux/amd64`. Attempt 1 of the
+[image qualification run](https://github.com/groktopus/proprio/actions/runs/45350841926)
+tested that child from the signed index.
+The runner verified both signatures and the source revision label before
+checking the five installed harness versions and both Compose layouts.
+The [retained build record and SPDX SBOM](https://github.com/groktopus/proprio/actions/runs/45350841926/artifacts/14900667594)
+identify the same digest.
+
+An independent reference install pulled the manifest anonymously on Linux
+x86-64, verified its build provenance and SPDX SBOM with GitHub CLI 2.105.0,
+and ran the same state drill with Docker Engine 29.9.2 and Compose 5.6.1.
+Between 08:07:58 and 08:10:15 UTC on November 24, 2026, both layouts
+preserved their company, successful synthetic agent run, and single receipt
+through recreation and fresh restore. The embedded archive was a stopped
+PostgreSQL 18.1 cluster. Both standalone PostgreSQL servers and the dump and
+restore clients reported 17.12.
+
+This run made the digest available through the public candidate tag
+`candidate-45350841926-1`. The optional version-tag job was skipped.
+Retain the candidate tag, index, child manifest, and attestations until a
+retained release tag points to the same index.
+
+The qualified image recovery procedure restores its backups into a fresh
+project using the same digest. The preceding
+[`v0.0.2` source prerelease](https://github.com/groktopus/proprio/releases/tag/v0.0.2)
+has a separate [managed source recovery record](https://github.com/groktopus/proprio/actions/runs/45340716133).
+Use a backup taken on that source revision and its original configuration,
+signing keys, and storage settings for a source recovery.
+
+### Start Compose
 
 Follow the [Compose setup](DOCKER.md#docker-compose) from the recorded
 source checkout. Add a Compose override setting the app service's `image`
