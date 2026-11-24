@@ -2864,13 +2864,15 @@ describe("ProprioControlPlanePort conformance", () => {
     if (authorityChange === "same-recipient newer handoff") {
       const newerHandoffId = randomUUID();
       recoveryEvidenceSuccessorHandoffId = newerHandoffId;
+      const correctedOfferContract = { ...offerContract, expectedDeliverable: "Corrected scope with verified publication",
+        requirementsDigest: "e".repeat(64) };
       await db.update(cases).set({ handoffVersion: 2 }).where(eq(cases.id, caseId));
       await db.insert(caseHandoffs).values({ id: newerHandoffId, companyId, caseId, issueId, version: 2,
         fromAgentId: agentId, destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Updated delivery",
         actorType: "agent", actorId: agentId, wakeupRequestId: randomUUID(), idempotencyKey: `newer-handoff-${newerHandoffId}`,
-        inputFingerprint: `newer-handoff-${newerHandoffId}`, offerContract,
+        inputFingerprint: `newer-handoff-${newerHandoffId}`, offerContract: correctedOfferContract,
         recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 2,
-          requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest, decidedAt: new Date().toISOString() },
+          requirementRevisionId: acceptedContract.id, requirementsDigest: correctedOfferContract.requirementsDigest, decidedAt: new Date().toISOString() },
         state: "delivered" });
     } else {
       await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date() }).where(eq(caseHandoffs.id, handoffId));
