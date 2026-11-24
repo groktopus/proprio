@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { Db } from "@groktopus/db";
-import { handoffCaseSchema } from "@groktopus/shared";
+import { caseHandoffRecipientDecisionSchema, handoffCaseSchema } from "@groktopus/shared";
 import { validate } from "../middleware/validate.js";
 import { notFound } from "../errors.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
@@ -24,6 +24,13 @@ export function caseHandoffRoutes(db: Db) {
     if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
     assertCompanyAccess(req, row.companyId);
     res.json(await service.list(req.actor, caseId, listSchema.parse(req.query)));
+  });
+  router.post("/cases/:caseId/handoffs/:handoffId/decision", validate(caseHandoffRecipientDecisionSchema), async (req, res) => {
+    const caseId = req.params.caseId as string;
+    const row = await service.visible(req.actor, caseId);
+    if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
+    assertCompanyAccess(req, row.companyId);
+    res.json(await service.recordRecipientDecision(req.actor, caseId, req.params.handoffId as string, req.body));
   });
   const control = (action: "retry" | "cancel") => async (req: Request, res: Response) => {
       const caseId = req.params.caseId as string;

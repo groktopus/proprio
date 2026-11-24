@@ -115,6 +115,32 @@ export const handoffCaseSchema = z.union([agentCaseHandoffSchema, doneCaseHandof
 export type AgentCaseHandoffInput = z.infer<typeof agentCaseHandoffSchema>;
 export type DoneCaseHandoffInput = z.infer<typeof doneCaseHandoffSchema>;
 export type HandoffCaseInput = z.input<typeof handoffCaseSchema>;
+
+const decisionTarget = {
+  expectedHandoffVersion: z.number().int().positive(),
+  requirementRevisionId: z.string().guid(),
+};
+
+export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    ...decisionTarget,
+    outcome: z.literal("accepted"),
+  }).strict(),
+  z.object({
+    ...decisionTarget,
+    outcome: z.literal("clarification"),
+    reasonCode: z.enum(["missing_prerequisite", "unclear_requirements", "missing_evidence", "other"]),
+    message: z.string().trim().min(1).max(4_000),
+  }).strict(),
+  z.object({
+    ...decisionTarget,
+    outcome: z.literal("declined"),
+    reasonCode: z.enum(["unavailable", "missing_capability", "outside_scope", "other"]),
+    message: z.string().trim().min(1).max(4_000),
+  }).strict(),
+]);
+export type CaseHandoffRecipientDecisionInput = z.infer<typeof caseHandoffRecipientDecisionSchema>;
+
 export type HandoffCaseResult = {
   handoffId: string;
   caseId: string;
