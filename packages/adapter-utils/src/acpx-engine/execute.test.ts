@@ -5270,6 +5270,39 @@ describe("ACPX engine Claude skill bundle staging (remote ACP lane)", () => {
     await expect(pathExists(path.join(hostSkillsHome, "symlinked-skill-md"))).resolves.toBe(false);
     await expect(pathExists(path.join(hostSkillsHome, "no-skill-md"))).resolves.toBe(false);
   });
+
+  it("stages only this Gemini run's authorized skills, leaving old and operator links out", async () => {
+    const { root, stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const home = path.join(root, "gemini-home");
+    const selected = await createSkill(path.join(root, "sources"), "selected-gemini", "# SELECTED_GEMINI\n");
+    const revoked = await createSkill(path.join(root, "sources"), "revoked-gemini", "# REVOKED_GEMINI\n");
+    const skillsHome = path.join(home, ".gemini", "skills");
+    await fs.mkdir(skillsHome, { recursive: true });
+    await fs.symlink(revoked.source, path.join(skillsHome, revoked.runtimeName));
+    const operator = path.join(root, "operator", "skills", "operator-skill");
+    await fs.mkdir(operator, { recursive: true });
+    await fs.writeFile(path.join(operator, "SKILL.md"), "# OPERATOR_SKILL\n");
+    await fs.symlink(operator, path.join(skillsHome, "operator-skill"));
+
+    const runId = "gemini-selected-run";
+    const { meta, result } = await runExecutor({
+      agent: "gemini", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd,
+      env: { HOME: home }, proprioRuntimeSkills: [selected],
+      proprioSkillSync: { desiredSkills: [selected.key] },
+    }, {
+      runId, authToken: "real-run-jwt", executionTarget,
+      prepareRemoteManagedHome: stagingClaudeSeam(),
+    });
+
+    const bundle = path.join(stateDir, "runtime-skills", "gemini", runId, "skills");
+    expect(await fs.readdir(bundle)).toEqual([selected.runtimeName]);
+    await expect(fs.readFile(path.join(bundle, selected.runtimeName, "SKILL.md"), "utf8")).resolves.toContain("SELECTED_GEMINI");
+    await expect(fs.readFile(path.join(bundle, revoked.runtimeName, "SKILL.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(path.join(bundle, "operator-skill", "SKILL.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(String(meta[0]?.prompt ?? "")).toContain("Skill root for this run:");
+    expect(String(meta[0]?.prompt ?? "")).not.toContain(home);
+    expect(result.sessionParams?.skills).toMatchObject({ selectedSkills: [selected.runtimeName] });
+  });
 });
 
 describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / reuse on compatible resume)", () => {

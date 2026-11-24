@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -125,22 +124,6 @@ export function buildGeminiAcpConfig(config: Record<string, unknown>): Record<st
 }
 
 /**
- * Host skills dir the shared engine materializes this run's Gemini skills into.
- * Derived here — inside the adapter boundary — from the same generic `config`
- * the engine reads (`config.env.HOME` else the process home), so the remote seam
- * ships exactly the dir the engine's `prepareGeminiSkillRuntime` prepared without
- * the engine having to hand a Gemini-specific path across the seam.
- */
-function resolveGeminiSkillsHome(config: Record<string, unknown>): string {
-  const envConfig = parseObject(config.env);
-  const configuredHome =
-    typeof envConfig.HOME === "string" && envConfig.HOME.trim().length > 0
-      ? path.resolve(envConfig.HOME.trim())
-      : os.homedir();
-  return path.join(configuredHome, ".gemini", "skills");
-}
-
-/**
  * Gemini remote managed-home seed for the runner-backed remote sandbox ACP lane.
  * Mirrors the Gemini CLI lane (`gemini-local/execute.ts`): set `HOME` to the
  * managed runtime root, ship the prepared skills dir as the `skills` asset,
@@ -170,10 +153,10 @@ async function prepareGeminiRemoteManagedHome(
       startMessage: "[proprio] Restoring workspace changes from the sandbox.\n",
       failurePrefix: "[proprio] Gemini ACP teardown workspace restore failed",
     });
-  const geminiSkillsHome = resolveGeminiSkillsHome(input.config);
+  const geminiSkillsHome = input.skillsBundleDir;
   const stagedRuntime = await input.stage(
     geminiSkillsHome
-      ? [{ key: "skills", localDir: geminiSkillsHome, followSymlinks: true }]
+      ? [{ key: "skills", localDir: geminiSkillsHome, followSymlinks: false }]
       : [],
   );
 

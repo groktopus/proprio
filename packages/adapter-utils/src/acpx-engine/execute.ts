@@ -1450,14 +1450,28 @@ function resolveGeminiSkillsHome(config: Record<string, unknown>): string {
 }
 
 async function prepareGeminiSkillRuntime(input: {
+  stateDir: string;
+  runId: string;
   config: Record<string, unknown>;
   moduleDir: string;
   onLog: AdapterExecutionContext["onLog"];
-}): Promise<{ identity: Record<string, unknown>; commandNotes: string[] }> {
+}): Promise<{ identity: Record<string, unknown>; commandNotes: string[]; bundleDir: string | null }> {
   const { allSkills, selectedSkills, desiredSkillNames } = await resolveSelectedRuntimeSkills(input.config, input.moduleDir);
   const skillSetKey = await buildSkillSetKey({ skills: selectedSkills, label: "gemini" });
   const skillsHome = resolveGeminiSkillsHome(input.config);
   await fs.mkdir(skillsHome, { recursive: true });
+  // Remote Gemini staging must never archive the persistent host skills home:
+  // it may contain skills revoked from this run or operator-owned links.
+  const bundleDir = selectedSkills.length > 0
+    ? path.join(input.stateDir, "runtime-skills", "gemini", input.runId, "skills")
+    : null;
+  if (bundleDir) {
+    await fs.rm(bundleDir, { recursive: true, force: true });
+    await fs.mkdir(bundleDir, { recursive: true });
+    for (const entry of selectedSkills) {
+      await materializeProprioSkillCopy(entry.source, path.join(bundleDir, entry.runtimeName));
+    }
+  }
 
   const allowedSkillNames = selectedSkills.map((entry) => entry.runtimeName);
   const removedSkills = await removeMaintainerOnlySkillSymlinks(skillsHome, allowedSkillNames);
@@ -1500,6 +1514,7 @@ async function prepareGeminiSkillRuntime(input: {
       selectedSkills: selectedSkills.map((entry) => entry.runtimeName).sort(),
       skillsHome,
     },
+    bundleDir,
     commandNotes: selectedSkills.length > 0
       ? [`Prepared ${selectedSkills.length} ACPX Gemini skill(s) at ${skillsHome}.`]
       : [],
@@ -2168,6 +2183,7 @@ async function buildRuntime(input: {
   // below, after `placeWorkspace` returns). This field is `null` for every
   // non-Claude agent, and for a Claude run with no skill selected.
   let claudeSkillsBundleDir: string | null = null;
+  let geminiSkillsBundleDir: string | null = null;
   let proprioClaudeSettings: ProprioClaudeSettingsResult | null = null;
   if (acpxAgent === "claude") {
     const preparedSkills = await prepareClaudeSkillRuntime({
@@ -2219,11 +2235,14 @@ async function buildRuntime(input: {
     skillCommandNotes.push(...preparedSkills.commandNotes);
   } else if (acpxAgent === "gemini") {
     const preparedSkills = await prepareGeminiSkillRuntime({
+      stateDir,
+      runId,
       config,
       moduleDir: input.engine.moduleDir,
       onLog: input.ctx.onLog,
     });
     skillsIdentity = preparedSkills.identity;
+    geminiSkillsBundleDir = preparedSkills.bundleDir;
     skillCommandNotes.push(...preparedSkills.commandNotes);
   } else {
     // A minimal, separate Grok seam: only the company-scoped `GROK_HOME`
@@ -2486,7 +2505,7 @@ async function buildRuntime(input: {
               env,
               onLog: input.ctx.onLog,
               onRuntimeProgress: input.ctx.onRuntimeProgress,
-              skillsBundleDir: claudeSkillsBundleDir,
+              skillsBundleDir: claudeSkillsBundleDir ?? geminiSkillsBundleDir,
               stage,
             }) : { stagedRuntime: await stage([]) };
             return {
@@ -2641,6 +2660,12 @@ async function buildRuntime(input: {
       skillCommandNotes[i] = rebaseToSandbox(skillCommandNotes[i]!);
     }
   }
+  if (acpxAgent === "gemini" && stagedRuntime && geminiSkillsBundleDir) {
+    const inSandboxSkillsRoot = stagedRuntime.runtimeRootDir
+      ? path.posix.join(stagedRuntime.runtimeRootDir, ".gemini", "skills")
+      : stagedRuntime.assetDirs.skills ?? path.posix.join(stagedRuntime.workspaceRemoteDir ?? cwd, ".proprio-runtime", acpxAgent, ".gemini", "skills");
+    skillsIdentity = { ...skillsIdentity, skillsHome: inSandboxSkillsRoot };
+  }
   // Both bridge starts run under one try so a failure at EITHER — including the
   // proprio callback bridge — fires the same abandon-path cleanup. The
   // proprio bridge starts after the workspace + managed home were already
@@ -2710,7 +2735,7 @@ async function buildRuntime(input: {
   }
   const currentSkillRoot = acpxAgent === "codex" && runtimeEnv.CODEX_HOME
     ? path.join(runtimeEnv.CODEX_HOME, "skills")
-    : acpxAgent === "gemini" && !executionTargetIsRemote && typeof skillsIdentity.skillsHome === "string"
+    : acpxAgent === "gemini" && typeof skillsIdentity.skillsHome === "string"
       ? skillsIdentity.skillsHome
       : null;
   if (currentSkillRoot && Array.isArray(skillsIdentity.selectedSkills) && skillsIdentity.selectedSkills.length > 0) {
