@@ -9,7 +9,7 @@ description: >
 # Proprio Page
 
 Use this skill to publish a static directory to the configured Proprio pages
-host, for example `https://pages.paperclip.ing/<slug>/`.
+host, for example `https://pages.example.com/<slug>/`.
 
 ## Requirements
 

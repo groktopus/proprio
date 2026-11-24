@@ -4,9 +4,9 @@
   "description": "Review your team, delegate work and retrieve durable results in Proprio.",
   "author": {
     "name": "Proprio",
-    "url": "https://paperclip.ing"
+    "url": "https://github.com/groktopus/proprio"
   },
-  "homepage": "https://paperclip.ing",
+  "homepage": "https://github.com/groktopus/proprio",
   "repository": "https://github.com/groktopus/proprio",
   "license": "MIT",
   "skills": "./skills/",

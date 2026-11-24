@@ -39,6 +39,32 @@ repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
 
+For a fork contribution, open or retarget the pull request to `main`. If
+GitHub holds its workflow, a maintainer reviews the proposed changes, opens **Awaiting approval** to see the **Merge status** panel, then
+selects **Approve workflows to run**. Open the run from the Checks tab and
+match its head SHA to the pull request's current head. Confirm that
+`stability-checks` executed and passed, and that the required `smoke` check
+passed. The aggregate job requires a successful test job and routing job, plus
+a successful Linux qualification when routing selects it. A missing,
+skipped, failed, or superseded test run provides no merge evidence. A new head
+needs its own successful run.
+
+The first fork qualification used [PR #144](https://github.com/groktopus/proprio/pull/144)
+at `1bffbc100ac85d0f0c48c5c4347de9cc72645f5a`. The
+[successful smoke job](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137783508363)
+was attempt 3. It checked out that head and ran tests, typecheck, and build.
+[Attempt 1](https://github.com/groktopus/proprio/actions/runs/45195834705/attempts/1)
+required approval and ran no jobs.
+[Attempt 2](https://github.com/groktopus/proprio/actions/runs/45195834705/job/137771466960)
+was cancelled during typecheck and build. These attempts provide no passing
+evidence. The run predates the split of the
+test job and aggregate check. For the current split on a same-repository PR,
+see [PR #257](https://github.com/groktopus/proprio/pull/257) at
+`a3ade7df7c560734f4a88cc54de64d96050c23c4` and its
+[executed test job](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138206578219)
+and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
+Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
+
 ### Durable-work acceptance
 
 The required `smoke` job combines Stability smoke with [Linux source
@@ -106,6 +132,22 @@ stale, failed, expired, or incomplete evidence blocks `gh release create` and
 artifact URLs when the gate passes. `--dry-run` remains available without
 publication evidence. Use an authenticated GitHub CLI session with Actions read
 access when publishing locally.
+
+### Workspace regression
+
+[Workspace regression](../.github/workflows/workspace-regression.yml) runs on
+the exact `main` revision selected by the daily 06:23 UTC schedule or manual
+dispatch. Each lane installs frozen dependencies on GitHub-hosted Ubuntu
+24.04. The workflow uses the stable test runner's existing general, chat,
+serialized, native Runner, and workspace groupings. A separate baseline job
+verifies that the CLI install, update, and server health files ran and passed.
+
+Each lane retains its Vitest results, retry timings, and a summary with the
+tested SHA and counts for executed, failed, skipped, and unresolved cases.
+A failed or incomplete required lane fails the workflow. A test that passes
+on retry is visible in the summary. Live provider journeys, real browser E2E,
+and non-Linux environments remain separate coverage. The CI maintainers
+triage failures and record any excluded environments and test skips.
 
 ### Standalone sandbox-provider dependencies
 

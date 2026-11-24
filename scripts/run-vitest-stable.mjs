@@ -459,6 +459,11 @@ async function runVitest(args, label, testShard = null, exactFiles = false) {
   console.log(`\n[test:run] ${label}`);
   const isolated = isolatedTestEnv();
   const { env } = isolated;
+  const reportDir = env.PROPRIO_WORKSPACE_REGRESSION_DIR;
+  if (reportDir) {
+    mkdirSync(reportDir, { recursive: true });
+    env.PROPRIO_VITEST_JSON_REPORT = path.resolve(reportDir, `vitest-${invocationIndex}.json`);
+  }
   if (testShard) {
     const file = path.resolve(repoRoot, chatSuite);
     const sourceLines = readFileSync(file, "utf8").split("\n");
