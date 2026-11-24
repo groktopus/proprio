@@ -409,7 +409,7 @@ describe("CompanyAccess", () => {
     });
     await flushReact();
 
-    expect(document.body.textContent).toContain("Unable to check assigned tasks");
+    expect(document.body.textContent).toContain("Proprio is temporarily unavailable");
     expect(document.body.textContent).toContain("Retry");
     const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
       (button) => button.textContent === "Remove member",
