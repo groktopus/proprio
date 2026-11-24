@@ -2435,12 +2435,15 @@ describe("IssueDetail", () => {
     mockIssuesApi.getCostSummary.mockReturnValue(cost.promise);
 
     await act(async () => renderIssueView());
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="More task actions"]')!.click();
+    });
     await waitForAssertion(() => {
-      expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Activity")).toBe(true);
+      expect(Array.from(document.body.querySelectorAll("button")).some((button) => button.textContent?.trim() === "Show task activity")).toBe(true);
     });
     await act(async () => {
-      Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
-        .find((button) => button.textContent?.trim() === "Activity")!
+      Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.trim() === "Show task activity")!
         .click();
     });
     await waitForAssertion(() => {
