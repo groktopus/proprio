@@ -6,6 +6,12 @@ Do not print raw bearer tokens, gateway session tokens, credential headers, envi
 
 Tool action approvals and sensitive request identities use a durable key independent from auth/JWT secrets. `PROPRIO_TOOL_ACTION_SIGNING_SECRET` takes precedence when configured. `proprio onboard` generates it for local instances, and worktree setup propagates or generates an independent value in the worktree `.env`. When unset, the server derives a separate key from the persisted secrets master key, using its configured environment value or durable key file. Processes serving the same instance must share that signing key or master key, and operators must back it up with the database. Rotation can invalidate outstanding approvals and retry matching; drain or reject pending approvals and reconcile completed writes before rotating.
 
+Managed resolution capture starts after all review writers run a revision that
+records approval and decline events. During a mixed-version rollout, an
+admission record can exist for a request that an older writer already resolved.
+The retry returns that settled request. For any interval that includes older
+writers, check the existing approval and task records for resolution evidence.
+
 ## Support Matrix
 
 | Transport | Local trusted | Hosted cloud / public authenticated | Notes |

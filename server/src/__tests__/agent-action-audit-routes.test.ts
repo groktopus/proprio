@@ -203,6 +203,8 @@ describePostgres("agent action audit routes", () => {
       const first = await board.get(exportPath);
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
+      expect(first.body.events[0]).not.toHaveProperty("operationFingerprint");
+      expect(first.body.events[0]).not.toHaveProperty("providerRequestId");
       expect((await board.get(exportPath)).body).toEqual(first.body);
       expect((await board.get(exportPath).query({ cursor: "10036." + "a".repeat(64) })).status).toBe(409);
 
