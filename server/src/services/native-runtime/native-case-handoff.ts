@@ -1,7 +1,53 @@
-import { caseHandoffs, type Db } from "@groktopus/db";
+import { caseHandoffs, cases, type Db } from "@groktopus/db";
 import { and, eq } from "drizzle-orm";
 import type { PrpStructuredRunResult } from "../../vendor/proprio-runner/index.js";
 import { pendingCaseHandoffForRun } from "../heartbeat/case-handoff-lifecycle.js";
+
+const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
+  ? value as Record<string, unknown> : {};
+const uuid = (value: unknown): string | null => typeof value === "string"
+  && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
+
+/**
+ * Return null for legacy/ordinary runs and false when a handoff-bound run has
+ * lost current task authority. Called with the issue already locked by the
+ * status committer, so handoff application and reassignment serialize here.
+ */
+export async function nativeCaseHandoffStatusAuthorityIsCurrent(db: Db, input: {
+  companyId: string;
+  issue: { id: string; assigneeAgentId: string | null; assigneeUserId: string | null };
+  runAgentId: string | null;
+  runWakeupRequestId: string | null;
+  contextSnapshot: unknown;
+}): Promise<boolean | null> {
+  const context = record(input.contextSnapshot);
+  if (!Object.prototype.hasOwnProperty.call(context, "caseHandoffId") || context.caseHandoffId == null) return null;
+  const handoffId = uuid(context.caseHandoffId);
+  if (!handoffId || !input.runAgentId) return null;
+  const [current] = await db.select({ handoff: caseHandoffs, case: cases })
+    .from(caseHandoffs)
+    .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, caseHandoffs.companyId)))
+    .where(and(eq(caseHandoffs.id, handoffId), eq(caseHandoffs.companyId, input.companyId),
+      eq(caseHandoffs.issueId, input.issue.id), eq(caseHandoffs.toAgentId, input.runAgentId)))
+    .limit(1);
+  if (!current) return false;
+  const { handoff, case: caseRow } = current;
+  const offer = record(handoff.offerContract);
+  // Pre-versioned handoffs and board kickoff runs retain their historical
+  // status behavior; only the revision-accepted protocol opts into this fence.
+  if (offer.schema !== "proprio.case-handoff-offer.v1") return null;
+  const recipientDecision = record(handoff.recipientDecision);
+  const requirementRevisionId = uuid(record(offer.requirementRevision).id);
+  const deliveryCurrent = handoff.state === "delivered"
+    || (handoff.state === "pending_dispatch" && input.runWakeupRequestId === handoff.wakeupRequestId);
+  return handoff.destinationKind === "agent" && deliveryCurrent
+    && caseRow.workIssueId === input.issue.id && caseRow.handoffVersion === handoff.version
+    && input.issue.assigneeAgentId === input.runAgentId && input.issue.assigneeUserId === null
+    && recipientDecision.outcome === "accepted" && recipientDecision.actorType === "agent"
+    && recipientDecision.actorId === input.runAgentId && recipientDecision.handoffVersion === handoff.version
+    && offer.requirementsDigest === recipientDecision.requirementsDigest
+    && requirementRevisionId !== null && recipientDecision.requirementRevisionId === requirementRevisionId;
+}
 
 /** Server-issued semantic yield. The provider does not need a second finish call. */
 export async function nativeCaseHandoffResult(db: Db, input: {

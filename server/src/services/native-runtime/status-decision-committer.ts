@@ -97,6 +97,7 @@ import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
 import { NATIVE_TOOL_RECEIPT_LIMIT_CODE } from "./native-tool-receipt-limit.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
+import { nativeCaseHandoffStatusAuthorityIsCurrent } from "./native-case-handoff.js";
 
 export class NativeStatusRaceError extends Error {
   readonly code = "native_status_race" as const;
@@ -1737,16 +1738,10 @@ export async function commitNativeStatusDecision(input: {
   if (input.decision.reasonCode === null) {
     throw new Error("native_status_reason_code_required");
   }
-  const reasonCode = input.decision.reasonCode;
-  if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
-    throw new Error("native_model_rejection_owner_required");
-  }
-  if ((reasonCode.startsWith("native_provider_overloaded") || reasonCode === "native_run_failed_continuation_exhausted"
-      || reasonCode === NATIVE_TOOL_RECEIPT_LIMIT_CODE || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_CODE
-      || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_EXHAUSTED_CODE || reasonCode === NATIVE_AGENT_BLOCKER_CONTINUATION_CODE
-      || reasonCode === NATIVE_AGENT_BLOCKER_HANDOFF_CODE) && !input.requireProviderFailureOwner) {
-    throw new Error("native_provider_failure_owner_required");
-  }
+  // This effective reason drives every locked validation branch and the
+  // decision/effect ledger below. A stale versioned handoff replaces it under
+  // the issue lock so no original status gate can still materialize effects.
+  let reasonCode = input.decision.reasonCode;
   let verifiedMergedPullRequests: ReadonlySet<string> | undefined;
   if (input.decision.statusAction === "done") {
     try { verifiedMergedPullRequests = await verifyNativePullRequestCompletion(input.db, input); }
@@ -1795,8 +1790,33 @@ export async function commitNativeStatusDecision(input: {
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!issue) throw new NativeStatusRaceError();
-    const [originRun] = await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
+    const [originRun] = await tx.select({ agentId: heartbeatRuns.agentId, contextSnapshot: heartbeatRuns.contextSnapshot,
+      wakeupRequestId: heartbeatRuns.wakeupRequestId }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
+    const caseHandoffAuthority = await nativeCaseHandoffStatusAuthorityIsCurrent(tx as unknown as Db, {
+      companyId: input.companyId, issue, runAgentId: originRun?.agentId ?? null,
+      runWakeupRequestId: originRun?.wakeupRequestId ?? null, contextSnapshot: originRun?.contextSnapshot,
+    });
+    if (caseHandoffAuthority === false) {
+      reasonCode = "case_handoff_superseded";
+      input = { ...input, decision: { ...input.decision, statusAction: "preserve", toStatus: issue.status as NativeStatusDecision["toStatus"],
+        reasonCode, unblockDescriptor: null, effects: [] }, requireReassessmentSource: undefined,
+        supersededExternalReviewRequests: undefined, requireExternalChatResponseWaitAuthorization: undefined,
+        requirePreservedResultFinalization: undefined, requirePlanWaitSource: undefined, requireMonitorWait: undefined,
+        requireMonitorDelivery: undefined, requirePreservedMonitorWait: undefined, requireSupersededMonitorWait: undefined,
+        requireNoPendingChildCompletion: undefined, requireModelRejectionOwner: undefined, requireProviderFailureOwner: undefined,
+        requireBoardResponseWaitSource: undefined, requireBoardResponseWaitOrigin: undefined, reviewResponsePresentation: undefined };
+    } else {
+      if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
+        throw new Error("native_model_rejection_owner_required");
+      }
+      if ((reasonCode.startsWith("native_provider_overloaded") || reasonCode === "native_run_failed_continuation_exhausted"
+          || reasonCode === NATIVE_TOOL_RECEIPT_LIMIT_CODE || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_CODE
+          || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_EXHAUSTED_CODE || reasonCode === NATIVE_AGENT_BLOCKER_CONTINUATION_CODE
+          || reasonCode === NATIVE_AGENT_BLOCKER_HANDOFF_CODE) && !input.requireProviderFailureOwner) {
+        throw new Error("native_provider_failure_owner_required");
+      }
+    }
     if (input.requireReassessmentSource) {
       const expected = input.requireReassessmentSource;
       const now = Date.now();
