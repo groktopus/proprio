@@ -22,13 +22,14 @@ const fixture = vi.hoisted(() => ({
   boardAccess: null as null | Record<string, unknown>,
   receipts: [] as AttentionReceipt[],
 }));
+const decisionListMock = vi.hoisted(() => vi.fn());
 vi.mock("../hooks/useCoordinatorWorkspaceEnabled", () => ({ useCoordinatorWorkspaceEnabled: () => ({ enabled: false, userId: fixture.userId }) }));
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company" }) }));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("../context/ToastContext", () => ({ useToastActions: () => ({ pushToast: vi.fn() }), useOptionalToastActions: () => ({ pushToast: vi.fn() }) }));
 vi.mock("../hooks/useInboxBadge", () => ({ useInboxDismissals: () => ({ dismiss: vi.fn(), snooze: vi.fn(), restore: vi.fn() }) }));
 vi.mock("../api/agents", () => ({ agentsApi: { list: async () => [] } }));
-vi.mock("../api/decisions", () => ({ decisionsApi: { list: async () => [] } }));
+vi.mock("../api/decisions", () => ({ decisionsApi: { list: decisionListMock } }));
 vi.mock("../api/access", () => ({ accessApi: {
   listUserDirectory: async () => ({ users: [] }),
   getCurrentBoardAccess: async () => { if (!fixture.boardAccess) throw new Error("No board access"); return fixture.boardAccess; },
@@ -88,6 +89,8 @@ beforeEach(() => {
     mine: [card("mine-1", { kind: "user", userId: "scott", reason: "addressee" })],
     unassigned: [card("pool-1", { kind: "pool", userId: null, reason: "none" })],
   };
+  decisionListMock.mockReset();
+  decisionListMock.mockResolvedValue([]);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -106,6 +109,38 @@ async function render(url = "/decisions") {
 }
 
 describe("classic Decisions views", () => {
+  it("keeps a failed decided-history read distinct from an empty result", async () => {
+    decisionListMock.mockRejectedValueOnce(new Error("history unavailable"));
+    await render();
+    const decided = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Decided"));
+    expect(decided).toBeTruthy();
+    await act(async () => decided?.click());
+    await flush();
+    expect(container.textContent).not.toContain("No decided decisions.");
+    expect(container.textContent).toContain("load decided decisions");
+    expect(container.textContent).toContain("Retry");
+  });
+
+  it("keeps a failed expired-history read distinct from an empty result", async () => {
+    decisionListMock.mockRejectedValueOnce(new Error("history unavailable"));
+    await render();
+    const expired = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Expired"));
+    expect(expired).toBeTruthy();
+    await act(async () => expired?.click());
+    await flush();
+    expect(container.textContent).not.toContain("No expired decisions.");
+    expect(container.textContent).toContain("load expired decisions");
+    expect(container.textContent).toContain("Retry");
+  });
+
+  it("shows the empty copy after a successful zero-row history read", async () => {
+    await render();
+    const decided = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Decided"));
+    await act(async () => decided?.click());
+    await flush();
+    expect(container.textContent).toContain("No decided decisions.");
+  });
+
   it("finds a linked decision outside Mine before consuming its URL", async () => {
     fixture.boardAccess = { userId: "scott", source: "session", memberships: [{ companyId: "company", status: "active", membershipRole: "admin" }] };
     fixture.byView.all = [{ ...card("decision-target", { kind: "pool", userId: null, reason: "none" }), sourceKind: "decision", subject: { id: "target", kind: "decision", title: "Linked decision" } } as AttentionItem];

@@ -211,16 +211,20 @@ function ClassicWhatNeedsMe() {
 
   // Decision history — decided / expired decisions leave the open attention
   // feed (entryRule = open only), so we fetch them directly for the curtains.
-  const { data: decidedDecisions, isLoading: decidedDecisionsLoading } = useQuery({
+  const decidedDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "decided"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "decided", limit: DECISION_HISTORY_QUERY_LIMIT }),
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, decidedOpen),
   });
-  const { data: expiredDecisions, isLoading: expiredDecisionsLoading } = useQuery({
+  const decidedDecisionsView = useQueryView(decidedDecisionsQuery);
+  const { data: decidedDecisions } = decidedDecisionsQuery;
+  const expiredDecisionsQuery = useQuery({
     queryKey: queryKeys.decisions.list(selectedCompanyId!, "expired"),
     queryFn: () => decisionsApi.list(selectedCompanyId!, { status: "expired", limit: DECISION_HISTORY_QUERY_LIMIT }),
     enabled: decisionHistoryQueryEnabled(selectedCompanyId, expiredOpen),
   });
+  const expiredDecisionsView = useQueryView(expiredDecisionsQuery);
+  const { data: expiredDecisions } = expiredDecisionsQuery;
 
   const { data: userDirectory } = useQuery({
     queryKey: queryKeys.access.companyUserDirectory(selectedCompanyId!),
@@ -845,20 +849,35 @@ function ClassicWhatNeedsMe() {
           open={decidedOpen}
           onToggle={() => setDecidedOpen((prev) => !prev)}
         >
-          {decidedDecisionsLoading ? (
+          {decidedDecisionsView.kind === "loading" || decidedDecisionsView.kind === "reconnecting" ? (
             <p className="text-xs text-muted-foreground">Loading decided decisions…</p>
-          ) : (decidedDecisions?.length ?? 0) > 0 ? (
-            decidedDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-              <DecisionResolver
-                key={decision.id}
-                companyId={selectedCompanyId}
-                decisionId={decision.id}
-                agentMap={agentMap}
-                initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-              />
-            ))
+          ) : decidedDecisionsView.kind === "error" && !decidedDecisions ? (
+            <QueryErrorState
+              size="inline"
+              error={decidedDecisionsView.error}
+              action="load decided decisions"
+              onRetry={decidedDecisionsView.retry}
+              retrying={decidedDecisionsView.isFetching}
+            />
           ) : (
-            <p className="text-xs text-muted-foreground">No decided decisions.</p>
+            <>
+              {decidedDecisionsView.kind === "stale" ? (
+                <p className="text-xs text-muted-foreground">Could not refresh. Showing the last saved decided results.</p>
+              ) : null}
+              {(decidedDecisions?.length ?? 0) > 0 ? (
+                decidedDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+                  <DecisionResolver
+                    key={decision.id}
+                    companyId={selectedCompanyId}
+                    decisionId={decision.id}
+                    agentMap={agentMap}
+                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                  />
+                ))
+              ) : (
+                <p className="text-xs text-muted-foreground">No decided decisions.</p>
+              )}
+            </>
           )}
         </Curtain>
 
@@ -868,20 +887,35 @@ function ClassicWhatNeedsMe() {
           open={expiredOpen}
           onToggle={() => setExpiredOpen((prev) => !prev)}
         >
-          {expiredDecisionsLoading ? (
+          {expiredDecisionsView.kind === "loading" || expiredDecisionsView.kind === "reconnecting" ? (
             <p className="text-xs text-muted-foreground">Loading expired decisions…</p>
-          ) : (expiredDecisions?.length ?? 0) > 0 ? (
-            expiredDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-              <DecisionResolver
-                key={decision.id}
-                companyId={selectedCompanyId}
-                decisionId={decision.id}
-                agentMap={agentMap}
-                initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-              />
-            ))
+          ) : expiredDecisionsView.kind === "error" && !expiredDecisions ? (
+            <QueryErrorState
+              size="inline"
+              error={expiredDecisionsView.error}
+              action="load expired decisions"
+              onRetry={expiredDecisionsView.retry}
+              retrying={expiredDecisionsView.isFetching}
+            />
           ) : (
-            <p className="text-xs text-muted-foreground">No expired decisions.</p>
+            <>
+              {expiredDecisionsView.kind === "stale" ? (
+                <p className="text-xs text-muted-foreground">Could not refresh. Showing the last saved expired results.</p>
+              ) : null}
+              {(expiredDecisions?.length ?? 0) > 0 ? (
+                expiredDecisions!.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
+                  <DecisionResolver
+                    key={decision.id}
+                    companyId={selectedCompanyId}
+                    decisionId={decision.id}
+                    agentMap={agentMap}
+                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
+                  />
+                ))
+              ) : (
+                <p className="text-xs text-muted-foreground">No expired decisions.</p>
+              )}
+            </>
           )}
         </Curtain>
       </div>
