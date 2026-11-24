@@ -4,6 +4,7 @@ interface SessionRun {
   sessionDigest: string;
   runnerDigest: string;
   runnerGenerations: number[];
+  providerProcessGenerations: number[];
   compactionRequestId: string | null;
   startedAt: number;
   finishedAt: number;

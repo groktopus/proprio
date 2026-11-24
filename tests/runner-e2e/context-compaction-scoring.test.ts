@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { runnerMatrix } from "./catalog.js";
-import { configureContextCompactionBudgets } from "./context-compaction-case.js";
+import { configureContextCompactionBudgets, contextCompactionQuestionInput } from "./context-compaction-case.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
 
 const fixture = { retainedMarker: "keep-amber", activeFormat: "current-v2", supersededFormat: "obsolete-v1", releaseCode: "EMBER-72" };
@@ -10,7 +10,7 @@ function lane(mode: "control" | "treatment"): CompactionObservation {
   const taskId = `${mode}-task`;
   const sessionDigest = `${mode}-digest`;
   const run = (kind: string, startedAt: number, finishedAt: number) => ({ id: `${mode}-${kind}`, taskId,
-    sessionDigest, runnerDigest: `${mode}-runner`, runnerGenerations: [1],
+    sessionDigest, runnerDigest: `${mode}-runner`, runnerGenerations: [1], providerProcessGenerations: [1],
     compactionRequestId: kind === "compact" ? "manual-compact" : null, startedAt, finishedAt, status: "succeeded" });
   const initial = run("initial", 1, 5);
   const compact = run("compact", 6, 8);
@@ -33,6 +33,17 @@ function pair() {
 }
 
 describe("paired Codex context compaction oracle", () => {
+  it("accepts a native text input and a legacy custom-only input but rejects selectable answers", () => {
+    const question = { id: "prerequisite", prompt: "Release code?", selectionMode: "single" as const };
+    const custom = { id: "custom", label: "Enter the code", freeText: true };
+    const payload = { version: 1 as const, questions: [{ ...question, options: [custom] }] };
+    expect(contextCompactionQuestionInput(payload)).toEqual({ customOption: { label: custom.label, role: "radio" }, submitLabel: "Submit answers" });
+    expect(contextCompactionQuestionInput({ ...payload, questionSet: { schema: "proprio.question_set.v1", submitLabel: "Send code",
+      questions: [{ id: question.id, prompt: question.prompt, required: true, answerMode: "text" }] } }))
+      .toEqual({ customOption: null, submitLabel: "Send code" });
+    expect(contextCompactionQuestionInput({ ...payload, questions: [{ ...question, options: [custom, { id: "guess", label: "Guess" }] }] })).toBeNull();
+  });
+
   it.each([["OPENAI_API_KEY", "block"], ["CODEX_AUTH_JSON", "allow"]] as const)(
     "keeps both priced-spend hard stops for %s and sets the unpriced usage policy to %s",
     async (credential, unpricedUsagePolicy) => {

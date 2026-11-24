@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, type Page } from "@playwright/test";
 import { pollUntil, type RunnerApi } from "./api.js";
-import { chatQuestionPresentation } from "./chat-flow.js";
-import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE, COMPACTION_FIXTURE_DIGEST, COMPACTION_PROMPT, compactionRequirements, configureContextCompactionBudgets } from "./context-compaction-case.js";
+import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE, COMPACTION_FIXTURE_DIGEST, COMPACTION_PROMPT, compactionRequirements, configureContextCompactionBudgets, contextCompactionQuestionInput } from "./context-compaction-case.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
 import type { LiveFixtureValues } from "./live-fixtures.js";
 import { isBoundNativePrpEventRow } from "./native-event-envelope.js";
@@ -70,11 +69,14 @@ export async function runContextCompactionFlow(input: {
         interaction.status === "pending" && interaction.sourceRunId === runId);
     }
     async function answer(question: Row, text: string) {
-      const presentation = chatQuestionPresentation(question.payload);
-      if (presentation.questions.length !== 1 || presentation.questions[0]?.answerMode !== "text") throw new Error("Expected one free-text question");
+      const presentation = contextCompactionQuestionInput(question.payload);
+      if (!presentation) throw new Error("Expected one question with only a free-text answer");
       await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue!.identifier ?? taskId}`);
-      await page.getByTestId("question-text-answer-composer").last().locator('[contenteditable="true"],textarea').first().fill(text);
-      await page.getByRole("button", { name: presentation.submitLabel ?? "Submit answers", exact: true }).last().click();
+      const option = presentation.customOption;
+      if (option) await page.getByRole(option.role, { name: option.label, exact: true }).last().click();
+      await page.getByTestId(option ? "question-other-answer-composer" : "question-text-answer-composer")
+        .last().locator('[contenteditable="true"],textarea').first().fill(text);
+      await page.getByRole("button", { name: presentation.submitLabel, exact: true }).last().click();
     }
 
     const seeded = await wait("initial question", 1, state => Boolean(pending(state, state.runs[0]?.id)));
@@ -126,11 +128,15 @@ export async function runContextCompactionFlow(input: {
       }
       const runnerGenerations = [...new Set(valid.map(({ envelope }) => envelope.generation)
         .filter((value): value is number => Number.isSafeInteger(value) && value >= 0))].sort((left, right) => left - right);
+      const providerProcessGenerations = [...new Set(valid.filter(({ event, envelope }) => event.eventType === "harness.diagnostic"
+        && envelope.payload?.code === "provider_startup_ownership" && envelope.payload.startup?.schema === "proprio.provider_startup.v1")
+        .map(({ envelope }) => envelope.payload?.startup?.attemptedProcessGeneration)
+        .filter((value): value is number => Number.isSafeInteger(value) && value >= 0))].sort((left, right) => left - right);
       const requestId = run.contextSnapshot?.contextCompactionRequestId;
       sessions.set(run.id, { id: run.id, taskId,
         sessionDigest: valid.length ? createHash("sha256").update(run.nativeSessionId).digest("hex") : "",
         runnerDigest: valid.length ? createHash("sha256").update(run.runnerInstanceId).digest("hex") : "",
-        runnerGenerations, compactionRequestId: typeof requestId === "string" ? requestId : null,
+        runnerGenerations, providerProcessGenerations, compactionRequestId: typeof requestId === "string" ? requestId : null,
         startedAt: Date.parse(run.startedAt), finishedAt: Date.parse(run.finishedAt), status: run.status });
     }
     observed.set(lane, { sourceRevision: input.sourceRevision, profileId: execution.profile.id, provider: execution.profile.provider,

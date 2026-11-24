@@ -1,8 +1,26 @@
 import { createHash } from "node:crypto";
+import type { AskUserQuestionsPayload } from "../../packages/shared/src/types/issue.js";
 import type { RunnerApi } from "./api.js";
 import type { RunnerProfileFixture, RunnerTaskFixture } from "./types.js";
 
 export const COMPACTION_BUDGET_CENTS = 1_000;
+
+export function contextCompactionQuestionInput(payload: AskUserQuestionsPayload) {
+  const submitLabel = payload.questionSet?.submitLabel ?? payload.submitLabel ?? "Submit answers";
+  if (payload.questionSet) {
+    const [question] = payload.questionSet.questions;
+    if (payload.questionSet.questions.length === 1 && question?.answerMode === "text") {
+      return { customOption: null, submitLabel };
+    }
+    return null;
+  }
+  const [question] = payload.questions;
+  const [option] = question?.options ?? [];
+  if (payload.questions.length === 1 && question?.options.length === 1 && option?.freeText) {
+    return { customOption: { label: option.label, role: question.selectionMode === "multi" ? "checkbox" as const : "radio" as const }, submitLabel };
+  }
+  return null;
+}
 
 export async function configureContextCompactionBudgets(
   api: Pick<RunnerApi, "post">, companyId: string, agentId: string, credential: RunnerProfileFixture["credential"],
