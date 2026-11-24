@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { TranscriptEntry } from "../../adapters";
 import type { ToolRunDecision } from "@groktopus/shared";
 import { MarkdownBody, type MarkdownExternalReferenceMap } from "../MarkdownBody";
-import { cn, formatTokens } from "../../lib/utils";
+import { cn, formatDateTime, formatTokens } from "../../lib/utils";
 import { runningLabelText } from "../../lib/status-colors";
 import {
   Check,
@@ -993,9 +993,10 @@ function ToolDecisionInlineDetail({ decision }: { decision: ToolRunDecision | nu
   );
 }
 
-function ToolDecisionDetails({ decision, compact }: { decision: ToolRunDecision | null; compact: boolean }) {
+export function ToolDecisionDetails({ decision, compact }: { decision: ToolRunDecision | null; compact: boolean }) {
   if (!decision) return null;
   const actionRequest = decision.actionRequest;
+  const policyProvenance = decision.policyProvenance;
   return (
     <div className={cn(
       "rounded-lg border border-border/60 bg-background/60 p-2",
@@ -1016,6 +1017,30 @@ function ToolDecisionDetails({ decision, compact }: { decision: ToolRunDecision 
         <span>audit {decision.auditEvents.length}</span>
         {actionRequest && <span>action {actionRequest.status} {actionRequest.id.slice(0, 8)}</span>}
         {actionRequest?.interactionId && <span>card {actionRequest.interactionId.slice(0, 8)}</span>}
+      </div>
+      <div className="mt-2 border-t border-border/60 pt-2">
+        <div className="font-semibold text-muted-foreground">Policy history</div>
+        {policyProvenance.captureStatus === "unknown" ? (
+          <div className="mt-1 text-muted-foreground">Evaluation history unavailable for this invocation.</div>
+        ) : policyProvenance.policies.length === 0 ? (
+          <div className="mt-1 text-muted-foreground">No explicit policy evaluations recorded.</div>
+        ) : (
+          <ul className="mt-1 space-y-2">
+            {policyProvenance.policies.map(policy => (
+              <li key={`${policy.principalRole}:${policy.policyId}:${policy.decisionReason}`} className="break-words">
+                <div>
+                  <span className="font-medium">{policy.policyType}</span> · {policy.principalRole} · priority {policy.priority}
+                  {policy.selected ? " · selected evaluation" : " · not selected"}
+                </div>
+                <div className="text-muted-foreground">{policy.decisionReason}</div>
+                <div className="font-mono text-muted-foreground">Revision {policy.revisionFingerprint}</div>
+                <div className="text-muted-foreground">
+                  Changed {formatDateTime(policy.revisionUpdatedAt)} · evaluated {formatDateTime(policy.evaluatedAt)}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
       {decision.pendingAction?.previewMarkdown && (
         <MarkdownBody className="mt-2 text-(length:--text-micro) leading-5 text-foreground/75 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">

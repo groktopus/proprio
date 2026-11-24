@@ -6,7 +6,7 @@ import { parseAcpxStdoutLine } from "@groktopus/adapter-utils/acpx-engine/ui";
 import { buildTranscript, type RunLogChunk, type TranscriptEntry } from "../../adapters";
 import type { ToolRunDecision } from "@groktopus/shared";
 import { ThemeProvider } from "../../context/ThemeContext";
-import { RunTranscriptView, keyTranscriptBlocks, normalizeTranscript } from "./RunTranscriptView";
+import { RunTranscriptView, ToolDecisionDetails, keyTranscriptBlocks, normalizeTranscript } from "./RunTranscriptView";
 
 describe("RunTranscriptView", () => {
   it("renders provider activity semantically without dumping the payload", () => {
@@ -217,6 +217,10 @@ describe("RunTranscriptView", () => {
     const invocationId = "11111111-1111-4111-8111-111111111111";
     const actionRequestId = "22222222-2222-4222-8222-222222222222";
     const decision: ToolRunDecision = {
+      policyProvenance: { captureStatus: "recorded", policies: [{ policyId: "policy-1", policyType: "require_approval",
+        priority: 10, revisionUpdatedAt: "2026-03-11T00:00:00.000Z", revisionFingerprint: "a".repeat(64),
+        decisionReason: "requires_approval_policy", evaluatedAt: "2026-03-12T00:00:00.000Z",
+        principalRole: "actor", selected: true }] },
       invocation: {
         id: invocationId,
         companyId: "company-1",
@@ -308,6 +312,13 @@ describe("RunTranscriptView", () => {
 
     expect(html).toContain("Needs approval");
     expect(html).toContain(`Action request ${actionRequestId.slice(0, 8)}`);
+    const recordedHtml = renderToStaticMarkup(<ThemeProvider><ToolDecisionDetails decision={decision} compact /></ThemeProvider>);
+    expect(recordedHtml).toContain("Policy history");
+    expect(recordedHtml).toContain("requires_approval_policy");
+    expect(recordedHtml).toContain("a".repeat(64));
+    const legacyHtml = renderToStaticMarkup(<ThemeProvider><ToolDecisionDetails decision={{ ...decision,
+      policyProvenance: { captureStatus: "unknown", policies: [] } }} compact /></ThemeProvider>);
+    expect(legacyHtml).toContain("Evaluation history unavailable for this invocation.");
   });
 
   it("windows large raw transcripts instead of rendering every entry at once", () => {

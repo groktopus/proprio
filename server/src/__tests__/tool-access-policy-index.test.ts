@@ -381,6 +381,7 @@ describeEmbeddedPostgres("tool policy index decisions", () => {
 
     expect(readsForOneTool).toBeGreaterThan(0);
     expect(counter.reads).toBe(readsForOneTool);
+    expect([first, ...rest].every(decision => decision.policyExplanation?.explicitMatchedPolicies === undefined)).toBe(true);
     const uncached = toolAccessPolicyService(db);
     const expected = [];
     for (const entry of fixture.entries) expected.push(await uncached.decide(decisionInput(fixture, entry)));

@@ -7,6 +7,8 @@ import { type Db, toolConnections, toolApplications, toolProfiles, toolProfileEn
 import { badRequest, forbidden, notFound, HttpError } from "../errors.js";
 import { assertAuthenticated, assertCompanyAccess, hasCompanyAccess, getActorInfo } from "./authz.js";
 import { connectionManagementService, responsibleConnectionUser, type ConnectionManagementContext } from "../services/connection-management.js";
+import { authorizationService } from "../services/authorization.js";
+import { canActorReadHeartbeatRun, heartbeatRunReadAccessColumns } from "../services/heartbeat-run-privacy.js";
 import type { ConnectionManagementAction, ConnectionManagementResource } from "../services/connection-management-policy.js";
 
 const contexts = new WeakMap<Request, ConnectionManagementContext>();
@@ -196,9 +198,18 @@ export function connectionManagementGuard(db: Db, purpose: "tool" | "chat" | "ai
         bindCompany(issue); resource.issueId = issue.id; resource.projectId = issue.projectId;
       }
       if (req.params.runId) {
-        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, uuid(req.params.runId)));
+        const [run] = await db.select({
+          ...heartbeatRunReadAccessColumns,
+          contextIssueId: sql<string | null>`case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}->'issueId') = 'string'
+            then ${heartbeatRuns.contextSnapshot}->>'issueId'
+          end`,
+        }).from(heartbeatRuns).where(eq(heartbeatRuns.id, uuid(req.params.runId)));
         bindCompany(run);
-        resource.issueId = run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
+        if (!(await canActorReadHeartbeatRun(db, authorizationService(db), req.actor, run))) {
+          throw notFound(inaccessibleMessage);
+        }
+        resource.issueId = run.issueId ?? run.contextIssueId;
       }
       if (req.params.conversationId) {
         const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.id, uuid(req.params.conversationId)));

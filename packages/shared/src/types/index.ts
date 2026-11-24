@@ -620,6 +620,8 @@ export type {
   ToolPolicy,
   ToolPolicyConditions,
   ToolPolicyDecision,
+  ToolPolicyEvaluationSnapshot,
+  ToolPolicyRunProvenance,
   ToolPolicyType,
   ToolMcpGateway,
   ToolMcpGatewayAuthConfig,
