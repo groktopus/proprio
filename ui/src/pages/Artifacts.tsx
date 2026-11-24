@@ -215,7 +215,7 @@ export function Artifacts() {
 
   useEffect(() => {
     if (artifactsQuery.isFetchNextPageError && artifactsQuery.error) {
-      setPaginationFailure((previous) => previous ?? artifactsQuery.error);
+      setPaginationFailure((previous: unknown) => previous ?? artifactsQuery.error);
     }
   }, [artifactsQuery.error, artifactsQuery.isFetchNextPageError]);
 

@@ -8,7 +8,7 @@ import { useNavigate, useSearchParams } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
-import { decisionsApi, type DecisionOutcome } from "../api/decisions";
+import { decisionsApi, type DecisionListItem } from "../api/decisions";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, useClaimAttentionItem, useDismissAttentionReceipt } from "../hooks/useAttentionViews";
@@ -77,7 +77,7 @@ function DecisionHistoryBody({
   emptyCopy,
   children,
 }: {
-  view: QueryViewState<DecisionOutcome[] | undefined>;
+  view: QueryViewState<DecisionListItem[]>;
   emptyCopy: string;
   children: ReactNode;
 }) {
@@ -897,18 +897,19 @@ function ClassicWhatNeedsMe() {
           onToggle={() => setDecidedOpen((prev) => !prev)}
         >
           <DecisionHistoryBody view={decidedDecisionsView} emptyCopy="No decided decisions.">
-            {(decidedDecisions ?? []).length > 0 ? (
-                (decidedDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-                  <DecisionResolver
-                    key={decision.id}
-                    companyId={selectedCompanyId}
-                    decisionId={decision.id}
-                    agentMap={agentMap}
-                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-                    recordedDecision={decision}
-                  />
-                ))
-              ) : null}
+            {decidedDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => {
+              const historyDecision = { ...decision, executions: decision.executions ?? [] };
+              return (
+                <DecisionResolver
+                  key={decision.id}
+                  companyId={selectedCompanyId}
+                  decisionId={decision.id}
+                  agentMap={agentMap}
+                  initialDecision={historyDecision}
+                  recordedDecision={historyDecision}
+                />
+              );
+            })}
           </DecisionHistoryBody>
         </Curtain>
 
@@ -919,18 +920,19 @@ function ClassicWhatNeedsMe() {
           onToggle={() => setExpiredOpen((prev) => !prev)}
         >
           <DecisionHistoryBody view={expiredDecisionsView} emptyCopy="No expired decisions.">
-            {(expiredDecisions ?? []).length > 0 ? (
-                (expiredDecisions ?? []).slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => (
-                  <DecisionResolver
-                    key={decision.id}
-                    companyId={selectedCompanyId}
-                    decisionId={decision.id}
-                    agentMap={agentMap}
-                    initialDecision={{ ...decision, executions: decision.executions ?? [] }}
-                    recordedDecision={decision}
-                  />
-                ))
-              ) : null}
+            {expiredDecisions?.slice(0, DECISION_HISTORY_VISIBLE_LIMIT).map((decision) => {
+              const historyDecision = { ...decision, executions: decision.executions ?? [] };
+              return (
+                <DecisionResolver
+                  key={decision.id}
+                  companyId={selectedCompanyId}
+                  decisionId={decision.id}
+                  agentMap={agentMap}
+                  initialDecision={historyDecision}
+                  recordedDecision={historyDecision}
+                />
+              );
+            })}
           </DecisionHistoryBody>
         </Curtain>
       </div>
