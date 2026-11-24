@@ -4978,6 +4978,9 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   flex-wrap: wrap;
   gap: var(--collection-toolbar-gap);
 }
+[data-canonical-toolbar].inbox-collection-toolbar {
+  --collection-toolbar-control-text: var(--foreground);
+}
 [data-canonical-toolbar] :is(button:not([data-toolbar-clear], .canonical-tab), a[data-slot="button"], select, [data-toolbar-control]) {
   height: var(--collection-toolbar-height);
   border: var(--task-row-rule-width) solid var(--collection-toolbar-border);
@@ -4988,7 +4991,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   line-height: var(--design-page-type-leading);
   font-weight: var(--font-weight-normal);
   background: var(--design-page-control-surface);
-  color: var(--muted-foreground);
+  color: var(--collection-toolbar-control-text, var(--muted-foreground));
 }
 [data-canonical-toolbar] button:not([data-toolbar-clear]):is([data-size="icon"], [data-size="icon-sm"], [data-size="icon-xs"], .design-toolbar-icon) {
   width: var(--collection-toolbar-height);
@@ -5039,7 +5042,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
 }
 
 /* Canonical pill tabs: Compact (12px) and Standard (14px).
-   Shared geometry applies to Radix content tabs and exclusive collection filters. */
+   Shared geometry applies to content tabs, collection filters, and section links. */
 :root {
   --canonical-tab-compact-height: calc(var(--spacing) * 6);
   --canonical-tab-standard-height: calc(var(--spacing) * 8);
@@ -5090,7 +5093,7 @@ html:has(.design-proposal-theme) .design-navigation-group-label {
   line-height: calc(var(--text-xs) * var(--text-xs--line-height));
 }
 [data-canonical-tabs] .canonical-tab::after { display: none; }
-[data-canonical-tabs] .canonical-tab:is([data-state="active"], [aria-checked="true"]) {
+[data-canonical-tabs] .canonical-tab:is([data-state="active"], [aria-checked="true"], [aria-current="page"]) {
   background: var(--muted-highlight);
   color: var(--foreground);
   box-shadow: none;

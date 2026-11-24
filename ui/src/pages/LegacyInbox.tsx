@@ -101,7 +101,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
-import { Tabs } from "@/components/ui/tabs";
+import { InboxViewNavigation } from "@/components/InboxViewNavigation";
 import {
   Select,
   SelectContent,
@@ -126,7 +126,6 @@ import {
   ListTree,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { PageTabBar } from "../components/PageTabBar";
 import type { Approval, HeartbeatRun, Issue, JoinRequest } from "@groktopus/shared";
 import {
   ACTIONABLE_APPROVAL_STATUSES,
@@ -2313,23 +2312,7 @@ export function Inbox() {
           />
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2">
-        <Tabs value={tab} onValueChange={(value) => navigate(`/inbox/${value}`)}>
-          <PageTabBar
-            items={[
-              {
-                value: "mine",
-                label: "Mine",
-              },
-              {
-                value: "recent",
-                label: "Recent",
-              },
-              { value: "unread", label: "Unread" },
-              { value: "blocked", label: "Blocked" },
-              { value: "all", label: "All" },
-            ]}
-          />
-        </Tabs>
+        <InboxViewNavigation current={tab} />
 
         <div className="flex items-center gap-2">
           <div className="relative hidden sm:block">

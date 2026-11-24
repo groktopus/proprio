@@ -10,6 +10,7 @@ import { useIssueRowDetails } from "../hooks/useIssueRowDetails";
 import { IssueRowDetailsNotice } from "../components/IssueRowDetailsNotice";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router";
+import { InboxViewNavigation } from "@/components/InboxViewNavigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { deriveOriginatingActor, INBOX_MINE_ISSUE_STATUS_FILTER, isHeartbeatRunVisibleInMine } from "@groktopus/shared";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "@/hooks/useSharedPolling";
@@ -118,7 +119,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
-import { Tabs } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Inbox as InboxIcon,
@@ -136,7 +136,6 @@ import {
   ListTree,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { PageTabBar } from "../components/PageTabBar";
 import type { Approval, HeartbeatRun, InboxMineSnapshot, Issue, JoinRequest } from "@groktopus/shared";
 import {
   ACTIONABLE_APPROVAL_STATUSES,
@@ -810,7 +809,7 @@ function InboxCollectionToolbar({
   if (streamlined) {
     return (
       <CollectionToolbar
-        className={ariaLabel === "Tasks controls" ? "mobile-task-toolbar" : undefined}
+        className={cn("inbox-collection-toolbar", ariaLabel === "Tasks controls" && "mobile-task-toolbar")}
         ariaLabel={ariaLabel}
         context={context}
         search={search}
@@ -2783,19 +2782,7 @@ function StreamlinedInbox({
       <InboxCollectionToolbar
         streamlined={streamlinedUiEnabled}
         ariaLabel={`${surfaceLabel} controls`}
-        context={toolbarContext ?? (
-          <Tabs value={tab} onValueChange={(value) => navigate(`/inbox/${value}`)}>
-            <PageTabBar
-              items={[
-                { value: "mine", label: "Mine" },
-                { value: "recent", label: "Recent" },
-                { value: "unread", label: "Unread" },
-                { value: "blocked", label: "Blocked" },
-                { value: "all", label: "All" },
-              ]}
-            />
-          </Tabs>
-        )}
+        context={toolbarContext ?? <InboxViewNavigation current={tab} />}
         search={(
           <div className="relative ml-auto w-full sm:w-(--sz-220px)">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -3068,7 +3055,7 @@ function StreamlinedInbox({
       {listError && (
         <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
           <p>Unable to load the inbox: {describeError(listError).body}</p>
-          <Button variant="outline" size="sm" onClick={() => { retryFailedSources(); if (externalObjectSummariesError) retryExternalObjectSummaries(); }}>Retry</Button>
+          <Button variant="outline" size="sm" className="text-foreground" onClick={() => { retryFailedSources(); if (externalObjectSummariesError) retryExternalObjectSummaries(); }}>Retry</Button>
         </div>
       )}
       {actionError && <p className="text-sm text-destructive">{actionError}</p>}

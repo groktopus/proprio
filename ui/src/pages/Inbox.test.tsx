@@ -532,7 +532,12 @@ describe("Inbox toolbar", () => {
 
     expect(container.querySelector('[data-slot="collection-toolbar"]')).toBeNull();
     expect(container.querySelector('[role="toolbar"][aria-label="Inbox controls"]')).toBeNull();
-    expect(container.textContent).toContain("Mine");
+    const views = container.querySelector('nav[aria-label="Inbox views"]');
+    expect(views?.querySelector('a[aria-current="page"]')?.textContent).toBe("Mine");
+    const unread = views?.querySelector<HTMLAnchorElement>('a[href="/inbox/unread"]');
+    expect(unread?.textContent).toBe("Unread");
+    unread?.focus();
+    expect(document.activeElement).toBe(unread);
     expect(container.querySelector('[data-slot="task-row"]')).toBeNull();
     const issueLink = container.querySelector('[data-inbox-issue-link]');
     // Production reads the legacy Inbox column key and must ignore the
@@ -1802,6 +1807,9 @@ describe("Inbox toolbar", () => {
     try {
       await act(() => root.render(<QueryClientProvider client={client}><Inbox /></QueryClientProvider>));
       await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).not.toBeNull());
+      const views = container.querySelector('nav[aria-label="Inbox views"]');
+      expect(views?.querySelectorAll("a")).toHaveLength(5);
+      expect(views?.querySelector('a[aria-current="page"]')?.getAttribute("href")).toBe("/inbox/mine");
       expect(container.querySelector('[aria-label="Loading tasks"]')).toBeNull();
       expect(container.textContent).not.toContain("temporarily_unavailable");
       apiMocks.inboxMine.mockResolvedValue(createMineSnapshot({ issues: [createIssue({ title: "Recovered task" })] }));
