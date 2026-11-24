@@ -1,0 +1,48 @@
+name: Critical-journey QA
+run-name: Critical-journey QA report
+
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      end_date:
+        description: Exclusive UTC end date, YYYY-MM-DD (default is today)
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Verify the default-branch event
+        run: |
+          test "$GITHUB_REPOSITORY" = groktopus/proprio
+          test "$GITHUB_REF" = refs/heads/main
+      - name: Check out the report definition
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Generate the report from retained GitHub evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          args=()
+          if [[ -n "$END_DATE" ]]; then args+=("$END_DATE"); fi
+          node scripts/ci/critical-journey-qa.mjs "${args[@]}" > "$RUNNER_TEMP/critical-journey-qa.md"
+          cat "$RUNNER_TEMP/critical-journey-qa.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the QA report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: critical-journey-qa-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/critical-journey-qa.md
+          if-no-files-found: error
+          retention-days: 90
