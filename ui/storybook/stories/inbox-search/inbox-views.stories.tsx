@@ -28,12 +28,15 @@ const meta = {
     },
   },
   beforeEach: ({ parameters }) => {
+    let recovered = false;
+    const recover = () => { recovered = true; };
+    if (parameters.recoveryFixture) window.addEventListener("storybook:restore-inbox-read", recover);
     const api = prepareFixtureApi(
       [
         {
           path: "/api/companies/company-storybook/issues",
           read: () => {
-            if (parameters.recoveryFixture && sessionStorage.getItem("storybook.inbox-fixture-recovered") !== "true") {
+            if (parameters.recoveryFixture && !recovered) {
               return Response.json({ error: "Fixture read unavailable" }, { status: 500 });
             }
             return parameters.fixtureState === "empty" ? [] : storybookIssues;
@@ -57,6 +60,7 @@ const meta = {
       },
     ]);
     return () => {
+      window.removeEventListener("storybook:restore-inbox-read", recover);
       flags.cleanup();
       api.cleanup();
     };

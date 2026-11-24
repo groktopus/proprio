@@ -36,8 +36,17 @@ const monitored: Issue = {
 const working: Issue = { ...storybookIssues[1]!, parentId: null, status: "in_progress", displayStatus: "in_progress", title: "Implement the next change" };
 const rows = [monitored, working, ...storybookIssues.slice(2)];
 
-function fixtures() {
+function fixtures(allowTitleUpdate = false) {
+  let currentTask = monitored;
   return installFixtureApi([
+    ...(allowTitleUpdate ? [{
+      path: `/api/issues/${monitored.id}`,
+      method: "PATCH",
+      read: ({ body }: { body: Record<string, unknown> }) => {
+        if (typeof body.title === "string") currentTask = { ...currentTask, title: body.title };
+        return currentTask;
+      },
+    }] : []),
     { path: "/api/workspace-preferences/me", read: () => ({ userId: "user-storybook", coordinatorWorkspaceEnabled: false, updatedAt: null }) },
     { path: "/api/instance/settings/experimental", read: () => instanceExperimentalSettingsSchema.parse({ enableStreamlinedUi: true, enableCombinedInboxTasks: true }) },
 
@@ -56,7 +65,7 @@ function fixtures() {
       countsByType: { issue: 1, artifact: 0, agent: 0, project: 0, comment: 0, document: 0 },
       filterOptionCounts: { status: { in_progress: 1 }, displayStatus: { monitoring: 1 }, priority: {}, assigneeAgentId: {}, assigneeUserId: {}, projectId: {}, labelId: {}, updatedWithin: {} },
       results: [{ id: monitored.id, type: "issue", score: 6000, title: monitored.title, href: `/PAP/issues/${monitored.identifier}`, matchedFields: ["title"], sourceLabel: null, snippet: null, snippets: [], updatedAt: monitored.updatedAt.toISOString(), previewImageUrl: null, issue: { ...monitored, updatedAt: monitored.updatedAt.toISOString() } }] }) },
-    { path: /^\/api\/issues\/[^/]+$/, read: ({ url }) => rows.find(row => url.pathname.endsWith(row.id) || url.pathname.endsWith(row.identifier ?? "__none__")) ?? monitored },
+    { path: /^\/api\/issues\/[^/]+$/, read: ({ url }) => [currentTask, ...rows.slice(1)].find(row => url.pathname.endsWith(row.id) || url.pathname.endsWith(row.identifier ?? "__none__")) ?? currentTask },
     { path: /^\/api\/issues\/[^/]+\/recent-comments$/, read: () => ({ comments: [], hasMore: false, latestCommentId: null }) },
     { path: /^\/api\/issues\/[^/]+\/tree-control\/state$/, read: () => ({ activePauseHold: null }) },
     { path: /^\/api\/issues\/[^/]+\/active-run$/, read: () => null },
@@ -65,10 +74,10 @@ function fixtures() {
   ]).cleanup;
 }
 
-function MonitoringPage({ path }: { path: string }) {
+function MonitoringPage({ path, allowTitleUpdate = false }: { path: string; allowTitleUpdate?: boolean }) {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
-  useEffect(() => { const cleanup = fixtures(); navigate(path, { replace: true }); setReady(true); return cleanup; }, [path, navigate]);
+  useEffect(() => { const cleanup = fixtures(allowTitleUpdate); navigate(path, { replace: true }); setReady(true); return cleanup; }, [allowTitleUpdate, path, navigate]);
   if (!ready) return null;
   return <PluginLauncherProvider><Routes><Route path="/:companyPrefix" element={<Layout />}>
     <Route path="issues" element={<Issues />} />
@@ -84,12 +93,16 @@ const meta = {
   id: "tasks-monitoring-status",
   title: "Tasks and conversations/Task creation and lifecycle/Monitoring",
   parameters: { layout: "fullscreen", proprio: { capabilities: ["tasks/organize", "tasks/properties"], implementation: "production", boundary: "fixtures", notes: "Production task pages and shared indicators with isolated API fixtures. Database projection and execution boundaries are tested separately." } },
-  beforeEach: fixtures,
+  beforeEach: () => fixtures(),
 } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const TaskDetail: Story = { render: () => <MonitoringPage path="/PAP/issues/PAP-120" /> };
+export const TaskDetailKeyboardEditing: Story = {
+  render: () => <MonitoringPage path="/PAP/issues/PAP-120" allowTitleUpdate />,
+  tags: ["!dev"],
+};
 export const TaskList: Story = { render: () => <MonitoringPage path="/PAP/issues?view=all" /> };
 export const SearchResults: Story = { render: () => <MonitoringPage path="/PAP/search?q=deployment" /> };
 export const CompanyDashboard: Story = { render: () => <MonitoringPage path="/PAP/dashboard" /> };

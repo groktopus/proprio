@@ -1,15 +1,5 @@
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-
-const require = createRequire(import.meta.url);
-const ui = resolve(import.meta.dirname, "../../ui");
-const addon = require.resolve("@storybook/addon-a11y/package.json", { paths: [ui] });
-const axeScript = require.resolve("axe-core/axe.min.js", { paths: [addon] });
-
-type AxeResult = {
-  violations: { id: string; nodes: { target: string[]; failureSummary?: string }[] }[];
-};
+import { scanStoryAccessibility } from "../storybook-visual/axe-scan";
 
 async function openStory(page: Page, story: string, theme = "light") {
   await page.goto(`/iframe.html?id=${story}&viewMode=story&globals=theme:${theme}`);
@@ -19,30 +9,7 @@ async function openStory(page: Page, story: string, theme = "light") {
 
 async function expectAccessible(page: Page, story: string, selector: string) {
   await expect(page.locator(selector).first()).toBeVisible();
-  await page.evaluate(() => document.fonts.ready);
-  await page.addScriptTag({ path: axeScript });
-  let violations: AxeResult["violations"] | null = null;
-  await expect.poll(async () => {
-    violations = await page.evaluate(async (selector) => {
-      const axe = (window as Window & {
-        axe: { run: (context: unknown, options: unknown) => Promise<AxeResult> };
-      }).axe;
-      try {
-        const { violations } = await axe.run({ include: [selector] }, {
-          runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21aa"] },
-        });
-        return violations.map(({ id, nodes }) => ({
-          id,
-          nodes: nodes.map(({ target, failureSummary }) => ({ target, failureSummary })),
-        }));
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith("Axe is already running")) return null;
-        throw error;
-      }
-    }, selector);
-    return violations !== null;
-  }, { message: `Wait for axe to scan ${story}` }).toBe(true);
-  expect(violations, `${story} (${selector})`).toEqual([]);
+  expect(await scanStoryAccessibility(page, [selector]), `${story} (${selector})`).toEqual([]);
 }
 
 test.beforeEach(async ({ page, baseURL }) => {
@@ -54,9 +21,8 @@ test.beforeEach(async ({ page, baseURL }) => {
 });
 
 test("shell account overlay moves focus in and returns it on Escape", async ({ page }) => {
-  const story = "product-navigation-layout--account-popover";
+  const story = "product-navigation-layout--account-popover-browser";
   await openStory(page, story);
-  await expect(page.locator("[data-navigation-overlay-verified=true]")).toBeVisible();
   const trigger = page.getByRole("button", { name: "Open account menu" });
   await trigger.press("Enter");
   const dialog = page.getByRole("dialog", { name: "Account" });
@@ -72,7 +38,11 @@ test("task list links have names and can receive keyboard focus", async ({ page 
   await openStory(page, story);
   const row = page.getByRole("link", { name: /open .*:/i }).first();
   await expect(row).toBeVisible();
-  await row.focus();
+  await page.getByRole("button", { name: "Filter", exact: true }).focus();
+  for (let tab = 0; tab < 20; tab += 1) {
+    await page.keyboard.press("Tab");
+    if (await row.evaluate((element) => element === document.activeElement)) break;
+  }
   await expect(row).toBeFocused();
   await expectAccessible(page, story, "#storybook-root");
 });
@@ -97,7 +67,8 @@ test("narrow New task dialog supports keyboard editor input and dismissal", asyn
   const story = "product-dialogs-modals--new-issue-keyboard";
   await page.setViewportSize({ width: 390, height: 844 });
   await openStory(page, story);
-  await page.getByRole("button", { name: "New task", exact: true }).press("Enter");
+  const opener = page.getByRole("button", { name: "New task", exact: true });
+  await opener.press("Enter");
   const dialog = page.getByRole("dialog", { name: "New task" });
   const editor = dialog.locator("[contenteditable=true]");
   await expect(editor).toBeFocused();
@@ -106,6 +77,22 @@ test("narrow New task dialog supports keyboard editor input and dismissal", asyn
   await expect(editor).toContainText("Review the board");
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test("the saved task title can be edited with a keyboard", async ({ page }) => {
+  const story = "tasks-monitoring-status--task-detail-keyboard-editing";
+  await openStory(page, story);
+  const original = page.getByRole("button", { name: "Verify deployment after CI completes", exact: true });
+  await expect(original).toBeVisible();
+  await original.press("Enter");
+  const editor = page.getByRole("textbox", { name: "Click to edit..." });
+  await expect(editor).toBeFocused();
+  await expectAccessible(page, story, "textarea[aria-label='Click to edit...']");
+  await page.keyboard.insertText("Verify release recovery");
+  await page.keyboard.press("Enter");
+  const saved = page.getByRole("button", { name: "Verify release recovery", exact: true });
+  await expect(saved).toBeFocused();
 });
 
 test("Inbox marks its current link and exposes retry after a failed read", async ({ page }) => {
@@ -116,7 +103,7 @@ test("Inbox marks its current link and exposes retry after a failed read", async
   await expectAccessible(page, story, "#storybook-root");
   const retry = page.getByRole("alert").getByRole("button", { name: "Retry", exact: true });
   await expect(retry).toBeVisible();
-  await page.evaluate(() => sessionStorage.setItem("storybook.inbox-fixture-recovered", "true"));
+  await page.evaluate(() => window.dispatchEvent(new Event("storybook:restore-inbox-read")));
   await retry.press("Enter");
   await expect(retry).toBeHidden();
   await expect(page.locator("[data-inbox-item]").first()).toBeVisible();

@@ -620,12 +620,14 @@ pnpm exec playwright test --config tests/board-accessibility/playwright.config.t
 ```
 
 The tests start a local Storybook preview. To reuse an existing preview, set
-`BOARD_A11Y_STORYBOOK_URL` to its origin. CI builds Storybook before starting
+`STORYBOOK_TEST_BASE_URL` to its origin. CI builds Storybook before starting
 Chromium so the tests load compiled fixtures. To use the same path locally,
 run `pnpm build-storybook` and set `BOARD_A11Y_STORYBOOK_DIR=ui/storybook-static`
 when invoking Playwright from the repository root. GitHub Actions publishes
-the report and failure traces in its `board-accessibility-<attempt>` artifact. The aggregate
-smoke check reports when changes do not require the suite. Manual keyboard and
+the report and failure traces in its `board-accessibility-<attempt>` artifact.
+The aggregate smoke check reports when changes do not require the suite. If a
+PR predates the suite and CI asks for an update, bring its branch up to date
+with `main` before retrying. Manual keyboard and
 screen-reader review still applies to interactions outside these fixtures.
 
 The Storybook visual regression suite uses external PNG baselines instead of

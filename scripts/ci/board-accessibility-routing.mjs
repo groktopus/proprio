@@ -4,9 +4,10 @@ import { mergeDiff } from "../../.github/scripts/ci-diff.mjs";
 
 const boardAccessibilityPaths = [
   /^ui\//,
-  /^packages\/(?:shared|plugins\/sdk)\//,
+  /^packages\/(?:shared|adapter-utils|adapters|plugins\/sdk)\//,
+  /^maps\//,
   /^tests\/(?:board-accessibility|storybook-visual)\//,
-  /^scripts\/(?:ci\/board-accessibility-routing(?:\.test)?\.mjs|storybook[-.]|serve-storybook-static\.mjs)/,
+  /^scripts\/(?:ci\/board-accessibility-routing(?:\.test)?\.mjs|storybook[-.]|serve-storybook-static\.mjs|check-maps\.mjs|feature-map\.mjs|ensure-plugin-build-deps\.mjs)/,
   /^\.github\/(?:workflows\/stability-smoke\.yml|scripts\/ci-diff\.mjs)$/,
   /^(?:\.nvmrc|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$/,
 ];
