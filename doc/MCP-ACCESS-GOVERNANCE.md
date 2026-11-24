@@ -286,6 +286,42 @@ A null scope or an empty object preserves the existing unrestricted grant
 behavior. Discovery and execution evaluate the current grant. A revoked grant
 cannot authorize a later call merely because discovery previously listed it.
 
+### Independent review of sensitive authority changes
+
+For a protected connector, give the requesting agent only the access it needs to
+run tasks and request changes. Remove its `tools:manage_profiles` and
+`tools:manage_connections` grants, and remove `agents:configure` where it
+could permit installation changes. A board permission manager can revoke
+individual grants with `proprio agent permission:revoke <agentId> <permissionKey>`.
+Check the effective grants after onboarding because standard agents can receive
+connection management grants by default. Keep any bounded setup workflow on a
+separately authorized principal. Review alternate paths to the target, such as
+a separate connection, a standing token or a provider-native tool.
+
+The requester records the desired change on a task visible to the reviewers.
+Include the agent, connection or grant, current scope, proposed scope, reason
+and expiry or revocation plan. A different, authorized human compares the
+request with current authority and decides whether to apply the exact change
+through the board or authenticated API. The same governance role can revoke it.
+Keep that role separate from the agent and the requesting workflow.
+
+Record the request comment ID, prior and new scope, policy or grant ID, and
+decision on the task. Use product activity to verify the deciding actor and
+the activation and revocation times. Test with a synthetic connector before
+granting access to the real target. Verify that the original call is denied,
+the call after activation reaches the target, and the next call after
+revocation is denied with no additional target effect. Reconcile any call
+already in flight separately.
+
+The restricted posture uses current grants and a human procedure. Product
+activity records the mutation, and the review task preserves the request and
+the before/after scope. The product does not require a second human approval
+from a principal who already has authority to edit the policy. Deployments
+that require enforced two-person control or per-rule co-signing need an
+additional control. The fixture qualifies authenticated policy updates and
+the managed synthetic connection test path. Qualification of other runners
+and external paths requires separate evidence.
+
 ## Policies
 
 Policies run after profile selection. A profile decides *can this agent see the tool*; a policy decides *is this exact call allowed right now*. Policy types:

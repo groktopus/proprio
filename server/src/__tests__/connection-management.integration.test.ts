@@ -806,6 +806,119 @@ describe("connection management with production default agents", () => {
     expect(await f.request("GET", `${path}/${hidden.id}`)).toMatchObject({ status: 404 });
   });
 
+  it("lets an agent request authority while an independent operator activates and revokes it", async () => {
+    const f = await fixture();
+    const reviewerId = randomUUID();
+    await server.db.insert(authUsers).values({
+      id: reviewerId,
+      name: "Independent reviewer",
+      email: `${reviewerId}@fixture.invalid`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const access = accessService(server.db);
+    await access.ensureMembership(f.companyId, "user", reviewerId, "owner", "active");
+    await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "owner", reviewerId);
+    const cookie = await server.humanSession(reviewerId);
+    const review = async (method: string, path: string, body: unknown) => {
+      const response = await fetch(`${server.apiUrl}/api${path}`, {
+        method,
+        headers: { cookie, origin: server.apiUrl, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+
+    const calls: string[] = [];
+    const remote = createServer(async (req, res) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const rpc = JSON.parse(body || "{}");
+      const results: Record<string, unknown> = {
+        initialize: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "Authority fixture", version: "1" } },
+        "tools/call": { content: [{ type: "text", text: "Fixture effect recorded" }] },
+      };
+      if (!Object.hasOwn(results, rpc.method)) {
+        res.writeHead(req.method === "DELETE" ? 204 : 202).end();
+        return;
+      }
+      if (rpc.method === "tools/call") calls.push(rpc.params.name);
+      res.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: results[rpc.method] }));
+    });
+    await new Promise<void>(resolve => remote.listen(0, "127.0.0.1", resolve));
+    const address = remote.address();
+    if (!address || typeof address === "string") throw new Error("Fixture did not listen");
+    try {
+      const companyPath = `/companies/${f.companyId}/tools`;
+      const connection = await review("POST", `${companyPath}/connections`, {
+        name: "Authority review fixture",
+        transport: "mcp_remote",
+        authKind: "none",
+        transportConfig: { url: `http://127.0.0.1:${address.port}/mcp` },
+      });
+      expect(connection).toMatchObject({ status: 201 });
+      const connectionId = connection.body.id as string;
+      await server.db.update(toolConnections).set({ healthStatus: "ok" }).where(eq(toolConnections.id, connectionId));
+      const [entry] = await server.db.insert(toolCatalogEntries).values({
+        companyId: f.companyId, applicationId: connection.body.applicationId, connectionId,
+        entryKind: "tool", name: "Fixture effect", toolName: "fixture_effect",
+        inputSchema: { type: "object" }, riskLevel: "write", status: "active", versionHash: "fixture-v1",
+      }).returning();
+      expect(await review("POST", `${companyPath}/apps/${connectionId}/finish`, {
+        enabledCatalogEntryIds: [entry.id], access: { agentIds: [f.agentId] },
+      })).toMatchObject({ status: 200 });
+
+      const grantPath = `/agents/${f.agentId}/permission-grants`;
+      for (const permissionKey of ["tools:manage_profiles", "tools:manage_connections", "agents:configure"]) {
+        expect(await review("PATCH", grantPath, { permissionKey, enabled: false })).toMatchObject({ status: 200 });
+      }
+      const policies = `${companyPath}/policies`;
+      const selectors = { connectionId, agentId: f.agentId };
+      const rule = await review("POST", policies, { name: "Review required for fixture effect", policyType: "block", selectors, priority: 1 });
+      expect(rule).toMatchObject({ status: 201 });
+      const policyId = rule.body.id as string;
+      const policy = `${policies}/${policyId}`;
+      const comments = `/issues/${f.issueId}/comments`;
+      const requested = await f.request("POST", comments, { body: `Request changing policy ${policyId} from block to allow for the fixture effect.` }, f.jwt);
+      expect(requested).toMatchObject({ status: 201, body: { authorAgentId: f.agentId } });
+      expect(await f.request("PATCH", policy, { policyType: "allow" }, f.jwt)).toMatchObject({ status: 403 });
+      expect(await f.request("PATCH", grantPath, { permissionKey: "tools:manage_profiles", enabled: true }, f.jwt))
+        .toMatchObject({ status: 403 });
+
+      const testCall = () => f.request("POST", `/tool-connections/${connectionId}/test-calls`, {
+        agentId: f.agentId, toolName: "fixture_effect", parameters: {},
+      }, f.jwt);
+      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "off" } });
+      expect(calls).toEqual([]);
+
+      expect(await review("PATCH", policy, { policyType: "allow" })).toMatchObject({ status: 200 });
+      expect(await review("POST", comments, {
+        body: `Reviewed request ${requested.body.id}. Changed policy ${policyId} from block to allow.`,
+      })).toMatchObject({ status: 201, body: { authorUserId: reviewerId } });
+      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "allowed" } });
+      expect(calls).toEqual(["fixture_effect"]);
+
+      expect(await review("PATCH", policy, { policyType: "block" })).toMatchObject({ status: 200 });
+      expect(await review("POST", comments, {
+        body: `Revoked request ${requested.body.id}. Changed policy ${policyId} from allow to block.`,
+      })).toMatchObject({ status: 201, body: { authorUserId: reviewerId } });
+      expect(await testCall()).toMatchObject({ status: 200, body: { decision: "off" } });
+      expect(calls).toEqual(["fixture_effect"]);
+
+      const changes = await server.db.select().from(activityLog)
+        .where(and(eq(activityLog.companyId, f.companyId), eq(activityLog.entityId, policyId)))
+        .orderBy(activityLog.createdAt);
+      expect(changes.map(row => [row.action, row.actorId, row.details?.policyType])).toEqual([
+        ["tool_policy.created", reviewerId, "block"],
+        ["tool_policy.updated", reviewerId, "allow"],
+        ["tool_policy.updated", reviewerId, "block"],
+      ]);
+    } finally {
+      await new Promise<void>(resolve => remote.close(() => resolve()));
+    }
+  });
+
   it("keeps narrow policy create, update, reorder, and delete within their actual audiences", async () => {
     const f = await fixture();
     const other = (await server.db.select({ id: agents.id }).from(agents).where(eq(agents.companyId, f.companyId))).find(agent => agent.id !== f.agentId)!;
