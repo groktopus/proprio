@@ -17,6 +17,8 @@ let exitCode = 0;
 try {
   const results = [];
   for (const issueId of issueIds) results.push(await recovery.assignedWork.checkIssue({ companyId, issueId }));
+  await heartbeat.resumeQueuedRuns();
+  await heartbeat.drainActiveRunExecutions();
   process.stdout.write(`${JSON.stringify({ results })}\n`);
 } catch (error) {
   console.error(error);

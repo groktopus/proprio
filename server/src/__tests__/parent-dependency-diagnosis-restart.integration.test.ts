@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, heartbeatRuns, issueDocuments,
+import { activityLog, agentWakeupRequests, agents, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, issueDocuments,
   issueRelations, issueTreeHolds, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { describe, expect, it } from "vitest";
@@ -41,6 +41,7 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
     const db = createDb(database.connectionString, { maxConnections: 4 });
     const temporary = await mkdtemp(path.join(os.tmpdir(), "dependency-diagnosis-restart-"));
     const receipt = path.join(temporary, "crash-receipt.jsonl");
+    const effectLedger = path.join(temporary, "agent-effects.jsonl");
     const companyId = randomUUID();
     const prefix = `D${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`;
     try {
@@ -50,8 +51,17 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       await db.insert(authUsers).values({ id: userId, name: "Fixture owner", email: `${userId}@example.invalid`,
         createdAt: new Date(), updatedAt: new Date() });
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, membershipRole: "owner" });
-      const [agent] = await db.insert(agents).values({ companyId, name: "Recovery worker", role: "engineer", status: "idle",
-        adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {} }).returning();
+      // Each process writes a durable, idempotent effect receipt once per
+      // logical task. A recovery retry or replay with another run id must not
+      // repeat the effect.
+      const effectScript = "const fs=require('node:fs');const path=process.env.DIAGNOSIS_EFFECT_LEDGER+'.'+process.env.DIAGNOSIS_EFFECT_LABEL;try{const fd=fs.openSync(path,'wx');fs.writeFileSync(fd,JSON.stringify({label:process.env.DIAGNOSIS_EFFECT_LABEL,runId:process.env.PROPRIO_RUN_ID}));fs.closeSync(fd)}catch(error){if(error.code!=='EEXIST')throw error}";
+      const processAgent = (name: string, label: string) => ({ companyId, name, role: "engineer", status: "idle", adapterType: "process",
+        adapterConfig: { command: process.execPath, args: ["-e", effectScript], cwd: process.cwd(),
+          env: { DIAGNOSIS_EFFECT_LEDGER: effectLedger, DIAGNOSIS_EFFECT_LABEL: label } },
+        runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } }, permissions: {} });
+      const [agent, unrelatedAgent] = await db.insert(agents).values([
+        processAgent("Recovery worker", "diagnosis"), processAgent("Independent worker", "unrelated"),
+      ]).returning();
       const parentId = randomUUID();
       const childId = randomUUID();
       const grandchildId = randomUUID();
@@ -70,7 +80,7 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         { id: siblingId, companyId, identifier: `${prefix}-4`, issueNumber: 4, title: "Completed sibling branch",
           status: "done", parentId, createdAt: old, updatedAt: old },
         { id: unrelatedId, companyId, identifier: `${prefix}-5`, issueNumber: 5, title: "Unrelated assigned task",
-          status: "in_progress", assigneeAgentId: agent!.id, responsibleUserId: userId, createdAt: old, updatedAt: old },
+          status: "in_progress", assigneeAgentId: unrelatedAgent!.id, responsibleUserId: userId, createdAt: old, updatedAt: old },
         { id: heldParentId, companyId, identifier: `${prefix}-6`, issueNumber: 6, title: "Paused parent remains paused",
           status: "in_progress", assigneeAgentId: agent!.id, responsibleUserId: userId, createdAt: old, updatedAt: old },
         { id: heldChildId, companyId, identifier: `${prefix}-7`, issueNumber: 7, title: "Paused required dependency",
@@ -84,8 +94,6 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         { companyId, issueId: siblingId, relatedIssueId: parentId, type: "blocks" },
         { companyId, issueId: heldChildId, relatedIssueId: heldParentId, type: "blocks" },
       ]);
-      await db.insert(heartbeatRuns).values({ companyId, agentId: agent!.id, invocationSource: "assignment",
-        triggerDetail: "system", status: "running", contextSnapshot: { issueId: unrelatedId, taskId: unrelatedId } });
       await db.insert(issueTreeHolds).values({ companyId, rootIssueId: heldParentId, mode: "pause", status: "active",
         reason: "Fixture stop gate" });
 
@@ -122,6 +130,10 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       const restarted = await runRecoveryProcess({ connectionString: database.connectionString, companyId, issueId: parentId,
         additionalIssueIds: [unrelatedId, heldParentId] });
       expect(restarted.code, restarted.stderr).toBe(0);
+      const effectsAfterRestart = await Promise.all(["diagnosis", "unrelated"].map(async label =>
+        JSON.parse(await readFile(`${effectLedger}.${label}`, "utf8")) as { label: string; runId: string }));
+      expect(effectsAfterRestart.map(effect => effect.label).sort()).toEqual(["diagnosis", "unrelated"]);
+      expect(new Set(effectsAfterRestart.map(effect => effect.runId)).size).toBe(2);
       const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         eq(agentWakeupRequests.idempotencyKey, String(details.idempotencyKey))));
       expect(wakes, JSON.stringify(restarted)).toHaveLength(1);
@@ -137,10 +149,13 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         eq(activityLog.action, "issue.dependency_diagnosis.requested")))).toHaveLength(0);
       expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         sql`${agentWakeupRequests.payload}->>'issueId' = ${heldParentId}`))).toHaveLength(0);
-      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-        sql`${agentWakeupRequests.payload}->>'issueId' = ${unrelatedId}`))).toHaveLength(0);
+      const unrelatedWakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${unrelatedId}`));
+      const unrelatedAssignments = unrelatedWakes.filter(wake => wake.reason === "issue_assigned");
+      expect(unrelatedAssignments).toHaveLength(1);
+      expect(unrelatedAssignments[0]!.agentId).toBe(unrelatedAgent!.id);
       expect((await db.select().from(issues).where(eq(issues.id, unrelatedId)))[0]).toMatchObject({ status: "in_progress",
-        assigneeAgentId: agent!.id });
+        assigneeAgentId: unrelatedAgent!.id });
       const artifactAfterRestart = await db.select({ body: documents.latestBody }).from(issueDocuments)
         .innerJoin(documents, eq(documents.id, issueDocuments.documentId)).where(and(eq(issueDocuments.issueId, siblingId),
           eq(issueDocuments.key, "result")));
@@ -149,6 +164,9 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       // Replaying the recovery pass is safe after the wake receipt exists.
       const replay = await runRecoveryProcess({ connectionString: database.connectionString, companyId, issueId: parentId });
       expect(replay.code, replay.stderr).toBe(0);
+      const effectsAfterReplay = await Promise.all(["diagnosis", "unrelated"].map(async label =>
+        JSON.parse(await readFile(`${effectLedger}.${label}`, "utf8")) as { label: string; runId: string }));
+      expect(effectsAfterReplay).toEqual(effectsAfterRestart);
       const wakesAfterReplay = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
         eq(agentWakeupRequests.idempotencyKey, String(details.idempotencyKey))));
       expect(wakesAfterReplay).toHaveLength(1);
