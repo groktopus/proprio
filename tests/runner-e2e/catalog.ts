@@ -41,6 +41,7 @@ import { blockerTasks, blockerProfile } from "./blocker-cases.js";
 import { accountingTasks } from "./accounting-cases.js";
 import { continuationTasks, questionResumeTask } from "./continuation-cases.js";
 import { contextIntegrityTasks, proprioDocumentTask } from "./context-integrity-cases.js";
+import { COMPACTION_BUDGET_CENTS, COMPACTION_FIXTURE_DIGEST, contextCompactionTask } from "./context-compaction-case.js";
 import { productionDefaultHireProfile, stockHarnessSourceDigest, stockHarnessSkillSources } from "./stock-harness.js";
 import { lifecycleLiveTasks, lifecycleLiveDefinitionDigest } from "./lifecycle-live-cases.js";
 import { publicMcpTasks, publicMcpExpandedDigest, publicMcpSetupDigest, publicMcpWorkflowDigest, publicMcpWorkerInstructions, publicMcpWorkerSkillDigest } from "./public-mcp-cases.js";
@@ -1831,6 +1832,20 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     definitionMetadata: { version: 1, fixtureDigest: nativeCompletionDefinitionDigest(), instructions: "unchanged-master-production-default",
       providerTurns: 6, maximumAttemptsPerCell: 1, automaticRetryPolicy: "single_attempt", budgetMonthlyCents: NATIVE_COMPLETION_BUDGET_CENTS,
       grading: "original-assigned-skill-durable-document-plus-native-disposition-and-observable-final-order", scheduling: "explicit-only" },
+  },
+  {
+    id: "context-compaction",
+    label: "Paired Codex context compaction",
+    manualOnly: true,
+    description: "Compare matched native Codex continuations after a requirement revision, with manual compaction in one lane.",
+    groups: ["native", "context-integrity"],
+    profiles: runnerProfiles.filter(profile => profile.id === "runner-codex"),
+    environments: [localEnvironment],
+    tasks: [contextCompactionTask],
+    expectedMatrixSize: 1,
+    definitionMetadata: { version: 1, fixtureDigest: COMPACTION_FIXTURE_DIGEST, budgetMonthlyCents: COMPACTION_BUDGET_CENTS,
+      maximumAttemptsPerCell: 1, scheduling: "explicit-only", providerTurns: 6, compactionOperations: 1,
+      grading: "paired-current-requirements-and-persisted-prerequisite" },
   },
   {
     id: "context-integrity",

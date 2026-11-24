@@ -326,6 +326,11 @@ separate: missing read provenance leaves the candidate/baseline pair
 uncomparable even if work succeeds. Baseline bundles and coder examples derive
 from their own source revision, without requiring candidate wording or length.
 
+The explicit-only [context compaction suite](../tests/runner-e2e/SUITES.md#suites-in-the-catalog)
+compares two native Codex tasks with the same revised requirements and pending
+prerequisite. It checks the manual compaction event against the continuing
+session and grades both saved artifacts against their active requirements.
+
 The explicit-only `context-integrity` Product E2E suite covers ordered public
 comment continuation and explicit invocation of an assigned pinned skill across
 the seven selected legacy/native local profiles. Select it by suite or exact

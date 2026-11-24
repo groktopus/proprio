@@ -998,6 +998,23 @@ The separate, explicit-only `native-instruction-consolidation` suite reuses thos
 
 The corrected source variants add explicit blocker explanations and canonical document citations. Accepted feedback repeats links only for this run's current saved revisions, and Markdown navigation preserves document anchors after issue details load. Observation v3 independently requires the persisted provider final to explain missing release/deployment access and, for completion, link this task's one revisioned document on the same origin. A correct structured blocker, an unblock action alone, or an unbound/foreign document URL cannot pass. These stricter checks and browser navigation apply only to the manual instruction comparison; the existing `native-completion` suite keeps v2 checks. Task prompts and the durable-output oracle remain unchanged. Admission now requires eighteen shared runnerd RPC captures and six direct OpenCode HTTP captures using a local fake server, all provider-free. Replay of retained v2 evidence is a separate diagnostic, never a replacement for its original verdict. See the [answer correction](../../doc/plans/2026-10-04-native-completion-answer-fix.md).
 
+The explicit-only `context-compaction` suite runs one local Codex pair. It uses
+the same saved requirements and pending prerequisite in two independent task
+sessions. One session uses the public manual compaction operation before the
+next ordinary turn. The other follows the same work turns. The case allows
+six work turns and one compaction operation with a 1,000-cent company and agent
+budget hard stop. The oracle records source and fixture digests, run IDs, hashed
+session identity, runner generation, and evidence for each constraint. It grades
+the result revision and checks for writes before the prerequisite answer.
+
+```sh
+pnpm test:e2e:runner -- --list --suite context-compaction
+pnpm test:e2e:runner -- --id context-compaction.runner-codex.local.matched-continuations
+```
+
+ACPX Claude is a separate coverage case. Credential-free grader tests calibrate
+the oracle. A live Codex result requires a completed pair with retained evidence.
+
 `context-integrity` is an explicit-only local suite with two bounded cases across
 ten listed legacy/native profiles (20 cells). Six cells are pending-prerequisite
 profiles and are listed for discovery but rejected before provider credentials are

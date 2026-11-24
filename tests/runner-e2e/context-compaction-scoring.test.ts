@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { runnerMatrix } from "./catalog.js";
 import { gradeContextCompactionPair, type CompactionObservation } from "./context-compaction-scoring.js";
 
-const fixture = { retainedMarker: "keep-amber", activeFormat: "current-v2", supersededFormat: "obsolete-v1" };
+const fixture = { retainedMarker: "keep-amber", activeFormat: "current-v2", supersededFormat: "obsolete-v1", releaseCode: "EMBER-72" };
 const requirementRevisionIds = { control: "control-requirements-v2", treatment: "treatment-requirements-v2" };
 
 function lane(mode: "control" | "treatment"): CompactionObservation {
@@ -17,10 +18,11 @@ function lane(mode: "control" | "treatment"): CompactionObservation {
     fixtureDigest: "same-fixture", taskId, initial, waiting, final,
     compactRequest: mode === "treatment" ? { requestId: "manual-compact", run: compact } : null,
     compactionEvents: mode === "treatment" ? [{ runId: compact.id, reason: "manual", sameSession: true, sequence: 3 }] : [],
-    prerequisite: { revisionId: `${mode}-prerequisite`, publishedAt: 18 },
+    prerequisite: { receiptId: `${mode}-prerequisite`, publishedAt: 18 },
     actions: [{ runId: waiting.id, kind: "request_prerequisite", at: 12 }, { runId: final.id, kind: "write_artifact", at: 22 }],
     artifact: { taskId, revisionId: `${mode}-artifact`, writtenByRunId: final.id,
-      body: JSON.stringify({ marker: fixture.retainedMarker, format: fixture.activeFormat, requirementRevisionId: requirementRevisionIds[mode] }) },
+      body: JSON.stringify({ marker: fixture.retainedMarker, format: fixture.activeFormat, releaseCode: fixture.releaseCode,
+        requirementRevisionId: requirementRevisionIds[mode] }) },
   };
 }
 
@@ -29,6 +31,14 @@ function pair() {
 }
 
 describe("paired Codex context compaction oracle", () => {
+  it("registers one explicit local Codex pair with a bounded run count", () => {
+    const cells = runnerMatrix.filter(cell => cell.suite.id === "context-compaction");
+    expect(cells).toHaveLength(1);
+    expect(cells[0]).toMatchObject({ id: "context-compaction.runner-codex.local.matched-continuations",
+      suite: { manualOnly: true, definitionMetadata: { maximumAttemptsPerCell: 1, providerTurns: 6, compactionOperations: 1 } },
+      task: { expectedRunCount: 7 } });
+  });
+
   it("accepts a continuing treatment and matched control with independently retained constraints", () => {
     const result = gradeContextCompactionPair(pair());
     expect(result.matchedPair).toBe(true);

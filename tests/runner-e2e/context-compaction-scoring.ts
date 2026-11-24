@@ -27,7 +27,7 @@ export interface CompactionObservation {
   final: SessionRun;
   compactRequest: { requestId: string; run: SessionRun } | null;
   compactionEvents: CompactionEvent[];
-  prerequisite: { revisionId: string; publishedAt: number } | null;
+  prerequisite: { receiptId: string; publishedAt: number } | null;
   actions: Array<{ runId: string; kind: "request_prerequisite" | "write_artifact"; at: number }>;
   artifact: { taskId: string; revisionId: string; writtenByRunId: string; body: string } | null;
 }
@@ -36,6 +36,7 @@ export interface CompactionFixtureRequirements {
   retainedMarker: string;
   supersededFormat: string;
   activeFormat: string;
+  releaseCode: string;
 }
 
 function outputFields(body: string) {
@@ -74,7 +75,7 @@ function gradeLane(lane: CompactionObservation, mode: "control" | "treatment", f
       && fields.requirementRevisionId === requirementRevisionId,
     supersededInstructionOmitted: Boolean(fixture.supersededFormat) && Boolean(artifact?.body)
       && !artifact!.body.includes(fixture.supersededFormat),
-    prerequisiteRespected: Boolean(prerequisite?.revisionId) && Boolean(prerequisite &&
+    prerequisiteRespected: Boolean(prerequisite?.receiptId) && fields.releaseCode === fixture.releaseCode && Boolean(prerequisite &&
       prerequisite.publishedAt >= waiting.finishedAt && prerequisite.publishedAt <= final.startedAt)
       && requests.length === 1 && requests[0]!.runId === waiting.id && requests[0]!.at >= waiting.startedAt
       && requests[0]!.at <= waiting.finishedAt
