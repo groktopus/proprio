@@ -8,7 +8,7 @@ import type {
   AttentionSeverity,
   AttentionSourceKind,
 } from "@groktopus/shared";
-import { Routes, Route } from "@/lib/router";
+import { Routes, Route, useLocation, useNavigate } from "@/lib/router";
 import { WhatNeedsMe } from "@/pages/WhatNeedsMe";
 import { DecisionQueuePage } from "@/pages/DecisionQueuePage";
 import { AttentionQueueRow } from "@/components/AttentionQueueRow";
@@ -28,6 +28,19 @@ const NOW = Date.parse("2026-08-02T15:00:00Z");
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 const iso = (ms: number) => new Date(ms).toISOString();
+
+function RouteProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const path = `${location.pathname}${location.search}${location.hash}`;
+  return <div><output data-testid="storybook-router-path">{path}</output>{location.pathname.includes("/issues/") ? <button type="button" onClick={() => navigate(-1)}>Back to Needs You</button> : null}</div>;
+}
+
+function SourceTaskJourneyFixture() {
+  const source = DESK_ITEMS.find(item => item.id === "review-1");
+  if (!source) return null;
+  return <div data-testid="source-task-journey" className="mt-4"><AttentionQueueRow item={source} companyId={companyId} expanded={false} onToggleExpand={() => {}} currentUserId={STORYBOOK_USER_ID} /></div>;
+}
 
 // --- fixture builders -------------------------------------------------------
 
@@ -474,8 +487,10 @@ type Story = StoryObj;
 export const TodaysDesk: Story = {
   render: () => (
     <PrimeDeskFixtures items={DESK_ITEMS}>
+      <RouteProbe />
       <div className="p-6">
         <WhatNeedsMe />
+        <SourceTaskJourneyFixture />
       </div>
     </PrimeDeskFixtures>
   ),
