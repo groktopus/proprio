@@ -92,6 +92,8 @@ jobs:
         run: node scripts/ci/run-security-regressions.mjs
       - name: Check durable-work workflow and lifecycle harness
         run: node --test scripts/ci/durable-work-acceptance.test.mjs scripts/ci/durable-work-policy.test.mjs scripts/ci/durable-work-release-evidence.test.mjs scripts/ci/write-durable-work-acceptance.test.mjs scripts/create-github-release.test.mjs scripts/__tests__/e2e-update-migrations.test.mjs
+      - name: Test the task readiness report
+        run: node --test tests/perf/issue-detail/task-open-report.test.mjs
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
@@ -491,12 +493,16 @@ jobs:
           });
           JS
           pnpm exec vitest run ui/src/pages/TeamCatalog.test.tsx
+      - name: Check Agent Detail header
+        run: pnpm exec vitest run --maxWorkers 1 ui/src/pages/AgentDetail.header.test.tsx
       - name: Typecheck server and build affected packages
         run: |
           node scripts/link-plugin-dev-sdk.mjs
           pnpm --filter @groktopus/server typecheck
           pnpm --filter @groktopus/hermes-proprio-adapter build
           node scripts/run-tsc.mjs -p server/tsconfig.build.json
+      - name: Typecheck the board UI
+        run: pnpm --filter @groktopus/ui typecheck
 
   smoke:
     if: ${{ always() && github.repository == 'groktopus/proprio' }}

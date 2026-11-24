@@ -15,6 +15,7 @@ import { useAttentionBadge, useAttentionCloseActions, useAttentionEveryoneView, 
 import { ATTENTION_VIEW_PARAM, parseAttentionView } from "../lib/attention-views";
 import { buildCompanyUserLabelMap } from "../lib/company-members";
 import { AttentionReceiptList, AttentionUnassignedBanner, AttentionViewSwitch } from "../components/AttentionViews";
+import { AttentionTasksHint } from "../components/AttentionTasksHint";
 import { AttentionSnoozedGroup, AttentionStaleGroup } from "../components/AttentionCloseMenu";
 import { DecisionHistoryPanel } from "../components/DecisionHistoryPanel";
 import { Button } from "../components/ui/button";
@@ -171,7 +172,7 @@ function ClassicWhatNeedsMe() {
   );
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Decisions" }]);
+    setBreadcrumbs([{ label: "Needs You" }]);
   }, [setBreadcrumbs]);
 
   // Re-hydrate per-company preferences when the company changes.
@@ -614,12 +615,15 @@ function ClassicWhatNeedsMe() {
       </Sheet>
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-xl font-bold">Decisions</h1>
+          <h1 className="text-xl font-bold">Needs You</h1>
           <Button variant="ghost" size="sm" onClick={() => setHistoryOpen(true)}>
             <History className="h-4 w-4" />
             Decision history
           </Button>
         </div>
+        <p className="text-sm text-muted-foreground">
+          <AttentionTasksHint />
+        </p>
         <AttentionViewSwitch value={view} counts={viewCounts} onChange={setView} everyone={everyone} />
         {view === "mine" ? <AttentionUnassignedBanner count={viewCounts.unassigned} onOpen={() => setView("unassigned")} /> : null}
         <DecisionsToolbar
