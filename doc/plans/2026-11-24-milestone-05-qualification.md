@@ -16,6 +16,8 @@ The referenced work was open on November 24, 2026. Check each merge and its exac
 
 Focused Node 24 tests used isolated PostgreSQL. The reconstruction test exercised the authenticated controller with a process adapter and synthetic MCP target. The reconstruction, checkpointed export, older restore, and direct and approved dispatch tests passed with the audit and provenance changes combined locally. The fixture observed one approved effect, zero denied effects, and an interrupted response with an effect visible in the synthetic target ledger. Repeat the applicable checks through the same entry points on the integrated candidate. Record commands, revision, environment, results and links. Required candidate CI typecheck, tests and build must pass. Record the evidence separately for each runner, connector and recovery mode covered by the release. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
 
+The trace restore rehearsal also passed on Node 24.22.1 with an isolated PostgreSQL instance and loopback MinIO `RELEASE.2025-09-07T16-13-09Z`. The test restored a database row with its old local trace filename, created its migrated object journal, and applied the deletion manifest through the CLI. It verified removal of the local bytes and active ciphertext, a durable database tombstone, and rejection by the object journal. The deployment's object-version retention and candidate restore still require verification. [Restore rehearsal](https://github.com/groktopus/proprio/pull/361#issuecomment-7145834381)
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
@@ -25,7 +27,9 @@ The release decision depends on the following checks.
 
 ## Lock and provenance hold
 
-The reviewed source-SDK provenance report records a lock identity that does not match the dependency lock currently present on `main` after the pre-existing merged [#125 change](https://github.com/groktopus/proprio/pull/125). The report remains evidence for the revision it reviewed. Before trusted qualification of source-SDK provenance work (including #358 and #363), a maintainer must approve a lock refresh and the affected provenance checks must be rerun against the refreshed, exact candidate.
+The reporting lock guard rejects the lock on `main` at `6e6ebf51`. The committed lock SHA-256 is `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`, while the report policy lists `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e` for both input and output. The intervening change pins `oxlint@1.94.0` and its platform packages. [Dependency change](https://github.com/groktopus/proprio/pull/125)
+
+The release maintainer must review the lock change and approve the reporting lock refresh. Then regenerate the public input pins, run the trusted SDK checks for #358 and #363, and record the results for the exact candidate. [Runner operations](https://github.com/groktopus/proprio/blob/6e6ebf51cb0cf214375523171f80f19d14da073f/tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
 
 ## Hold, recovery and resume
 
