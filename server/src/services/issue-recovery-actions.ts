@@ -40,6 +40,38 @@ function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
   );
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** Case offer details have a stricter visibility boundary than the task card.
+ * Keep the full receipt in durable storage, but only project generic task-local
+ * gap counts into the task recovery read model. */
+function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<string, unknown>; nextAction: string } {
+  const evidence = { ...row.evidence };
+  const receipt = asRecord(evidence.caseHandoffCompletion);
+  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") {
+    return { evidence, nextAction: readModelNextAction(row) };
+  }
+  delete evidence.caseHandoffCompletion;
+  const caseHandoff = asRecord(receipt.caseHandoff);
+  const assessment = asRecord(receipt.assessment);
+  const criteria = Array.isArray(assessment.criteriaNeedingWork)
+    ? assessment.criteriaNeedingWork.map(asRecord) : [];
+  const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
+  const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
+  const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
+  const prerequisiteCount = Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
+  evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: prerequisiteCount > 0 ? "review_in_case" : "none",
+    unmetCriterionCount, evidenceIssueCount };
+  const guidance = [
+    prerequisiteCount > 0 ? "Review the prerequisite checklist in the authorized Case view." : null,
+    unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
+    evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
+  ].filter((item): item is string => Boolean(item));
+  return { evidence, nextAction: guidance.length ? `Review the task completion assessment. ${guidance.join(" ")}` : "Review the task completion assessment." };
+}
+
 export type UpsertIssueRecoveryActionInput = {
   companyId: string;
   sourceIssueId: string;
@@ -100,6 +132,7 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
 }
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
+  const recovery = taskRecoveryEvidence(row);
   return {
     id: row.id,
     companyId: row.companyId,
@@ -114,8 +147,8 @@ function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
     returnOwnerAgentId: row.returnOwnerAgentId,
     cause: row.cause,
     fingerprint: row.fingerprint,
-    evidence: row.evidence,
-    nextAction: readModelNextAction(row),
+    evidence: recovery.evidence,
+    nextAction: recovery.nextAction,
     wakePolicy: row.wakePolicy,
     monitorPolicy: row.monitorPolicy,
     attemptCount: row.attemptCount,

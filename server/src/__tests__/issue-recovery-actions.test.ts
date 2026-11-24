@@ -41,7 +41,7 @@ import { issueRoutes } from "../routes/issues.js";
 import { buildProprioWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { deliverReconciledExecutions, markExecutionReconciliation } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
-import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
+import { issueRecoveryActionReadModel, issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { issueService } from "../services/issues.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
@@ -92,6 +92,32 @@ function makeRecoveryActionRow(overrides: Record<string, unknown> = {}) {
 const LATEST_RUN_TIMES = { startedAt: new Date(), createdAt: new Date() };
 
 describe("issueRecoveryActionService", () => {
+  it("hides Case-scoped completion receipts from task recovery read models", () => {
+    const row = makeRecoveryActionRow({ nextAction: "Check Confirm deployment access.", evidence: {
+      runId: "task-run", decisionId: "task-decision",
+      caseHandoffCompletion: {
+        schema: "proprio.case-handoff-completion-recovery.v1",
+        caseHandoff: { id: "case-secret-id", requirementsDigest: "secret-digest", prerequisites: ["Confirm deployment access"] },
+        assessment: { id: "assessment-secret-id", criteriaNeedingWork: [
+          { criterionId: "tests", requirement: "Run the test suite", reasonCode: "criterion_evidence_missing" },
+          { criterionId: "artifact", requirement: "Publish the artifact", reasonCode: "criterion_claim_missing" },
+        ] },
+      },
+    } });
+    const model = issueRecoveryActionReadModel(row as never);
+    const serialized = JSON.stringify(model);
+    expect(serialized).not.toContain("case-secret-id");
+    expect(serialized).not.toContain("secret-digest");
+    expect(serialized).not.toContain("Confirm deployment access");
+    expect(serialized).not.toContain("assessment-secret-id");
+    expect(model.evidence).not.toHaveProperty("caseHandoffCompletion");
+    expect(model.evidence.completionRecovery).toEqual({ schema: "proprio.task-completion-recovery.v1",
+      prerequisiteChecklist: "review_in_case", unmetCriterionCount: 1, evidenceIssueCount: 1 });
+    expect(model.nextAction).toContain("Review the prerequisite checklist in the authorized Case view");
+    expect(model.nextAction).toContain("Complete 1 unmet task criterion");
+    expect(model.nextAction).toContain("Add or correct evidence for 1 task criterion");
+  });
+
   it.each(["unrelated unique constraint", "other SQLSTATE", "cyclic cause"])("does not retry %s errors", async kind => {
     const constraint = "issue_recovery_actions_active_source_uq";
     const error: Error & { cause?: unknown } = new Error("Wrapped database failure");
