@@ -41,14 +41,14 @@ jobs:
           - lane: database
             args: --mode general --group general-workspaces-c
     env:
-      PROPRIO_WORKSPACE_REGRESSION_DIR: ${{ runner.temp }}/workspace-regression
       PROPRIO_VITEST_RETRY: '1'
       PROPRIO_CI_PROFILE: 'true'
-      PROPRIO_CI_PROFILE_DIR: ${{ runner.temp }}/workspace-regression/timings
       PROPRIO_CI_PROFILE_JOB: ${{ matrix.lane }}
     steps:
       - name: Verify the default-branch event
         run: |
+          printf 'PROPRIO_WORKSPACE_REGRESSION_DIR=%s/workspace-regression\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'PROPRIO_CI_PROFILE_DIR=%s/workspace-regression/timings\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           test "$GITHUB_REPOSITORY" = groktopus/proprio
           test "$GITHUB_REF" = refs/heads/main
       - name: Check out the event SHA
@@ -105,6 +105,6 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: workspace-regression-${{ matrix.lane }}-${{ github.run_attempt }}
-          path: ${{ env.PROPRIO_WORKSPACE_REGRESSION_DIR }}
+          path: ${{ runner.temp }}/workspace-regression
           if-no-files-found: error
           retention-days: 30
