@@ -8,7 +8,12 @@ import { setTimeout } from "node:timers/promises";
 import { makeDirectoryTreeRemovable } from "../../runner-e2e/directory-cleanup";
 import { gradeMixedHandoff } from "./mixed-handoff-evidence";
 
-for (const restart of [false, true]) test(`a legacy lead hands the same Case to a native builder and legacy verifier${restart ? " after controller restart" : ""}`, async ({ page, request }, info) => {
+for (const scenario of [
+  { restart: false, revokeBuilder: false },
+  { restart: true, revokeBuilder: false },
+  { restart: false, revokeBuilder: true },
+]) test(`a legacy lead hands the same Case to a native builder and legacy verifier${scenario.restart ? " after controller restart" : ""}${scenario.revokeBuilder ? " after builder authority is restored" : ""}`, async ({ page, request }, info) => {
+  const { restart, revokeBuilder } = scenario;
   const repo = resolve(import.meta.dirname, "../../..");
   const fixtureDir = resolve(import.meta.dirname, "../fixtures");
   const scratch = info.outputPath("mixed-handoff-fixture");
@@ -105,6 +110,16 @@ for (const restart of [false, true]) test(`a legacy lead hands the same Case to 
     expect(outgoing.staleWriteCode).toBe("case_handoff_run_yielded");
     expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
     expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ title, assigneeAgentId: lead.id });
+    if (revokeBuilder) {
+      const builderState = await api(`/agents/${builder.id}`);
+      await api(`/agents/${builder.id}/permissions`, "PATCH", {
+        canCreateAgents: builderState.permissions?.canCreateAgents ?? false,
+        canAssignTasks: builderState.permissions?.canAssignTasks ?? false,
+        canCreateSkills: builderState.permissions?.canCreateSkills ?? true,
+        trustPreset: builderState.permissions?.trustPreset ?? "standard",
+        authorizationPolicy: { protectedAgent: { blockAssignment: true } },
+      });
+    }
     await writeFile(releaseFile, "release", { flag: "wx" });
 
     const handoffPath = `/cases/${caseId}/handoffs?limit=20`;
@@ -130,9 +145,33 @@ for (const restart of [false, true]) test(`a legacy lead hands the same Case to 
       restartEvidence = { stoppedAt, readyAt, handoffId: outgoing.handoffId, runId: outgoing.runId };
     }
 
+    if (revokeBuilder) {
+      await expect.poll(async () => {
+        const ledger = await api(handoffPath);
+        const items = Array.isArray(ledger) ? ledger : ledger.items ?? ledger.handoffs;
+        return items.find((handoff: { id: string }) => handoff.id === outgoing.handoffId);
+      }, { timeout: 45_000 }).toMatchObject({ state: "awaiting_release", lastErrorCode: "access_or_admission_blocked" });
+      expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
+      expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ status: "in_progress", assigneeAgentId: lead.id });
+      const absentResult = await request.get(`${base}/api/issues/${taskId}/documents/result`);
+      expect(absentResult.status()).toBe(404);
+
+      const builderState = await api(`/agents/${builder.id}`);
+      await api(`/agents/${builder.id}/permissions`, "PATCH", {
+        canCreateAgents: builderState.permissions?.canCreateAgents ?? false,
+        canAssignTasks: builderState.permissions?.canAssignTasks ?? false,
+        canCreateSkills: builderState.permissions?.canCreateSkills ?? true,
+        trustPreset: builderState.permissions?.trustPreset ?? "standard",
+        authorizationPolicy: {},
+      });
+    }
+
     await expect.poll(async () => (await api(`/issues/${taskId}?view=core`)).status, { timeout: 90_000 }).toBe("done");
     await expect.poll(async () => (await api(runsPath)).map((run: { status: string }) => run.status), { timeout: 25_000 })
       .toEqual(["succeeded", "succeeded", "succeeded"]);
+    if (revokeBuilder) {
+      expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id, builder.id, verifier.id]);
+    }
     const task = await api(`/issues/${taskId}?view=core`);
     const caseRecord = await api(`/cases/${caseId}`);
     const ledger = await api(`/cases/${caseId}/handoffs?limit=20`);
