@@ -1,3 +1,6 @@
+import { z } from "zod";
+import type { providerTraceStore } from "./provider-trace-store.js";
+
 export interface RunEvidenceDeletionRecord {
   traceId: string;
   runId: string;
@@ -5,15 +8,20 @@ export interface RunEvidenceDeletionRecord {
   deletedAt: string;
 }
 
-export interface RunEvidenceDeletionWindow {
+interface RunEvidenceDeletionWindow {
   recoveryPoint: string;
   coversThrough: string;
 }
 
-export interface RestoreTraceStore {
-  reconcileDeletion(input: Omit<RunEvidenceDeletionRecord, "deletedAt"> & { deletedAt: Date }): Promise<{
-    status: "cleaned" | "missing" | "mismatch";
-  }>;
+type RestoreTraceStore = Pick<ReturnType<typeof providerTraceStore>, "reconcileDeletion">;
+
+const timestamp = z.iso.datetime({ offset: true });
+
+function timestampMicros(value: unknown) {
+  if (typeof value !== "string" || !timestamp.safeParse(value).success) return NaN;
+  const fraction = value.match(/\.(\d+)/)?.[1] ?? "";
+  if (fraction.length > 6) return NaN;
+  return Date.parse(value) * 1_000 + Number(fraction.padEnd(6, "0").slice(3));
 }
 
 export function validateRunEvidenceDeletionRecords(
@@ -21,22 +29,23 @@ export function validateRunEvidenceDeletionRecords(
   window?: RunEvidenceDeletionWindow,
 ) {
   const seen = new Set<string>();
-  const recoveryPointMs = window ? Date.parse(window.recoveryPoint) : 0;
-  const coversThroughMs = window ? Date.parse(window.coversThrough) : 0;
-  if (window && (!Number.isFinite(recoveryPointMs) || !Number.isFinite(coversThroughMs) || coversThroughMs < recoveryPointMs)) {
+  const recoveryPoint = window ? timestampMicros(window.recoveryPoint) : 0;
+  const coversThrough = window ? timestampMicros(window.coversThrough) : 0;
+  if (window && (!Number.isFinite(recoveryPoint) || !Number.isFinite(coversThrough) || coversThrough < recoveryPoint)) {
     throw new Error("invalid_run_evidence_deletion_window");
   }
   for (const record of records) {
-    const deletedAtMs = record && typeof record.deletedAt === "string" ? Date.parse(record.deletedAt) : NaN;
+    const deletedAt = timestampMicros(record?.deletedAt);
     if (!record || !isUuid(record.traceId) || !isUuid(record.runId) || !isUuid(record.companyId)
-      || typeof record.deletedAt !== "string" || !Number.isFinite(deletedAtMs)) {
+      || typeof record.deletedAt !== "string" || !Number.isFinite(deletedAt)) {
       throw new Error("invalid_run_evidence_deletion_record");
     }
-    if (window && (deletedAtMs <= recoveryPointMs || deletedAtMs > coversThroughMs)) {
+    if (window && (deletedAt <= recoveryPoint || deletedAt > coversThrough)) {
       throw new Error("run_evidence_deletion_outside_manifest_window");
     }
-    if (seen.has(record.traceId)) throw new Error("duplicate_run_evidence_deletion_record");
-    seen.add(record.traceId);
+    const traceId = record.traceId.toLowerCase();
+    if (seen.has(traceId)) throw new Error("duplicate_run_evidence_deletion_record");
+    seen.add(traceId);
   }
 }
 
@@ -53,18 +62,25 @@ export async function reconcileRunEvidenceDeletions(
   validateRunEvidenceDeletionRecords(records);
   const result: {
     reconciled: string[];
-    reconciliationPending: Array<{ traceId: string; error: "reconciliation_failed" }>;
+    reconciliationPending: Array<{ traceId: string; error: "reconciliation_failed" | "cleanup_grace_period" | "object_cleanup_unconfirmed" }>;
     missing: string[];
     mismatched: string[];
   } = { reconciled: [], reconciliationPending: [], missing: [], mismatched: [] };
   for (const record of records) {
+    const traceId = record.traceId.toLowerCase();
     try {
-      const status = await traces.reconcileDeletion({ ...record, deletedAt: new Date(record.deletedAt) });
-      if (status.status === "cleaned") result.reconciled.push(record.traceId);
-      else if (status.status === "missing") result.missing.push(record.traceId);
-      else result.mismatched.push(record.traceId);
+      const status = await traces.reconcileDeletion({
+        traceId,
+        runId: record.runId.toLowerCase(),
+        companyId: record.companyId.toLowerCase(),
+        deletedAt: new Date(record.deletedAt),
+      });
+      if (status.status === "cleaned") result.reconciled.push(traceId);
+      else if (status.status === "missing") result.missing.push(traceId);
+      else if (status.status === "mismatch") result.mismatched.push(traceId);
+      else result.reconciliationPending.push({ traceId, error: status.reason });
     } catch {
-      result.reconciliationPending.push({ traceId: record.traceId, error: "reconciliation_failed" });
+      result.reconciliationPending.push({ traceId, error: "reconciliation_failed" });
     }
   }
   return result;

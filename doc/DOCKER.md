@@ -226,8 +226,21 @@ services:
   "${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
     -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
     < "$backup_dir/proprio.tar.gz"
-  "${quick_restore[@]}" up -d --wait
 )
+```
+
+Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
+before starting `proprio` if deletions followed the recovery point. Run
+PostgreSQL alone on the restored data in a one-off Compose container
+using the matching embedded PostgreSQL binaries and the restored instance
+configuration. Give that container the restored `/proprio` mount and
+mount the retained manifest read-only. Run the reconciliation command
+there against its loopback database, verify the results, and stop
+PostgreSQL before starting the app.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml up -d --wait
 ```
 
 #### Separate PostgreSQL full stack
@@ -272,8 +285,27 @@ described above. Keep the signing values and master key from the backup.
   "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
     -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
     < "$backup_dir/proprio.tar.gz"
-  "${full_restore[@]}" up -d --wait
 )
+```
+
+Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
+before starting `server` if deletions followed the recovery point. Use
+a one-off `server` container so it inherits the restored `/proprio`
+volume, Compose network and database URL. Mount the retained manifest
+read-only and run the reconciliation command with the app entrypoint
+and the CLI command shown below. Only start the service after verification.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.yml -f docker/restore-only.yml \
+  run --rm --no-deps -T -v "$restore_manifest:/run/deletions.json:ro" server \
+  node --import ./server/node_modules/tsx/dist/loader.mjs \
+  server/scripts/reconcile-run-evidence-deletions.ts /run/deletions.json
+```
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.yml -f docker/restore-only.yml up -d --wait
 ```
 
 If a restore fails, use a fresh target for the next attempt. After either

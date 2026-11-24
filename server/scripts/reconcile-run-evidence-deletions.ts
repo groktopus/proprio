@@ -17,14 +17,14 @@ const manifest = parsed as {
   recoveryPoint?: unknown;
   coversThrough?: unknown;
   coverageComplete?: unknown;
+  coordinatedPayloadSnapshot?: unknown;
   source?: unknown;
   records?: unknown;
 };
 if (manifest.schema !== "proprio.run_evidence_deletions.v1" || !Array.isArray(manifest.records)
-  || typeof manifest.recoveryPoint !== "string" || !Number.isFinite(Date.parse(manifest.recoveryPoint))
-  || typeof manifest.coversThrough !== "string" || !Number.isFinite(Date.parse(manifest.coversThrough))
-  || Date.parse(manifest.coversThrough) < Date.parse(manifest.recoveryPoint)
-  || manifest.coverageComplete !== true || typeof manifest.source !== "string" || !manifest.source.trim()) {
+  || typeof manifest.recoveryPoint !== "string" || typeof manifest.coversThrough !== "string"
+  || manifest.coverageComplete !== true || manifest.coordinatedPayloadSnapshot !== true
+  || typeof manifest.source !== "string" || !manifest.source.trim()) {
   throw new Error("invalid_run_evidence_deletion_manifest");
 }
 const records = manifest.records as RunEvidenceDeletionRecord[];

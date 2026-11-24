@@ -1,18 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import {
+  agents,
+  companies,
   createDb,
+  heartbeatRuns,
+  providerTraceRecords,
   ensurePostgresDatabase,
   getEmbeddedPostgresTestSupport,
   runDatabaseBackup,
   runDatabaseRestore,
   startEmbeddedPostgresTestDatabase,
 } from "@groktopus/db";
+import { createProviderTraceObjectStore } from "../services/provider-trace-object-store.js";
 import { providerTraceStore } from "../services/provider-trace-store.js";
 
 const qualificationEnabled = process.env.PROPRIO_RUN_EVIDENCE_RESTORE_QUALIFICATION === "true";
@@ -26,7 +32,6 @@ integrationTest("reapplies a later deletion after restoring an older database an
   let sourceDb: ReturnType<typeof createDb> | undefined;
   let restoredDb: ReturnType<typeof createDb> | undefined;
   let sourceStoreDb: ReturnType<typeof createDb> | undefined;
-  let sourceDatabaseName: string | undefined;
   let targetDatabaseName: string | undefined;
   let adminUrl: URL | undefined;
   const originalTraceBasePath = process.env.PROVIDER_TRACE_BASE_PATH;
@@ -55,46 +60,24 @@ integrationTest("reapplies a later deletion after restoring an older database an
     source = await startEmbeddedPostgresTestDatabase("proprio-trace-delete-source-");
     adminUrl = new URL(source.connectionString);
     adminUrl.pathname = "/postgres";
-    sourceDatabaseName = `trace_restore_source_${randomUUID().replaceAll("-", "")}`;
     targetDatabaseName = `trace_restore_target_${randomUUID().replaceAll("-", "")}`;
-    await ensurePostgresDatabase(adminUrl.toString(), sourceDatabaseName);
     await ensurePostgresDatabase(adminUrl.toString(), targetDatabaseName);
-    const sourceDatabaseUrl = new URL(source.connectionString);
-    sourceDatabaseUrl.pathname = `/${sourceDatabaseName}`;
-    const sourceUrl = sourceDatabaseUrl.toString();
+    const sourceUrl = source.connectionString;
     const targetDatabaseUrl = new URL(source.connectionString);
     targetDatabaseUrl.pathname = `/${targetDatabaseName}`;
     const targetUrl = targetDatabaseUrl.toString();
 
     sourceDb = createDb(sourceUrl);
-    await sourceDb.$client.unsafe(`
-      CREATE TABLE companies (id uuid PRIMARY KEY, name text NOT NULL);
-      CREATE TABLE agents (id uuid PRIMARY KEY, company_id uuid NOT NULL REFERENCES companies(id), name text NOT NULL);
-      CREATE TABLE heartbeat_runs (
-        id uuid PRIMARY KEY, company_id uuid NOT NULL REFERENCES companies(id),
-        agent_id uuid NOT NULL REFERENCES agents(id), status text NOT NULL,
-        started_at timestamptz NOT NULL, finished_at timestamptz NOT NULL
-      );
-      CREATE TABLE provider_trace_records (
-        id uuid PRIMARY KEY, company_id uuid NOT NULL REFERENCES companies(id),
-        run_id uuid NOT NULL UNIQUE REFERENCES heartbeat_runs(id) ON DELETE CASCADE,
-        status text NOT NULL DEFAULT 'capturing', provider text NOT NULL, trace_ref text NOT NULL,
-        frame_count integer NOT NULL DEFAULT 0, byte_count bigint NOT NULL DEFAULT 0,
-        digest text, reason text, requested_by text NOT NULL, expires_at timestamptz NOT NULL,
-        deleted_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
-      );
-    `);
-    await sourceDb.$client.unsafe("INSERT INTO companies (id, name) VALUES ($1, $2)", [companyId, "restore deletion fixture"]);
-    await sourceDb.$client.unsafe("INSERT INTO agents (id, company_id, name) VALUES ($1, $2, $3)", [agentId, companyId, "fixture agent"]);
-    await sourceDb.$client.unsafe(
-      "INSERT INTO heartbeat_runs (id, company_id, agent_id, status, started_at, finished_at) VALUES ($1, $3, $4, 'succeeded', now(), now()), ($2, $3, $4, 'succeeded', now(), now())",
-      [deletedRunId, unrelatedRunId, companyId, agentId],
-    );
+    await sourceDb.insert(companies).values({ id: companyId, name: "Restore deletion fixture", issuePrefix: "TRACE" });
+    await sourceDb.insert(agents).values({ id: agentId, companyId, name: "Fixture agent" });
+    await sourceDb.insert(heartbeatRuns).values([deletedRunId, unrelatedRunId].map(id => ({
+      id, companyId, agentId, status: "succeeded", startedAt: new Date(), finishedAt: new Date(),
+    })));
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1_000);
-    await sourceDb.$client.unsafe(
-      "INSERT INTO provider_trace_records (id, company_id, run_id, status, provider, trace_ref, requested_by, expires_at) VALUES ($1, $3, $4, 'complete', 'codex', $6, 'restore-fixture', $8), ($2, $3, $5, 'complete', 'codex', $7, 'restore-fixture', $8)",
-      [deletedTraceId, unrelatedTraceId, companyId, deletedRunId, unrelatedRunId, deletedTraceRef, unrelatedTraceRef, expiresAt.toISOString()],
-    );
+    await sourceDb.insert(providerTraceRecords).values([
+      { id: deletedTraceId, runId: deletedRunId, traceRef: deletedTraceRef },
+      { id: unrelatedTraceId, runId: unrelatedRunId, traceRef: unrelatedTraceRef },
+    ].map(trace => ({ ...trace, companyId, status: "complete", provider: "codex", requestedBy: "restore-fixture", expiresAt })));
 
     writeFileSync(path.join(sourceStorage, deletedTraceRef), deletedBytes, { mode: 0o600 });
     writeFileSync(path.join(sourceStorage, unrelatedTraceRef), unrelatedBytes, { mode: 0o600 });
@@ -145,12 +128,13 @@ integrationTest("reapplies a later deletion after restoring an older database an
       recoveryPoint,
       coversThrough: deletedAt,
       coverageComplete: true,
+      coordinatedPayloadSnapshot: true,
       source: "isolated restore integration fixture",
       records: [{ traceId: deletedTraceId, runId: deletedRunId, companyId, deletedAt }],
     }, null, 2));
 
     const loader = path.join(repoRoot, "server/node_modules/tsx/dist/loader.mjs");
-    const command = spawnSync(process.execPath, [
+    const reconcile = () => spawnSync(process.execPath, [
       "--import", loader,
       "server/scripts/reconcile-run-evidence-deletions.ts",
       manifestPath,
@@ -168,6 +152,31 @@ integrationTest("reapplies a later deletion after restoring an older database an
         PROPRIO_HOME: path.join(root, "proprio-home"),
       },
     });
+    const restoredPayload = path.join(restoredStorage, deletedTraceRef);
+    const heldPayload = path.join(root, "held-payload");
+    renameSync(restoredPayload, heldPayload);
+    mkdirSync(restoredPayload);
+    const pending = reconcile();
+    expect(pending.status, pending.stderr).toBe(1);
+    expect(JSON.parse(pending.stdout)).toMatchObject({
+      reconciled: [],
+      reconciliationPending: [{ traceId: deletedTraceId, error: "reconciliation_failed" }],
+    });
+    restoredDb = createDb(targetUrl);
+    const pendingStore = providerTraceStore(restoredDb);
+    await expect(pendingStore.getByRun(deletedRunId, companyId)).resolves.toMatchObject({
+      status: "deleted", traceRef: deletedTraceRef, deletedAt: expect.any(Date),
+    });
+    await expect(pendingStore.inspect(deletedRunId, companyId)).resolves.toEqual({ trace: null, entries: [] });
+    await expect(pendingStore.prepare({
+      runId: deletedRunId, companyId, provider: "codex", requestedBy: "restore-fixture",
+    })).rejects.toThrow("provider_trace_unavailable");
+    await restoredDb.$client.end();
+    restoredDb = undefined;
+    rmSync(restoredPayload, { recursive: true });
+    renameSync(heldPayload, restoredPayload);
+
+    const command = reconcile();
     if (command.error) {
       throw new Error(`Reconciliation command failed: ${command.error.message}\nstdout:\n${command.stdout}\nstderr:\n${command.stderr}`);
     }
@@ -194,6 +203,55 @@ integrationTest("reapplies a later deletion after restoring an older database an
       trace: { id: unrelatedTraceId, deletedAt: null },
       entries: [{ status: "unrelated-trace-fixture" }],
     });
+
+    // A second restore ordering leaves the local filename in PostgreSQL
+    // while the restored object store contains its later imported copy.
+    const migratedRef = `s3-segments-v1:${companyId}/${unrelatedRunId}/${unrelatedTraceRef}`;
+    const migratedPath = path.join(restoredStorage, unrelatedTraceRef);
+    const objects = new Map<string, { bytes: Buffer; etag: string }>();
+    const previousMasterKey = process.env.PROPRIO_SECRETS_MASTER_KEY;
+    process.env.PROPRIO_SECRETS_MASTER_KEY = "e".repeat(64);
+    try {
+      const journal = createProviderTraceObjectStore({
+        id: "s3",
+        async getObject({ objectKey }) {
+          const object = objects.get(objectKey);
+          if (!object) throw Object.assign(new Error("Missing object"), { name: "NoSuchKey" });
+          return { stream: Readable.from([object.bytes]), etag: object.etag, contentLength: object.bytes.length };
+        },
+        async putObject() { throw new Error("Unexpected unconditional write"); },
+        async putObjectConditional({ objectKey, body, ifMatch, ifNoneMatch }) {
+          const previous = objects.get(objectKey);
+          if (ifNoneMatch ? previous : previous?.etag !== ifMatch) {
+            throw Object.assign(new Error("Object changed"), { name: "PreconditionFailed" });
+          }
+          const chunks: Buffer[] = [];
+          if (Buffer.isBuffer(body)) chunks.push(body);
+          else for await (const chunk of body) chunks.push(Buffer.from(chunk));
+          const etag = randomUUID();
+          objects.set(objectKey, { bytes: Buffer.concat(chunks), etag });
+          return { etag };
+        },
+        async headObject({ objectKey }) { return { exists: objects.has(objectKey) }; },
+        async deleteObject({ objectKey }) { objects.delete(objectKey); },
+        async listObjects({ prefix }) { return { keys: [...objects.keys()].filter(key => key.startsWith(prefix)) }; },
+      });
+      await journal.open(migratedRef, migratedPath, async () => undefined);
+      writeFileSync(migratedPath, unrelatedBytes);
+      await journal.finish(migratedRef);
+      await expect(journal.read(migratedRef)).resolves.toEqual(unrelatedBytes);
+      const migratedStore = providerTraceStore(restoredDb, { objectStore: journal });
+      await expect(migratedStore.reconcileDeletion({
+        traceId: unrelatedTraceId, runId: unrelatedRunId, companyId, deletedAt: new Date(),
+      })).resolves.toEqual({ status: "cleaned" });
+      await expect(journal.read(migratedRef)).rejects.toThrow("provider_trace_payload_unavailable");
+      await expect(journal.open(migratedRef, migratedPath, async () => undefined)).rejects.toThrow();
+      expect([...objects.keys()].every(key => key.endsWith("/head.json"))).toBe(true);
+      expect(existsSync(migratedPath)).toBe(false);
+    } finally {
+      if (previousMasterKey === undefined) delete process.env.PROPRIO_SECRETS_MASTER_KEY;
+      else process.env.PROPRIO_SECRETS_MASTER_KEY = previousMasterKey;
+    }
   } finally {
     try {
       await sourceStoreDb?.$client.end();
@@ -201,12 +259,10 @@ integrationTest("reapplies a later deletion after restoring an older database an
       await restoredDb?.$client.end();
     } finally {
       try {
-        if (adminUrl && (sourceDatabaseName || targetDatabaseName)) {
+        if (adminUrl && targetDatabaseName) {
           const adminDb = createDb(adminUrl.toString());
           try {
-            for (const name of [sourceDatabaseName, targetDatabaseName]) {
-              if (name) await adminDb.$client.unsafe(`DROP DATABASE IF EXISTS "${name}"`);
-            }
+            await adminDb.$client.unsafe(`DROP DATABASE IF EXISTS "${targetDatabaseName}"`);
           } finally {
             await adminDb.$client.end();
           }

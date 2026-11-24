@@ -26,7 +26,7 @@ describe("run evidence restore deletion reconciliation", () => {
     });
     const store = { reconcileDeletion };
     const record: RunEvidenceDeletionRecord = {
-      traceId: deletedTraceId, runId: deletedRunId, companyId, deletedAt: "2026-11-23T13:00:00.000Z",
+      traceId: deletedTraceId, runId: deletedRunId, companyId: companyId.toUpperCase(), deletedAt: "2026-11-23T13:00:00.000Z",
     };
 
     await expect(reconcileRunEvidenceDeletions(store, [record])).resolves.toEqual({
@@ -38,7 +38,7 @@ describe("run evidence restore deletion reconciliation", () => {
     expect(deleted?.payload).toBe("private");
     expect(unrelated).toMatchObject({ deletedAt: null, payload: "keep" });
     expect(reconcileDeletion).toHaveBeenCalledOnce();
-    expect(reconcileDeletion).toHaveBeenCalledWith({ ...record, deletedAt: new Date(record.deletedAt) });
+    expect(reconcileDeletion).toHaveBeenCalledWith({ ...record, companyId, deletedAt: new Date(record.deletedAt) });
   });
 
   it("reports target-specific missing, mismatched, and cleanup-pending records", async () => {
@@ -73,5 +73,12 @@ describe("run evidence restore deletion reconciliation", () => {
     expect(() => validateRunEvidenceDeletionRecords([{ ...valid, traceId: "not-a-uuid" }], window)).toThrow("invalid_run_evidence_deletion_record");
     expect(() => validateRunEvidenceDeletionRecords([{ ...valid, deletedAt: window.recoveryPoint }], window)).toThrow("run_evidence_deletion_outside_manifest_window");
     expect(() => validateRunEvidenceDeletionRecords([{ ...valid, deletedAt: "2026-11-23T15:00:00.000Z" }], window)).toThrow("run_evidence_deletion_outside_manifest_window");
+    const preciseWindow = { recoveryPoint: "2026-11-23T12:00:00.123456Z", coversThrough: "2026-11-23T12:00:00.123789Z" };
+    expect(() => validateRunEvidenceDeletionRecords([{ ...valid, deletedAt: "2026-11-23T12:00:00.123457Z" }], preciseWindow)).not.toThrow();
+    expect(() => validateRunEvidenceDeletionRecords([{ ...valid, deletedAt: "2026-11-23T12:00:00.123790Z" }], preciseWindow))
+      .toThrow("run_evidence_deletion_outside_manifest_window");
+    const alphabeticTrace = { ...valid, traceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+    expect(() => validateRunEvidenceDeletionRecords([alphabeticTrace, { ...alphabeticTrace, traceId: alphabeticTrace.traceId.toUpperCase() }], window))
+      .toThrow("duplicate_run_evidence_deletion_record");
   });
 });

@@ -220,6 +220,7 @@ For an isolated restore, convert the external audit export into this manifest:
   "recoveryPoint": "2026-11-23T12:00:00.000Z",
   "coversThrough": "2026-11-23T13:30:00.000Z",
   "coverageComplete": true,
+  "coordinatedPayloadSnapshot": true,
   "source": "deployment audit sink export 2026-11-23T13:30:00Z",
   "records": [
     {
@@ -237,22 +238,36 @@ secrets, and isolated restored database configured, run
 `pnpm --filter @groktopus/server exec tsx scripts/reconcile-run-evidence-deletions.ts <manifest.json>`
 from the repository root, setting `DATABASE_URL` to that restored database. The
 manifest must identify the exact database recovery point, the deletion feed
-cutoff, and the external source, and assert complete coverage. The deployment
-operator verifies those claims against the backup timestamp and audit sink. If
-the source instance can still record deletions during recovery, export and apply
-the final interval again immediately before cutover; the operation is
-idempotent. Keep the target isolated until the feed is confirmed current through
-the cutover boundary.
+cutoff and the external source. Set `coverageComplete` after verifying the
+retained feed for that interval. Set `coordinatedPayloadSnapshot` only after
+verifying that the restored payload copy cannot reintroduce evidence deleted
+before the database recovery point. An older sidecar snapshot can contain raw
+bytes whose restored database row has already lost the original filename.
+Use a coordinated snapshot or inventory and clean those older payloads before
+running the command. Include all storage locations used by the restored
+instance. If a former object store is outside the configured profile, account
+for its active copies separately.
+
+Stop source deletion writes and wait for outstanding deletions and audit
+delivery to settle before exporting the final interval. Keep the restored
+target isolated until the command and the storage checks pass.
 
 The command processes each trace independently through the trace store. A
 successful result means the restored trace is tombstoned and its active payload
 namespace was removed. It does not run global retention cleanup. A
 `reconciliationPending` entry identifies a trace whose operation did not
-complete. The tombstone transaction may or may not have committed; inspect that
-exact restored row, keep the instance isolated, and retry the manifest. The
+complete. A `cleanup_grace_period` result can be retried after outstanding
+object writers settle. For `object_cleanup_unconfirmed`, check the configured
+storage profile, encryption key and access before retrying. For other failures,
+inspect the exact restored row to verify the tombstone, then check local
+storage and database access. Keep the instance isolated while an obligation
+is pending. When the destination uses S3, the command also fences and cleans
+the exact object journal location that a local trace could have migrated to. The
 command exits unsuccessfully if any pending, missing, or mismatched records
 remain. It validates UUID identities and requires each deletion timestamp to be
-after `recoveryPoint` and at or before `coversThrough`.
+after `recoveryPoint` and at or before `coversThrough`. Use ISO timestamps
+with an offset and up to six fractional digits so the command can compare
+PostgreSQL timestamps at microsecond precision.
 
 `missing` means the restored database has no trace row for the recorded run;
 this is not counted as success. A trace can have been created after the backup
@@ -263,7 +278,9 @@ procedure to any located copy and account separately for retained versions and
 backups. The command cannot create a tombstone without a matching restored row,
 so do not claim CLI reconciliation succeeded for this case. If the mapping,
 payload copies, or retention state cannot be proved, keep recovery isolated and
-leave the obligation unresolved. A mismatched row likewise requires operator
+leave the obligation unresolved. If the restored run exists without a trace row,
+also obtain durable proof that the run cannot resume capture. A storage
+inventory alone leaves that obligation open. A mismatched row likewise requires operator
 investigation rather than an inferred success.
 
 After a clean command result, verify deleted traces are unreadable, recapture is
