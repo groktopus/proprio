@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeManagedShim, flipCurrentAtomic, initializeInstallStore, payloadPathFor, readInstallManifest, resolveInstallStorePaths, withInstallStoreLock, writeInstallManifestAtomic, type InstallManifest, type InstallRecord } from "../install-store.js";
 import type { CommandRunner } from "../commands/install.js";
+import { createGitCheckoutRunCommand } from "./fixtures/managed-git-checkout.js";
 import { compareVersions, detectInstallMode, resolveUpdateRequest, rollbackManagedInstall, updateCommand } from "../commands/update.js";
 
 let root: string;
@@ -331,7 +332,7 @@ describe("update command", () => {
     const { paths, currentSha, targetSha, targetPayload } = fixture;
     const confirm = vi.fn(async () => false);
     const backup = vi.fn();
-    await expect(updateCommand({}, { ...fixture, confirm, backup })).rejects.toThrow("Git update cancelled");
+    await expect(updateCommand({}, { ...fixture, confirm, backup, hasInstanceData: () => true })).rejects.toThrow("Git update cancelled");
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining(targetSha.slice(0, 12)));
     expect(backup).not.toHaveBeenCalled();
     expect(fs.existsSync(targetPayload)).toBe(false);
@@ -339,20 +340,35 @@ describe("update command", () => {
   });
 
   it("backs up before activation, retains both Git payloads, and permits rollback", async () => {
-    const fixture = gitUpdateFixture();
-    const { paths, currentSha, targetSha, currentPayload, targetPayload, runCommand } = fixture;
+    const fixture = gitUpdateFixture(false);
+    const { paths, currentSha, targetSha, currentPayload, targetPayload } = fixture;
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "corepack"), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    vi.stubEnv("PATH", bin);
+
+    const gitCheckout = createGitCheckoutRunCommand(targetSha);
     const backup = vi.fn(async () => {
       expect(readInstallManifest(paths)?.sha).toBe(currentSha);
       expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
-      expect(runCommand).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(targetPayload)).toBe(false);
+    });
+    const runCommand = vi.fn<CommandRunner>(async (file, args, options) => {
+      if (file === "curl" && args.includes("--output")) {
+        expect(backup).toHaveBeenCalledOnce();
+        expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(currentPayload));
+      }
+      return gitCheckout(file, args, options);
     });
     const restartActiveService = vi.fn(async () => {
       expect(readInstallManifest(paths)?.sha).toBe(targetSha);
+      expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(targetPayload));
       return true;
     });
-    await updateCommand({ yes: true }, { ...fixture, backup, restartActiveService, hasInstanceData: () => true });
+    await updateCommand({ yes: true }, { ...fixture, runCommand, backup, restartActiveService, hasInstanceData: () => true });
     expect(backup).toHaveBeenCalledOnce();
-    expect(restartActiveService).toHaveBeenCalledWith("2.0.0", { expectedCommit: targetSha });
+    expect(runCommand.mock.calls.some(([file, args]) => file === "curl" && args.includes("--output"))).toBe(true);
+    expect(restartActiveService).toHaveBeenCalledWith("0.3.1", { expectedCommit: targetSha });
     expect(readInstallManifest(paths)?.sha).toBe(targetSha);
     expect(fs.realpathSync(paths.currentPath)).toBe(fs.realpathSync(targetPayload));
     expect(rollbackManagedInstall(paths).sha).toBe(currentSha);
