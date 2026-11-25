@@ -43,6 +43,7 @@ export function toolActionDeliveryService(
   heartbeat: Pick<ReturnType<typeof heartbeatService>, "wakeup">,
 ) {
   async function deliver(actionRequestId: string) {
+    // Keep the advisory lock while wakeup opens its own transaction on the ordinary pool.
     return withDedicatedDbConnection(db, (deliveryDb) => deliveryDb.transaction(async (tx) => {
       const [source] = await tx
         .select()
@@ -209,7 +210,7 @@ export function toolActionDeliveryService(
       const idempotencyKey = `tool-action-response:${first.request.id}`;
       const existing = async () =>
         (
-          await tx
+          await db
             .select({
               id: agentWakeupRequests.id,
               payload: agentWakeupRequests.payload,
