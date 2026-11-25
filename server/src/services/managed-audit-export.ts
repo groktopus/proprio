@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
+import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, companies, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, managedAuditTransitionReceipts, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, not, or, sql, type SQL } from "drizzle-orm";
 import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -103,7 +103,7 @@ async function runExportTransaction<T>(
     }, transactionOptions), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
     if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
-      || ["40001", "57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
+      || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
       throw new ManagedAuditExportUnavailableError();
     }
     throw error;
@@ -333,9 +333,14 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
-  const publications: ActivityPublication[] = [];
   const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
+    // Acquire the company FK lock before the snapshot row. Company deletion
+    // locks the company first and then cascades into snapshots/receipts; using
+    // the same order prevents invalidation from deadlocking with deletion.
+    const [company] = await tx.select({ id: companies.id }).from(companies)
+      .where(eq(companies.id, scope.companyId)).for("key share");
+    if (!company) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     const ownedSnapshot = and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),
@@ -378,15 +383,15 @@ export async function readManagedAuditExportPage(
           .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
           .returning({ id: managedAuditExports.id });
         if (invalidated) {
-          await logActivity(tx as unknown as Db, {
+          await tx.insert(managedAuditTransitionReceipts).values({
             companyId: scope.companyId,
-            actorType: "user",
+            transition: "export_invalidated",
             actorId: userId,
-            action: "audit.managed_export_invalidated",
-            entityType: "company",
-            entityId: scope.companyId,
-            details: { exportId: invalidated.id, source: "tool_gateway" },
-          }, publications);
+            exportId: invalidated.id,
+            recordCount: 1,
+            source: "tool_gateway",
+            createdAt: sql`clock_timestamp()`,
+          });
         }
         return null;
       }
@@ -444,7 +449,6 @@ export async function readManagedAuditExportPage(
       complete: deliveredThrough === snapshot.eventCount,
     };
   });
-  for (const publication of publications) publishActivity(publication);
   if (!page) {
     throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", {
       reasonCode: "snapshot_incomplete",
