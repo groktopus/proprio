@@ -472,16 +472,16 @@ describe("adapter skill snapshots", () => {
     });
     expect(snapshot.entries).toEqual([
       expect.objectContaining({
-        key: "missing-skill",
-        state: "missing",
-        origin: "external_unknown",
-        desired: true,
-      }),
-      expect.objectContaining({
         key: requiredEntry.key,
         state: "configured",
         origin: "company_managed",
         detail: "Mounted on next run.",
+      }),
+      expect.objectContaining({
+        key: "missing-skill",
+        state: "missing",
+        origin: "external_unknown",
+        desired: true,
       }),
     ]);
   });
