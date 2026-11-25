@@ -334,11 +334,20 @@ company.
 [Wake queue test fixture](https://github.com/groktopus/proprio/pull/401)
 
 The Apps review queue checks the approval result on the standalone and
-linked-interaction paths. Both show the reconciliation message when the
-approval returns a failed action. Four regression tests and the UI typecheck
-passed for the UI source at `e64691e778d660e48b21130e322445c690255435`. The
-live browser focus and screen-reader checks still need to run.
+linked-interaction paths. Both show the reconciliation message for a failed
+action and preserve the distinction between approval and execution. The
+Always allow path indicates that the permission may still apply. Five UI
+tests and the UI typecheck passed for the source at
+`0d5d5d869a49b4d80246e909bbd06fb620511b64`. An independent review confirmed
+the saved-approval correction. The live browser focus and screen-reader
+checks still need to run.
 [Approval feedback](https://github.com/groktopus/proprio/pull/402)
+
+The authenticated tool-call OpenAPI contract documents the 409 reconciliation
+reason. It leaves the internal dispatch classification private. All 56
+OpenAPI and five Apps queue tests and the generated OpenAPI check passed on
+composition `4ad55ab58824ed3622d17df421e438aaa2d8dee5`.
+[Gateway conflict contract](https://github.com/groktopus/proprio/pull/403)
 
 Composition `a176612803e5836ef31f56f858973cf05a7ecb53` passed 214 tests
 across audit routes, MCP Tasks, wake queue and the Apps review queue. The
