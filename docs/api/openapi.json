@@ -138255,7 +138255,7 @@
           "Cases"
         ],
         "summary": "Withdraw an accepted delivered handoff after a confirmed Stop",
-        "description": "Board operators only. Requires the current handoff version, current recipient assignment, and the exact recipient heartbeat run's acknowledged operator Stop receipt. Preserves the accepted decision and handoff history, prevents stale task status advancement, creates a board-owned next-action hold, and does not wake a successor. Stop cannot undo external effects or workspace edits already made; inspect them before reassigning or creating a replacement handoff.",
+        "description": "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
         "responses": {
           "200": {
             "description": "Success",

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { hasRecordedStopAcknowledgement } from "./native-runtime/native-cancellation-request.js";
+import { isAcknowledgedOperatorRunStop } from "./acknowledged-native-stop.js";
+import { readCaseHandoffIdForNativeRun } from "./native-runtime/native-continuation-delivery.js";
+import { boundRunIssueIdSql } from "./run-task-binding.js";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
 import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, completionContracts, heartbeatRuns, issues, projects } from "@groktopus/db";
-import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
+import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type CaseHandoffWithdrawalInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { casesDisabledError } from "./cases-disabled.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -23,7 +25,7 @@ import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
 import { nativeRuntimeSupportsCaseOfferDecision } from "./native-runtime/runtime-mode.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
-import { assertAcceptedOfferIsCurrent, assertOfferRequirementsCurrent, CaseHandoffRequirementsSuperseded, computeCaseHandoffRequirementsDigest } from "./case-handoff-offer-authority.js";
+import { assertAcceptedOfferIsCurrent, assertOfferRequirementsCurrent, CaseHandoffRequirementsSuperseded, computeCaseHandoffRequirementsDigest, readAcceptedCaseHandoffOffer } from "./case-handoff-offer-authority.js";
 import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING } from "./case-handoff-states.js";
 import { completeTerminalCaseHandoffsForIssue, pendingCaseHandoffForRun } from "./heartbeat/case-handoff-lifecycle.js";
 import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHandoffCloudAuthority, lockCaseHandoffAuthorityRun, restoreCaseHandoffActor } from "./case-handoff-authority.js";
@@ -31,10 +33,6 @@ import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHa
 export type CaseHandoffRow = typeof caseHandoffs.$inferSelect;
 type CaseRow = typeof cases.$inferSelect;
 type IssueRow = typeof issues.$inferSelect;
-
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
 
 function publicHandoff(row: CaseHandoffRow) {
   const { actorContext: _actorContext, workflowPrompt: _prompt, baseWorkflowDocumentRevisionId: _base, ...publicRow } = row;
@@ -81,7 +79,7 @@ function result(row: CaseHandoffRow, issue: Pick<IssueRow, "id" | "identifier">,
 }
 
 async function event(tx: Db, row: CaseHandoffRow, kind: "handoff_requested" | "handoff_applied" | "handoff_delivered" | "handoff_cancelled" | "handoff_decision_recorded",
-  publications: ActivityPublication[], actor?: AuthorizationActor) {
+  publications: ActivityPublication[], actor?: AuthorizationActor, withdrawalEvidence?: Record<string, unknown>) {
   const decision = kind === "handoff_decision_recorded" ? row.recipientDecision : null;
   const decisionEvidence = decision ? {
     outcome: decision.outcome,
@@ -95,12 +93,12 @@ async function event(tx: Db, row: CaseHandoffRow, kind: "handoff_requested" | "h
     actorType: who.actorType, actorUserId: who.actorType === "user" ? who.actorId : null,
     actorAgentId: who.actorType === "agent" ? who.actorId : null, runId,
     payload: { handoffId: row.id, issueId: row.issueId, phase: row.phase, version: row.version, destinationKind: row.destinationKind,
-      fromAgentId: row.fromAgentId, toAgentId: row.toAgentId, workflowTransition: row.workflowTransition, ...decisionEvidence } });
+      fromAgentId: row.fromAgentId, toAgentId: row.toAgentId, workflowTransition: row.workflowTransition, ...decisionEvidence, ...withdrawalEvidence } });
   const saved = await persistActivity(tx, { companyId: row.companyId, ...who,
     agentId: who.actorType === "agent" ? who.actorId : null, runId, issueId: row.issueId,
     action: `case.${kind}`, entityType: "case", entityId: row.caseId, responsibleUserIdOverride: row.responsibleUserId,
     details: { handoffId: row.id, issueId: row.issueId, phase: row.phase, version: row.version, state: row.state, destinationKind: row.destinationKind,
-      workflowTransition: row.workflowTransition, ...decisionEvidence } });
+      workflowTransition: row.workflowTransition, ...decisionEvidence, ...withdrawalEvidence } });
   publications.push(saved.publication);
 }
 
@@ -825,10 +823,7 @@ export function caseHandoffService(db: Db) {
       return db.select().from(caseHandoffs).where(eq(caseHandoffs.id, row.id)).then(rows => publicHandoff(rows[0]!));
     },
 
-    async withdrawDelivered(actor: AuthorizationActor, caseId: string, handoffId: string, input: {
-      expectedHandoffVersion: number;
-      stoppedRunId: string;
-    }) {
+    async withdrawDelivered(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffWithdrawalInput) {
       if (actor.type !== "board") throw forbidden("Only a board operator can withdraw delivered work");
       if (!isUuidLike(handoffId) || !isUuidLike(input.stoppedRunId)) throw notFound("Handoff not found");
       const caseSnapshot = await visible(actor, caseId);
@@ -847,7 +842,9 @@ export function caseHandoffService(db: Db) {
           eq(cases.id, snapshot.caseId))).for("update");
         const [row] = await tx.select().from(caseHandoffs).where(scope).for("update");
         if (!caseRow || !row) throw notFound("Handoff not found");
-        await authorizeHandoffControl(tx, actor, row, issue, false);
+        await assertActorCanReadCase(tx, actor, caseRow);
+        await assertActorCanWriteCase(tx, actor, caseRow);
+        await authorizeTerminalTask(tx, actor, issue);
         if (row.state === "cancelled" && row.lastErrorCode === "operator_withdrawn_after_stop"
             && row.version === input.expectedHandoffVersion) {
           const [receipt] = await tx.select({ id: caseEvents.id }).from(caseEvents).where(and(
@@ -864,22 +861,17 @@ export function caseHandoffService(db: Db) {
           throw conflict("The delivered handoff or its task owner changed. Read the current Case and task before withdrawing it.",
             { code: "case_handoff_withdrawal_stale", expectedHandoffVersion: input.expectedHandoffVersion });
         }
-        const offer = record(row.offerContract);
-        const decision = record(row.recipientDecision);
-        const revision = record(offer.requirementRevision);
-        if (offer.schema !== "proprio.case-handoff-offer.v1" || decision.outcome !== "accepted"
-            || decision.actorType !== "agent" || decision.actorId !== row.toAgentId
-            || decision.handoffVersion !== row.version || decision.requirementsDigest !== offer.requirementsDigest
-            || decision.requirementRevisionId !== revision.id) {
+        if (!readAcceptedCaseHandoffOffer(row)) {
           throw conflict("Only an accepted versioned handoff can be withdrawn through this control.", { code: "case_handoff_withdrawal_not_versioned" });
         }
-        const [stoppedRun] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.stoppedRunId),
-          eq(heartbeatRuns.companyId, row.companyId), eq(heartbeatRuns.agentId, row.toAgentId), eq(heartbeatRuns.status, "cancelled"),
-          or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id)))).for("share").limit(1);
-        const stopResult = record(stoppedRun?.resultJson);
-        if (!stoppedRun || record(stoppedRun.contextSnapshot).caseHandoffId !== row.id
-            || stopResult.cancelledByActorType !== "user" || record(stopResult.cancellation).source !== "operator"
-            || !hasRecordedStopAcknowledgement(stoppedRun)) {
+        const runScope = and(eq(heartbeatRuns.companyId, row.companyId), eq(boundRunIssueIdSql(), issue.id));
+        const [stoppedRun] = await tx.select().from(heartbeatRuns).where(and(runScope,
+          eq(heartbeatRuns.id, input.stoppedRunId), eq(heartbeatRuns.agentId, row.toAgentId), eq(heartbeatRuns.status, "cancelled")))
+          .for("share").limit(1);
+        const stoppedHandoffId = stoppedRun && isAcknowledgedOperatorRunStop(stoppedRun) ? await readCaseHandoffIdForNativeRun(tx, {
+          companyId: row.companyId, issueId: issue.id, runId: stoppedRun.id, contextSnapshot: stoppedRun.contextSnapshot,
+        }) : null;
+        if (!stoppedRun || stoppedHandoffId !== row.id) {
           throw conflict("Stop the recipient run and wait for its acknowledged Stop receipt before withdrawing this handoff.",
             { code: "case_handoff_withdrawal_stop_required", runId: input.stoppedRunId });
         }
@@ -888,13 +880,14 @@ export function caseHandoffService(db: Db) {
           throw conflict("A different run is now admitted for this task. Stop or reassign it before withdrawing the handoff.",
             { code: "case_handoff_withdrawal_run_changed", runId: issue.executionRunId ?? issue.checkoutRunId });
         }
+        // Compare timestamps in PostgreSQL, preserving sub-millisecond order.
+        const stoppedPosition = tx.select({ createdAt: heartbeatRuns.createdAt, id: heartbeatRuns.id })
+          .from(heartbeatRuns).where(eq(heartbeatRuns.id, stoppedRun.id));
         const [supersedingRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-          eq(heartbeatRuns.companyId, row.companyId),
-          or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id)),
-          sql`${heartbeatRuns.id} <> ${stoppedRun.id}`,
+          runScope, ne(heartbeatRuns.id, stoppedRun.id),
           or(inArray(heartbeatRuns.status, ["queued", "running"]),
-            sql`(${heartbeatRuns.createdAt}, ${heartbeatRuns.id}) > (${stoppedRun.createdAt.toISOString()}::timestamptz, ${stoppedRun.id}::uuid)`),
-        )).limit(1);
+            sql`(${heartbeatRuns.createdAt}, ${heartbeatRuns.id}) > (${stoppedPosition})`),
+        )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
         if (supersedingRun) throw conflict("A different run is active or ran after this Stop. Review the current task execution.",
           { code: "case_handoff_withdrawal_run_changed", runId: supersedingRun.id });
 

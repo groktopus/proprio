@@ -33,7 +33,9 @@ export async function readNativeContinuationSource(
       eq(dispatch.requestedByActorType, "system"),
       sql`${dispatch.requestedByActorId} = 'native-status-wake-dispatch:' || ${agentWakeupRequests.id}::text`,
       eq(dispatch.idempotencyKey, agentWakeupRequests.idempotencyKey),
-      inArray(dispatch.status, ["queued", "claimed", "completed", "coalesced"]),
+      or(inArray(dispatch.status, ["queued", "claimed", "completed", "coalesced"]),
+        binding.completionRecovery
+          ? and(eq(dispatch.status, "cancelled"), eq(heartbeatRuns.status, "cancelled")) : undefined),
       sql`${dispatch.payload}->>'issueId' = ${binding.issueId}`,
     ))
     .innerJoin(statusDecisionEffects, and(

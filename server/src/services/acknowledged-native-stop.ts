@@ -7,6 +7,7 @@ import { hasRecoveredCleanupStopReceipt, hasRemoteTerminationReceipt } from "./r
 import { validatePrpEvent } from "../vendor/proprio-runner/index.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
 import { isConfirmedCursorCloudTerminalObservation } from "./native-runtime/cursor-cloud-runtime.js";
+import { readRunCancellation } from "./run-cancellation.js";
 import { isAgentLifecycleStopRecord } from "./governance-pause-stop.js";
 
 export function hasAcknowledgedNativeRunStopRequest(run: {
@@ -66,6 +67,16 @@ export function isAcknowledgedNativeReassignmentStop(run: Parameters<typeof hasA
 
 export function isAcknowledgedNativeStop(run: Parameters<typeof hasAcknowledgedNativeStopIntent>[0]): boolean {
   return run.status === "cancelled" && hasAcknowledgedNativeStopIntent(run);
+}
+
+/** The operator's exact run Stop as recorded by the native or local controller. */
+export function isAcknowledgedOperatorRunStop(run: Pick<typeof heartbeatRuns.$inferSelect,
+  "id" | "companyId" | "status" | "nativeIssueId" | "finishedAt" | "resultJson">): boolean {
+  if (run.status !== "cancelled" || !run.finishedAt || run.resultJson?.cancelledByActorType !== "user") return false;
+  const cancellation = readRunCancellation(run.resultJson);
+  if (!cancellation) return run.resultJson.cancellation === undefined && isAcknowledgedNativeStop(run);
+  return cancellation.source === "operator" && cancellation.expected && cancellation.initiator.type === "user"
+    && (hasAcknowledgedNativeRunStopReceipt(run) || parseObject(run.resultJson.executionCancellation).state === "acknowledged");
 }
 
 /** API-owned execution has no Computer lease. Its provider terminal and retired

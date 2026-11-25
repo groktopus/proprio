@@ -14075,7 +14075,7 @@ for (const action of ["retry", "cancel"] as const) registry.registerPath({ metho
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/withdraw", tags: ["Cases"],
   summary: "Withdraw an accepted delivered handoff after a confirmed Stop",
-  description: "Board operators only. Requires the current handoff version, current recipient assignment, and the exact recipient heartbeat run's acknowledged operator Stop receipt. Preserves the accepted decision and handoff history, prevents stale task status advancement, creates a board-owned next-action hold, and does not wake a successor. Stop cannot undo external effects or workspace edits already made; inspect them before reassigning or creating a replacement handoff.",
+  description: "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffWithdrawalSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 
