@@ -138,7 +138,9 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const historyKey = [...queryKeys.attention("company-1"), "history"];
     const questionKey = ["issues", "pending-questions", "chat-1", "user-1"];
     const taskRecordKey = queryKeys.decisions.taskRecord("company-1", "task-1", "user-1", "decision-1");
+    const completionHistoryKey = queryKeys.issues.completionHistory("another-task");
     const diagnosisKey = queryKeys.issues.dependencyInvestigation("parent-issue");
+    client.setQueryData(completionHistoryKey, [{ id: "revoked-history" }]);
     client.setQueryData(diagnosisKey, { dependencyPath: [{ title: "Private dependency" }] });
     client.setQueryData(taskRecordKey, { title: "Private decision" });
     client.setQueryData(questionKey, [{ title: "Private question" }]);
@@ -152,6 +154,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(questionKey)).toBeUndefined();
     expect(client.getQueryData(taskRecordKey)).toBeUndefined();
     expect(client.getQueryData(diagnosisKey)).toBeUndefined();
+    expect(client.getQueryData(completionHistoryKey)).toBeUndefined();
     client.clear();
   });
   it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {

@@ -96,8 +96,8 @@ export const activityApi = {
     return (await Promise.all(batches)).flat();
   },
   forIssue: (issueId: string) => api.get<ActivityEvent[]>(`/issues/${issueId}/activity`),
-  completionHistoryForIssue: (issueId: string) =>
-    api.get<NativeCompletionHistoryEntry[]>(`/issues/${issueId}/completion-history`),
+  completionHistoryForIssue: (issueId: string, options?: RequestOptions) =>
+    api.get<NativeCompletionHistoryEntry[]>(`/issues/${issueId}/completion-history`, options),
   recentRunsForIssue: (issueId: string) => api.get<RunForIssue[]>(`/issues/${issueId}/runs?view=recent`),
   runsForIssue: (issueId: string) => api.get<RunForIssue[]>(`/issues/${issueId}/runs`),
   runsByIdsForIssue: (issueId: string, runIds: string[]) => {

@@ -1,6 +1,11 @@
 import type { NativeCompletionCriterionAssessment, NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { activityApi } from "@/api/activity";
+import { classifyError } from "@/api/errors";
+import { useQueryView } from "@/components/QueryView";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { queryKeys } from "@/lib/queryKeys";
 import { cn, formatDateTime } from "@/lib/utils";
 
 function label(value: string | null | undefined): string {
@@ -63,7 +68,13 @@ function Verification({ check }: {
   );
 }
 
-function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
+function CompletionEntry({ entry, entryRef, priorDecisionEntryId, priorAssessmentEntryId, jumpToEntry }: {
+  entry: NativeCompletionHistoryEntry;
+  entryRef: (element: HTMLElement | null) => void;
+  priorDecisionEntryId?: string;
+  priorAssessmentEntryId?: string;
+  jumpToEntry: (entryId: string) => void;
+}) {
   const criteria = entry.contract?.criteria ?? [];
   const assessment = entry.assessment;
   const assessmentsByCriterion = new Map<string, NativeCompletionCriterionAssessment>();
@@ -71,12 +82,15 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
     const { criterionId } = item;
     if (!assessmentsByCriterion.has(criterionId)) assessmentsByCriterion.set(criterionId, item);
   }
+  const entryLabel = assessment?.triggerKind === "native_attention" ? "Native attention assessment" : "Native completion assessment";
+  const date = formatDateTime(entry.createdAt);
+  const linksShareTarget = priorDecisionEntryId !== undefined && priorDecisionEntryId === priorAssessmentEntryId;
   return (
-    <article className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
+    <article ref={entryRef} tabIndex={-1} aria-label={`${entryLabel}, ${date}`} className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
       <header className="space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h3 className="font-medium text-foreground">{assessment?.triggerKind === "native_attention" ? "Native attention assessment" : "Native completion assessment"}</h3>
-          <time className="font-mono text-xs text-muted-foreground" dateTime={entry.createdAt}>{formatDateTime(entry.createdAt)}</time>
+          <h3 className="font-medium text-foreground">{entryLabel}</h3>
+          <time className="font-mono text-xs text-muted-foreground" dateTime={entry.createdAt}>{date}</time>
         </div>
         {entry.result?.summary ? <p className="text-sm text-muted-foreground">{entry.result.summary}</p> : null}
       </header>
@@ -135,10 +149,20 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
           </p>
           {entry.decision.statusAction ? <p className="text-sm text-muted-foreground">Action {label(entry.decision.statusAction)}</p> : null}
           {entry.decision.appliedAt ? <p className="text-sm text-muted-foreground">Applied <time dateTime={entry.decision.appliedAt} className="font-mono">{formatDateTime(entry.decision.appliedAt)}</time></p> : null}
-          {entry.decision.supersedesDecisionId ? <p className="text-sm text-muted-foreground">Supersedes an earlier status decision.</p> : null}
-          {assessment?.supersedesAssessmentId || assessment?.priorDecisionId ? <p className="text-sm text-muted-foreground">This assessment supersedes an earlier assessment or decision.</p> : null}
         </section>
       ) : <p className="text-sm text-muted-foreground">No status decision is linked to this assessment.</p>}
+
+      {priorDecisionEntryId ? (
+        <button type="button" onClick={() => jumpToEntry(priorDecisionEntryId)} className="text-sm text-primary underline underline-offset-2">
+          {linksShareTarget ? "Open earlier decision and assessment" : "Open earlier decision and evidence"}
+        </button>
+      ) : entry.decision?.supersedesDecisionId ? <p className="text-sm text-muted-foreground">Supersedes an earlier status decision.</p> : null}
+      {priorAssessmentEntryId && !linksShareTarget ? (
+        <button type="button" onClick={() => jumpToEntry(priorAssessmentEntryId)} className="block text-sm text-primary underline underline-offset-2">
+          Open earlier assessment
+        </button>
+      ) : !priorAssessmentEntryId && !priorDecisionEntryId && (assessment?.supersedesAssessmentId || assessment?.priorDecisionId)
+        ? <p className="text-sm text-muted-foreground">This assessment supersedes an earlier assessment or decision.</p> : null}
 
       {entry.lineageGaps.length ? (
         <p className="text-sm text-muted-foreground">Incomplete history: missing {entry.lineageGaps.map(label).join(", ")} record{entry.lineageGaps.length === 1 ? "" : "s"}.</p>
@@ -147,15 +171,28 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
   );
 }
 
-export function NativeCompletionHistory({ entries, isLoading, error, onRetry }: {
+export function NativeCompletionHistory({ entries, isLoading, error, onRetry, showHeading = true }: {
   entries: NativeCompletionHistoryEntry[] | undefined;
   isLoading: boolean;
   error: boolean;
   onRetry: () => void;
+  showHeading?: boolean;
 }) {
+  const entryElements = useRef(new Map<string, HTMLElement>());
+  const decisionEntries = new Map<string, string>();
+  const assessmentEntries = new Map<string, string>();
+  entries?.forEach(entry => {
+    if (entry.decision) decisionEntries.set(entry.decision.id, entry.id);
+    if (entry.assessment) assessmentEntries.set(entry.assessment.id, entry.id);
+  });
+  function jumpToEntry(entryId: string) {
+    const element = entryElements.current.get(entryId);
+    element?.focus({ preventScroll: true });
+    element?.scrollIntoView?.({ block: "nearest" });
+  }
   return (
     <section aria-label="Native completion history" className="mb-4 space-y-3">
-      <h2 className="text-base font-medium text-foreground">Native completion history</h2>
+      {showHeading && <h2 className="text-base font-medium text-foreground">Native completion history</h2>}
       {isLoading && !entries ? <p role="status" className="text-sm text-muted-foreground">Loading completion history…</p> : null}
       {error ? (
         <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
@@ -164,7 +201,74 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry }: 
         </div>
       ) : null}
       {!isLoading && !error && entries?.length === 0 ? <p className="text-sm text-muted-foreground">No native completion history recorded.</p> : null}
-      {entries?.length ? <div className={cn("min-w-0 space-y-4 wrap-anywhere", ANALYTICS_MASK_CLASS)}>{entries.map(entry => <CompletionEntry key={entry.id} entry={entry} />)}</div> : null}
+      {entries?.length ? (
+        <div className={cn("min-w-0 space-y-4 wrap-anywhere", ANALYTICS_MASK_CLASS)}>
+          {entries.map(entry => {
+            const supersedesDecisionId = entry.decision?.supersedesDecisionId;
+            const priorDecisionId = entry.assessment?.priorDecisionId;
+            const priorAssessmentId = entry.assessment?.supersedesAssessmentId;
+            const decisionEntryId = (supersedesDecisionId ? decisionEntries.get(supersedesDecisionId) : undefined)
+              ?? (priorDecisionId ? decisionEntries.get(priorDecisionId) : undefined);
+            const assessmentEntryId = priorAssessmentId ? assessmentEntries.get(priorAssessmentId) : undefined;
+            return (
+              <CompletionEntry key={entry.id} entry={entry}
+                entryRef={element => {
+                  if (element) entryElements.current.set(entry.id, element);
+                  else entryElements.current.delete(entry.id);
+                }}
+                priorDecisionEntryId={decisionEntryId === entry.id ? undefined : decisionEntryId}
+                priorAssessmentEntryId={assessmentEntryId === entry.id ? undefined : assessmentEntryId}
+                jumpToEntry={jumpToEntry} />
+            );
+          })}
+        </div>
+      ) : null}
     </section>
+  );
+}
+
+
+export function useTaskCompletionHistory(issueId: string) {
+  const queryClient = useQueryClient();
+  const queryKey = queryKeys.issues.completionHistory(issueId);
+  const history = useQuery({
+    queryKey,
+    refetchOnMount: "always",
+    queryFn: async ({ signal }) => {
+      try {
+        return await activityApi.completionHistoryForIssue(issueId, { signal });
+      } catch (error) {
+        const errorKind = classifyError(error);
+        if (!signal.aborted && (errorKind === "auth" || errorKind === "forbidden" || errorKind === "not_found")) {
+          queryClient.setQueryData(queryKey, []);
+        }
+        throw error;
+      }
+    },
+  });
+  const view = useQueryView(history);
+  const waiting = history.fetchStatus !== "idle" || view.kind === "loading" || view.kind === "reconnecting";
+  return {
+    entries: history.isSuccess && !waiting ? view.data : undefined,
+    isLoading: waiting,
+    error: !waiting && history.isError,
+    onRetry: view.retry,
+  };
+}
+
+function TaskCompletionHistory({ issueId }: { issueId: string }) {
+  const history = useTaskCompletionHistory(issueId);
+  return <NativeCompletionHistory {...history} showHeading={false} />;
+}
+
+export function TaskCompletionHistoryDisclosure({ issueId }: { issueId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer rounded-sm text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        Completion history
+      </summary>
+      {open && <TaskCompletionHistory issueId={issueId} />}
+    </details>
   );
 }

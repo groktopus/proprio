@@ -84,7 +84,7 @@ import { SubtaskCancellationError, TaskCancellationDismissedError, useTaskCancel
 import { describeInteractionResolutionFailure, interactionResolutionErrorMessage } from "../lib/interaction-resolution-error";
 import { approvalsApi } from "../api/approvals";
 import { activityApi, type RunForIssue } from "../api/activity";
-import { NativeCompletionHistory } from "../components/NativeCompletionHistory";
+import { NativeCompletionHistory, useTaskCompletionHistory } from "../components/NativeCompletionHistory";
 import {
   fetchRecentIssueActivity,
   fetchRecentIssueRunWindow,
@@ -2939,19 +2939,12 @@ function IssueDetailActivityTab({
   handoffFocusSignal = 0,
   externalReferences,
 }: IssueDetailActivityTabProps) {
+  const completionHistory = useTaskCompletionHistory(issueId);
   const { data: activity, isLoading: activityLoading } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),
     queryFn: () => activityApi.forIssue(issueId),
     placeholderData: keepPreviousDataForSameQueryTail<ActivityEvent[]>(issueId),
   });
-  const completionHistoryQuery = useQuery({
-    queryKey: queryKeys.issues.completionHistory(issueId),
-    queryFn: () => activityApi.completionHistoryForIssue(issueId),
-  });
-  const completionHistoryView = useQueryView(completionHistoryQuery);
-  const completionHistoryAccessDenied = completionHistoryView.errorKind === "auth"
-    || completionHistoryView.errorKind === "forbidden"
-    || completionHistoryView.errorKind === "not_found";
   const {
     data: linkedRuns,
     isLoading: linkedRunsLoading,
@@ -2995,12 +2988,7 @@ function IssueDetailActivityTab({
 
   return (
     <>
-      <NativeCompletionHistory
-        entries={completionHistoryAccessDenied ? undefined : completionHistoryView.data}
-        isLoading={completionHistoryView.kind === "loading" || completionHistoryView.kind === "reconnecting"}
-        error={completionHistoryView.kind === "error"}
-        onRetry={completionHistoryView.retry}
-      />
+      <NativeCompletionHistory {...completionHistory} />
       <TaskExecutionCostSummary
         linkedRuns={linkedRuns}
         issueTreeCostSummary={issueTreeCostSummary}

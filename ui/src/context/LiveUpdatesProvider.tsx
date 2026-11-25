@@ -1625,6 +1625,10 @@ function invalidateActivityQueries(
     action?.startsWith("company_membership.") ||
     action?.startsWith("membership.") || action?.includes("privacy");
   if (decisionAudienceChanged) {
+    void queryClient.resetQueries({
+      queryKey: ["issues", "activity"],
+      predicate: query => query.queryKey[3] === "completion-history",
+    });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
