@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQueryView } from "@/components/QueryView";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ArrowRight, ChevronRight } from "lucide-react";
@@ -7,8 +8,9 @@ import { Identity } from "@/components/Identity";
 import { MarkdownBody } from "@/components/MarkdownBody";
 import { IssueReferencePill } from "@/components/IssueReferencePill";
 import { Button } from "@/components/ui/button";
-import { formatDateTime, relativeTime } from "@/lib/utils";
+import { cn, formatCodeLabel, formatDateTime, relativeTime } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import type { CaseAgentMap } from "./CaseWorkSummary";
 
 function HandoffActor({ id, name, fallback, agents }: {
@@ -41,6 +43,7 @@ export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; t
 }
 
 function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?: CaseWorkIssue | null; agents?: CaseAgentMap }) {
+  const [open, setOpen] = useState(false);
   const createdAt = new Date(handoff.createdAt).toISOString();
   const terminal = handoff.destinationKind === "done";
   const settled = handoff.state === "delivered" || handoff.state === "completed";
@@ -49,7 +52,7 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
     : handoff.assignmentAppliedAt ? "Applied · waiting for delivery" : "Pending transfer";
   const handoffTask = task?.id === handoff.issueId ? task : null;
   return <li>
-    <details className="group">
+    <details className="group" onToggle={event => setOpen(event.currentTarget.open)}>
       <summary className="flex cursor-pointer list-none items-start gap-2 rounded-sm py-3 marker:content-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <ChevronRight aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-(--motion-duration-fast) group-open:rotate-90 motion-reduce:transition-none" />
         <span className="min-w-0 flex-1 space-y-1">
@@ -73,9 +76,47 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
           {handoff.workflowTransition.from.name ?? "Case instructions"}{handoff.workflowTransition.from.phase ? ` · ${handoff.workflowTransition.from.phase}` : ""}
           {" → "}{handoff.workflowTransition.to.name ?? "Case instructions"} · {handoff.workflowTransition.to.phase}
         </p>}
+        {open && <HandoffOffer handoff={handoff} agents={agents} />}
         {handoff.lastError && !settled && handoff.state !== "cancelled" ? <p className="text-xs text-muted-foreground">{handoff.lastError}</p> : null}
         <MarkdownBody linkIssueReferences linkCaseReferences>{handoff.instructions}</MarkdownBody>
       </div>
     </details>
   </li>;
+}
+
+function HandoffOffer({ handoff, agents }: { handoff: CaseHandoffView; agents?: CaseAgentMap }) {
+  const offer = handoff.offerContract;
+  if (!offer) return null;
+  const decision = handoff.recipientDecision;
+  const decidedAt = decision ? new Date(decision.decidedAt).toISOString() : null;
+  const outcome = decision?.outcome === "accepted" ? "Accepted"
+    : decision?.outcome === "clarification" ? "Clarification requested"
+      : decision?.outcome === "declined" ? "Declined" : null;
+  const reason = decision?.reasonCode ? formatCodeLabel(decision.reasonCode) : null;
+  return <section className="min-w-0 space-y-2 wrap-anywhere" aria-label="Versioned handoff offer">
+    <h3 className="text-xs font-semibold">Offer requirements</h3>
+    <p className="text-xs">Expected deliverable: <span className={ANALYTICS_MASK_CLASS}>{offer.expectedDeliverable}</span></p>
+    <div className="text-xs">
+      <span>Prerequisites:</span>
+      {offer.prerequisites.length ? <ul className="list-disc pl-5">{offer.prerequisites.map((item, index) => <li key={`${index}-${item}`} className={ANALYTICS_MASK_CLASS}>{item}</li>)}</ul>
+        : <span className="ml-1 text-muted-foreground">None listed</span>}
+    </div>
+    <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>Recipient:</span><HandoffActor id={handoff.toAgentId} name={handoff.toAgentName} fallback="Agent" agents={agents} />
+      <span>{handoff.assignmentAppliedAt ? "Previous owner:" : "Accountable source:"}</span><HandoffActor id={handoff.fromAgentId} name={handoff.fromAgentName} fallback="Agent" agents={agents} />
+    </p>
+    <p className="break-all text-xs text-muted-foreground">
+      Requirement revision <span className="font-mono">{offer.requirementRevision.revision}</span>
+      {" · ID "}<code className={cn("font-mono", ANALYTICS_MASK_CLASS)}>{offer.requirementRevision.id}</code>
+      {" · SHA-256 "}<code className={cn("font-mono", ANALYTICS_MASK_CLASS)}>{offer.requirementRevision.canonicalSha256}</code>
+    </p>
+    <p className="break-all text-xs text-muted-foreground">Offer digest <code className={cn("font-mono", ANALYTICS_MASK_CLASS)}>{offer.requirementsDigest}</code></p>
+    {decision ? <>
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{outcome}{reason ? ` · ${reason}` : ""}</span>
+        {decidedAt && <time dateTime={decidedAt} title={formatDateTime(decidedAt)} className="font-mono">{formatDateTime(decidedAt)}</time>}
+      </p>
+      {decision.message && <p className={cn("whitespace-pre-wrap text-xs", ANALYTICS_MASK_CLASS)}>{decision.message}</p>}
+    </> : <p className="text-xs text-muted-foreground">No recipient decision recorded.</p>}
+  </section>;
 }
