@@ -355,6 +355,14 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents null when an agent did not submit a completion criterion claim", () => {
+    const response = buildOpenApiSpec().paths["/api/issues/{id}/completion-history"].get.responses[200];
+    const schema = response.content["application/json"].schema.items.properties.assessment.properties;
+    expect(schema.criterionAssessments.items.properties.claimStatus).toEqual({
+      type: "string", nullable: true, enum: ["satisfied", "not_satisfied", "unknown", null],
+    });
+  });
+
   it("describes cached link results with the lookup shape and shared batch bound", () => {
     const paths = buildOpenApiSpec().paths;
     const batch = paths["/api/companies/{companyId}/link-previews/cached"].get;

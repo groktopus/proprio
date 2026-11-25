@@ -54,15 +54,16 @@ export {
   type NativeRuntimeMode,
   type NativeRunTerminalState,
 } from "./types/native-finalization.js";
-export type {
-  NativeCompletionCriterion,
-  NativeCompletionCriterionAssessment,
-  NativeCompletionEvidenceKind,
-  NativeCompletionEvidenceOutcome,
-  NativeCompletionEvidenceReference,
-  NativeCompletionEvidenceVisibility,
-  NativeCompletionHistoryEntry,
-  NativeCompletionVerificationAssessment,
+export {
+  nativeCompletionEvidenceKindSchema,
+  nativeCompletionEvidenceOutcomeSchema,
+  nativeCompletionHistorySchema,
+  type NativeCompletionCriterionAssessment,
+  type NativeCompletionEvidenceKind,
+  type NativeCompletionEvidenceOutcome,
+  type NativeCompletionEvidenceReference,
+  type NativeCompletionHistoryEntry,
+  type NativeCompletionVerificationAssessment,
 } from "./types/native-completion-history.js";
 export {
   decisionEffectStalenessSchema,

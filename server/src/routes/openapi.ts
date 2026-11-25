@@ -1,3 +1,4 @@
+import { nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
@@ -6533,46 +6534,12 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
-const nativeCompletionEvidenceSchema = z.object({
-  kind: z.enum(["event", "work_product", "approval", "interaction", "attachment", "case_handoff", "unknown"]),
-  outcome: z.enum(["accepted", "missing", "rejected", "unverifiable"]),
-  visibility: z.enum(["available", "restricted", "missing", "unverifiable"]),
-  reasonCode: z.string(),
-  label: z.string(),
-  recordId: z.string().optional(),
-  title: z.string().optional(),
-});
-const nativeCompletionHistorySchema = z.array(z.object({
-  id: z.string(),
-  createdAt: z.string().datetime(),
-  runId: z.string(),
-  contract: z.object({
-    id: z.string(), revision: z.number(), policyVersion: z.string(), risk: z.string(), completionAuthority: z.string(),
-    incompleteCriteriaPolicy: z.string(), criteria: z.array(z.object({ id: z.string(), requirement: z.string() })),
-    supersedesContractId: z.string().nullable(),
-  }).nullable(),
-  result: z.object({ id: z.string(), disposition: z.string().nullable(), summary: z.string().nullable(), schemaStatus: z.string(), createdAt: z.string().datetime() }).nullable(),
-  assessment: z.object({
-    id: z.string(), policyVersion: z.string(), triggerKind: z.string(), summary: z.string().nullable(), reportedDisposition: z.string().nullable(),
-    allCriteriaSatisfied: z.boolean().nullable(), verificationPassed: z.boolean().nullable(),
-    criterionAssessments: z.array(z.object({ criterionId: z.string(), claimStatus: z.enum(["satisfied", "not_satisfied", "unknown"]).nullable(),
-      outcome: z.enum(["accepted", "missing", "rejected", "unverifiable"]), reasonCode: z.string(), evidence: z.array(nativeCompletionEvidenceSchema) })),
-    verificationAssessments: z.array(z.object({ commandOrCheck: z.string(), claimStatus: z.enum(["passed", "failed", "not_run"]),
-      outcome: z.enum(["accepted", "missing", "rejected", "unverifiable"]), reasonCode: z.string(), detail: z.string().nullable(), evidence: nativeCompletionEvidenceSchema.nullable() })),
-    priorDecisionId: z.string().nullable(), supersedesAssessmentId: z.string().nullable(),
-  }).nullable(),
-  decision: z.object({ id: z.string(), applicationState: z.string(), fromStatus: z.string(), toStatus: z.string(), reasonCode: z.string(),
-    statusAction: z.string().nullable(), policyVersion: z.string(), supersedesDecisionId: z.string().nullable(),
-    createdAt: z.string().datetime(), appliedAt: z.string().datetime().nullable() }).nullable(),
-  lineageGaps: z.array(z.enum(["contract", "result", "decision"])),
-}));
-
 registry.registerPath({
   method: "get",
   path: "/api/issues/{id}/completion-history",
   tags: ["activity"],
   summary: "Read native completion criteria, evidence and status decisions for a task",
-  description: "Returns assessment-rooted native completion lineage newest first. Contract revisions, results, assessments and status decisions remain linked across superseding records. Evidence outcome is separate from record visibility; inaccessible evidence omits identifiers. Older or incomplete histories report null records and lineageGaps.",
+  description: "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(nativeCompletionHistorySchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });

@@ -32,7 +32,6 @@ const mockAgentActionAuditService = vi.hoisted(() => ({
 }));
 
 const mockCompletionHistory = vi.hoisted(() => ({ read: vi.fn() }));
-const mockFilterCasesForActor = vi.hoisted(() => vi.fn());
 
 const caseReadCondition = vi.hoisted(() => ({ policy: "authorized-cases" }));
 vi.mock("../services/case-activity-access.js", () => ({
@@ -67,11 +66,6 @@ vi.mock("../services/agent-action-audit.js", () => ({
 
 vi.mock("../services/native-runtime/native-completion-history.js", () => ({
   readNativeCompletionHistory: mockCompletionHistory.read,
-}));
-
-vi.mock("../services/case-access.js", () => ({
-  caseReadSqlCondition: vi.fn(async () => ({ caseReadable: true })),
-  filterCasesForActor: mockFilterCasesForActor,
 }));
 
 async function createApp(
@@ -143,7 +137,6 @@ describe("activity routes", () => {
     mockAccessService.canUser.mockReset();
     mockAgentActionAuditService.list.mockReset();
     mockCompletionHistory.read.mockReset();
-    mockFilterCasesForActor.mockReset().mockImplementation(async (_db, _actor, rows) => rows);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       action: "company_scope:read",
@@ -176,50 +169,53 @@ describe("activity routes", () => {
     });
     const entry = { id: "assessment-1", runId: "run-1", lineageGaps: [] };
     mockCompletionHistory.read.mockResolvedValue([entry]);
-    const db = { select: () => ({ from: () => ({ innerJoin: () => ({ where: async () => [] }) }) }) };
-    const app = await createApp({ type: "agent", companyId: "company-1", agentId: "agent-1" }, db);
+    const db = {};
+    const actor = { type: "agent", companyId: "company-1", agentId: "agent-1" };
+    const app = await createApp(actor, db);
     const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
     expect(res.status).toBe(200);
     expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({
       action: "issue:read", resource: expect.objectContaining({ companyId: "company-1", issueId: "issue-1" }),
     }));
     expect(mockCompletionHistory.read).toHaveBeenCalledWith(db, {
-      companyId: "company-1", issueId: "issue-1", readableCaseHandoffIds: new Set(),
+      companyId: "company-1", issueId: "issue-1", actor: expect.objectContaining(actor),
     });
     expect(res.body).toEqual([entry]);
   });
 
-  it("only exposes handoffs from Cases that pass the canonical read check", async () => {
-    mockIssueService.getByIdentifier.mockResolvedValue({ id: "issue-1", companyId: "company-1" });
-    mockCompletionHistory.read.mockResolvedValue([]);
-    const candidates = [
-      { id: "handoff-allowed", caseId: "case-allowed" },
-      { id: "handoff-restricted", caseId: "case-restricted" },
-    ];
-    const db = { select: () => ({ from: () => ({ innerJoin: () => ({ where: async () => candidates }) }) }) };
-    mockFilterCasesForActor.mockResolvedValue([{ id: "case-allowed" }]);
-    const actor = { type: "agent", companyId: "company-1", agentId: "agent-1" };
-    const app = await createApp(actor, db);
-
-    const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
-
-    expect(res.status).toBe(200);
-    expect(res.headers["cache-control"]).toBe("private, no-store");
-    expect(mockCompletionHistory.read).toHaveBeenCalledWith(db, {
-      companyId: "company-1", issueId: "issue-1", readableCaseHandoffIds: new Set(["handoff-allowed"]),
-    });
-    expect(mockFilterCasesForActor).toHaveBeenCalledWith(db, expect.objectContaining(actor), [
-      { id: "case-allowed" }, { id: "case-restricted" },
-    ]);
-  });
-
-  it("does not query completion lineage when the task is unreadable", async () => {
-    mockIssueService.getById.mockResolvedValue({ id: "issue-1", companyId: "company-1", projectId: null,
-      parentId: null, assigneeAgentId: "agent-1", assigneeUserId: null, status: "done" });
+  it("returns the missing-task response when the task exists but is unreadable", async () => {
+    mockIssueService.getByIdentifier
+      .mockResolvedValueOnce({ id: "issue-1", companyId: "company-1", projectId: null,
+        parentId: null, assigneeAgentId: "agent-1", assigneeUserId: null, status: "done" })
+      .mockResolvedValueOnce(null);
     mockAccessService.decide.mockResolvedValue({ allowed: false, reason: "deny_issue_private" });
     const app = await createApp({ type: "agent", companyId: "company-1", agentId: "agent-1" });
-    const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/issue-1/completion-history"));
-    expect(res.status).toBe(404);
+    const denied = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
+    const missing = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-2/completion-history"));
+
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
+    expect(denied.status).toBe(404);
+    expect(denied.body).toEqual(missing.body);
+    expect(mockCompletionHistory.read).not.toHaveBeenCalled();
+  });
+
+  it("requires authentication before resolving a completion history task", async () => {
+    const app = await createApp({ type: "none" });
+    const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
+
+    expect(res.status).toBe(401);
+    expect(mockIssueService.getByIdentifier).not.toHaveBeenCalled();
+    expect(mockCompletionHistory.read).not.toHaveBeenCalled();
+  });
+
+  it("requires telemetry access before reading native completion results", async () => {
+    mockIssueService.getByIdentifier.mockResolvedValue({ id: "issue-1", companyId: "company-1" });
+    mockAccessService.decide.mockImplementation(async ({ action }) => ({ allowed: action === "issue:read" }));
+    const app = await createApp({ type: "agent", companyId: "company-1", agentId: "agent-1" });
+    const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
+
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "company_scope:read" }));
+    expect(res.status).toBe(403);
     expect(mockCompletionHistory.read).not.toHaveBeenCalled();
   });
 

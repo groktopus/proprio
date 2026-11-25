@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
-import { caseHandoffs, cases, type Db } from "@groktopus/db";
+import type { Db } from "@groktopus/db";
 import { normalizeIssueIdentifier } from "@groktopus/shared";
 import { validate } from "../middleware/validate.js";
 import { activityService, normalizeActivityLimit } from "../services/activity.js";
@@ -16,7 +15,6 @@ import { contextCompactionService } from "../services/context-compaction.js";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
 import { issueReadSqlCondition } from "../services/authorization.js";
 import { caseActivityReadSqlCondition } from "../services/case-activity-access.js";
-import { caseReadSqlCondition, filterCasesForActor } from "../services/case-access.js";
 import { readNativeCompletionHistory } from "../services/native-runtime/native-completion-history.js";
 
 /** Max rows a single CSV export will stream (guards against runaway exports). */
@@ -203,7 +201,7 @@ export function activityRoutes(db: Db) {
     assigneeAgentId: string | null;
     assigneeUserId: string | null;
     status: string;
-  }) {
+  }, { hideExistence = false } = {}) {
     const decision = await access.decide({
       actor: req.actor,
       action: "issue:read",
@@ -219,7 +217,8 @@ export function activityRoutes(db: Db) {
       },
     });
     if (decision.allowed) return true;
-    res.status(403).json({ error: "Issue activity is outside this actor's authorization boundary" });
+    if (hideExistence) res.status(404).json({ error: "Issue not found" });
+    else res.status(403).json({ error: "Issue activity is outside this actor's authorization boundary" });
     return false;
   }
 
@@ -376,21 +375,16 @@ export function activityRoutes(db: Db) {
   });
 
   router.get("/issues/:id/completion-history", async (req, res) => {
+    assertAuthenticated(req);
     const rawId = req.params.id as string;
     const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const caseReadCondition = await caseReadSqlCondition(db, req.actor);
-    const candidateHandoffs = await db.select({ id: caseHandoffs.id, caseId: caseHandoffs.caseId }).from(caseHandoffs)
-      .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, issue.companyId)))
-      .where(and(eq(caseHandoffs.companyId, issue.companyId), eq(caseHandoffs.issueId, issue.id), caseReadCondition));
-    const candidateCases = [...new Set(candidateHandoffs.map(({ caseId }) => caseId))].map(id => ({ id }));
-    const readableCases = await filterCasesForActor(db, req.actor, candidateCases);
-    const readableCaseIds = new Set(readableCases.map(({ id }) => id));
-    const readableHandoffs = candidateHandoffs.filter(({ caseId }) => readableCaseIds.has(caseId));
+    if (!(await assertIssueReadAllowed(req, res, issue, { hideExistence: true }))) return;
+    if (!(await assertCompanyScopeReadAllowed(req, res, issue.companyId))) return;
     res.setHeader("Cache-Control", "private, no-store");
-    res.json(await readNativeCompletionHistory(db, { companyId: issue.companyId, issueId: issue.id,
-      readableCaseHandoffIds: new Set(readableHandoffs.map(({ id }) => id)) }));
+    res.json(await readNativeCompletionHistory(db, {
+      companyId: issue.companyId, issueId: issue.id, actor: req.actor,
+    }));
   });
 
   router.get("/issues/:id/runs", async (req, res) => {

@@ -62830,7 +62830,7 @@
           "activity"
         ],
         "summary": "Read native completion criteria, evidence and status decisions for a task",
-        "description": "Returns assessment-rooted native completion lineage newest first. Contract revisions, results, assessments and status decisions remain linked across superseding records. Evidence outcome is separate from record visibility; inaccessible evidence omits identifiers. Older or incomplete histories report null records and lineageGaps.",
+        "description": "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
         "responses": {
           "200": {
             "description": "Success",
@@ -62979,7 +62979,8 @@
                                   "enum": [
                                     "satisfied",
                                     "not_satisfied",
-                                    "unknown"
+                                    "unknown",
+                                    null
                                   ],
                                   "nullable": true
                                 },
@@ -63090,6 +63091,10 @@
                                 "reasonCode": {
                                   "type": "string"
                                 },
+                                "reportedReasonCode": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
                                 "detail": {
                                   "type": "string",
                                   "nullable": true
@@ -63155,6 +63160,7 @@
                                 "claimStatus",
                                 "outcome",
                                 "reasonCode",
+                                "reportedReasonCode",
                                 "detail",
                                 "evidence"
                               ]

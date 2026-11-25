@@ -1,4 +1,4 @@
-import { and, desc, eq, ne, or } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import {
   approvals,
@@ -6,6 +6,7 @@ import {
   caseHandoffs,
   completionContracts,
   heartbeatRunEvents,
+  heartbeatRuns,
   issueApprovals,
   issueAttachments,
   issueThreadInteractions,
@@ -14,33 +15,45 @@ import {
   statusDecisions,
   workAssessments,
 } from "@groktopus/db";
-import type {
-  NativeCompletionCriterionAssessment,
-  NativeCompletionEvidenceKind,
-  NativeCompletionEvidenceOutcome,
-  NativeCompletionEvidenceReference,
-  NativeCompletionHistoryEntry,
-  NativeCompletionVerificationAssessment,
+import {
+  nativeCompletionEvidenceKindSchema,
+  nativeCompletionEvidenceOutcomeSchema,
+  type NativeCompletionCriterionAssessment,
+  type NativeCompletionEvidenceKind,
+  type NativeCompletionEvidenceOutcome,
+  type NativeCompletionEvidenceReference,
+  type NativeCompletionHistoryEntry,
+  type NativeCompletionVerificationAssessment,
 } from "@groktopus/shared";
 
-type RecordValue = Record<string, unknown>;
-const record = (value: unknown): RecordValue =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? value as RecordValue : {};
-const text = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : null;
+import { redactSensitiveText } from "../../redaction.js";
+import { authorizationService, canActorReadApproval, type AuthorizationActor } from "../authorization.js";
+import { readableCaseHandoffIds } from "../case-access.js";
+import { getHeartbeatRunReadDecisions } from "../heartbeat-run-privacy.js";
+import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
+
+import { record, text } from "./evidence-json.js";
+
 const uuid = (value: string) => {
   const match = /(?:^|:)([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=$|\s|\()/i.exec(value);
   return match?.[1] ?? null;
 };
 const outcome = (value: unknown): NativeCompletionEvidenceOutcome =>
-  value === "accepted" || value === "missing" || value === "rejected" || value === "unverifiable" ? value : "unverifiable";
+  nativeCompletionEvidenceOutcomeSchema.safeParse(value).data ?? "unverifiable";
 const evidenceKind = (value: unknown): NativeCompletionEvidenceKind =>
-  value === "event" || value === "work_product" || value === "approval" || value === "interaction"
-    || value === "attachment" || value === "case_handoff" ? value : "unknown";
+  nativeCompletionEvidenceKindSchema.safeParse(value).data ?? "unknown";
 
 type EvidenceSource = { ref: string; kind: NativeCompletionEvidenceKind; outcome: NativeCompletionEvidenceOutcome;
   reasonCode: string; durableRecordId: string | null };
 
-async function evidenceReference(db: Db, scope: { companyId: string; issueId: string; runId: string; readableCaseHandoffIds?: ReadonlySet<string> }, source: EvidenceSource): Promise<NativeCompletionEvidenceReference> {
+type CompletionHistoryScope = { companyId: string; issueId: string; actor: AuthorizationActor };
+type EvidenceReadScope = CompletionHistoryScope & {
+  runId: string;
+  readableHandoffs: ReadonlySet<string>;
+  unavailableCitationIds: Set<string>;
+};
+
+async function evidenceReference(db: Db, scope: EvidenceReadScope, source: EvidenceSource): Promise<NativeCompletionEvidenceReference> {
   let recordId: string | null = null;
   let title: string | null = null;
   let existsInCompanyOtherScope = false;
@@ -70,8 +83,10 @@ async function evidenceReference(db: Db, scope: { companyId: string; issueId: st
       const [row] = await db.select({ id: approvals.id, kind: approvals.type })
         .from(issueApprovals).innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, scope.companyId)))
         .where(and(eq(issueApprovals.companyId, scope.companyId), eq(issueApprovals.issueId, scope.issueId), eq(issueApprovals.approvalId, parsed))).limit(1);
-      if (row) { recordId = row.id; title = row.kind; }
-      else {
+      if (row) {
+        if (await canActorReadApproval(db, scope.actor, row.id)) { recordId = row.id; title = row.kind; }
+        else existsInCompanyOtherScope = true;
+      } else {
         const [otherTask] = await db.select({ id: issueApprovals.approvalId }).from(issueApprovals)
           .where(and(eq(issueApprovals.companyId, scope.companyId), ne(issueApprovals.issueId, scope.issueId), eq(issueApprovals.approvalId, parsed))).limit(1);
         existsInCompanyOtherScope = Boolean(otherTask);
@@ -88,11 +103,13 @@ async function evidenceReference(db: Db, scope: { companyId: string; issueId: st
       if (row?.issueId === scope.issueId) { recordId = row.id; title = row.filename; }
       else if (row) existsInCompanyOtherScope = true;
     } else if (source.kind === "case_handoff") {
-      const [row] = await db.select({ id: caseHandoffs.id, issueId: caseHandoffs.issueId, phase: caseHandoffs.phase })
+      const [row] = await db.select({ id: caseHandoffs.id, issueId: caseHandoffs.issueId,
+        phase: caseHandoffs.phase, sourceRunId: caseHandoffs.sourceRunId })
         .from(caseHandoffs).where(and(eq(caseHandoffs.companyId, scope.companyId), eq(caseHandoffs.id, parsed))).limit(1);
-      if (row?.issueId === scope.issueId && scope.readableCaseHandoffIds?.has(row.id)) { recordId = row.id; title = row.phase; }
-      else if (row?.issueId === scope.issueId) existsInCompanyOtherScope = true;
-      else if (row) existsInCompanyOtherScope = true;
+      if (row?.issueId === scope.issueId && row.sourceRunId === scope.runId && scope.readableHandoffs.has(row.id)) {
+        recordId = row.id;
+        title = row.phase;
+      } else if (row) existsInCompanyOtherScope = true;
     }
   }
 
@@ -103,8 +120,9 @@ async function evidenceReference(db: Db, scope: { companyId: string; issueId: st
     return { kind: source.kind, outcome: source.outcome, visibility: "available", reasonCode: source.reasonCode,
       label: title ? `${prefix}: ${title}` : prefix, recordId, ...(title ? { title } : {}) };
   }
+  if (parsed) scope.unavailableCitationIds.add(parsed.toLowerCase());
   if (existsInCompanyOtherScope) {
-    return { kind: source.kind, outcome: source.outcome, visibility: "restricted", reasonCode: source.reasonCode,
+    return { kind: source.kind, outcome: "unverifiable", visibility: "restricted", reasonCode: "evidence_access_restricted",
       label: "Supporting record is outside this task's readable scope." };
   }
   return { kind: source.kind, outcome: source.outcome,
@@ -131,11 +149,13 @@ function criteria(contractJson: unknown) {
 }
 
 /** Read immutable native completion lineage for one already-authorized task. */
-export async function readNativeCompletionHistory(db: Db, scope: { companyId: string; issueId: string; readableCaseHandoffIds?: ReadonlySet<string> }): Promise<NativeCompletionHistoryEntry[]> {
+export async function readNativeCompletionHistory(db: Db, scope: CompletionHistoryScope): Promise<NativeCompletionHistoryEntry[]> {
   const rows = await db.select({
     assessmentId: workAssessments.id,
     assessmentCreatedAt: workAssessments.createdAt,
     runId: workAssessments.runId,
+    runScopeKind: heartbeatRuns.scopeKind,
+    runIssueId: heartbeatRuns.issueId,
     assessmentPolicyVersion: workAssessments.policyVersion,
     triggerKind: workAssessments.triggerKind,
     assessmentJson: workAssessments.assessmentJson,
@@ -164,6 +184,7 @@ export async function readNativeCompletionHistory(db: Db, scope: { companyId: st
     decisionCreatedAt: statusDecisions.createdAt,
     decisionAppliedAt: statusDecisions.appliedAt,
   }).from(workAssessments)
+    .innerJoin(heartbeatRuns, and(eq(heartbeatRuns.companyId, workAssessments.companyId), eq(heartbeatRuns.id, workAssessments.runId)))
     .leftJoin(completionContracts, and(eq(completionContracts.companyId, workAssessments.companyId),
       eq(completionContracts.issueId, workAssessments.issueId), eq(completionContracts.id, workAssessments.contractId)))
     .leftJoin(nativeRunResults, and(eq(nativeRunResults.companyId, workAssessments.companyId),
@@ -173,29 +194,50 @@ export async function readNativeCompletionHistory(db: Db, scope: { companyId: st
       eq(statusDecisions.issueId, workAssessments.issueId), eq(statusDecisions.runId, workAssessments.runId),
       eq(statusDecisions.assessmentId, workAssessments.id)))
     .where(and(eq(workAssessments.companyId, scope.companyId), eq(workAssessments.issueId, scope.issueId),
-      eq(workAssessments.triggerKind, "native_result")))
+      inArray(workAssessments.triggerKind, ["native_result", "native_attention"])))
     .orderBy(desc(workAssessments.createdAt), desc(workAssessments.id));
 
-  return Promise.all(rows.map(async (row) => {
+  const runReadDecisions = await getHeartbeatRunReadDecisions(db, authorizationService(db), scope.actor,
+    rows.map(row => ({ companyId: scope.companyId, scopeKind: row.runScopeKind, issueId: row.runIssueId })));
+  const assessments = rows.filter((_, index) => runReadDecisions[index]).map(row => {
     const assessmentJson = record(row.assessmentJson);
-    const resultEnvelope = record(row.resultJson);
-    const resultPayload = record(resultEnvelope.result);
     const criteriaRows = Array.isArray(assessmentJson.criterionAssessments) ? assessmentJson.criterionAssessments : [];
     const verificationRows = Array.isArray(assessmentJson.verificationAssessments) ? assessmentJson.verificationAssessments : [];
+    return { row, assessmentJson, criteriaRows, verificationRows };
+  });
+  const citedHandoffIds = new Set<string>();
+  for (const { criteriaRows, verificationRows } of assessments) {
+    const citations = [
+      ...criteriaRows.flatMap(value => Array.isArray(record(value).evidenceRefs) ? record(value).evidenceRefs as unknown[] : []),
+      ...verificationRows.map(value => record(value).evidenceRef),
+    ];
+    for (const citation of citations) {
+      const source = evidenceSource(citation);
+      const id = source?.kind === "case_handoff" ? uuid(source.ref) : null;
+      if (id) citedHandoffIds.add(id.toLowerCase());
+    }
+  }
+  const readableHandoffs = await readableCaseHandoffIds(db, scope.actor, { ...scope, handoffIds: [...citedHandoffIds] });
+  const unavailableCitationIds = new Set<string>();
+  const history = await Promise.all(assessments.map(async ({ row, assessmentJson, criteriaRows, verificationRows }) => {
+    const evidenceScope = { ...scope, runId: row.runId, readableHandoffs, unavailableCitationIds };
+    const resultEnvelope = record(row.resultJson);
+    const resultPayload = record(resultEnvelope.result);
     const [criterionAssessments, verificationAssessments] = await Promise.all([
       Promise.all(criteriaRows.map(async (value): Promise<NativeCompletionCriterionAssessment> => {
         const item = record(value);
         const sources = Array.isArray(item.evidenceRefs) ? item.evidenceRefs.map(evidenceSource).filter((entry): entry is EvidenceSource => !!entry) : [];
         return { criterionId: text(item.criterionId) ?? "unknown", claimStatus: item.claimStatus === "satisfied" || item.claimStatus === "not_satisfied" || item.claimStatus === "unknown" ? item.claimStatus : null,
           outcome: outcome(item.outcome), reasonCode: text(item.reasonCode) ?? "assessment_reason_unavailable",
-          evidence: await Promise.all(sources.map((source) => evidenceReference(db, { ...scope, runId: row.runId }, source))) };
+          evidence: await Promise.all(sources.map((source) => evidenceReference(db, evidenceScope, source))) };
       })),
       Promise.all(verificationRows.map(async (value): Promise<NativeCompletionVerificationAssessment> => {
         const item = record(value);
         const source = evidenceSource(item.evidenceRef);
         return { commandOrCheck: text(item.commandOrCheck) ?? "Verification", claimStatus: item.claimStatus === "passed" || item.claimStatus === "failed" || item.claimStatus === "not_run" ? item.claimStatus : "not_run",
-          outcome: outcome(item.outcome), reasonCode: text(item.reasonCode) ?? "verification_reason_unavailable", detail: text(item.detail),
-          evidence: source ? await evidenceReference(db, { ...scope, runId: row.runId }, source) : null };
+          outcome: outcome(item.outcome), reasonCode: text(item.reasonCode) ?? "verification_reason_unavailable",
+          reportedReasonCode: text(item.reportedReasonCode), detail: text(item.detail),
+          evidence: source ? await evidenceReference(db, evidenceScope, source) : null };
       })),
     ]);
     const gaps: NativeCompletionHistoryEntry["lineageGaps"] = [];
@@ -226,4 +268,21 @@ export async function readNativeCompletionHistory(db: Db, scope: { companyId: st
       lineageGaps: gaps,
     } satisfies NativeCompletionHistoryEntry;
   }));
+  const cleanText = (value: string): string => redactSensitiveText(value).replace(
+    /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi,
+    identifier => unavailableCitationIds.has(identifier.toLowerCase()) ? "[REDACTED]" : identifier,
+  );
+  const redactProjection = (value: unknown): unknown => {
+    if (typeof value === "string") return cleanText(value);
+    if (Array.isArray(value)) return value.map(redactProjection);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactProjection(item)]));
+    }
+    return value;
+  };
+  const redactions = createRunSecretRedactionRegistry(db);
+  return (await redactions.redactForRuns(scope.companyId,
+    history.map(entry => ({ id: entry.runId, entry: redactProjection(entry) as NativeCompletionHistoryEntry })),
+    scope.actor.type === "board" ? scope.actor.userId ?? null : null,
+  )).map(({ entry }) => entry);
 }
