@@ -3402,6 +3402,19 @@ rl.on("line", (line) => {
         (error) => expectGatewayError(error, 422, "remote_http_private_endpoint"),
       );
       expect(fetchSpy).not.toHaveBeenCalled();
+      const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+      expect(invocation).toMatchObject({ status: "failed", errorCode: "remote_http_private_endpoint" });
+      const [failure] = await db.select().from(toolCallEvents).where(and(
+        eq(toolCallEvents.invocationId, invocation!.id), eq(toolCallEvents.eventType, "call_failed"),
+      ));
+      expect(failure?.metadata).toMatchObject({ execution: { request: { dispatched: false } } });
+      const receipts = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      ));
+      expect(receipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ phase: "dispatch_intent" }),
+        expect.objectContaining({ phase: "terminal_outcome", status: "failed", reasonCode: "remote_http_private_endpoint" }),
+      ]));
     } finally {
       fetchSpy.mockRestore();
     }
@@ -5761,11 +5774,15 @@ rl.on("line", (line) => {
     });
   }
 
-  async function startRemoteCallWithControlledBody(respond: (body: ReadableStream<Uint8Array>) => Response, waitForRead = true) {
+  async function startRemoteCallWithControlledBody(
+    respond: (body: ReadableStream<Uint8Array>) => Response,
+    waitForRead = true,
+    riskLevel: "read" | "write" = "write",
+  ) {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
     const { run } = await createIssueAndRun(db, company.id, agent.id);
-    await createRemoteMcpTool(db, company.id);
+    await createRemoteMcpTool(db, company.id, { riskLevel });
     await allowAllToolsForAgent(db, company.id, agent.id);
     const reading = Promise.withResolvers<void>();
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
@@ -5806,7 +5823,7 @@ rl.on("line", (line) => {
   it("records a transport failure kind when the remote hostname does not resolve", async () => {
     const remote = await startRemoteCallWithControlledBody(() => {
       throw new ToolGatewayHttpError(502, "Remote MCP connection hostname did not resolve", "remote_http_dns_failed");
-    }, false);
+    }, false, "read");
     try {
       expectGatewayError((await remote.call).error, 502, "remote_http_dns_failed");
       expect((await remote.failedEvent()).metadata).toMatchObject({ execution: { failureKind: "transport_failure" } });
@@ -5860,11 +5877,11 @@ rl.on("line", (line) => {
       },
     },
     {
-      name: "timeout abort",
-      reasonCode: "tool_timeout",
-      status: 504,
-      timeoutMs: 10,
-      response: () => ({ delayMs: 75, body: { jsonrpc: "2.0", id: "slow", result: { content: [{ type: "text", text: "late" }] } } }),
+      name: "an uncertain write timeout after sending the request",
+      reasonCode: "managed_dispatch_outcome_unknown",
+      status: 409,
+      timeoutMs: 300,
+      response: () => ({ delayMs: 1_000, body: { jsonrpc: "2.0", id: "slow", result: { content: [{ type: "text", text: "late" }] } } }),
     },
   ];
 
@@ -5900,14 +5917,22 @@ rl.on("line", (line) => {
         );
 
         const [invocation] = await db.select().from(toolInvocations);
+        if (scenario.reasonCode === "managed_dispatch_outcome_unknown") {
+          expect(invocation).toMatchObject({ status: "executing" });
+          expect(fake.requests.filter((request) => request.body?.method === "tools/call")).toHaveLength(1);
+          const receipts = await db.select().from(managedAuditEvents)
+            .where(eq(managedAuditEvents.invocationId, invocation!.id));
+          expect(receipts.map((receipt) => receipt.phase).sort()).toEqual(["dispatch_intent", "policy_decision"]);
+          return;
+        }
         expect(invocation).toMatchObject({
-          status: scenario.status === 504 ? "timed_out" : "failed",
+          status: "failed",
           errorCode: scenario.reasonCode,
         });
         const [failureAudit] = await db
           .select()
           .from(activityLog)
-          .where(eq(activityLog.action, scenario.status === 504 ? "tool_gateway.call_deferred" : "tool_gateway.call_failed"));
+          .where(eq(activityLog.action, "tool_gateway.call_failed"));
         expect(failureAudit.details).toMatchObject({
           argumentsSummary: {
             summary: expect.stringContaining('"key":"alpha"'),
@@ -6000,6 +6025,7 @@ rl.on("line", (line) => {
         const { connection } = await createRemoteMcpTool(db, company.id, {
           applicationKey: `per-call-${scenario.reasonCode}`,
           toolName: "kv_get",
+          riskLevel: "read",
           url: fake.url,
           connectionConfig: { mcpSessionRequired: true },
         });
