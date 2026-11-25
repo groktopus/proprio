@@ -1757,7 +1757,7 @@ export function createToolGatewayService(
       if (!identity) return false;
       const { admission } = identity;
       const operationFingerprint = input.fenceEquivalentWrites ? createHash("sha256").update(JSON.stringify([
-        admission.companyId, identity.actorType, identity.actorId, admission.connectionId,
+        admission.companyId, admission.actorType, admission.actorId, admission.connectionId,
         input.destinationFingerprint, input.toolName, input.argumentsHash, input.routingHash,
       ])).digest("hex") : null;
       const [existingIntent] = await tx.select().from(managedAuditEvents).where(and(
@@ -8621,15 +8621,24 @@ export function createToolGatewayService(
             } : {}),
           });
         }
-        return options.remoteHttpRequest
-          ? options.remoteHttpRequest(target, init)
-          : guardedRemoteHttpFetch(target, init, {
-              ...remoteHttpFetchOptions(),
-              // This call site owns a caller-set budget that can exceed the
-              // transport's default response deadline, so hand it down rather than
-              // letting the tighter default cut a legitimately slow tool short.
-              responseTimeoutMs: ms,
-            });
+        try {
+          return await (options.remoteHttpRequest
+            ? options.remoteHttpRequest(target, init)
+            : guardedRemoteHttpFetch(target, init, {
+                ...remoteHttpFetchOptions(),
+                // This call site owns a caller-set budget that can exceed the
+                // transport's default response deadline, so hand it down rather than
+                // letting the tighter default cut a legitimately slow tool short.
+                responseTimeoutMs: ms,
+              }));
+        } catch (error) {
+          if (toolCall && tool.risk !== "read" && managedDispatchIntentWritten) {
+            throw new ToolGatewayHttpError(409,
+              "The managed MCP transport failed after dispatch intent was recorded. The provider outcome is unknown; reconcile before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+          throw error;
+        }
       };
       // AWS refused the minted token: drop it everywhere and rebuild this call's headers with a fresh one.
       const remintAwsCredentials = async () => {
