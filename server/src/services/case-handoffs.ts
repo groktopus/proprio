@@ -21,6 +21,7 @@ import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
+import { lockCurrentNativeCompletionContract } from "./native-runtime/completion-contracts.js";
 import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING } from "./case-handoff-states.js";
 import { completeTerminalCaseHandoffsForIssue, pendingCaseHandoffForRun } from "./heartbeat/case-handoff-lifecycle.js";
 import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHandoffCloudAuthority, lockCaseHandoffAuthorityRun, restoreCaseHandoffActor } from "./case-handoff-authority.js";
@@ -283,15 +284,20 @@ export function caseHandoffService(db: Db) {
   async function assertOfferRequirementsCurrent(tx: Db, row: CaseHandoffRow, issue: IssueRow) {
     const offer = row.offerContract;
     if (!offer) return;
-    const [contract] = await tx.select({ id: completionContracts.id, revision: completionContracts.revision,
+    if (!await lockCurrentNativeCompletionContract(tx, { companyId: row.companyId, issueId: row.issueId,
+      contractId: offer.requirementRevision.id })) {
+      throw conflict("The offer's completion contract is no longer current or is being revised");
+    }
+    const [contract] = await tx.select({ revision: completionContracts.revision,
       canonicalSha256: completionContracts.canonicalSha256 }).from(completionContracts).where(and(
-        eq(completionContracts.companyId, row.companyId), eq(completionContracts.issueId, row.issueId),
-      )).orderBy(desc(completionContracts.revision)).limit(1);
+        eq(completionContracts.id, offer.requirementRevision.id), eq(completionContracts.companyId, row.companyId),
+        eq(completionContracts.issueId, row.issueId),
+      )).limit(1);
     const [sourceRun] = row.sourceRunId ? await tx.select({ runtimeMode: heartbeatRuns.runtimeMode,
       completionContractId: heartbeatRuns.completionContractId }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.id, row.sourceRunId), eq(heartbeatRuns.companyId, row.companyId),
       )).limit(1) : [];
-    if (!contract || contract.id !== offer.requirementRevision.id || !sourceRun || sourceRun.runtimeMode !== "native"
+    if (!contract || !sourceRun || sourceRun.runtimeMode !== "native"
         || sourceRun.completionContractId !== offer.requirementRevision.id ||
         contract.revision !== offer.requirementRevision.revision || contract.canonicalSha256 !== offer.requirementRevision.canonicalSha256) {
       throw conflict("Versioned offer requirement revision changed; record a new offer");
@@ -719,7 +725,8 @@ export function caseHandoffService(db: Db) {
         if (actor.runId) await assertAgentRunWriteAllowed(tx, companyId, { agentId, runId: actor.runId });
         const [caseRow] = await tx.select().from(cases).where(and(eq(cases.companyId, companyId), eq(cases.id, caseId))).for("update");
         const [row] = await tx.select().from(caseHandoffs).where(scope).for("update");
-        if (!caseRow || !row || row.toAgentId !== agentId || !(await canActorReceiveCase(tx, actor, caseRow, issue.id, agentId))) {
+        if (!caseRow || !row || row.toAgentId !== agentId || !await canActorReadCase(tx, actor, caseRow)
+          || !await canActorReceiveCase(tx, actor, caseRow, issue.id, agentId)) {
           throw notFound("Handoff not found");
         }
         if (!row.offerContract || input.expectedHandoffVersion !== row.version

@@ -28,11 +28,11 @@ export const CASE_HANDOFF_STATES = ["offered", "awaiting_release", "pending_disp
 export type CaseHandoffState = typeof CASE_HANDOFF_STATES[number];
 export type CaseHandoffDestinationKind = "agent" | "done";
 
-const offerText = (maxLength: number) => z.string().trim().min(1).max(maxLength)
+const handoffReceiptText = (maxLength: number) => z.string().trim().min(1).max(maxLength)
   .refine(value => !value.includes("\u0000") && !/[\uD800-\uDFFF]/u.test(value), "Text must use valid Unicode and contain no NUL characters");
 const caseHandoffOfferSchema = z.object({
-  expectedDeliverable: offerText(8_000),
-  prerequisites: z.array(offerText(2_000)).max(20).default([]),
+  expectedDeliverable: handoffReceiptText(8_000),
+  prerequisites: z.array(handoffReceiptText(2_000)).max(20).default([]),
 }).strict();
 type CaseHandoffOfferInput = z.infer<typeof caseHandoffOfferSchema>;
 export interface CaseHandoffOfferContract extends CaseHandoffOfferInput {
@@ -133,13 +133,13 @@ export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome"
     ...decisionTarget,
     outcome: z.literal("clarification"),
     reasonCode: z.enum(["missing_prerequisite", "unclear_requirements", "missing_evidence", "other"]),
-    message: z.string().trim().min(1).max(4_000),
+    message: handoffReceiptText(4_000),
   }).strict(),
   z.object({
     ...decisionTarget,
     outcome: z.literal("declined"),
     reasonCode: z.enum(["unavailable", "missing_capability", "outside_scope", "other"]),
-    message: z.string().trim().min(1).max(4_000),
+    message: handoffReceiptText(4_000),
   }).strict(),
 ]);
 export type CaseHandoffRecipientDecisionInput = z.infer<typeof caseHandoffRecipientDecisionSchema>;

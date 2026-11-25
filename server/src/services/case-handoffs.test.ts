@@ -153,7 +153,7 @@ describe("durable same-task case handoffs", () => {
 
   it("records an immutable offered revision without transferring ownership or dispatching work", async () => {
     const f = await versionedOffer();
-    const { contract, first, receipt, taskBefore, offer } = f;
+    const { contract, first, receipt, runId, taskBefore, offer } = f;
     const [saved] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
     const [taskAfter] = await db.select().from(issues).where(eq(issues.id, first.taskId));
     const [caseAfter] = await db.select().from(cases).where(eq(cases.id, first.caseId));
@@ -202,6 +202,28 @@ describe("durable same-task case handoffs", () => {
     return request(app).post(`/api/cases/${f.first.caseId}/handoffs/${f.receipt.handoffId}/decision`);
   }
 
+  it("limits decision requests per agent and preserves an independent principal's access", async () => {
+    const f = await versionedOffer();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "agent", source: "agent_key", companyId: f.companyId,
+        agentId: req.header("x-test-agent") ?? f.engineer };
+      next();
+    });
+    app.use("/api", caseHandoffRoutes(db));
+    app.use(errorHandler);
+    const path = `/api/cases/${f.first.caseId}/handoffs/${f.receipt.handoffId}/decision`;
+    const input = { outcome: "accepted", expectedHandoffVersion: f.receipt.handoffVersion, requirementRevisionId: f.contract.id };
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await request(app).post(path).send(input).expect(200);
+    }
+    expect((await request(app).post(path).send(input).expect(429)).headers["retry-after"]).toBeDefined();
+    await request(app).post(path).set("x-test-agent", f.verifier).send(input).expect(404);
+    expect(await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.first.caseId),
+      eq(caseEvents.kind, "handoff_decision_recorded")))).toHaveLength(1);
+  });
+
   it("records one recipient acceptance, then transfers only after normal release", async () => {
     const f = await versionedOffer();
     const recipient = { type: "agent" as const, source: "agent_key" as const, companyId: f.companyId, agentId: f.engineer };
@@ -239,6 +261,7 @@ describe("durable same-task case handoffs", () => {
     const recipient = { type: "agent" as const, source: "agent_key" as const, companyId: f.companyId, agentId: f.engineer };
     const input = { outcome, reasonCode, message: "Private follow-up", expectedHandoffVersion: f.receipt.handoffVersion,
       requirementRevisionId: f.contract.id };
+    await recipientDecisionRequest(recipient, f).send({ ...input, message: "invalid\u0000text" }).expect(400);
     const result = await recipientDecisionRequest(recipient, f).send(input).expect(200);
     expect(result.body).toMatchObject({ state: "cancelled", lastErrorCode,
       recipientDecision: { outcome, reasonCode, actorId: f.engineer, message: input.message } });
@@ -247,6 +270,22 @@ describe("durable same-task case handoffs", () => {
       eq(caseEvents.kind, "handoff_decision_recorded")));
     expect(audit!.payload).toMatchObject({ outcome, reasonCode });
     expect(JSON.stringify(audit!.payload)).not.toContain(input.message);
+  });
+
+  it("refuses an offer whose completion contract was superseded", async () => {
+    const f = await versionedOffer();
+    await db.insert(completionContracts).values({ companyId: f.companyId, issueId: f.first.taskId, revision: 2,
+      schemaVersion: f.contract.schemaVersion, policyVersion: f.contract.policyVersion, risk: f.contract.risk,
+      completionAuthority: f.contract.completionAuthority, incompleteCriteriaPolicy: f.contract.incompleteCriteriaPolicy,
+      contractJson: f.contract.contractJson, canonicalSha256: "b".repeat(64), createdByActorType: "agent", createdByActorId: f.triage });
+    const recipient = { type: "agent" as const, source: "agent_key" as const, companyId: f.companyId, agentId: f.engineer };
+    const response = await recipientDecisionRequest(recipient, f).send({ outcome: "accepted",
+      expectedHandoffVersion: f.receipt.handoffVersion, requirementRevisionId: f.contract.id }).expect(409);
+    expect(response.body.error).toContain("completion contract is no longer current");
+    expect((await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.receipt.handoffId)))[0])
+      .toMatchObject({ state: "offered", recipientDecision: null });
+    expect(await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.first.caseId),
+      eq(caseEvents.kind, "handoff_decision_recorded")))).toHaveLength(0);
   });
 
   it("refuses a stale or withdrawn offer and starts no successor", async () => {

@@ -1363,6 +1363,7 @@ function registerCurrentRoute(input: {
 type OpenApiAuthLevel =
   | "public"
   | "agent_run"
+  | "agent"
   | "agent_heartbeat"
   | "runtime_tools"
   | "authenticated"
@@ -1761,6 +1762,7 @@ function resolveOperationAuthLevel(
   if (path === "/api/companies/{companyId}/grok-invitations"
       || /^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/grok-binding(?:\/(?:routine|verify|retry|stop|recover))?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision") return "agent";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/agents/me/chat/messages") return "agent_heartbeat";
   // An approved connected-app skill's file: an agent in an active run only.
@@ -1838,7 +1840,7 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "agent_run") {
         operation.security = [securityRequirement(AGENT_RUN_AUTH_SCHEME)];
-      } else if (authLevel === "agent_heartbeat") {
+      } else if (authLevel === "agent_heartbeat" || authLevel === "agent") {
         operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
       } else if (authLevel === "runtime_tools") {
         operation.security = RUNTIME_TOOLS_SECURITY;
@@ -1857,6 +1859,8 @@ function applyDocumentFixups(document: any): any {
               ? { actor: "agent", heartbeatBound: true, taskBound: true }
             : authLevel === "agent_heartbeat"
               ? { actor: "agent", heartbeatBound: true }
+            : authLevel === "agent"
+              ? { actor: "agent" }
             : authLevel === "runtime_tools"
               ? { actor: "runtime_tools", heartbeatBound: true }
               : authLevel === "authenticated"
@@ -14037,9 +14041,9 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
 registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/decision", tags: ["Cases"],
   summary: "Record a recipient decision on a versioned handoff offer",
-  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt.",
+  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The endpoint accepts up to 12 requests per minute per recipient principal.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffRecipientDecisionSchema) },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 429: r.tooManyRequests } });
 for (const action of ["retry", "cancel"] as const) registry.registerPath({ method: "post", path: `/api/cases/{caseId}/handoffs/{handoffId}/${action}`,
   tags: ["Cases"], summary: `${action === "retry" ? "Retry" : "Cancel"} pending case handoff`,
   description: "Requires case access and ordinary task-control authority. Retry preserves the existing handoff/task identity. Cancellation remains available when enableCases is disabled; it prevents delivery and does not undo an applied assignment.",
