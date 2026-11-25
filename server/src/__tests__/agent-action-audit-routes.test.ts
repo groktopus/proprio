@@ -981,8 +981,10 @@ describePostgres("agent action audit routes", () => {
       companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: issue.id, status: "succeeded",
     }).returning().then(rows => rows[0]!);
     const membershipCount = 20_000;
+    const offPageMemberId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
     for (let offset = 0; offset < membershipCount; offset += 1_000) {
-      await db.insert(managedAuditEvents).values(Array.from({ length: 1_000 }, () => ({
+      await db.insert(managedAuditEvents).values(Array.from({ length: 1_000 }, (_, index) => ({
+        id: offset === membershipCount - 1_000 && index === 999 ? offPageMemberId : randomUUID(),
         companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway" as const,
         taskId: issue.id, runId: run.id,
         occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
@@ -1050,6 +1052,21 @@ describePostgres("agent action audit routes", () => {
         .from(managedAuditExportPageAccess).where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId));
       expect(pageAccess).toEqual([{ companyId: company.id, userId, exportId: receipt.body.exportId,
         pageOffset: 0, itemCount: response.body.events.length }]);
+      expect(response.body.events.map((event: { id: string }) => event.id)).not.toContain(offPageMemberId);
+
+      await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, offPageMemberId));
+      const replay = await board.get(exportPath).expect(409);
+      expect(replay.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      expect(replay.body).not.toHaveProperty("eventCount");
+      expect(replay.body).not.toHaveProperty("watermark");
+      expect(replay.body).not.toHaveProperty("events");
+      expect(await db.select({ companyId: managedAuditExportPageAccess.companyId,
+        userId: managedAuditExportPageAccess.userId, exportId: managedAuditExportPageAccess.exportId,
+        pageOffset: managedAuditExportPageAccess.pageOffset, itemCount: managedAuditExportPageAccess.itemCount })
+        .from(managedAuditExportPageAccess).where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId)))
+        .toEqual(pageAccess);
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.exportId, receipt.body.exportId))).toHaveLength(1);
     } finally {
       release.resolve();
       await Promise.allSettled([locker, pendingRead]);
@@ -1179,11 +1196,8 @@ describePostgres("agent action audit routes", () => {
       expect(created.body.eventCount).toBe(201);
       const exportPath = `${path}/${created.body.exportId}`;
       const first = await board.get(exportPath).expect(200);
-      expect(first.body.events).toHaveLength(200);
-      expect(first.body.events.map((entry: { id: string }) => entry.id)).not.toContain(privateCandidateId);
-      const pageAccessBeforeInvalidation = await db.select().from(managedAuditExportPageAccess)
-        .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId));
-      expect(pageAccessBeforeInvalidation).toHaveLength(1);
+      const second = await board.get(exportPath).query({ cursor: first.body.nextCursor }).expect(200);
+      expect(second.body.events).toMatchObject([{ id: privateCandidateId }]);
 
       await db.update(issues).set({ visibility: "private", responsibleUserId: randomUUID() }).where(eq(issues.id, issue.id));
       const replay = await board.get(exportPath).expect(409);
@@ -1191,9 +1205,6 @@ describePostgres("agent action audit routes", () => {
       expect(replay.body).not.toHaveProperty("eventCount");
       expect(replay.body).not.toHaveProperty("watermark");
       expect(replay.body).not.toHaveProperty("events");
-      expect(await db.select().from(managedAuditExportPageAccess)
-        .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId)))
-        .toEqual(pageAccessBeforeInvalidation);
 
       await db.update(issues).set({ visibility: "open", responsibleUserId: null }).where(eq(issues.id, issue.id));
       const resumed = await board.get(exportPath).query({ cursor: first.body.nextCursor }).expect(409);
