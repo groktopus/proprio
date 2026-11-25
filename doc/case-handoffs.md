@@ -129,6 +129,12 @@ delivered handoff and its recipient. Task recovery shows counts of unmet
 criteria and evidence gaps. It directs readers to the authorized Case view for
 the checklist and keeps the Case receipt in durable storage.
 
+Status commitment rechecks the accepted handoff for the receiving run and
+its completion corrective wake. If the Case is cancelled, the handoff is
+withdrawn or superseded, or the recipient no longer owns the task, the
+result, assessment, and final reply remain in run history. The status decision
+records `case_handoff_superseded` at the task's current status.
+
 ## Board and verification
 
 The board case list/detail pages are read-only. URL query parameters retain

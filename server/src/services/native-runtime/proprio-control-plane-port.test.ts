@@ -2800,11 +2800,11 @@ describe("ProprioControlPlanePort conformance", () => {
     return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract };
   }
 
-  it("keeps synthetic provider completion open until the requested task document is published", async () => {
+  it.each(["current", "cancelled"] as const)("handles an unpublished task document after a %s Case corrective wake", async caseState => {
     const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
-    const { handoffId, acceptedContract } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
+    const { caseId, handoffId, acceptedContract } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
     await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, caseHandoffId: handoffId,
       executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));
     const synthetic: PrpStructuredRunResult = { ...result, summary: "Created briefing.md with the returned page titles and service receipt.",
@@ -2851,7 +2851,26 @@ describe("ProprioControlPlanePort conformance", () => {
     await followUp.openRun({ identity: { ...CONTROL_PLANE_CONFORMANCE_OPEN.identity, companyId, issueId, agentId, runId: followUpId },
       backendKind: "mock", sourceInstanceId: runnerInstanceId });
     await followUp.completeRun({ result: synthetic, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
+    if (caseState === "cancelled") {
+      await db.update(cases).set({ status: "cancelled" }).where(eq(cases.id, caseId));
+    }
+    const [before] = await db.select().from(issues).where(eq(issues.id, issueId));
     await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
+    if (caseState === "cancelled") {
+      const [after] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(after).toMatchObject({ status: before!.status, statusVersion: before!.statusVersion,
+        assigneeAgentId: before!.assigneeAgentId, lastStatusDecisionId: before!.lastStatusDecisionId });
+      const [decision] = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, followUpId));
+      expect(decision).toMatchObject({ reasonCode: "case_handoff_superseded", applicationState: "applied",
+        decisionJson: { statusAction: "preserve", effects: [] } });
+      expect(await db.select().from(statusDecisionEffects).where(eq(statusDecisionEffects.decisionId, decision!.id))).toEqual([]);
+      expect(await db.select().from(workAssessments).where(eq(workAssessments.runId, followUpId))).toHaveLength(1);
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([]);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, followUpId));
+      expect(run).toMatchObject({ nativePhase: "committed", resultJson: { finalizationPhase: "committed",
+        finalizationReasonCode: "case_handoff_superseded", authoritativeDecision: before!.status } });
+      return;
+    }
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_progress");
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
       .toHaveLength(wakes.length + 1);
@@ -2870,11 +2889,18 @@ describe("ProprioControlPlanePort conformance", () => {
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });
   });
 
-  it.each(["same-recipient newer handoff", "withdrawal"] as const)("preserves a late accepted result after %s", async authorityChange => {
+  it.each(["same-recipient newer handoff", "withdrawal", "Case cancellation"] as const)("preserves a late accepted result after %s", async authorityChange => {
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     const { caseId, handoffId, acceptedContract, offerContract } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
     const initialIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
-    await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const turnId = "late-case-result";
+    await port.appendEvent({ schema: "proprio.prp.event.v1", sourceEventId: "late-case-answer",
+      sourceSeq: 1, sourceInstanceId: run!.runnerInstanceId!, sourceKind: "runner", runId,
+      normalizedSessionId: run!.nativeSessionId!, turnId, eventType: "item.completed", schemaVersion: 1,
+      priority: 0, emittedAt: new Date().toISOString(),
+      payload: { kind: "agentMessage", channel: "final", text: "The previous handoff requirements are complete." } });
+    await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
 
     if (authorityChange === "same-recipient newer handoff") {
       const newerHandoffId = randomUUID();
@@ -2887,8 +2913,10 @@ describe("ProprioControlPlanePort conformance", () => {
         recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 2,
           requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest, decidedAt: new Date().toISOString() },
         state: "delivered" });
-    } else {
+    } else if (authorityChange === "withdrawal") {
       await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date() }).where(eq(caseHandoffs.id, handoffId));
+    } else {
+      await db.update(cases).set({ status: "cancelled" }).where(eq(cases.id, caseId));
     }
 
     await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
@@ -2903,6 +2931,10 @@ describe("ProprioControlPlanePort conformance", () => {
       eq(nativeRunResults.issueId, issueId), eq(nativeRunResults.runId, runId)))).toHaveLength(1);
     expect(await db.select().from(workAssessments).where(and(eq(workAssessments.companyId, companyId),
       eq(workAssessments.issueId, issueId), eq(workAssessments.runId, runId)))).toHaveLength(1);
+    expect(await db.select().from(issueComments).where(eq(issueComments.createdByRunId, runId))).toEqual([]);
+    expect(await nativeResponsePresentationWork(db).load({ companyId, issueId, runId })).toEqual([]);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId)))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "item.completed" })]));
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
       eq(agentWakeupRequests.agentId, agentId), sql`${agentWakeupRequests.payload}->>'continuationIdempotencyKey' = 'native-completion-incomplete'`)))
       .toHaveLength(0);

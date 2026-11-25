@@ -1,3 +1,4 @@
+import { isStrictUuid } from "../uuid.js";
 import { and, eq } from "drizzle-orm";
 import { completionContracts, documents, heartbeatRuns, issueDocuments, type caseHandoffs, type issues, type Db } from "@groktopus/db";
 import type { CaseWorkflowTransition } from "@groktopus/shared";
@@ -79,7 +80,7 @@ export function readAcceptedCaseHandoffOffer(row: CaseHandoffRow) {
   const decision = row.recipientDecision;
   if (offer?.schema !== "proprio.case-handoff-offer.v1"
       || typeof offer.requirementsDigest !== "string" || !/^[0-9a-f]{64}$/.test(offer.requirementsDigest)
-      || !offer.requirementRevision?.id
+      || !isStrictUuid(offer.requirementRevision?.id)
       || decision?.outcome !== "accepted"
       || decision.actorType !== "agent" || decision.actorId !== row.toAgentId
       || decision.handoffVersion !== row.version || decision.requirementRevisionId !== offer.requirementRevision.id
