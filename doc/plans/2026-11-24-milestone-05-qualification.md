@@ -465,7 +465,10 @@ The enhanced reconstruction fixture passed on composition
 `cf9548d1faefc0ac4a916f60aef71eddf952d924` with one PostgreSQL
 connection. It verified the completed export count and watermark against the
 creation receipt and retained the observed audit phases and target ledger.
-The export contained nine events. Approved, denied, and interrupted calls
+Export `9dfc8283-a0f7-4156-b094-d90066ebeddf` contained nine events and
+reported watermark
+`7379f1a03ba796c639a21598991ac0924a450b767e78b5266fac4df0fa94af3c`.
+Approved, denied, and interrupted calls
 produced four, two, and three audit phases and one, zero, and one target
 effects respectively. A separate review checked the retained result against
 the fixture and passing log. The test recreated the controller in the same
@@ -576,13 +579,36 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
    both target historical policy. Independent authority targets `main`. Review
-the retained evidence follow-up after the reconstruction fixture.
-[#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368) [#406](https://github.com/groktopus/proprio/pull/406)
+   the retained evidence follow-up after the reconstruction fixture.
+   [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368) [#406](https://github.com/groktopus/proprio/pull/406)
 6. Review the one-connection task and wake changes before repeating the
    stress reconstruction on the selected source. Task creation and wake delivery
    target `main`. Deferred promotion follows wake delivery. The independent
    [#401](https://github.com/groktopus/proprio/pull/401) fixture correction also targets `main`.
    [#393](https://github.com/groktopus/proprio/pull/393) [#394](https://github.com/groktopus/proprio/pull/394) [#395](https://github.com/groktopus/proprio/pull/395)
+
+### Hosted smoke for PRs targeting main
+
+The required `smoke` check passed on each of the ten heads below. The
+linked Ubuntu 24.04 runs checked out those exact heads and passed the
+board build, server and UI typechecks, and stability tests. The workflow
+also passed the durable-work qualification for #373, #354, #359, #394,
+and #401, and the board accessibility suite for #373. After a stack
+moves to `main`, verify the required checks for the new comparison and
+rerun release qualification on the selected candidate.
+
+| PR | Tested head | Hosted run |
+| --- | --- | --- |
+| #351 | `3477a629` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45486097821) |
+| #373 | `40aa561e` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45557419079) |
+| #361 | `f5e0509c` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45500836578) |
+| #353 | `ac9e405c` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45508306314) |
+| #354 | `89387dfa` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45549671170) |
+| #359 | `4d09625d` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45513462419) |
+| #357 | `b7f1d5e0` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45498517535) |
+| #393 | `cb46372e` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45563175648) |
+| #394 | `f47472b3` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45563179883) |
+| #401 | `e793dced` | [Stability smoke](https://github.com/groktopus/proprio/actions/runs/45568551197) |
 
 After a base PR lands, check the next PR's comparison and verify its current
 head against `main` when retargeting it. Rebase stacked branches as needed to
