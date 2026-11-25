@@ -1,6 +1,8 @@
 import { agentWakeupRequests, heartbeatRuns, statusDecisions, statusDecisionEffects, type Db } from "@groktopus/db";
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { isStrictUuid } from "../../uuid.js";
+import { record } from "./evidence-json.js";
 import { boundRunIssueIdSql } from "../run-task-binding.js";
 import { NATIVE_RUN_FAILED_RETRY_CAUSE } from "./status-arbiter.js";
 
@@ -74,4 +76,23 @@ export async function readNativeContinuationSource(
       eq(boundRunIssueIdSql(), binding.issueId)))
     .groupBy(source.id).limit(2);
   return sources.length === 1 ? sources[0]!.runId : null;
+}
+
+/** Read the admitted handoff or its one server-issued completion correction.
+ * Other native continuation provenance is for conversation delivery. */
+export async function readCaseHandoffIdForNativeRun(
+  db: Pick<Db, "select">,
+  binding: { companyId: string; issueId: string; runId: string; contextSnapshot: unknown },
+): Promise<string | null> {
+  const context = record(binding.contextSnapshot);
+  if (isStrictUuid(context.caseHandoffId)) return context.caseHandoffId;
+  if (context.caseHandoffId != null || !isStrictUuid(context.nativeStatusWakeIntentId)) return null;
+  const sourceRunId = await readNativeContinuationSource(db, { companyId: binding.companyId, issueId: binding.issueId,
+    runId: binding.runId, completionRecovery: true });
+  if (!sourceRunId) return null;
+  const [source] = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.id, sourceRunId), eq(heartbeatRuns.companyId, binding.companyId),
+      eq(heartbeatRuns.nativeIssueId, binding.issueId))).limit(1);
+  const handoffId = record(source?.contextSnapshot).caseHandoffId;
+  return isStrictUuid(handoffId) ? handoffId : null;
 }

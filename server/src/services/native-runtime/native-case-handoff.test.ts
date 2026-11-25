@@ -8,7 +8,7 @@ import { agents, caseEvents, caseHandoffs, cases, companies, createDb, heartbeat
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { assertAgentRunWriteAllowed } from "../../agent-run-cancellation.js";
 import { assertNoCaseHandoffMutation, isCaseHandoffSourceReleased, pendingCaseHandoffForRun, recordCaseHandoffExecutionReleased } from "../heartbeat/case-handoff-lifecycle.js";
-import { nativeCaseHandoffResult, assertNativeCaseHandoffResult } from "./native-case-handoff.js";
+import { nativeCaseHandoffResult, assertNativeCaseHandoffResult, nativeCaseHandoffStatusAuthorityIsCurrent } from "./native-case-handoff.js";
 import { createGovernedWaitEventObservation } from "./native-session-executor.js";
 import type { PrpEvent } from "../../vendor/proprio-runner/index.js";
 import { recordNativeLocalProcessStop } from "../native-local-process-stop.js";
@@ -48,6 +48,23 @@ describe("native persisted case handoff runtime", () => {
     await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date() }).where(eq(caseHandoffs.id, f.handoffId));
     // A later Stop must not strand cleanup of the already-checkpointed yield.
     expect(await assertNativeCaseHandoffResult(db, f.runId, f.issueId, result)).toMatchObject({ id: f.handoffId, state: "cancelled" });
+  });
+  it("recognizes an admitted versioned handoff wake while delivery is still pending", async () => {
+    const f = await fixture();
+    const [handoff] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.handoffId));
+    const requirementRevisionId = randomUUID(), requirementsDigest = "e".repeat(64);
+    await db.update(issues).set({ assigneeAgentId: handoff!.toAgentId }).where(eq(issues.id, f.issueId));
+    await db.update(caseHandoffs).set({ state: "pending_dispatch", offerContract: {
+      schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Deliver the implementation", prerequisites: [],
+      requirementRevision: { id: requirementRevisionId, revision: 1, canonicalSha256: "sha256:test" },
+      requirementsDigest, taskBrief: { title: "Build", description: null },
+    }, recipientDecision: { outcome: "accepted", actorType: "agent", actorId: handoff!.toAgentId!, handoffVersion: handoff!.version,
+      requirementRevisionId, requirementsDigest, decidedAt: new Date().toISOString() } }).where(eq(caseHandoffs.id, f.handoffId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    const bound = { companyId: f.companyId, runId: f.runId, issue: { id: f.issueId, assigneeAgentId: issue!.assigneeAgentId,
+      assigneeUserId: issue!.assigneeUserId }, runAgentId: handoff!.toAgentId, contextSnapshot: { caseHandoffId: f.handoffId } };
+    await expect(nativeCaseHandoffStatusAuthorityIsCurrent(db, { ...bound, runWakeupRequestId: handoff!.wakeupRequestId })).resolves.toBe(true);
+    await expect(nativeCaseHandoffStatusAuthorityIsCurrent(db, { ...bound, runWakeupRequestId: randomUUID() })).resolves.toBe(false);
   });
   it("fences late writes and requires executor settlement beyond terminal task status", async () => {
     const f = await fixture();

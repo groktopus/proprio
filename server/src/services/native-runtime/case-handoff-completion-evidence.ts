@@ -11,9 +11,8 @@ import {
   workAssessments,
 } from "@groktopus/db";
 
-import { isStrictUuid } from "../../uuid.js";
 import { readAcceptedCaseHandoffOffer } from "../case-handoff-offer-authority.js";
-import { readNativeContinuationSource } from "./native-continuation-delivery.js";
+import { readCaseHandoffIdForNativeRun } from "./native-continuation-delivery.js";
 import { record, text } from "./evidence-json.js";
 
 /**
@@ -34,18 +33,10 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
     eq(heartbeatRuns.nativeIssueId, input.issueId), eq(heartbeatRuns.runtimeMode, "native"),
   )).limit(1);
   if (!run) return null;
-  let handoffId = record(run.contextSnapshot).caseHandoffId;
-  if (!isStrictUuid(handoffId)) {
-    const sourceRunId = await readNativeContinuationSource(input.db, {
-      companyId: input.companyId, issueId: input.issueId, runId: input.runId, completionRecovery: true,
-    });
-    if (sourceRunId) {
-      const [source] = await input.db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
-        .from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId)).limit(1);
-      handoffId = record(source?.contextSnapshot).caseHandoffId;
-    }
-  }
-  if (!isStrictUuid(handoffId)) return null;
+  const handoffId = await readCaseHandoffIdForNativeRun(input.db, {
+    companyId: input.companyId, issueId: input.issueId, runId: input.runId, contextSnapshot: run.contextSnapshot,
+  });
+  if (!handoffId) return null;
 
   const [decision] = await input.db.select({ assessmentId: statusDecisions.assessmentId, reasonCode: statusDecisions.reasonCode }).from(statusDecisions).where(and(
     eq(statusDecisions.id, input.decisionId), eq(statusDecisions.companyId, input.companyId),
@@ -88,7 +79,6 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
   const offer = readAcceptedCaseHandoffOffer(handoff);
   if (!offer) return null;
   const revision = offer.requirementRevision;
-  if (!isStrictUuid(revision.id)) return null;
   const [acceptedRequirementRevision] = await input.db.select().from(completionContracts).where(and(
     eq(completionContracts.id, revision.id), eq(completionContracts.companyId, input.companyId),
     eq(completionContracts.issueId, input.issueId),

@@ -22,6 +22,7 @@ import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js"
 import { onboardingFirstTaskCompletionAllowed } from "../onboarding-first-task-admission.js";
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { reconcileMuseNativeTerminalRun } from "./muse-terminal-reconciliation.js";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import { assertNativeCaseHandoffResult } from "./native-case-handoff.js";
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
 import { hasPublishedGitHubReview, readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
@@ -1163,6 +1164,7 @@ async function recoverCommittedNativeChatResponseInScope(
       if (
         !accepted ||
         !decision ||
+        decision.reasonCode === CASE_HANDOFF_SUPERSEDED_REASON ||
         result.schema !== "proprio.run_result.v1" ||
         !(await acceptedResponseDigestMatches(tx, run, accepted))
       )
@@ -1987,19 +1989,14 @@ export async function finalizeNativeRun(input: {
       });
       crashPoint("native.finalize.after_decision_before_projection");
       const now = new Date();
-      const finalizationFailed = decision.effects.some(
-        (effect) => effect.kind === "record_finalization_error",
-      );
-      const finalizationPhase = finalizationFailed
+      const savedDecision = record(committed.decision.decisionJson);
+      const effects = Array.isArray(savedDecision.effects) ? savedDecision.effects.map(record) : [];
+      const finalizationPhase = effects.some(effect => effect.kind === "record_finalization_error")
         ? "retryable_failure"
         : "committed";
-      // commitNativeStatusDecision() already committed its own transaction above.
-      // Its "cancel_continuations" effect (status-decision-committer.ts) writes a
-      // terminal status to this same run and emits for it. Skip the emit here in
-      // that case so one run reaching a terminal state emits exactly one event.
-      const alreadyEmittedByCommittedDecision = decision.effects.some(
-        (effect) => effect.kind === "cancel_continuations",
-      );
+      // The status transaction already emits a terminal event when it cancels
+      // a continuation. The run projection emits only when that effect is absent.
+      const alreadyEmittedByCommittedDecision = effects.some(effect => effect.kind === "cancel_continuations");
       const clearExecutionFailure = input.projectRunStatus && finalizationPhase === "committed" && terminalState === "succeeded";
       const finalizationMetadata = {
         ...(providerExplanation ? { providerFailure: providerExplanation } : {}),
@@ -2009,9 +2006,9 @@ export async function finalizeNativeRun(input: {
         ...(finalizationPhase === "committed" ? { failureCode: null, originalFailureCode: null, nextAttemptAt: null } : {}),
         assessmentId: assessmentRow.id,
         decisionId: committed.decision.id,
-        authoritativeDecision: decision.toStatus,
-        finalizationPolicyVersion: decision.policyVersion,
-        finalizationReasonCode: decision.reasonCode,
+        authoritativeDecision: committed.decision.toStatus,
+        finalizationPolicyVersion: committed.decision.policyVersion,
+        finalizationReasonCode: committed.decision.reasonCode,
         // Only the locked status transaction can mint this presentation
         // proof. Never carry a runner-provided marker forward.
         externalChatReviewPresentation: record(
