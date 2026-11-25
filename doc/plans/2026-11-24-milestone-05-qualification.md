@@ -190,6 +190,30 @@ Hosted stability and durable-work qualification passed for adapter head
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
 recovery cases. [Hosted adapter qualification](https://github.com/groktopus/proprio/actions/runs/45535156471)
 
+The Pi follow-up stages explicit runtime inventories in a fresh directory per
+run. The exact Node 24 execution test covers disjoint choices, an empty
+inventory, operator-supplied skill arguments, and cleanup after success and
+failure. The Codex follow-up reuses bundled discovery when the inventory is
+implicit. Its 14 execution tests and both adapter typechecks passed.
+[Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
+
+The Pi change covers Proprio skill discovery for explicit assignments.
+Other legacy local providers can still discover skills in shared homes.
+OpenCode's Claude directory filter also hides operator-owned Claude skills.
+Gemini's CLI home override moves provider state and resume data. Keep
+these provider-specific paths outside the isolated Pi qualification scope.
+[OpenCode source](https://github.com/anomalyco/opencode/blob/v1.18.34/packages/opencode/src/skill/index.ts)
+[Gemini configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md#environment-variables-and-env-files)
+
+Composition `928a3db8af5c69e0c7c9c37933e41f33b74fd792` against main
+`2363fe6f` passed 276 audit, reconstruction, OpenAPI, adapter and scheduling
+tests on Node 24.22.1. The initial scheduling run found a read-only Git
+marker above the temporary workspace. Two failures reproduced on unmodified
+main. The rerun used an isolated application home and temporary directory
+under a valid disposable Git root. Composition
+`abbeccfe4fec6a7de1605a70a16e9c27efed1813` added both adapter follow-ups to
+that base and passed 198 adapter, commentary and receipt recovery tests.
+
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
@@ -238,7 +262,7 @@ The release decision depends on the following checks.
 ## Lock and provenance hold
 
 The reporting lock and SDK public-input checks reject `main` at
-`19b4a032258db9395b6c6cacc183d913d69ba40e`. The committed lock SHA-256 is
+`2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. The committed lock SHA-256 is
 `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`. The
 report policy lists
 `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e`
@@ -269,7 +293,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 ## Review order
 
 1. Review the governance coverage and the adapter prerequisite for commentary,
-   then review operator opt-in. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352)
+   then review operator opt-in and the adapter follow-ups. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352) [#388](https://github.com/groktopus/proprio/pull/388) [#389](https://github.com/groktopus/proprio/pull/389)
 2. Review older-restore deletion, the audit design and the run-visibility guard.
    These PRs target `main`. [#361](https://github.com/groktopus/proprio/pull/361) [#353](https://github.com/groktopus/proprio/pull/353) [#354](https://github.com/groktopus/proprio/pull/354)
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
