@@ -260,7 +260,11 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     expect(snapshot.status, JSON.stringify(snapshot.body)).toBe(201);
     const page = await api("GET", `${exportPath}/${snapshot.body.exportId}`);
     expect(page.status, JSON.stringify(page.body)).toBe(200);
-    expect(page.body).toMatchObject({ complete: true });
+    expect(page.body).toMatchObject({
+      complete: true,
+      eventCount: snapshot.body.eventCount,
+      watermark: snapshot.body.watermark,
+    });
     const events = page.body.events as Array<{ invocationId: string; phase: string; status: string }>;
     const fingerprints = new Map<string, string>();
     for (const [marker, ids] of cases) {
@@ -313,7 +317,8 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     }
     expect(fingerprints.get("approved")).not.toBe(fingerprints.get("denied"));
     expect(fingerprints.get("denied")).toBe(fingerprints.get("interrupted"));
-    expect(await effects()).toEqual(["approved", "interrupted"]);
+    const observedTargetEffects = await effects();
+    expect(observedTargetEffects).toEqual(["approved", "interrupted"]);
     const pending = await api("GET", `${companyPath}/tools/action-requests?status=pending`);
     expect(pending.status).toBe(200);
     expect((pending.body.actionRequests as ToolActionRequestListItem[]).filter(item => [...cases.values()].some(ids => ids.issueId === item.request.issueId))).toHaveLength(0);
@@ -334,10 +339,16 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
         connectorProfile: "synthetic localhost HTTP MCP target",
         reviewer: "separate company operator with default audit role grants",
         companyId: f.companyId,
+        auditExport: {
+          exportId: snapshot.body.exportId,
+          eventCount: page.body.eventCount,
+          watermark: page.body.watermark,
+        },
         cases: Object.fromEntries([...cases].map(([marker, ids]) => [marker, {
           issueId: ids.issueId, runId: ids.runId, invocationId: ids.invocationId,
           actionRequestId: ids.requestId, policyFingerprint: ids.fingerprint, policyPriority: ids.priority,
-          targetEffects: marker === "denied" ? [] : [marker],
+          auditPhases: events.filter(event => event.invocationId === ids.invocationId).map(event => event.phase).sort(),
+          targetEffects: observedTargetEffects.filter(effect => effect === marker),
         }])),
         outcomes: { approved: "success receipt and one target effect", denied: "denied with zero target effects", interrupted: "target effect durable; response lost; no retry submitted" },
         scope: "same-PostgreSQL test-server recreation in one Vitest process; not production index startup or independent database restore",
