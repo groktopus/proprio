@@ -964,7 +964,7 @@ describePostgres("agent action audit routes", () => {
     30_000,
   );
 
-  it("keeps sibling-company work responsive while validating task and run bound snapshot members", async () => {
+  it("keeps sibling-company work responsive while validating 20,000 task and run bound snapshot members", async () => {
     const { company, agent, issue } = await seed();
     const { company: siblingCompany } = await seed();
     const userId = randomUUID();
@@ -982,13 +982,15 @@ describePostgres("agent action audit routes", () => {
     const run = await db.insert(heartbeatRuns).values({
       companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: issue.id, status: "succeeded",
     }).returning().then(rows => rows[0]!);
-    const eventRows = Array.from({ length: 64 }, () => ({
-      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway" as const,
-      taskId: issue.id, runId: run.id,
-      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
-      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
-    }));
-    const inserted = await db.insert(managedAuditEvents).values(eventRows).returning({ id: managedAuditEvents.id });
+    const membershipCount = 20_000;
+    for (let offset = 0; offset < membershipCount; offset += 1_000) {
+      await db.insert(managedAuditEvents).values(Array.from({ length: 1_000 }, () => ({
+        companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway" as const,
+        taskId: issue.id, runId: run.id,
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+        phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+      })));
+    }
     const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1, dedicatedConnectionMax: 1 });
     const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
     const board = request(await createApp(requestDb, { type: "board", source: "session", userId, companyIds: [company.id] }));
@@ -1035,16 +1037,18 @@ describePostgres("agent action audit routes", () => {
       const response = await pendingRead;
       expect(response.status, response.text).toBe(200);
       expect(response.body).toMatchObject({
-        eventCount: inserted.length,
-        complete: true,
-        nextCursor: null,
-        events: expect.arrayContaining(inserted.map(({ id }) => expect.objectContaining({ id, taskId: issue.id, runId: run.id }))),
+        eventCount: membershipCount,
+        complete: false,
+        events: expect.any(Array),
       });
+      expect(response.body.events).toHaveLength(200);
+      expect(response.body.nextCursor).toEqual(expect.any(String));
+      expect(response.body.events.every((event: { taskId: string; runId: string }) => event.taskId === issue.id && event.runId === run.id)).toBe(true);
       const [pageAccess] = await db.select({ companyId: managedAuditExportPageAccess.companyId,
         userId: managedAuditExportPageAccess.userId, exportId: managedAuditExportPageAccess.exportId,
         pageOffset: managedAuditExportPageAccess.pageOffset, itemCount: managedAuditExportPageAccess.itemCount })
         .from(managedAuditExportPageAccess).where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId));
-      expect(pageAccess).toEqual({ companyId: company.id, userId, exportId: receipt.body.exportId, pageOffset: 0, itemCount: inserted.length });
+      expect(pageAccess).toEqual({ companyId: company.id, userId, exportId: receipt.body.exportId, pageOffset: 0, itemCount: 200 });
     } finally {
       release.resolve();
       await Promise.allSettled([locker, pendingRead]);
