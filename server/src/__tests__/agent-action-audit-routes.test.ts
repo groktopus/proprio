@@ -377,10 +377,13 @@ describePostgres("agent action audit routes", () => {
       expect((await otherBoard.get(exportPath).expect(404)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
 
-      // Cleanup uses the database clock. A request replica behind the expiry
-      // clock must not retain an old marker indefinitely.
+      // An API replica behind the cleanup writer still sees an incomplete snapshot.
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(expired.getTime() - 60_000);
+      expect((await board.get(exportPath).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      // An older writer may have cleared the array without setting a marker.
+      await db.update(managedAuditExports).set({ invalidated: false, membershipCleared: false }).where(row);
       expect((await board.get(exportPath).expect(409)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
       await db.update(managedAuditExports).set({ expiresAt: new Date(expired.getTime() - 25 * 60 * 60 * 1000) }).where(row);
@@ -632,10 +635,14 @@ describePostgres("agent action audit routes", () => {
       )
       where company_id = ${company.id}
     `);
-    // Four recent expiry markers and 124 invalidated snapshots compete for a
-    // single eight-row cleanup budget in the same create operation.
+    // Purging a stale marker and clearing recent or retired memberships all
+    // spend the same eight-row budget.
+    const pastRetention = snapshotRows[2]!.id;
+    const recentlyExpiredIds = snapshotRows.slice(3, 6).map(row => row.id);
+    await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 25 * 60 * 60 * 1000) })
+      .where(eq(managedAuditExports.id, pastRetention));
     await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 1_000) })
-      .where(inArray(managedAuditExports.id, snapshotRows.slice(2, 6).map(row => row.id)));
+      .where(inArray(managedAuditExports.id, recentlyExpiredIds));
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
@@ -672,10 +679,12 @@ describePostgres("agent action audit routes", () => {
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
       const originalIds = new Set(snapshotRows.map(row => row.id));
-      const recentlyExpiredIds = new Set(snapshotRows.slice(2, 6).map(row => row.id));
-      expect(storage.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(8);
-      expect(storage.filter(row => recentlyExpiredIds.has(row.id) && row.membershipCleared)).toHaveLength(4);
-      expect(storage.filter(row => originalIds.has(row.id) && row.invalidated && row.membershipCleared && !recentlyExpiredIds.has(row.id))).toHaveLength(4);
+      expect(storage.some(row => row.id === pastRetention)).toBe(false);
+      expect(storage.filter(row => originalIds.has(row.id) && row.invalidated && row.membershipCleared && row.eventCount === 0)).toHaveLength(7);
+      expect(storage.filter(row => recentlyExpiredIds.includes(row.id) && row.membershipCleared)).toHaveLength(3);
+      const clearedRetired = storage.filter(row =>
+        originalIds.has(row.id) && row.invalidated && row.membershipCleared && !recentlyExpiredIds.includes(row.id));
+      expect(clearedRetired).toHaveLength(4);
       expect(storage.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(120);
       await board.post(path).send(window).expect(201);
       const nextBatch = await db.select({
@@ -684,16 +693,16 @@ describePostgres("agent action audit routes", () => {
         membershipCleared: managedAuditExports.membershipCleared,
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
-      expect(nextBatch.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(16);
+      expect(nextBatch.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(15);
       expect(nextBatch.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(112);
       expect(await db.select().from(managedAuditTransitionReceipts)
         .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
           eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
+      const [cleared] = await db.select({ sourceEpoch: managedAuditExports.sourceEpoch })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, clearedRetired[0]!.id));
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-      expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
-      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
-      expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", cleared!.sourceEpoch);
+      expect((await board.get(`${path}/${clearedRetired[0]!.id}`).expect(409)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
     } finally {
       vi.useRealTimers();

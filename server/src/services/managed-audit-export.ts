@@ -220,15 +220,15 @@ async function lockExportCompany(tx: DbTransaction, companyId: string) {
   if (!company) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
 }
 
-async function cleanExpiredSnapshots(tx: DbTransaction, companyId: string, now: Date) {
+async function removeExpiredSnapshotMarkers(tx: DbTransaction, companyId: string, now: Date) {
   const ordinals = [asc(managedAuditExports.expiresAt), asc(managedAuditExports.id)] as const;
   const markerCutoff = new Date(now.getTime() - EXPIRED_SNAPSHOT_MARKER_TTL_MS);
   const pastMarkerRetention = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
     .where(and(eq(managedAuditExports.companyId, companyId), lte(managedAuditExports.expiresAt, markerCutoff)))
     .orderBy(...ordinals)
     .limit(MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE);
-  const deleted = await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, pastMarkerRetention)).returning({ id: managedAuditExports.id });
-
+  const deleted = await tx.delete(managedAuditExports)
+    .where(inArray(managedAuditExports.id, pastMarkerRetention)).returning({ removed: sql<number>`1` });
   return deleted.length;
 }
 
@@ -320,11 +320,11 @@ export async function createManagedAuditExport(
       });
     }
     await lockExportCompany(tx, scope.companyId);
-    const expiredMembershipsReleased = await cleanExpiredSnapshots(tx, scope.companyId, now);
+    const removedMarkers = await removeExpiredSnapshotMarkers(tx, scope.companyId, now);
     await retireSupersededSnapshots(tx, scope, now, userId);
     // Marker deletions and membership clears share one per-create budget.
     // Select only the scalar terminal marker, never the UUID array itself.
-    await releaseTerminalMemberships(tx, scope.companyId, now, Math.max(0, MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE - expiredMembershipsReleased));
+    await releaseTerminalMemberships(tx, scope.companyId, now, MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE - removedMarkers);
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)

@@ -117,19 +117,19 @@ is in force, and `snapshot_incomplete` if that boundary is rolled back before
 expiry. Drain replicas with older settings before accepting export traffic
 after a source epoch or cutoff change.
 
-Retirement releases memberships in batches of at most eight snapshots per
-successful create; each membership is bounded at 20,000 IDs. The marker makes
-all selected snapshots unreadable before membership cleanup, and later creates
-continue the cleanup. The server records one `company_exports_retired`
-receipt in `managed_audit_transition_receipts` with the company, operator,
-source and number of retired snapshots. The receipt omits export IDs and
-event payloads. Retired snapshots do not consume active snapshot quota.
+A successful create processes at most eight expired or retired snapshots for
+cleanup. This includes deleting markers beyond retention and clearing retained
+memberships of up to 20,000 IDs each. Each clear commits with a terminal
+marker, and later creates continue the cleanup. Retired snapshots do not
+consume active capacity. The protected `company_exports_retired` receipt
+records the company, operator, source and number of retired snapshots.
 
-Successful creation removes expired membership in bounded batches. It keeps
-an owner-scoped marker for 24 hours after expiry. The marker returns
-`409 snapshot_expired` for the current epoch and retention window, including
-after cleanup. Later cleanup removes the marker and the cursor returns
-`404 snapshot_missing`. Page access records follow separate retention rules.
+The API keeps an owner-scoped marker for 24 hours after expiry. A reader in the
+current epoch and retention window returns `409 snapshot_expired` after the
+original expiry. A slower reader that still considers a cleared snapshot live
+returns `409 snapshot_incomplete`. Once cleanup removes the marker, the cursor
+returns `404 snapshot_missing`. Page access records follow separate retention
+rules.
 
 A source epoch change, a retired checkpoint, or an expired snapshot requires a
 new export after reconciliation. Snapshots expire after 24 hours.
