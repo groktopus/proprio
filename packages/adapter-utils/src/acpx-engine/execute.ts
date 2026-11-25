@@ -94,6 +94,7 @@ import {
   selectProprioPromptSections,
   resolveLegacyProprioDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
+  removeUnselectedProprioSkillSymlinks,
   PROPRIO_FEEDBACK_SKILL_KEYS,
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapeProprioWorkspaceEnvForExecution,
@@ -1310,18 +1311,13 @@ async function reconcileManagedCodexSkills(input: {
     }
   }
 
-  for (const entry of input.allSkills) {
-    if (preserved.has(entry.runtimeName) || managed.has(entry.runtimeName)) continue;
-    const target = path.join(input.skillsHome, entry.runtimeName);
-    const existing = await fs.lstat(target).catch(() => null);
-    if (!existing?.isSymbolicLink()) continue;
-    const linkedPath = await fs.readlink(target).catch(() => null);
-    if (!linkedPath) continue;
-    const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-    if (resolvedLinkedPath !== path.resolve(entry.source)) continue;
-    if (await removeSkillTarget(target)) {
-      await input.onLog("stdout", `[proprio] Revoked legacy ACPX Codex skill "${entry.runtimeName}" from ${input.skillsHome}\n`);
-    }
+  const revokedLegacySkills = await removeUnselectedProprioSkillSymlinks(
+    input.skillsHome,
+    input.allSkills,
+    [...preserved, ...managed],
+  );
+  for (const name of revokedLegacySkills) {
+    await input.onLog("stdout", `[proprio] Revoked legacy ACPX Codex skill "${name}" from ${input.skillsHome}\n`);
   }
 
   for (const name of managed) {

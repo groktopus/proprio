@@ -71,7 +71,7 @@ describe("cursor local skill sync", () => {
     expect((await fs.lstat(path.join(home, ".cursor", "skills", "proprio"))).isSymbolicLink()).toBe(true);
   });
 
-  it("recognizes company-library runtime skills supplied outside the bundled Proprio directory", async () => {
+  it("revokes only the known source of a deselected company-library skill", async () => {
     const home = await makeTempDir("proprio-cursor-runtime-skills-home-");
     const runtimeSkills = await makeTempDir("proprio-cursor-runtime-skills-src-");
     cleanupDirs.add(home);
@@ -114,7 +114,16 @@ describe("cursor local skill sync", () => {
     const after = await syncCursorSkills(ctx, ["ascii-heart"]);
     expect(after.warnings).toEqual([]);
     expect(after.entries.find((entry) => entry.key === "ascii-heart")?.state).toBe("installed");
-    expect((await fs.lstat(path.join(home, ".cursor", "skills", "ascii-heart"))).isSymbolicLink()).toBe(true);
+    const installedPath = path.join(home, ".cursor", "skills", "ascii-heart");
+    expect(await fs.readlink(installedPath)).toBe(asciiHeartDir);
+
+    await syncCursorSkills(ctx, []);
+    await expect(fs.lstat(installedPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const externalDir = await createSkillDir(runtimeSkills, "external-copy");
+    await fs.symlink(externalDir, installedPath, "junction");
+    await syncCursorSkills(ctx, []);
+    expect(await fs.readlink(installedPath)).toBe(externalDir);
   });
 
 });
