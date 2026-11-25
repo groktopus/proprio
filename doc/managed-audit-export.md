@@ -112,10 +112,11 @@ Readers check source epoch and retention cutoff first, then preserve the
 existing `snapshot_expired` response for an expired receipt, then check the
 invalidation marker. Before its original expiry, a reader with a clock behind
 the retirement writer still sees the durable marker. Retired checkpoints
-return `source_epoch_changed` or `retention_window_expired` while the boundary
-is in force, and `snapshot_incomplete` if that boundary is rolled back before
-expiry. Drain replicas with older settings before accepting export traffic
-after a source epoch or cutoff change.
+with retained markers return `source_epoch_changed` or
+`retention_window_expired` while the boundary is in force. If that boundary is
+rolled back before expiry, the retained marker returns `snapshot_incomplete`.
+Drain replicas with older settings before accepting export traffic after a
+source epoch or cutoff change.
 
 A successful create processes at most eight expired or retired snapshots for
 cleanup. This includes deleting markers beyond retention and clearing retained
@@ -124,12 +125,14 @@ marker, and later creates continue the cleanup. Retired snapshots do not
 consume active capacity. The protected `company_exports_retired` receipt
 records the company, operator, source and number of retired snapshots.
 
-The API keeps an owner-scoped marker for 24 hours after expiry. A reader in the
-current epoch and retention window returns `409 snapshot_expired` after the
-original expiry. A slower reader that still considers a cleared snapshot live
-returns `409 snapshot_incomplete`. Once cleanup removes the marker, the cursor
-returns `404 snapshot_missing`. Page access records follow separate retention
-rules.
+Once every export-serving replica uses marker-aware cleanup, the API keeps an
+owner-scoped marker for at least 24 hours after expiry. A reader in the current
+epoch and retention window returns `409 snapshot_expired` after the original
+expiry. A slower reader that still considers a cleared snapshot live returns
+`409 snapshot_incomplete`. An older replica can remove a marker sooner during
+a rolling upgrade or rollback. Once cleanup removes a marker, the cursor
+returns `404 snapshot_missing` and the collector must reconcile its checkpoint.
+Page access records follow separate retention rules.
 
 A source epoch change, a retired checkpoint, or an expired snapshot requires a
 new export after reconciliation. Snapshots expire after 24 hours.

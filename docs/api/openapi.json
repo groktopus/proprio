@@ -63212,7 +63212,7 @@
             }
           },
           "409": {
-            "description": "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. The owner receives snapshot_expired for at least 24 hours after expiry when the source epoch and retention window still apply. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
+            "description": "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. Once every export-serving replica uses marker-aware cleanup, the owner receives snapshot_expired for at least 24 hours after expiry when the source epoch and retention window still apply. An older replica can remove a marker sooner during a rolling upgrade or rollback, returning snapshot_missing. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
             "content": {
               "application/json": {
                 "schema": {

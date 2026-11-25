@@ -62,9 +62,11 @@ missing or no longer visible, the API returns HTTP `409` with
 events, event count, or watermark. The snapshot and its cursors remain invalid
 if the missing event returns or becomes visible again. Reconcile the checkpoint
 before opening a new snapshot.
-If a snapshot expires, its owner receives `409 snapshot_expired` for at least
-24 hours when the source epoch and retention window still apply. After cleanup removes that
-marker, the response is `404 snapshot_missing`.
+Once every export-serving replica uses marker-aware cleanup, the owner receives
+`409 snapshot_expired` for at least 24 hours after expiry when the source epoch
+and retention window still apply. An older replica can remove a marker sooner
+during a rolling upgrade or rollback. After cleanup removes a marker, the
+response is `404 snapshot_missing` and the checkpoint needs reconciliation.
 
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
