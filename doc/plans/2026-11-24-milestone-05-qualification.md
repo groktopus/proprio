@@ -37,6 +37,12 @@ PostgreSQL and a process adapter against a local synthetic MCP target. It
 captured historical policy in the transaction that writes the rate charge and
 managed admission record.
 
+GitHub's Linux source qualification passed for reconstruction PR head
+`9ac8fffe7fed9114b04ded567802a6381790b0f8` with baseline `6e6ebf51`. It covered
+locked install, source and Runner builds, managed update and rollback, a fresh
+synthetic task, fresh-target PostgreSQL restore, and interruption recovery. The
+run retained its durable-work acceptance report. [Hosted qualification](https://github.com/groktopus/proprio/actions/runs/45517565083)
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
