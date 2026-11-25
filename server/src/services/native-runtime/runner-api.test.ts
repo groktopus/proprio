@@ -213,22 +213,6 @@ describe("runner API catalog", () => {
     expect(runnerApiOperation("POST /api/companies/{companyId}/agent-hires").dedicatedToolGuidance).toContain("inherits the caller's native runtime");
   });
 
-  it("discovers the versioned case-handoff recipient decision through native search_api", () => {
-    const operationId = "POST /api/cases/{caseId}/handoffs/{handoffId}/decision";
-    const found = searchRunnerApi({ query: "record recipient decision on a versioned case handoff offer", limit: 10 }).results
-      .find(operation => operation.operationId === operationId);
-    expect(found).toBeDefined();
-    expect(found).toMatchObject({ operationId, method: "POST", transport: "rest", callPolicy: "rest", allowedModes: ["standard"] });
-    const body = found!.requestBody?.content["application/json"].schema;
-    const accepted = (body as { oneOf: Array<{ properties: Record<string, unknown>; required: string[] }> }).oneOf
-      .find(variant => (variant.properties.outcome as { enum?: string[] }).enum?.includes("accepted"));
-    expect(accepted?.required).toEqual(expect.arrayContaining(["expectedHandoffVersion", "requirementRevisionId", "outcome"]));
-    expect(accepted?.properties.expectedHandoffVersion).toMatchObject({ type: "integer" });
-    expect(accepted?.properties.requirementRevisionId).toMatchObject({ type: "string", format: "uuid" });
-    expect(runnerApiOperation(operationId).dedicatedTools).toEqual([]);
-    expect(CAPABILITY_SEMANTIC_TOOL_CATALOG.some(tool => tool.operationId === "search_api")).toBe(true);
-    expect(CAPABILITY_SEMANTIC_TOOL_CATALOG.some(tool => tool.operationId === "call_api")).toBe(true);
-  });
   it.each(runnerApiCatalog().filter(operation => operation.transport === "rest"))("resolves the catalog route $operationId inside the bound origin", operation => {
     const pathParams = Object.fromEntries(operation.parameters.filter(parameter => parameter.in === "path").map(parameter => [parameter.name, parameter.name === "companyId" ? context.companyId : "fixture-id"]));
     const url = runnerApiUrl(operation, { operationId: operation.operationId, pathParams }, context, "https://proprio.test");
@@ -244,9 +228,9 @@ describe("runner API catalog", () => {
     const install = results.find(row => row.operationId === "POST /api/companies/{companyId}/teams/catalog/{catalogId}/install")!;
     const previewBody = preview.requestBody?.content["application/json"].schema;
     const installBody = install.requestBody?.content["application/json"].schema;
-    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object) } });
+    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object), adapterOverrides: expect.any(Object) } });
     expect(installBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), adapterOverrides: expect.any(Object), secretValues: expect.any(Object) } });
-    expect(previewBody.properties).not.toHaveProperty("adapterOverrides");
+    expect(previewBody.properties).not.toHaveProperty("secretValues");
   });
 
   it("discovers proposal revision without confusing it with hiring, approval decisions, or reads", () => {

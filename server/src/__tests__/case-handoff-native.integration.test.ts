@@ -8,7 +8,7 @@ import { join } from "node:path";
 import express from "express";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentApiKeys, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
+import { agents, agentApiKeys, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { caseRoutes } from "../routes/cases.js";
@@ -111,16 +111,17 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 const config=${JSON.stringify(config)};
 const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
-let turn='native-case-turn-'+randomUUID(), thread='native-case-thread-'+randomUUID(), step=0, context, prompt='', active=false, contract, returning=false, finishing=false, threadMethod;
+let turn='native-case-turn-'+randomUUID(), thread='native-case-thread-'+randomUUID(), step=0, context, prompt='', active=false, contract, returning=false, finishing=false, threadMethod, lastTool;
 process.on('uncaughtException', error=>{writeFileSync(config.errors,JSON.stringify({message:error.message}));process.exit(1);});
-const call=(tool,args)=>{step++;send({id:'call-'+step,method:'item/tool/call',params:{threadId:thread,turnId:turn,callId:'tool-'+step,tool,arguments:args}});};
+const call=(tool,args)=>{step++;lastTool=tool;send({id:'call-'+step,method:'item/tool/call',params:{threadId:thread,turnId:turn,callId:'tool-'+step,tool,arguments:args}});};
 for await (const line of createInterface({input:process.stdin})) {
   const m=JSON.parse(line), p=m.params??{};
   if (!m.method) {
     if (!String(m.id).startsWith('call-')) continue;
-    if(m.error||m.result?.success!==true) throw new Error('fixture native tool rejected');
-    const content=m.result.contentItems??m.result.content??[];
-    const value=JSON.parse(content.find(item=>typeof item.text==='string')?.text??'{}');
+    const content=m.result?.contentItems??m.result?.content??[];
+    const responseText=content.find(item=>typeof item.text==='string')?.text;
+    if(m.error||m.result?.success!==true) throw new Error('fixture '+lastTool+' rejected: '+String(m.error?.message??responseText??'no diagnostic').slice(0,600));
+    const value=JSON.parse(responseText??'{}');
     if(step===1) {
       context=value.result?.activeTask?value.result:value;
       if(context.activeTask?.id!==config.taskId) throw new Error('fixture task identity mismatch');
@@ -201,7 +202,9 @@ for await (const line of createInterface({input:process.stdin})) {
       const state = await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status, error: heartbeatRuns.error, result: heartbeatRuns.resultJson }).from(heartbeatRuns);
       const ledger = await db.select().from(caseHandoffs).where(eq(caseHandoffs.caseId, initial.caseId));
       const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
-      throw new Error(`${label}: runs=${JSON.stringify(state)}; handoffs=${JSON.stringify(ledger)}; wakes=${JSON.stringify(wakes)}; provider=${await readFile(config.errors, "utf8").catch(() => "no scripted-provider error")}`);
+      const diagnostics = await db.select({ payload: heartbeatRunEvents.payload }).from(heartbeatRunEvents)
+        .where(and(eq(heartbeatRunEvents.companyId, companyId), eq(heartbeatRunEvents.eventType, "harness.diagnostic"))).limit(10);
+      throw new Error(`${label}: runs=${JSON.stringify(state)}; handoffs=${JSON.stringify(ledger)}; wakes=${JSON.stringify(wakes)}; provider=${await readFile(config.errors, "utf8").catch(() => "no scripted-provider error")}; diagnostics=${JSON.stringify(diagnostics)}`);
     };
     const delivery = caseHandoffDeliveryService(db, { heartbeat });
     const seeded = await db.select({ issueId: issueDocuments.issueId, key: issueDocuments.key, body: documents.latestBody })
@@ -230,28 +233,40 @@ for await (const line of createInterface({input:process.stdin})) {
     const [offer] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
     expect(offer).toMatchObject({ state: "offered", fromAgentId: triage, toAgentId: engineer, version: 2,
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A verified implementation observation",
-        prerequisites: ["Read the saved workflow and task brief"], decisionOwner: { type: "agent", id: engineer },
-        accountableOwner: { type: "agent", id: triage } }, recipientDecision: null });
+        prerequisites: ["Read the saved workflow and task brief"],
+        requirementRevision: { id: source!.completionContractId },
+        taskBrief: { title: "Native factory proof", description: "Native factory proof" } }, recipientDecision: null });
     expect((await db.select().from(issues).where(eq(issues.id, initial.taskId)))[0]).toMatchObject({ assigneeAgentId: triage });
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, engineer))).toHaveLength(0);
-    const historyResponse = await fetch(`${process.env.PROPRIO_API_URL}/api/cases/${initial.caseId}/handoffs`, {
-      headers: { authorization: `Bearer ${recipientApiKey}` },
+    const recipientHeaders = { authorization: `Bearer ${recipientApiKey}` };
+    const pendingResponse = await fetch(`${process.env.PROPRIO_API_URL}/api/companies/${companyId}/case-handoff-offers`, {
+      headers: recipientHeaders,
     });
+    expect(pendingResponse.status).toBe(200);
+    const pending = await pendingResponse.json() as {
+      items: { caseId: string; handoffId: string; handoffVersion: number; createdAt: string }[];
+      nextCursor: string | null;
+    };
+    expect(pending).toEqual({ items: [{ caseId: initial.caseId, handoffId: receipt.handoffId,
+      handoffVersion: offer!.version, createdAt: expect.any(String) }], nextCursor: null });
+    const [discovered] = pending.items;
+    const historyUrl = `${process.env.PROPRIO_API_URL}/api/cases/${discovered!.caseId}/handoffs`;
+    const historyResponse = await fetch(historyUrl, { headers: recipientHeaders });
     expect(historyResponse.status).toBe(200);
-    const history = await historyResponse.json();
-    const visibleOffers = Array.isArray(history) ? history : history.items ?? history.handoffs;
-    expect(visibleOffers.find((item: { id: string }) => item.id === receipt.handoffId)).toMatchObject({
+    const history = await historyResponse.json() as { items: { id: string }[] };
+    expect(history.items.find(item => item.id === discovered!.handoffId)).toMatchObject({
       version: 2, state: "offered", fromAgentId: triage, toAgentId: engineer,
       offerContract: { expectedDeliverable: "A verified implementation observation" },
     });
-    const staleDecisionResponse = await fetch(`${process.env.PROPRIO_API_URL}/api/cases/${initial.caseId}/handoffs/${receipt.handoffId}/decision`, {
-      method: "POST", headers: { authorization: `Bearer ${recipientApiKey}`, "content-type": "application/json" },
+    const decisionUrl = `${historyUrl}/${discovered!.handoffId}/decision`;
+    const staleDecisionResponse = await fetch(decisionUrl, {
+      method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
       body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: offer!.version, requirementRevisionId: randomUUID() }),
     });
     expect(staleDecisionResponse.status).toBe(409);
     expect(await staleDecisionResponse.json()).toMatchObject({ error: expect.stringContaining("revision changed") });
-    const decisionResponse = await fetch(`${process.env.PROPRIO_API_URL}/api/cases/${initial.caseId}/handoffs/${receipt.handoffId}/decision`, {
-      method: "POST", headers: { authorization: `Bearer ${recipientApiKey}`, "content-type": "application/json" },
+    const decisionResponse = await fetch(decisionUrl, {
+      method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
       body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: offer!.version,
         requirementRevisionId: offer!.offerContract!.requirementRevision.id }),
     });
@@ -261,6 +276,7 @@ for await (const line of createInterface({input:process.stdin})) {
       outcome: "accepted", actorId: engineer, handoffVersion: offer!.version,
       requirementRevisionId: offer!.offerContract!.requirementRevision.id,
     } });
+    expect(acceptedOffer).not.toHaveProperty("offerContract");
     expect((await db.select().from(issues).where(eq(issues.id, initial.taskId)))[0]).toMatchObject({ assigneeAgentId: triage });
     const [sourceSession] = await db.select().from(agentTaskSessions).where(and(eq(agentTaskSessions.agentId, triage), eq(agentTaskSessions.taskKey, initial.taskId)));
     expect(sourceSession).toMatchObject({ lastRunId: source!.id, sessionParamsJson: {

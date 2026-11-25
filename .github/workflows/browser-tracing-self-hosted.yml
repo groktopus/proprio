@@ -1,0 +1,97 @@
+name: Browser tracing self-hosted acceptance
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+    paths:
+      - ".github/workflows/browser-tracing-self-hosted.yml"
+      - "doc/browser-performance-tracing.md"
+      - "server/src/browser-tracing-config.ts"
+      - "server/src/routes/auth.ts"
+      - "ui/src/lib/browser-tracing/**"
+      - "ui/src/components/PageLoadTracker.tsx"
+      - "tests/perf/browser-tracing/**"
+permissions: {}
+
+jobs:
+  acceptance:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'browser-tracing-acceptance') }}
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: browser tracing / current / enabled
+            mode: enabled
+            ui_ref: ''
+          - name: browser tracing / current / disabled
+            mode: disabled
+            ui_ref: ''
+          - name: browser tracing / current / unsampled
+            mode: unsampled
+            ui_ref: ''
+          - name: browser tracing / current / sink-failure
+            mode: sink-failure
+            ui_ref: ''
+          - name: browser tracing / v0.0.3 UI / enabled
+            mode: enabled
+            ui_ref: 4e3525fd8381bc813f1fd9e54b8753e6bd6cd49e
+    steps:
+      - name: Check out exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Overlay the pinned v0.0.3 production UI
+        if: ${{ matrix.ui_ref != '' }}
+        env:
+          UI_REF: ${{ matrix.ui_ref }}
+        run: |
+          git fetch --depth=1 origin "$UI_REF"
+          rm -rf ui
+          git archive FETCH_HEAD ui | tar -x
+      - name: Resolve exact server and UI build identities
+        env:
+          UI_REF: ${{ matrix.ui_ref }}
+        run: |
+          server_sha="$(git rev-parse HEAD)"
+          if [[ -n "$UI_REF" ]]; then
+            ui_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          else
+            ui_sha="$server_sha"
+          fi
+          [[ "$server_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ui_sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "SERVER_SHA=$server_sha" >> "$GITHUB_ENV"
+          echo "UI_SHA=$ui_sha" >> "$GITHUB_ENV"
+      - name: Install locked dependencies and Chromium
+        run: |
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = "1"
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Run exact-build browser tracing acceptance
+        env:
+          PROPRIO_BROWSER_TRACING_MODE: ${{ matrix.mode }}
+          PROPRIO_BROWSER_TRACING_BUILD_ID: server-${{ env.SERVER_SHA }}__ui-${{ env.UI_SHA }}
+        run: >-
+          pnpm exec playwright test
+          tests/perf/browser-tracing/self-hosted-acceptance.spec.ts
+          --config tests/perf/browser-tracing/playwright.config.ts
+      - name: Upload acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-tracing-server-${{ env.SERVER_SHA }}-ui-${{ env.UI_SHA }}-${{ matrix.mode }}
+          path: test-results/browser-tracing
+          if-no-files-found: warn

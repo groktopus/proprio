@@ -87,23 +87,30 @@ fencing, outgoing yield detection and recipient dispatch.
 
 ## Versioned handoff offers
 
-A native source opts in by passing `offer.expectedDeliverable` and optional
-`offer.prerequisites` to `handoff_case` for another native agent. The offer binds to
-the source run's current completion contract. The source stays accountable
-while the offer awaits the named recipient's decision.
+Native `handoff_case` supports an opt-in `offer` for standard-mode native runs
+with generic API tools and agent JWT signing available. The offer requires an
+authenticated source run on the same task, a completion contract, and a different
+native recipient who can read the Case and use the decision API. The recipient
+can use `search_api` and `call_api` to call
+`GET /api/companies/:companyId/case-handoff-offers`. The list contains routing
+metadata for the agent's own readable pending offers. Use the returned Case ID
+to read the requirements in Case handoff history. Follow the cursor until it is
+null, even when a page contains no readable items.
 
-The recipient reads `GET /api/cases/:caseId/handoffs` with its agent identity,
-then sends `POST /api/cases/:caseId/handoffs/:handoffId/decision` with the observed
-`expectedHandoffVersion` and `requirementRevisionId`. The outcomes are
-`accepted`, `clarification`, and `declined`. Clarification and decline require a
-categorized `reasonCode` and a message. A `409` calls for
-rereading the task and handoff before deciding again.
-
-Acceptance can advance delivery once the source releases execution and current
-admission checks succeed. The handoff history retains the decision, actor,
-time, and requirement revision. Clarification and decline leave the source as
-assignee. Timing and categorized reasons are recorded without the private
-message in the activity event.
+The offer preserves the source assignment and records the task brief and the
+completion-contract and workflow revisions. A task brief change, Stop, or Case
+cancellation closes an unanswered offer.
+The named recipient can post a decision to `/api/cases/:caseId/handoffs/:handoffId/decision`
+using the observed handoff and completion-contract revisions. An identical reply
+returns the saved decision metadata. The Case-scoped history retains any message
+sent with a clarification or decline. Acceptance waits for the normal source
+release and recipient admission checks. The outcomes are `accepted`,
+`clarification`, and `declined`. Clarification and decline require a categorized
+`reasonCode` and a message. A stale offer closes when the recipient attempts a
+decision. On a `409`, reread the task and handoff before deciding again. If requirements change after assignment but before admission, the
+handoff remains held for the operator. Clarification or decline closes the offer
+and keeps the source assigned. The audit event records the category and elapsed
+time.
 
 Stage the versioned-offer schema before admitting pilot work. If ownership
 diverges or an effect is uncertain, pause new offers, retain the handoff and

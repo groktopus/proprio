@@ -112,6 +112,9 @@ test("handoff_case exposes a bounded opt-in offer and reserves it for agent hand
   expect(validate(input)).toBe(true);
   expect(toolInputVariantError("handoff_case", input)).toBeNull();
   expect(validate({ ...input, offer: { expectedDeliverable: " " } })).toBe(false);
+  expect(validate({ ...input, offer: { expectedDeliverable: "no\u0000NUL" } })).toBe(false);
+  expect(validate({ ...input, offer: { ...offer, prerequisites: ["🧾".repeat(2_000)] } })).toBe(true);
+  expect(validate({ ...input, offer: { ...offer, prerequisites: ["🧾".repeat(2_001)] } })).toBe(false);
   expect(validate({ ...input, offer: { ...offer, recipientId: B } })).toBe(false);
   expect(validate({ ...input, offer: { ...offer, prerequisites: Array.from({ length: 21 }, () => "step") } })).toBe(false);
   expect(toolInputVariantError("handoff_case", { ...done, offer })).toContain("does not accept offer");

@@ -85,6 +85,27 @@ function ineligible(
   );
 }
 
+/** Offers require a fresh runtime that exposes the generic case decision tools. */
+export function nativeRuntimeSupportsCaseOfferDecision(
+  agent: Parameters<typeof resolveNativeRuntimeMode>[0]["agent"] & { adapterConfig: unknown; runtimeConfig: unknown },
+  issueId: string,
+  settings: { enableNativeRunner: boolean; enableMuse: boolean; enableOpenAiDot: boolean; enableGrokBot: boolean },
+): boolean {
+  try {
+    // Heartbeat starts idle agents by moving them to running before resolving the runtime.
+    const recipient = agent.status === "idle" ? { ...agent, status: "running" } : agent;
+    const runtime = resolveNativeRuntimeMode({
+      enabled: settings.enableNativeRunner, museEnabled: settings.enableMuse, dotEnabled: settings.enableOpenAiDot,
+      grokEnabled: settings.enableGrokBot, agent: recipient, adapterConfig: agent.adapterConfig, runtimeConfig: agent.runtimeConfig,
+      issue: { id: issueId, workMode: "standard" }, target: null, workspaceId: null,
+    });
+    return runtime.kind === "native" && runtime.profile.backend !== "muse_external";
+  } catch (error) {
+    if (error instanceof NativeRuntimeEligibilityError) return false;
+    throw error;
+  }
+}
+
 export function resolveNativeRuntimeMode(input: {
   enabled: boolean;
   museEnabled?: boolean;
