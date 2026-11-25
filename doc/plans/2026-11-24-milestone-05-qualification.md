@@ -61,10 +61,12 @@ on the selected deployment image.
   qualification. [Test source](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
 
 The server revalidates membership and permissions when reading a page.
-Before advancing a checkpoint, count the persisted rows and compute SHA-256
-over the UTF-8 JSON array of persisted event IDs in ascending ID order.
-Compare the count and digest with the creation receipt
-and pause on a mismatch. The checksum covers the frozen export membership.
+Persist each page's membership for the export before advancing its cursor.
+After the final page reports completion, count the distinct persisted event
+IDs and compute SHA-256 over their compact UTF-8 JSON array in ascending ID
+order. Compare both values with the creation receipt before marking the
+export complete. Pause and reconcile on a mismatch. The checksum covers
+the frozen export membership.
 Record the capture window and producer coverage alongside the independent
 archive checkpoint. Account for late commits beyond the collection lookback.
 [Capture boundary](https://github.com/groktopus/proprio/pull/359)
