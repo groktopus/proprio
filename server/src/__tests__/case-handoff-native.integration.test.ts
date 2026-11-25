@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -8,7 +8,7 @@ import { join } from "node:path";
 import express from "express";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentApiKeys, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
+import { agents, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
 import type { CaseHandoffOfferContract } from "@groktopus/shared";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -16,6 +16,7 @@ import { caseRoutes } from "../routes/cases.js";
 import { caseHandoffRoutes } from "../routes/case-handoffs.js";
 import { issueRoutes } from "../routes/issues.js";
 import { setupRunnerPrpWebSocketServer, runnerPrpWebSocketInternals } from "../realtime/runner-prp-ws.js";
+import { agentService } from "../services/agents.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
 import { caseHandoffDeliveryService } from "../services/case-handoff-delivery.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -93,9 +94,9 @@ suite("case handoff through the assembled native runner", () => {
       role, ...(id === engineer ? { reportsTo: triage } : {}), status: id === engineer ? "error" : "idle", adapterType: "proprio_runner",
       adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: workspace, lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 30,
         env: { CODEX_HOME: sourceHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" } }, runtimeConfig: { heartbeat: { enabled: false } } });
-    const recipientApiKey = `native-case-recipient-${randomUUID()}`;
-    await db.insert(agentApiKeys).values({ companyId, agentId: engineer, name: "Native recipient decision fixture",
-      keyHash: createHash("sha256").update(recipientApiKey).digest("hex"), responsibleUserId: userId });
+    const { token: recipientApiKey } = await agentService(db).createApiKey(
+      engineer, "Native recipient decision fixture", { kind: "standard" }, { responsibleUserId: userId },
+    );
     const initial = await caseHandoffService(db).handoff(companyId, { type: "board", source: "local_implicit", userId }, {
       idempotencyKey: "native-factory-start", case: { create: { caseType: "work", title: "Native factory proof", fields: { specification: "persisted native specification canary" } } },
       workflow_document_text: "Workflow routing canary: triage reads the brief, implementation saves evidence, verification checks it, and finalization closes this same task.",
