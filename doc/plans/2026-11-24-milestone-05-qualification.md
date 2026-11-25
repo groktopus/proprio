@@ -599,6 +599,23 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
    [#401](https://github.com/groktopus/proprio/pull/401) fixture correction also targets `main`.
    [#393](https://github.com/groktopus/proprio/pull/393) [#394](https://github.com/groktopus/proprio/pull/394) [#395](https://github.com/groktopus/proprio/pull/395)
 
+The 48 PRs listed above were open and mergeable against their declared
+bases at the time of this check. Four child heads predate updates to their
+parents. Verify #360 on the current #359, #391 on the current #389, and
+#402 and #403 on the current #399 when advancing those stacks. Local
+merge checks against those exact parent heads reported no conflicts.
+
+Six targeted checks passed on the combined revision `9719c5bc` with
+Node 24.22.1, disposable PostgreSQL, and pinned local CLI fixtures. They
+covered checkpointed export, the approval dispatch fence, two Apps
+failure displays, and OpenCode and Pi skill discovery. The optional
+review for #390 hit its turn limit. The optional reviews for #405 and
+#406 hit their provider usage limit.
+[Combined revision](https://github.com/groktopus/proprio/commit/9719c5bcc48b22588312c70e051e490b8b0c1133)
+[#390 review](https://github.com/groktopus/proprio/actions/runs/45555985324)
+[#405 review](https://github.com/groktopus/proprio/actions/runs/45578123059)
+[#406 review](https://github.com/groktopus/proprio/actions/runs/45580838747)
+
 ### Hosted smoke for PRs targeting main
 
 The required `smoke` check passed on each of the ten heads below. The
