@@ -594,7 +594,7 @@ type RemoteHttpExecutionAudit = {
     mcpMethod: "tools/call";
     requestId: string;
     upstreamToolName: string;
-    dispatched: true;
+    dispatched: boolean;
   };
   response?: {
     httpStatus: number;
@@ -8564,7 +8564,7 @@ export function createToolGatewayService(
         mcpMethod: "tools/call",
         requestId,
         upstreamToolName,
-        dispatched: true,
+        dispatched: false,
       },
     };
     const controller = new AbortController();
@@ -8622,18 +8622,25 @@ export function createToolGatewayService(
             } : {}),
           });
         }
+        let requestStarted = false;
+        const onRequestStart = () => {
+          requestStarted = true;
+          if (toolCall) execution.request.dispatched = true;
+        };
         try {
-          return await (options.remoteHttpRequest
-            ? options.remoteHttpRequest(target, init)
-            : guardedRemoteHttpFetch(target, init, {
-                ...remoteHttpFetchOptions(),
-                // This call site owns a caller-set budget that can exceed the
-                // transport's default response deadline, so hand it down rather than
-                // letting the tighter default cut a legitimately slow tool short.
-                responseTimeoutMs: ms,
-              }));
+          if (options.remoteHttpRequest) {
+            onRequestStart();
+            return await options.remoteHttpRequest(target, init);
+          }
+          return await guardedRemoteHttpFetch(target, init, {
+            ...remoteHttpFetchOptions(),
+            // This call site owns a caller-set budget that can exceed the
+            // transport's default response deadline.
+            responseTimeoutMs: ms,
+            onRequestStart,
+          });
         } catch (error) {
-          if (toolCall && tool.risk !== "read" && managedDispatchIntentWritten) {
+          if (toolCall && requestStarted && tool.risk !== "read" && managedDispatchIntentWritten) {
             throw new ToolGatewayHttpError(409,
               "The managed MCP transport failed after dispatch intent was recorded. The provider outcome is unknown; reconcile before retrying.",
               "managed_dispatch_outcome_unknown", { invocationId });

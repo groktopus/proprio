@@ -19,6 +19,10 @@ intent with the provider. Checking the provider can establish the outcome.
 Equivalent attempts remain blocked while the original intent lacks a terminal
 receipt.
 
+A guard or connection failure before HTTP dispatch retains its transport
+diagnostic and records a terminal outcome. If HTTP dispatch may have started,
+a transport failure on a managed write leaves the intent open for reconciliation.
+
 ## Support Matrix
 
 | Transport | Local trusted | Hosted cloud / public authenticated | Notes |
