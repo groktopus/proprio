@@ -6478,6 +6478,9 @@ registry.registerPath({
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start the window at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    413: { description: "Snapshot exceeds the 20,000-event limit. Use a narrower time window.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "An export operation is in progress. Retry with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    503: { description: "Export query timed out or encountered database contention. Retry the request.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 
@@ -6497,6 +6500,8 @@ registry.registerPath({
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export requires reconciliation. For retention_window_expired, open a new export beginning at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "An export operation is in progress. Retry the same cursor with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    503: { description: "Export query timed out or encountered database contention. Retry the same cursor.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 
