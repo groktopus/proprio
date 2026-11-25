@@ -364,7 +364,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       });
     }
 
-    return { companyId, agentId, blockedIssueId, blockerIssueId, executionWorkspaceId };
+    return { companyId, agentId, ownerUserId, blockedIssueId, blockerIssueId, executionWorkspaceId };
   }
 
   it.each(["pathless", "monitor"] as const)("runs exactly one bounded review-path recovery with %s disposition", async (disposition) => {
@@ -916,6 +916,48 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.blockers_resolved_wake_emitted")));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ entityId: blockedIssueId });
+  });
+
+  it("admits the real dependency wake with a one-connection pool and records its run receipt", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId, ownerUserId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    await db.update(companies).set({ defaultResponsibleUserId: ownerUserId }).where(eq(companies.id, companyId));
+    const singleConnectionDb = createDb(externalUrl ?? tempDb!.connectionString, { maxConnections: 1 });
+    const heartbeat = heartbeatService(singleConnectionDb);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reconciliation = heartbeat.reconcileResolvedDependencyWakes();
+    // Closing the one-connection client in finally below interrupts this work
+    // if attribution accidentally borrows the held root connection.
+    void reconciliation.catch(() => {});
+    try {
+      const result = await Promise.race([
+        reconciliation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Dependency wake admission waited for another pooled connection")), 5_000);
+        }),
+      ]);
+      expect(result).toMatchObject({ healed: 1, issueIds: [blockedIssueId] });
+      const wake = await singleConnectionDb.select().from(agentWakeupRequests)
+        .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId)))
+        .then((rows) => rows[0] ?? null);
+      expect(wake).toMatchObject({
+        reason: "issue_blockers_resolved",
+        idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+          dependentIssueId: blockedIssueId,
+          blockerIssueIds: [blockerIssueId],
+        }),
+      });
+      expect(wake?.runId).toBeTruthy();
+      const run = await singleConnectionDb.select().from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.wakeupRequestId, wake!.id)))
+        .then((rows) => rows[0] ?? null);
+      expect(run).toMatchObject({ responsibleUserId: ownerUserId, wakeupRequestId: wake!.id });
+      await heartbeat.drainActiveRunExecutions();
+    } finally {
+      if (timer) clearTimeout(timer);
+      await singleConnectionDb.$client.end({ timeout: 1 });
+      await reconciliation.catch(() => {});
+    }
   });
 
   it("reconciles a resolved blocked dependency after the assignee-null window closes", async () => {
