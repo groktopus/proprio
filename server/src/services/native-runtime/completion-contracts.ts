@@ -146,16 +146,20 @@ function nativeCompletionContractLockKey(companyId: string, issueId: string): st
   return `proprio:native-completion-contract:${companyId}:${issueId}`;
 }
 
-export async function lockCurrentNativeCompletionContract(tx: Db, input: {
-  companyId: string; issueId: string; contractId: string;
-}): Promise<boolean> {
+type CompletionContractIdentity = { companyId: string; issueId: string; contractId: string };
+
+export async function lockCompletionContractRevision(tx: Db, input: CompletionContractIdentity): Promise<"current" | "busy" | "superseded"> {
   const [lock] = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(
     ${nativeCompletionContractLockKey(input.companyId, input.issueId)}, 0)) as acquired`) as unknown as Array<{ acquired: boolean }>;
-  if (!lock.acquired) return false;
+  if (!lock.acquired) return "busy";
   const [latest] = await tx.select({ id: completionContracts.id }).from(completionContracts)
     .where(and(eq(completionContracts.companyId, input.companyId), eq(completionContracts.issueId, input.issueId)))
     .orderBy(desc(completionContracts.revision)).limit(1);
-  return latest?.id === input.contractId;
+  return latest?.id === input.contractId ? "current" : "superseded";
+}
+
+export async function lockCurrentNativeCompletionContract(tx: Db, input: CompletionContractIdentity): Promise<boolean> {
+  return await lockCompletionContractRevision(tx, input) === "current";
 }
 
 export async function ensureNativeCompletionContract(input: {

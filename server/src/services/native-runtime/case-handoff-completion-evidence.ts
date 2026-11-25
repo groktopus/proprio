@@ -11,12 +11,10 @@ import {
   workAssessments,
 } from "@groktopus/db";
 
-type JsonRecord = Record<string, unknown>;
-const record = (value: unknown): JsonRecord => value && typeof value === "object" && !Array.isArray(value)
-  ? value as JsonRecord : {};
-const text = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
-const uuid = (value: unknown): string | null => typeof value === "string"
-  && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
+import { isStrictUuid } from "../../uuid.js";
+import { readAcceptedCaseHandoffOffer } from "../case-handoff-offer-authority.js";
+import { readNativeContinuationSource } from "./native-continuation-delivery.js";
+import { record, text } from "./evidence-json.js";
 
 /**
  * Read a completion-evidence receipt only when the run was admitted for the
@@ -24,21 +22,30 @@ const uuid = (value: unknown): string | null => typeof value === "string"
  * runs deliberately return null and retain their existing recovery receipt.
  */
 export async function readAcceptedCaseHandoffCompletionEvidence(input: {
-  db: Db;
+  db: Pick<Db, "select">;
   companyId: string;
   issueId: string;
   runId: string;
   decisionId: string;
-  reasonCode: string;
 }) {
   const [run] = await input.db.select({ agentId: heartbeatRuns.agentId, contextSnapshot: heartbeatRuns.contextSnapshot,
-    completionContractId: heartbeatRuns.completionContractId, nativeIssueId: heartbeatRuns.nativeIssueId,
-    companyId: heartbeatRuns.companyId }).from(heartbeatRuns).where(and(
+    completionContractId: heartbeatRuns.completionContractId }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
-    eq(heartbeatRuns.nativeIssueId, input.issueId),
+    eq(heartbeatRuns.nativeIssueId, input.issueId), eq(heartbeatRuns.runtimeMode, "native"),
   )).limit(1);
-  const handoffId = uuid(record(run?.contextSnapshot).caseHandoffId);
-  if (!run || !handoffId) return null;
+  if (!run) return null;
+  let handoffId = record(run.contextSnapshot).caseHandoffId;
+  if (!isStrictUuid(handoffId)) {
+    const sourceRunId = await readNativeContinuationSource(input.db, {
+      companyId: input.companyId, issueId: input.issueId, runId: input.runId, completionRecovery: true,
+    });
+    if (sourceRunId) {
+      const [source] = await input.db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, sourceRunId)).limit(1);
+      handoffId = record(source?.contextSnapshot).caseHandoffId;
+    }
+  }
+  if (!isStrictUuid(handoffId)) return null;
 
   const [decision] = await input.db.select({ assessmentId: statusDecisions.assessmentId, reasonCode: statusDecisions.reasonCode }).from(statusDecisions).where(and(
     eq(statusDecisions.id, input.decisionId), eq(statusDecisions.companyId, input.companyId),
@@ -60,33 +67,30 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
     eq(completionContracts.id, assessment.contractId), eq(completionContracts.companyId, input.companyId),
     eq(completionContracts.issueId, input.issueId),
   )).limit(1);
-  const [current] = await input.db.select({ handoff: caseHandoffs, case: cases, assigneeAgentId: issues.assigneeAgentId,
-    assigneeUserId: issues.assigneeUserId }).from(caseHandoffs)
-    .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, caseHandoffs.companyId)))
-    .innerJoin(issues, and(eq(issues.id, caseHandoffs.issueId), eq(issues.companyId, caseHandoffs.companyId)))
-    .where(and(eq(caseHandoffs.id, handoffId), eq(caseHandoffs.companyId, input.companyId),
-      eq(caseHandoffs.issueId, input.issueId), eq(caseHandoffs.toAgentId, run.agentId)))
-    .limit(1);
-  const handoff = current?.handoff;
-  if (!result || !assessedContract || !handoff || !current || run.completionContractId !== assessedContract.id
-      || result.completionContractId !== assessedContract.id
-      || current.case.workIssueId !== input.issueId || current.case.handoffVersion !== handoff.version
-      || current.assigneeAgentId !== run.agentId || current.assigneeUserId !== null
-      || handoff.state !== "delivered") return null;
+  if (!result || !assessedContract || run.completionContractId !== assessedContract.id
+      || result.completionContractId !== assessedContract.id) return null;
+  // Status commitment holds the task lock. Lock the Case before its handoff
+  // so cancellation and a newer offer cannot race receipt materialization.
+  const [current] = await input.db.select({ caseId: cases.id, version: cases.handoffVersion, status: cases.status,
+    assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId }).from(cases)
+    .innerJoin(issues, and(eq(issues.id, cases.workIssueId), eq(issues.companyId, cases.companyId)))
+    .where(and(eq(cases.workIssueId, input.issueId), eq(cases.companyId, input.companyId)))
+    .limit(1).for("share", { of: cases });
+  if (!current || current.status === "cancelled" || current.assigneeAgentId !== run.agentId
+      || current.assigneeUserId !== null) return null;
+  const [handoff] = await input.db.select().from(caseHandoffs).where(and(
+    eq(caseHandoffs.id, handoffId), eq(caseHandoffs.companyId, input.companyId), eq(caseHandoffs.caseId, current.caseId),
+    eq(caseHandoffs.issueId, input.issueId), eq(caseHandoffs.toAgentId, run.agentId),
+    eq(caseHandoffs.version, current.version), eq(caseHandoffs.state, "delivered"),
+  )).limit(1).for("share");
+  if (!handoff) return null;
 
-  const offer = record(handoff.offerContract);
-  const revision = record(offer.requirementRevision);
-  const recipientDecision = record(handoff.recipientDecision);
-  const acceptedRequirementRevisionId = uuid(revision.id);
-  if (recipientDecision.outcome !== "accepted"
-      || recipientDecision.actorType !== "agent"
-      || recipientDecision.actorId !== run.agentId
-      || recipientDecision.handoffVersion !== handoff.version
-      || !acceptedRequirementRevisionId
-      || recipientDecision.requirementRevisionId !== acceptedRequirementRevisionId
-      || recipientDecision.requirementsDigest !== offer.requirementsDigest) return null;
+  const offer = readAcceptedCaseHandoffOffer(handoff);
+  if (!offer) return null;
+  const revision = offer.requirementRevision;
+  if (!isStrictUuid(revision.id)) return null;
   const [acceptedRequirementRevision] = await input.db.select().from(completionContracts).where(and(
-    eq(completionContracts.id, acceptedRequirementRevisionId), eq(completionContracts.companyId, input.companyId),
+    eq(completionContracts.id, revision.id), eq(completionContracts.companyId, input.companyId),
     eq(completionContracts.issueId, input.issueId),
   )).limit(1);
   if (!acceptedRequirementRevision
@@ -114,14 +118,44 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
 
   return {
     schema: "proprio.case-handoff-completion-recovery.v1",
-    caseHandoff: { id: handoff.id, version: handoff.version, state: handoff.state,
+    caseHandoff: { id: handoff.id, version: handoff.version,
       acceptedRequirementRevision: { id: acceptedRequirementRevision.id, revision: acceptedRequirementRevision.revision,
         canonicalSha256: acceptedRequirementRevision.canonicalSha256 },
-      requirementsDigest: offer.requirementsDigest, recipientAgentId: run.agentId },
-    decision: { id: input.decisionId, recoveryCause: input.reasonCode, statusDecisionReasonCode: decision.reasonCode },
-    assessment: { id: assessment.id, resultId: result.id, assessedContractId: assessedContract.id,
+      requirementsDigest: offer.requirementsDigest, prerequisiteCount: Array.isArray(offer.prerequisites) ? offer.prerequisites.length : 0,
+      recipientAgentId: run.agentId },
+    decision: { statusDecisionReasonCode: decision.reasonCode },
+    assessment: { id: assessment.id, resultId: result.id,
       assessedContractRevision: { id: assessedContract.id, revision: assessedContract.revision,
         canonicalSha256: assessedContract.canonicalSha256 },
       criteriaNeedingWork },
   };
+}
+
+/** Case offer details have a stricter visibility boundary than the task card.
+ * Keep the full receipt in durable storage, but only project generic task-local
+ * gap counts into the task recovery read model. */
+export function projectTaskCompletionRecovery(savedEvidence: Record<string, unknown>) {
+  const evidence = { ...savedEvidence };
+  if (!Object.hasOwn(evidence, "caseHandoffCompletion")) return null;
+  const receipt = record(evidence.caseHandoffCompletion);
+  delete evidence.caseHandoffCompletion;
+  const fallback = "Review the task completion assessment.";
+  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") return { evidence, nextAction: fallback };
+  const caseHandoff = record(receipt.caseHandoff);
+  const assessment = record(receipt.assessment);
+  const criteria = Array.isArray(assessment.criteriaNeedingWork)
+    ? assessment.criteriaNeedingWork.map(record) : [];
+  const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
+  const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
+  const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
+  const prerequisiteCount = typeof caseHandoff.prerequisiteCount === "number" && Number.isSafeInteger(caseHandoff.prerequisiteCount)
+    ? caseHandoff.prerequisiteCount
+    : Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
+  const guidance = [
+    receipt.taskRemedy === "publish_task_document" ? "Publish the requested task document with write_document, or attach verified output with register_deliverable." : null,
+    prerequisiteCount > 0 ? "Review the prerequisite checklist in the authorized Case view." : null,
+    unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
+    evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
+  ].filter((item): item is string => Boolean(item));
+  return { evidence, nextAction: guidance.length ? `${fallback} ${guidance.join(" ")}` : fallback };
 }

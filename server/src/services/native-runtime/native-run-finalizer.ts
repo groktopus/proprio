@@ -1766,11 +1766,13 @@ export async function finalizeNativeRun(input: {
     const reviewStage = isConversation(authoritativeIssue) || reviewContext
       ? { kind: "none" as const } : completionReviewStageEntry(authoritativeIssue, run.agentId);
     await cancelStoppedRunContinuation(input.db, { companyId: run.companyId, resultJson: savedStop }, toolCallLoopContinuationKey(run.id));
+    const caseHandoff = await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result);
     const statusInput: Parameters<typeof resolveNativeFinalizerStatus>[0] = {
       requiredQualityReviewSatisfied: qualityReview.satisfied,
       executionStageApprovedByRun: await executionStageApprovedByRun(input.db, run, authoritativeIssue),
       executionReviewStageStarts: reviewStage.kind === "starts",
-      caseHandoffAuthorized: Boolean(await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result)),
+      caseHandoffAuthorized: Boolean(caseHandoff),
+      caseHandoffAwaitingDecision: caseHandoff?.state === "offered",
       monitorWaitDispatched: monitorDelivery !== null,
       monitorWaitPreserved: preservedMonitorWait !== null,
       monitorWaitSuperseded: supersededMonitorWait !== null,
@@ -1865,7 +1867,7 @@ export async function finalizeNativeRun(input: {
           assessment: { ...assessment, hasBlockingRemainingWork: true, continuation: null } });
         proposedDecision = { ...incomplete, effects: incomplete.effects.map(effect =>
           effect.kind === "enqueue_continuation" ? { ...effect, summary: error.message }
-            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message } : effect) };
+            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message, taskRemedy: error.taskRemedy } : effect) };
       }
     }
     proposedDecision = gateDoneOnConfiguredReview(proposedDecision, reviewStage, run.agentId);

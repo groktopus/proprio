@@ -1231,7 +1231,7 @@ describe("CompanyEnvironments — test provider button", () => {
     expect(FakeWebSocket.instances[0].sent).toContain(JSON.stringify({ type: "input", data: "\r" }));
   });
 
-  it("keeps the environment edit page open when Escape is pressed in setup terminal", async () => {
+  it("keeps the environment edit page open and gives keyboard users a way out of the terminal", async () => {
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const command = "ssh sandbox@setup.example.invalid -p 2222";
@@ -1265,12 +1265,21 @@ describe("CompanyEnvironments — test provider button", () => {
     });
 
     await act(async () => {
+      terminalScreen?.focus();
       terminalScreen?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     await flushReact();
 
     expect(getEnvironmentFormPage()?.textContent).toContain(command);
     expect(getEnvironmentFormPage()?.textContent).toContain("Edit environment");
+    expect(document.activeElement).toBe(terminalScreen);
+
+    const exitKey = new KeyboardEvent("keydown", {
+      key: "Escape", shiftKey: true, bubbles: true, cancelable: true,
+    });
+    await act(async () => { terminalScreen?.dispatchEvent(exitKey); });
+    expect(exitKey.defaultPrevented).toBe(true);
+    expect(document.activeElement?.id).toBe("terminal-keyboard-help-session-1");
   });
 
   it("does not render connect details when an active session refreshes as expired", async () => {

@@ -65,10 +65,10 @@ it("adds a Home tab for Responsibilities to the coordinator bar only while the f
   fixture.coordinator = true;
   fixture.responsibilities = true;
   let host = await renderNav();
-  expect(tabs(host)).toEqual(["Home:/responsibilities", "Chat:/chats", "Tasks:/issues", "Inbox:/decisions", "New task:action"]);
+  expect(tabs(host)).toEqual(["Home:/responsibilities", "Chat:/chats", "Tasks:/issues", "Needs You:/decisions", "New task:action"]);
   await cleanup?.();
 
   fixture.responsibilities = false;
   host = await renderNav();
-  expect(tabs(host)).toEqual(["Chat:/chats", "Tasks:/issues", "Inbox:/decisions", "New task:action"]);
+  expect(tabs(host)).toEqual(["Chat:/chats", "Tasks:/issues", "Needs You:/decisions", "New task:action"]);
 });

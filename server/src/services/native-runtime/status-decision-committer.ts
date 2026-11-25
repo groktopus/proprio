@@ -957,12 +957,11 @@ async function materializeDecisionEffect(input: {
     failAt("recovery_materialization", input.failpoint);
     const handoffCompletionEvidence = effect.cause === "completion_evidence_incomplete"
       ? await readAcceptedCaseHandoffCompletionEvidence({
-        db: input.tx as unknown as Db,
+        db: input.tx,
         companyId: input.companyId,
         issueId: input.issue.id,
         runId: input.runId,
         decisionId: input.decisionId,
-        reasonCode: effect.cause,
       })
       : null;
     const recovery = await issueRecoveryActionService(
@@ -982,9 +981,12 @@ async function materializeDecisionEffect(input: {
       evidence: {
         runId: input.runId,
         decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? { caseHandoffCompletion: handoffCompletionEvidence } : {}),
+        ...(handoffCompletionEvidence ? {
+          caseHandoffCompletion: { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        } : {}),
       },
       nextAction: effect.nextAction,
+      supersedeOnIdentityChange: Boolean(handoffCompletionEvidence),
       wakePolicy: null,
       maxAttempts: 3,
     });
