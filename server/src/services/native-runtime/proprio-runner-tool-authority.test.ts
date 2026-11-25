@@ -610,20 +610,24 @@ describe("ProprioRunnerToolAuthority", () => {
     const activeChildId = randomUUID();
     const unrelatedId = randomUUID();
     const otherCompanyId = randomUUID();
+    const foreignParentId = randomUUID();
     const foreignChildId = randomUUID();
     const hiddenChildIds = Array.from({ length: 101 }, () => randomUUID());
     await db.insert(companies).values({ id: otherCompanyId, name: "Other company", issuePrefix: "OTHER" });
-    await db.insert(issues).values([
-      { id: completedChildId, companyId, parentId: issueId, title: "Existing completed draft", status: "done", assigneeAgentId: agentId },
-      { id: activeChildId, companyId, parentId: issueId, title: "Existing active review", status: "in_progress", assigneeAgentId: agentId },
-      { id: unrelatedId, companyId, title: "Unrelated task", status: "todo" },
-      // Even inconsistent imported data cannot expose another company's task.
-      { id: foreignChildId, companyId: otherCompanyId, parentId: issueId, title: "Foreign child", status: "todo" },
-      // Hidden rows must neither enter context nor consume the visible child limit.
-      ...hiddenChildIds.map((id) => ({ id, companyId, parentId: issueId, title: "Hidden child",
-        hiddenAt: new Date(), createdAt: new Date(Date.now() + 1000) })),
-    ]);
     try {
+      const foreignChild = { id: foreignChildId, companyId: otherCompanyId, title: "Foreign child", status: "todo" };
+      await expect(db.insert(issues).values({ ...foreignChild, parentId: issueId }))
+        .rejects.toMatchObject({ cause: { code: "23503", constraint_name: "issues_parent_company_fk" } });
+      await db.insert(issues).values({ id: foreignParentId, companyId: otherCompanyId, title: "Foreign parent" });
+      await db.insert(issues).values([
+        { id: completedChildId, companyId, parentId: issueId, title: "Existing completed draft", status: "done", assigneeAgentId: agentId },
+        { id: activeChildId, companyId, parentId: issueId, title: "Existing active review", status: "in_progress", assigneeAgentId: agentId },
+        { id: unrelatedId, companyId, title: "Unrelated task", status: "todo" },
+        { ...foreignChild, parentId: foreignParentId },
+        // Hidden rows must neither enter context nor consume the visible child limit.
+        ...hiddenChildIds.map((id) => ({ id, companyId, parentId: issueId, title: "Hidden child",
+          hiddenAt: new Date(), createdAt: new Date(Date.now() + 1000) })),
+      ]);
       const authority = new ProprioRunnerToolAuthority(db, { companyId, agentId, issueId, runId });
       const context = await authority.execute({ tool: "get_task_context", callId: "context-existing-children", arguments: {} });
       expect(context).toMatchObject({
@@ -638,7 +642,7 @@ describe("ProprioRunnerToolAuthority", () => {
       expect(JSON.stringify(context)).not.toContain(unrelatedId);
       for (const id of hiddenChildIds) expect(JSON.stringify(context)).not.toContain(id);
     } finally {
-      await db.delete(issues).where(inArray(issues.id, [completedChildId, activeChildId, unrelatedId, foreignChildId, ...hiddenChildIds]));
+      await db.delete(issues).where(inArray(issues.id, [completedChildId, activeChildId, unrelatedId, foreignChildId, foreignParentId, ...hiddenChildIds]));
       await db.delete(companies).where(eq(companies.id, otherCompanyId));
     }
   });
