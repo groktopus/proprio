@@ -234,8 +234,11 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
+  // This race belongs with the route fixtures because it needs a held PostgreSQL
+  // writer plus the suite's authenticated HTTP requests and shared snapshot setup.
   it("finds a late-committing event only through a fresh overlapping export", async () => {
     const { company, agent } = await seed();
+    const writerDb = createDb(tempDb!.connectionString);
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
       companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
@@ -257,7 +260,7 @@ describePostgres("agent action audit routes", () => {
     const inserted = new Promise<void>(resolve => { signalInserted = resolve; });
     let finishTransaction!: () => void;
     const transactionMayCommit = new Promise<void>(resolve => { finishTransaction = resolve; });
-    const lateTransaction = db.transaction(async tx => {
+    const lateTransaction = writerDb.transaction(async tx => {
       await tx.insert(managedAuditEvents).values({
         id: eventId,
         companyId: company.id,
@@ -310,8 +313,12 @@ describePostgres("agent action audit routes", () => {
       expect(new Set(archivedKeys).size).toBe(1);
     } finally {
       finishTransaction();
-      vi.unstubAllEnvs();
-      await lateTransaction;
+      try {
+        await lateTransaction;
+      } finally {
+        await writerDb.$client.end();
+        vi.unstubAllEnvs();
+      }
     }
   }, 45_000);
 
