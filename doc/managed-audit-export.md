@@ -35,18 +35,20 @@ Keep this boundary outside the database rollback domain.
    IDs before advancing the checkpoint to the returned `nextCursor`. If a crash
    occurs before advancing it, replay the same page idempotently. A repeated
    page uses the same event IDs.
-4. Confirm that the final page reports `complete`. Count the distinct event IDs
-   recorded for this export ID and compare the count to `eventCount`. Compare
-   the watermark to the SHA-256 of those IDs encoded as a compact JSON array in
-   lexicographic order.
+4. Confirm that the final page reports `complete`. Compare its count and
+   watermark with the receipt saved at creation. Count the distinct event IDs
+   recorded for this export ID and compute the SHA-256 of those IDs encoded as
+   a compact JSON array in lexicographic order. Accept completion only when
+   both values match the saved creation receipt. Reconcile the checkpoint if
+   any comparison fails.
 
 An export belongs to the creating operator and company. Company, audit and task
 access are checked for eligible events. Personal conversations also require
 owner access, including when the only surviving reference is a run bound to the
 conversation. For a missing task or run, snapshot creation reports an incomplete
 source unless the surviving binding proves the event is outside the operator's
-access. Before releasing a page, the API checks
-every event in the snapshot because the count and watermark describe all pages.
+access. Before releasing a page, an upgraded reader checks every event in
+the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. The server persists the invalidation
 until the snapshot expires and discards its membership. Old cursors remain
@@ -105,13 +107,11 @@ slots. Its thin invalidation marker remains available through the snapshot's
 original expiry and the marker-retention period after expiry.
 
 Successful creation retires snapshots from older epochs or windows before the
-configured cutoff by setting their durable invalidation marker. It keeps each
-snapshot's original expiry time, so a replica with a clock behind the writer
-cannot treat a retired receipt as complete after memberships are released.
-Readers check source epoch and retention cutoff first, then preserve the
-existing `snapshot_expired` response for an expired receipt, then check the
-invalidation marker. Before its original expiry, a reader with a clock behind
-the retirement writer still sees the durable marker. Retired checkpoints
+configured cutoff by setting their durable invalidation marker. Upgraded
+readers check source epoch and retention cutoff first, then return
+`snapshot_expired` if the original expiry has passed, then check the
+invalidation marker. A reader whose clock is behind the writer still uses
+the marker while it considers the snapshot live. Retired checkpoints
 with retained markers return `source_epoch_changed` or
 `retention_window_expired` while the boundary is in force. If that boundary is
 rolled back before expiry, the retained marker returns `snapshot_incomplete`.
@@ -125,14 +125,20 @@ marker, and later creates continue the cleanup. Retired snapshots do not
 consume active capacity. The protected `company_exports_retired` receipt
 records the company, operator, source and number of retired snapshots.
 
-Once every export-serving replica uses marker-aware cleanup, the API keeps an
-owner-scoped marker for at least 24 hours after expiry. A reader in the current
-epoch and retention window returns `409 snapshot_expired` after the original
-expiry. A slower reader that still considers a cleared snapshot live returns
-`409 snapshot_incomplete`. An older replica can remove a marker sooner during
-a rolling upgrade or rollback. Once cleanup removes a marker, the cursor
-returns `404 snapshot_missing` and the collector must reconcile its checkpoint.
-Page access records follow separate retention rules.
+Marker-aware cleanup retains owned markers for at least 24 hours after expiry.
+Once every export-serving replica uses that cleanup, this policy applies to
+markers that still exist. An older replica can delete one sooner during a
+rolling upgrade or rollback. A marker deleted during rollout stays missing
+after the last old replica drains. The owned checkpoint then returns
+`404 snapshot_missing` and needs reconciliation.
+
+For a retained marker in the current epoch and retention window, expiry returns
+`409 snapshot_expired`. An upgraded reader that still considers a cleared
+snapshot live returns `409 snapshot_incomplete`. During a mixed-version
+rollout, an older reader can report `200` with zero events and `complete: true`
+after membership is cleared. Verify the page metadata and archived membership
+against the saved creation receipt before accepting completion. Page access
+records follow separate retention rules.
 
 A source epoch change, a retired checkpoint, or an expired snapshot requires a
 new export after reconciliation. Snapshots expire after 24 hours.
@@ -164,8 +170,8 @@ reconcile the affected interval against source or target evidence.
 export API against an older JavaScript logical backup restored into a sibling
 database. It writes delivered page bytes and the resume checkpoint to files
 outside both databases, resumes by that checkpoint, and verifies the archived
-ID watermark after a source row is deleted. The old checkpoint reports
-`snapshot_incomplete` when its row is missing. After restoring the older backup
+ID watermark after a source event row is deleted. The old checkpoint reports
+`snapshot_incomplete` when that event is missing. After restoring the older backup
 and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint and a
 retained expiry marker from the old epoch both report `source_epoch_changed`. A fresh API snapshot
 uses the restored data and current access. The test rejects the expired event
