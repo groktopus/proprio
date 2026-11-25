@@ -148,6 +148,33 @@ conflict for #360 with #359, #391 with #389, and #402 and #403 with #399.
 After a base PR lands, check the child comparison when retargeting it to
 main and rerun its required checks.
 
+### Landing the two audit branches
+
+A local merge rehearsal used all 49 published heads and main at
+`c4592c7fc6e3720df77766905a2045e08c25218d`. Landing the archive branch first
+conflicted with direct dispatch in the migration journal, snapshot, and
+export code. Landing the approval and dispatch branch first moved the first
+conflict to the page receipt migration in #378.
+
+Use the integration changes below as references when rebasing each PR on
+its new base. The recorded resolutions span both branches. Carry only the
+changes needed for each PR, preserve already-landed migrations, and rerun
+the migration and audit tests after retargeting.
+
+| PR | Integration reference |
+| --- | --- |
+| #378 Page access receipts | [Page receipt migration after direct dispatch](https://github.com/groktopus/proprio/commit/3c162006646e1bcc342ac797e425a11894ffc761) |
+| #380 Snapshot storage | [Bounded storage with minimized pages](https://github.com/groktopus/proprio/commit/a37f56b57690477ab193b312d283a4a848aec17f) |
+| #381 Invalidation | [Invalidation after dispatch and page receipts](https://github.com/groktopus/proprio/commit/3567104a60e7de303976c8cced4ba95a154a1e6c) |
+| #384 Page access serialization | [Protected transitions, including #385](https://github.com/groktopus/proprio/commit/1550223299c12acd2daf9dbc512c83ff12c91a2f) |
+| #386 Retirement | [Terminal snapshot cleanup](https://github.com/groktopus/proprio/commit/3d64f8c4510018e1ab8fd636a9cb2f4350eaecc7) |
+
+With those resolutions, the rehearsal produced tree
+`0fe714f851e9e9950ee50a0383b190891c08b993`, identical to the tested
+composition `31b5a8fb`. The rehearsal used local merge commits. Each
+PR still needs review and CI on its actual landing base.
+[Tested composition](https://github.com/groktopus/proprio/commit/31b5a8fbf368bb880ee1b36170bdf6baf1c348de)
+
 ### Hosted smoke for PRs targeting main
 
 The required `smoke` check passed on each of the ten heads below. The
