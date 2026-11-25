@@ -55,6 +55,17 @@ export {
   type NativeRunTerminalState,
 } from "./types/native-finalization.js";
 export {
+  nativeCompletionEvidenceKindSchema,
+  nativeCompletionEvidenceOutcomeSchema,
+  nativeCompletionHistorySchema,
+  type NativeCompletionCriterionAssessment,
+  type NativeCompletionEvidenceKind,
+  type NativeCompletionEvidenceOutcome,
+  type NativeCompletionEvidenceReference,
+  type NativeCompletionHistoryEntry,
+  type NativeCompletionVerificationAssessment,
+} from "./types/native-completion-history.js";
+export {
   decisionEffectStalenessSchema,
   decisionOptionStyleSchema,
   commentOnIssueDecisionEffectSchema,

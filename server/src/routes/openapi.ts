@@ -1,3 +1,4 @@
+import { nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
@@ -6531,6 +6532,17 @@ registry.registerPath({
     commentIds: z.string().optional().describe("For comment-inputs: up to 100 comma-separated comment UUIDs. Returns at most two original facts per comment."),
   }) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/completion-history",
+  tags: ["activity"],
+  summary: "Read native completion criteria, evidence and status decisions for a task",
+  description: "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(nativeCompletionHistorySchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } },
 });
 
 registry.registerPath({
