@@ -221,7 +221,7 @@ async function verifyDispatchStallWake(db: Db, input: {
       .where(and(eq(agentWakeupRequests.companyId, input.companyId), eq(agentWakeupRequests.id, wakeupRequestId)))
       .then(rows => rows[0]?.actor ?? null)
     : null;
-  return verifyBlockerStallWake(db, { ...wake, requestedByActorType });
+  return verifyBlockerStallWake(db, { ...wake, requestedByActorType, wakeupRequestId });
 }
 
 function queuedEffect(run: HeartbeatRun): PostCommitEffect {

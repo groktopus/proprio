@@ -1,8 +1,9 @@
 // Starts and stops browser performance tracing for one page session.
 //
 // Main-bundle code. It does nothing unless the authenticated session carries a
-// `browserTracing` config, which the server sends only for a hosted Proprio
-// Cloud instance with an operator-set endpoint. When active it:
+// `browserTracing` config, which the server sends only for a managed instance
+// or an explicitly opted-in self-hosted instance with an operator-set
+// endpoint. When active it:
 //   - decides once per page session whether this session is sampled; an
 //     unsampled session does nothing else and downloads nothing,
 //   - measures the hard load and every client-side navigation

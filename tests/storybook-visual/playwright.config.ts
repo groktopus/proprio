@@ -18,7 +18,10 @@ export default defineConfig({
   projects: [
     // The reproduction trial has a dedicated fixed-clock/browser contract and
     // requires its frozen first-submission PNG via TRIAL_REFERENCE_PNG.
-    { name: "stories", testIgnore: ["agent-personas.spec.ts", "task-list-reproduction-trial.spec.ts"] },
+    { name: "stories", testIgnore: ["agent-personas.spec.ts", "task-list-reproduction-trial.spec.ts", "operator-attention.spec.ts"] },
+    ...(process.env.STORYBOOK_VISUAL_BASELINE_MANIFEST?.endsWith("operator-attention-baseline.json")
+      ? [{ name: "operator-attention", testMatch: "operator-attention.spec.ts" }]
+      : []),
     {
       name: "agent-personas", testMatch: "agent-personas.spec.ts", fullyParallel: false,
       snapshotPathTemplate: `${snapshotDir}/agent-personas/{arg}{ext}`,

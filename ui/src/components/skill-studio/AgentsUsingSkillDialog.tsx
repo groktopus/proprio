@@ -7,7 +7,7 @@ import type {
   CompanySkillDetail,
   CompanySkillUsageAgent,
   CompanySkillVersionSummary,
-} from "@paperclipai/shared";
+} from "@groktopus/shared";
 import { Link } from "@/lib/router";
 import { agentsApi } from "@/api/agents";
 import { companySkillsApi } from "@/api/companySkills";
