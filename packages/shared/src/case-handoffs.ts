@@ -121,8 +121,9 @@ export type HandoffCaseInput = z.input<typeof handoffCaseSchema>;
 
 const decisionTarget = {
   expectedHandoffVersion: z.number().int().positive(),
-  requirementRevisionId: z.string().guid(),
+  requirementRevisionId: z.string().guid().toLowerCase(),
 };
+const decisionMessage = { message: handoffReceiptText(4_000) };
 
 export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome", [
   z.object({
@@ -133,13 +134,13 @@ export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome"
     ...decisionTarget,
     outcome: z.literal("clarification"),
     reasonCode: z.enum(["missing_prerequisite", "unclear_requirements", "missing_evidence", "other"]),
-    message: handoffReceiptText(4_000),
+    ...decisionMessage,
   }).strict(),
   z.object({
     ...decisionTarget,
     outcome: z.literal("declined"),
     reasonCode: z.enum(["unavailable", "missing_capability", "outside_scope", "other"]),
-    message: handoffReceiptText(4_000),
+    ...decisionMessage,
   }).strict(),
 ]);
 export type CaseHandoffRecipientDecisionInput = z.infer<typeof caseHandoffRecipientDecisionSchema>;

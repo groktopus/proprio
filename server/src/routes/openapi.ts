@@ -14041,9 +14041,10 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
 registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/decision", tags: ["Cases"],
   summary: "Record a recipient decision on a versioned handoff offer",
-  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The endpoint accepts up to 12 requests per minute per recipient principal.",
+  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffRecipientDecisionSchema) },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 429: r.tooManyRequests } });
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } } });
 for (const action of ["retry", "cancel"] as const) registry.registerPath({ method: "post", path: `/api/cases/{caseId}/handoffs/{handoffId}/${action}`,
   tags: ["Cases"], summary: `${action === "retry" ? "Retry" : "Cancel"} pending case handoff`,
   description: "Requires case access and ordinary task-control authority. Retry preserves the existing handoff/task identity. Cancellation remains available when enableCases is disabled; it prevents delivery and does not undo an applied assignment.",

@@ -137124,7 +137124,7 @@
           "Cases"
         ],
         "summary": "Record a recipient decision on a versioned handoff offer",
-        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The endpoint accepts up to 12 requests per minute per recipient principal.",
+        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
         "responses": {
           "200": {
             "description": "Success",
@@ -137187,12 +137187,31 @@
               }
             }
           },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Too many requests",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }

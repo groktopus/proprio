@@ -589,7 +589,8 @@ describe("openapi routes", () => {
     const decision = spec.paths["/api/cases/{caseId}/handoffs/{handoffId}/decision"].post;
     expect(decision.security).toEqual([{ AgentBearerAuth: [] }]);
     expect(decision["x-proprio-authorization"]).toEqual({ actor: "agent" });
-    expect(decision.responses[429]).toBeDefined();
+    expect(decision.responses[422]).toBeDefined();
+    expect(decision.responses[429].headers["Retry-After"].schema).toMatchObject({ type: "integer", minimum: 1 });
     expect(spec.paths["/api/companies/{companyId}/cases"].post).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/case-handoffs"].post).toBeDefined();
     expect(spec.paths["/api/cases/{id}"].get).toBeDefined();

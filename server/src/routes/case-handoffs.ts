@@ -6,7 +6,7 @@ import { caseHandoffRecipientDecisionSchema, handoffCaseSchema } from "@groktopu
 import { validate } from "../middleware/validate.js";
 import { notFound } from "../errors.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
-import { assertCompanyAccess, hasCompanyAccess } from "./authz.js";
+import { assertAuthenticated, assertCompanyAccess, hasCompanyAccess } from "./authz.js";
 
 const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(100).optional(), before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() });
 
@@ -29,27 +29,26 @@ export function caseHandoffRoutes(db: Db) {
     const result = await service.handoff(companyId, req.actor, req.body);
     res.status(result.replayed ? 200 : 202).json(result);
   });
-  router.get("/cases/:caseId/handoffs", async (req, res) => {
+  async function readableCaseId(req: Request) {
+    assertAuthenticated(req);
     const caseId = req.params.caseId as string;
     const row = await service.visible(req.actor, caseId);
     if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
     assertCompanyAccess(req, row.companyId);
+    return caseId;
+  }
+  router.get("/cases/:caseId/handoffs", async (req, res) => {
+    const caseId = await readableCaseId(req);
     res.json(await service.list(req.actor, caseId, listSchema.parse(req.query)));
   });
   router.post("/cases/:caseId/handoffs/:handoffId/decision", decisionRateLimit, validate(caseHandoffRecipientDecisionSchema), async (req, res) => {
-    const caseId = req.params.caseId as string;
-    const row = await service.visible(req.actor, caseId);
-    if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
-    assertCompanyAccess(req, row.companyId);
+    const caseId = await readableCaseId(req);
     res.json(await service.recordRecipientDecision(req.actor, caseId, req.params.handoffId as string, req.body));
   });
   const control = (action: "retry" | "cancel") => async (req: Request, res: Response) => {
-      const caseId = req.params.caseId as string;
-      const row = await service.visible(req.actor, caseId);
-      if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
-      assertCompanyAccess(req, row.companyId);
-      res.json(await service[action](req.actor, caseId, req.params.handoffId as string));
-    };
+    const caseId = await readableCaseId(req);
+    res.json(await service[action](req.actor, caseId, req.params.handoffId as string));
+  };
   router.post("/cases/:caseId/handoffs/:handoffId/retry", control("retry"));
   router.post("/cases/:caseId/handoffs/:handoffId/cancel", control("cancel"));
   return router;
