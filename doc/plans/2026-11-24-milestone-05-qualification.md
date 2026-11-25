@@ -458,7 +458,8 @@ dependency investigation browser test change.
 [Reviewed gateway composition](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
 
 Hosted Linux source qualification is running for the reviewed gateway
-composition against `166175cc093a569eed60b59f6df70f6c10c43290`.
+composition against `166175cc093a569eed60b59f6df70f6c10c43290`. Update and
+rollback passed. The source build was running at the latest check.
 [Reviewed gateway hosted qualification](https://github.com/groktopus/proprio/actions/runs/45579778025)
 
 The enhanced reconstruction fixture passed on composition
@@ -489,6 +490,20 @@ zero, and one observed target effects. The browser test sits outside these
 two local checks.
 [Controller-crash regression](https://github.com/groktopus/proprio/pull/329)
 [Exact tested composition](https://github.com/groktopus/proprio/commit/9719c5bcc48b22588312c70e051e490b8b0c1133)
+
+The full-controller follow-up passed on its PR head `3c2b0b78` and on
+composition `31b5a8fbf368bb880ee1b36170bdf6baf1c348de` with one ordinary
+PostgreSQL connection. The owner and a separate audit reviewer signed in
+over HTTP. The production controller started the process adapter and
+handled the approvals. A new production controller process then served the
+export to the reviewer from the same database. The independent target
+observed one approved effect, zero denied effects, and one interrupted
+effect with no terminal outcome in the nine-event export. The dependency
+diagnosis crash regression passed in the same local run. This used a
+disposable source checkout, Node 24.22.1, and a loopback connector. The
+selected-image restore and operator sign-off are still release gates.
+[Full-controller fixture](https://github.com/groktopus/proprio/pull/407)
+[Exact tested composition](https://github.com/groktopus/proprio/commit/31b5a8fbf368bb880ee1b36170bdf6baf1c348de)
 
 The earlier authenticated reconstruction also passed with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
@@ -591,16 +606,17 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
    both target historical policy. Independent authority targets `main`. Review
-   the retained evidence follow-up after the reconstruction fixture.
-   [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368) [#406](https://github.com/groktopus/proprio/pull/406)
+   the retained evidence and production controller restart follow-ups after
+   the reconstruction fixture.
+   [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368) [#406](https://github.com/groktopus/proprio/pull/406) [#407](https://github.com/groktopus/proprio/pull/407)
 6. Review the one-connection task and wake changes before repeating the
    stress reconstruction on the selected source. Task creation and wake delivery
    target `main`. Deferred promotion follows wake delivery. The independent
    [#401](https://github.com/groktopus/proprio/pull/401) fixture correction also targets `main`.
    [#393](https://github.com/groktopus/proprio/pull/393) [#394](https://github.com/groktopus/proprio/pull/394) [#395](https://github.com/groktopus/proprio/pull/395)
 
-The 48 PRs listed above were open and mergeable against their declared
-bases at the time of this check. Four child heads predate updates to their
+The 48 PRs preceding the full-controller follow-up were open and mergeable
+against their declared bases at the time of the stack check. Four child heads predate updates to their
 parents. Verify #360 on the current #359, #391 on the current #389, and
 #402 and #403 on the current #399 when advancing those stacks. Local
 merge checks against those exact parent heads reported no conflicts.
