@@ -134,9 +134,33 @@ no access record. The invalidation event records the company, operator and
 export ID once. All 31 exact audit route tests passed on `d5fb6cfd` with one
 ordinary connection. Composition `374d5d95c45c5682b43c2a42878d0ebb950247f9`
 against main `19b4a032` passed 88 audit export, reconstruction and OpenAPI
-tests with the default pool. The remaining quota review covers durable
-retirement, replacement capacity and peak cleanup.
+tests with the default pool. At `479b8d0e`, all 31 export route tests
+passed again after placing the receipt in protected storage with company
+cascade. A lookalike company activity write could not alter that receipt.
 [Page invalidation follow-up](https://github.com/groktopus/proprio/pull/384)
+
+The quota replacement PR excludes permanently invalidated snapshots from the
+32-per-operator and 128-per-company active limits. The route regression
+returned 429 before the change and 201 after it. At `c6c8819f`, all 32 audit
+route tests passed with one ordinary connection. The losing writer returned
+PostgreSQL serialization state `40001` and a retryable response. The prior marker remains
+readable within its existing owner-scoped retention window.
+[Replacement quota](https://github.com/groktopus/proprio/pull/385)
+
+The durable retirement PR preserves the stored expiry and fences superseded
+snapshots across clock skew and cutoff rollback. The old code returned HTTP
+200 in the cutoff rollback regression. The fixed revision `cf30a93f` passed
+all 32 route tests with one ordinary connection. The peak fixture retired
+128 snapshots of 20,000 IDs each. Two successive creates released eight
+memberships each and left one protected retirement summary.
+[Durable retirement](https://github.com/groktopus/proprio/pull/386)
+
+Composition `1550223299c12acd2daf9dbc512c83ff12c91a2f` against main
+`19b4a032` passed 89 export, reconstruction and OpenAPI tests on Node
+24.22.1 with isolated PostgreSQL and the default pool. The composition
+regenerated the protected transition receipt migration as 0512 after
+dispatch, page-access receipts and snapshot invalidation. Numbering, safety,
+compatibility and generated OpenAPI checks passed.
 
 Hosted stability and durable-work qualification passed for adapter head
 `40aa561ef4a65d4bef7a925a20ec2901c3f6338b`. The retained report records that
@@ -213,7 +237,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
    These PRs target `main`. [#361](https://github.com/groktopus/proprio/pull/361) [#353](https://github.com/groktopus/proprio/pull/353) [#354](https://github.com/groktopus/proprio/pull/354)
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
 4. From checkpointed export, review the two dependent branches in their listed order.
-   - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384)
+   - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384) → [#385](https://github.com/groktopus/proprio/pull/385) → [#386](https://github.com/groktopus/proprio/pull/386)
    - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363)
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
