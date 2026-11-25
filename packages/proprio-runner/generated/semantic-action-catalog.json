@@ -2052,7 +2052,7 @@
               "description": "The concrete deliverable the recipient agrees to produce.",
               "maxLength": 8000,
               "minLength": 1,
-              "pattern": "^(?=[\\s\\S]*[^\\s\\u0000])[^\\u0000\\uD800-\\uDFFF]+$",
+              "pattern": "^\\s*[^\\s\\x00][^\\x00]*$",
               "type": "string"
             },
             "prerequisites": {
@@ -2060,7 +2060,7 @@
               "items": {
                 "maxLength": 2000,
                 "minLength": 1,
-                "pattern": "^(?=[\\s\\S]*[^\\s\\u0000])[^\\u0000\\uD800-\\uDFFF]+$",
+                "pattern": "^\\s*[^\\s\\x00][^\\x00]*$",
                 "type": "string"
               },
               "maxItems": 20,

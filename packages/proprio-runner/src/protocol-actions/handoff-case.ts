@@ -7,7 +7,7 @@ const uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4
 // advertised schema stays a plain object. The agent-handoff and to: "done"
 // variants, and case id/create, are checked by toolInputVariantError on the
 // server with named errors.
-const offerTextPattern = "^(?=[\\s\\S]*[^\\s\\u0000])[^\\u0000\\uD800-\\uDFFF]+$";
+const offerTextPattern = "^\\s*[^\\s\\x00][^\\x00]*$";
 const inputSchema = {
   type: "object", additionalProperties: false,
   required: ["idempotencyKey", "case", "instructions"],
