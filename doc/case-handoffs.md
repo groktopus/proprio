@@ -122,8 +122,8 @@ profiles before resuming. See the
 [release plan](https://github.com/groktopus/proprio/issues/222) for the candidate
 and evidence requirements.
 
-When a recipient's native completion assessment needs more evidence, the
-recovery action records the accepted requirement revision, the assessed
+If a recipient's native completion still lacks evidence after the automatic
+continuation, or no continuation is available, the recovery action records the accepted requirement revision, the assessed
 contract revision, and the status decision. The receipt belongs to the current
 delivered handoff and its recipient. Task recovery shows counts of unmet
 criteria and evidence gaps. It directs readers to the authorized Case view for

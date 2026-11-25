@@ -69,13 +69,13 @@ describe("accepted case-handoff completion recovery evidence", () => {
 
   it("binds only outstanding criteria to the accepted revision and recipient", async () => {
     const f = await fixture();
-    const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" });
+    const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, ...f });
     expect(receipt).toMatchObject({
       schema: "proprio.case-handoff-completion-recovery.v1",
       caseHandoff: { id: f.handoffId, version: 2, recipientAgentId: f.agentId, prerequisiteCount: 1,
         acceptedRequirementRevision: { id: f.contractId, revision: 1 } },
-      decision: { id: f.decisionId, recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "completion_evidence_incomplete" },
-      assessment: { resultId: expect.any(String), assessedContractId: f.assessedContractId,
+      decision: { statusDecisionReasonCode: "completion_evidence_incomplete" },
+      assessment: { resultId: expect.any(String),
         assessedContractRevision: { id: f.assessedContractId, revision: 2 }, criteriaNeedingWork: [{ criterionId: "tests", requirement: "Run the test suite",
         outcome: "missing", reasonCode: "criterion_evidence_missing", evidence: [
           { outcome: "missing", reasonCode: "event_missing" },
@@ -87,19 +87,22 @@ describe("accepted case-handoff completion recovery evidence", () => {
     await db.update(caseHandoffs).set({ recipientDecision: { outcome: "accepted", actorType: "agent", actorId: randomUUID(),
       handoffVersion: 2, requirementRevisionId: f.contractId, requirementsDigest: "b".repeat(64), decidedAt: new Date().toISOString() } })
       .where(eq(caseHandoffs.id, f.handoffId));
-    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
 
     await db.update(caseHandoffs).set({ recipientDecision: { outcome: "accepted", actorType: "agent", actorId: f.agentId,
       handoffVersion: 2, requirementRevisionId: f.contractId, requirementsDigest: "b".repeat(64), decidedAt: new Date().toISOString() } })
       .where(eq(caseHandoffs.id, f.handoffId));
     await db.update(cases).set({ handoffVersion: 3 }).where(eq(cases.workIssueId, f.issueId));
-    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
     await db.update(cases).set({ handoffVersion: 2 }).where(eq(cases.workIssueId, f.issueId));
     await db.update(issues).set({ assigneeAgentId: null, assigneeUserId: "board-owner" }).where(eq(issues.id, f.issueId));
-    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
     await db.update(issues).set({ assigneeAgentId: f.agentId, assigneeUserId: null }).where(eq(issues.id, f.issueId));
+    await db.update(cases).set({ status: "cancelled" }).where(eq(cases.workIssueId, f.issueId));
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
+    await db.update(cases).set({ status: "draft" }).where(eq(cases.workIssueId, f.issueId));
     await db.update(caseHandoffs).set({ state: "cancelled" }).where(eq(caseHandoffs.id, f.handoffId));
-    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
   });
 
   it("requires a nonempty bound digest for the accepted offer and decision", async () => {
@@ -110,6 +113,6 @@ describe("accepted case-handoff completion recovery evidence", () => {
       recipientDecision: { ...row!.recipientDecision!, requirementsDigest: "" },
     }).where(eq(caseHandoffs.id, f.handoffId));
 
-    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
   });
 });

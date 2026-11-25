@@ -961,7 +961,6 @@ async function materializeDecisionEffect(input: {
         issueId: input.issue.id,
         runId: input.runId,
         decisionId: input.decisionId,
-        reasonCode: effect.cause,
       })
       : null;
     const recovery = await issueRecoveryActionService(
@@ -981,9 +980,12 @@ async function materializeDecisionEffect(input: {
       evidence: {
         runId: input.runId,
         decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? { caseHandoffCompletion: handoffCompletionEvidence } : {}),
+        ...(handoffCompletionEvidence ? {
+          caseHandoffCompletion: { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        } : {}),
       },
       nextAction: effect.nextAction,
+      supersedeOnIdentityChange: Boolean(handoffCompletionEvidence),
       wakePolicy: null,
       maxAttempts: 3,
     });

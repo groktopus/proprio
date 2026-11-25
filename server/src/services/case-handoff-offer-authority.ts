@@ -73,13 +73,22 @@ export async function assertOfferRequirementsCurrent(tx: Db, row: CaseHandoffRow
   if (digest !== offer.requirementsDigest) throw new CaseHandoffRequirementsSuperseded("Versioned offer requirements changed. Record a new offer.");
 }
 
-export async function assertAcceptedOfferIsCurrent(tx: Db, row: CaseHandoffRow, issue: IssueRow) {
+/** Read the persisted recipient acceptance shared by admission and recovery. */
+export function readAcceptedCaseHandoffOffer(row: CaseHandoffRow) {
   const offer = row.offerContract;
-  if (!offer) return;
   const decision = row.recipientDecision;
-  if (decision?.outcome !== "accepted" || decision.actorId !== row.toAgentId || decision.handoffVersion !== row.version
-    || decision.requirementRevisionId !== offer.requirementRevision.id || decision.requirementsDigest !== offer.requirementsDigest) {
-    throw conflict("The recipient must accept the current handoff offer.");
-  }
+  if (offer?.schema !== "proprio.case-handoff-offer.v1"
+      || typeof offer.requirementsDigest !== "string" || !/^[0-9a-f]{64}$/.test(offer.requirementsDigest)
+      || !offer.requirementRevision?.id
+      || decision?.outcome !== "accepted"
+      || decision.actorType !== "agent" || decision.actorId !== row.toAgentId
+      || decision.handoffVersion !== row.version || decision.requirementRevisionId !== offer.requirementRevision.id
+      || decision.requirementsDigest !== offer.requirementsDigest) return null;
+  return offer;
+}
+
+export async function assertAcceptedOfferIsCurrent(tx: Db, row: CaseHandoffRow, issue: IssueRow) {
+  if (!row.offerContract) return;
+  if (!readAcceptedCaseHandoffOffer(row)) throw conflict("The recipient must accept the current handoff offer.");
   await assertOfferRequirementsCurrent(tx, row, issue);
 }

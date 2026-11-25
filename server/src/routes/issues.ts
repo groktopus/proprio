@@ -10439,7 +10439,7 @@ export function issueRoutes(
             workspaceRepairOnly: true,
           });
           if (workspaceRepairAction.evidence.executionReconciliation) {
-            return { issue: lockedIssue, recoveryAction: workspaceRepairAction, replayed: true, workspaceRepairOnly: true };
+            return { issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(workspaceRepairAction), replayed: true, workspaceRepairOnly: true };
           }
           await markExecutionReconciliation(tx as unknown as Db, workspaceRepairAction,
             executionReconciliation!, actor.actorId, undefined, { workspaceRepairOnly: true });
@@ -10447,7 +10447,8 @@ export function issueRoutes(
           const [recoveryAction] = await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored",
             resolutionNote: resolutionNote ?? null, resolvedAt: new Date(), updatedAt: new Date(),
           }).where(eq(issueRecoveryActions.id, workspaceRepairAction.id)).returning();
-          return { issue: lockedIssue, recoveryAction, chatRetry: null, workspaceRepairOnly: true };
+          if (!recoveryAction) throw notFound("Recovery action not found");
+          return { issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(recoveryAction), chatRetry: null, workspaceRepairOnly: true };
         }
 
         let activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
@@ -10503,7 +10504,7 @@ export function issueRoutes(
             } else {
               return {
                 issue: lockedIssue,
-                recoveryAction: settled,
+                recoveryAction: issueRecoveryActionReadModel(settled),
                 replayed: true,
               };
             }

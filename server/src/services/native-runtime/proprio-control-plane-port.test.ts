@@ -56,6 +56,9 @@ import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embed
 import { startRecoveryPostgres } from "../../__tests__/helpers/recovery-postgres.js";
 import { ProprioControlPlanePort } from "./proprio-control-plane-port.js";
 import { secretEnvironmentValues } from "../agent-identity-redaction.js";
+import { heartbeatService } from "../heartbeat.js";
+import { issueRecoveryActionReadModel } from "../issue-recovery-actions.js";
+import { readNativeContinuationSource } from "./native-continuation-delivery.js";
 import { nativeSha256 } from "./canonical.js";
 import { NativeRunCoordinatorStore } from "./native-run-coordinator-store.js";
 import { finalizeNativeRun, repairCommittedNativeChatResponse } from "./native-run-finalizer.js";
@@ -2808,14 +2811,28 @@ describe("ProprioControlPlanePort conformance", () => {
     await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded" });
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
       .toHaveLength(wakes.length);
-    const followUpId = randomUUID(), runnerInstanceId = randomUUID();
+    const runnerInstanceId = randomUUID();
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const wake = wakes.find(row => row.payload?.continuationIdempotencyKey === "native-completion-incomplete")!;
-    await db.insert(heartbeatRuns).values({ id: followUpId, companyId, agentId, status: "succeeded", runtimeMode: "native",
-      nativeIssueId: issueId, nativeSessionId: source!.nativeSessionId, runnerInstanceId,
+    await db.update(agents).set({ status: "active", adapterType: "proprio_runner",
+      adapterConfig: { provider: "opencode", model: "openrouter/test-model" } }).where(eq(agents.id, agentId));
+    // Exercise normal wake admission while leaving execution to the conformance port.
+    const heartbeat = heartbeatService(db, { runStartHandover: { isYielding: () => true, refreshIfStale: () => null } });
+    expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+      .toMatchObject({ dispatched: 1 });
+    const [dispatchedRun] = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .filter(row => row.contextSnapshot?.nativeStatusWakeIntentId === wake.id);
+    expect(dispatchedRun).toMatchObject({ status: "queued" });
+    expect(dispatchedRun!.contextSnapshot).not.toHaveProperty("caseHandoffId");
+    const followUpId = dispatchedRun!.id;
+    await db.update(heartbeatRuns).set({ status: "succeeded", runtimeMode: "native", nativeIssueId: issueId,
+      nativeSessionId: source!.nativeSessionId, runnerInstanceId,
       completionContractId: source!.completionContractId, completionContractSha256: source!.completionContractSha256,
-      wakeupRequestId: wake.id, contextSnapshot: source!.contextSnapshot });
-    await db.update(agentWakeupRequests).set({ runId: followUpId }).where(eq(agentWakeupRequests.id, wake.id));
+      contextSnapshot: { ...dispatchedRun!.contextSnapshot, executionContinuation: { objective } } })
+      .where(eq(heartbeatRuns.id, followUpId));
+    const binding = { companyId, issueId, runId: followUpId, completionRecovery: true as const };
+    expect(await readNativeContinuationSource(db, binding)).toBe(runId);
+    expect(await readNativeContinuationSource(db, { companyId, issueId, runId: followUpId })).toBeNull();
     await db.update(issues).set({ executionRunId: followUpId }).where(eq(issues.id, issueId));
     const followUp = new ProprioControlPlanePort(db, { companyId, issueId, agentId, runId: followUpId,
       sessionId: source!.nativeSessionId!, sourceInstanceId: runnerInstanceId,
@@ -2827,16 +2844,18 @@ describe("ProprioControlPlanePort conformance", () => {
     await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_progress");
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
-      .toHaveLength(wakes.length);
+      .toHaveLength(wakes.length + 1);
     const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
     expect(recoveryActions).toContainEqual(expect.objectContaining({ ownerAgentId: agentId, cause: "completion_evidence_incomplete", nextAction: expect.stringContaining("write_document") }));
     const completionRecovery = recoveryActions.find(action => action.cause === "completion_evidence_incomplete");
     expect(completionRecovery?.evidence.caseHandoffCompletion).toMatchObject({
       caseHandoff: { id: handoffId, acceptedRequirementRevision: { id: acceptedContract!.id } },
-      decision: { recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "prior_status_preserved_no_live_path" },
-      assessment: { resultId: expect.any(String), assessedContractId: acceptedContract!.id },
+      decision: { statusDecisionReasonCode: "prior_status_preserved_no_live_path" },
+      assessment: { resultId: expect.any(String), assessedContractRevision: { id: acceptedContract!.id } },
+      taskRemedy: "publish_task_document",
     });
     expect(JSON.stringify(completionRecovery?.evidence)).not.toContain("provider:opencode:agent-message");
+    expect(issueRecoveryActionReadModel(completionRecovery!).nextAction).toContain("write_document");
     expect((await db.select().from(nativeRunResults).where(eq(nativeRunResults.runId, runId)))[0]!.resultJson)
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });
   });
