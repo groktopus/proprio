@@ -62,7 +62,7 @@ function callerHeaders(req: { headers: Record<string, string | string[] | undefi
  * it, and callers never need it. Agents paste errors into task comments.
  */
 function callerErrorDetails(details: Record<string, unknown>): Record<string, unknown> {
-  const { execution: _auditOnly, ...rest } = details;
+  const { execution: _auditOnly, blockedBeforeDispatch: _internalClassification, ...rest } = details;
   return rest;
 }
 

@@ -635,6 +635,7 @@ const REMOTE_TOOL_CALL_WORKFLOW_REASON_CODES = new Set([
   "provider_task_cancelled",
   "provider_task_expired",
   "provider_task_failed",
+  "managed_dispatch_outcome_unknown",
 ]);
 
 const REMOTE_TOOL_CALL_PROTOCOL_REASON_CODES = new Set([
@@ -9390,6 +9391,8 @@ export function createToolGatewayService(
       // A deliberate workflow stop, such as a tool question for the user, keeps
       // its own reason even when the deadline passes while it is recorded.
       if (error instanceof ToolGatewayHttpError && REMOTE_TOOL_CALL_WORKFLOW_REASON_CODES.has(error.reasonCode)) {
+        if (error.reasonCode === "managed_dispatch_outcome_unknown" && controller.signal.aborted && mcpSession)
+          forgetMcpHttpSession(mcpSession);
         throw new ToolGatewayHttpError(error.status, error.message, error.reasonCode, {
           ...error.details,
           execution: error.details.execution ?? execution,
@@ -14662,8 +14665,22 @@ export function createToolGatewayService(
                 err.details,
               )
             : err;
-        if (normalizedError instanceof ManagedAuditCaptureError ||
-            (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown")) {
+        const managedDispatchBlockedBeforeSend = normalizedError instanceof ToolGatewayHttpError &&
+          normalizedError.reasonCode === "managed_dispatch_outcome_unknown" &&
+          normalizedError.details.blockedBeforeDispatch === true;
+        if (normalizedError instanceof ManagedAuditCaptureError) {
+          throw normalizedError;
+        }
+        if (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown") {
+          if (managedDispatchBlockedBeforeSend && input.approvedActionRequestId && approvedDispatchClaim) {
+            await markApprovedActionFailed({
+              actionRequestId: approvedDispatchClaim.actionRequestId,
+              invocationId: approvedDispatchClaim.invocationId,
+              claimUpdatedAt: approvedDispatchClaim.claimedAt,
+              expectedInvocationStatus: "executing",
+              error: normalizedError,
+            });
+          }
           throw normalizedError;
         }
         if (managedTerminalCommitted) throw normalizedError;
