@@ -49,7 +49,9 @@ import {
   DEFAULT_PROPRIO_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PROPRIO_CONVERSATION_PROMPT_TEMPLATE,
   runChildProcess,
-  isProprioSkillSourceMissing,
+  hasExplicitProprioRuntimeSkillInventory,
+  hasProprioMaterializedSkillProvenance,
+  selectAvailableProprioRuntimeSkillEntries,
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
@@ -63,7 +65,7 @@ import {
 } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@groktopus/adapter-utils/server-utils";
 import { apiKeyBillingType } from "@groktopus/adapter-utils/api-billing-type";
-import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes } from "./runtime-config.js";
+import { prepareOpenCodeRuntimeConfig, prepareManagedOpenCodeRemoteHomes, resolveOpenCodeConfigHome } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
 
@@ -216,10 +218,11 @@ async function buildOpenCodeSkillsDir(config: Record<string, unknown>): Promise<
   const target = path.join(tmp, "skills");
   await fs.mkdir(target, { recursive: true });
   const availableEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
-  const desiredNames = new Set(resolveLegacyProprioDesiredSkillNames(config, availableEntries));
-  for (const entry of availableEntries) {
-    if (!desiredNames.has(entry.key)) continue;
-    if (isProprioSkillSourceMissing(entry)) continue;
+  const selectedEntries = selectAvailableProprioRuntimeSkillEntries(
+    availableEntries,
+    resolveLegacyProprioDesiredSkillNames(config, availableEntries),
+  );
+  for (const entry of selectedEntries) {
     await fs.symlink(entry.source, path.join(target, entry.runtimeName));
   }
   return target;
@@ -227,8 +230,12 @@ async function buildOpenCodeSkillsDir(config: Record<string, unknown>): Promise<
 
 async function stageOpenCodeSkillsInRuntimeConfig(
   entries: Awaited<ReturnType<typeof readProprioRuntimeSkillEntries>>,
+  provenanceEntries: Awaited<ReturnType<typeof readProprioRuntimeSkillEntries>>,
   desiredSkillNames: string[],
   runtimeConfigHome: string,
+  runtimeEnv: Record<string, string>,
+  sourceSkillsHome: string,
+  cwd: string,
 ): Promise<void> {
   const skillsHome = path.join(runtimeConfigHome, "opencode", "skills");
   const existing = await fs.lstat(skillsHome).catch((error: NodeJS.ErrnoException) => {
@@ -242,14 +249,93 @@ async function stageOpenCodeSkillsInRuntimeConfig(
     });
     await fs.unlink(skillsHome);
     if (sourceHome) {
+      await fs.mkdir(skillsHome, { recursive: true, mode: 0o700 });
       await fs.cp(sourceHome, skillsHome, { recursive: true, dereference: false });
     }
   }
-  await fs.mkdir(skillsHome, { recursive: true });
-  const desiredNames = new Set(desiredSkillNames);
-  for (const entry of entries) {
-    if (!desiredNames.has(entry.key) || isProprioSkillSourceMissing(entry)) continue;
-    await ensureProprioSkillSymlink(entry.source, path.join(skillsHome, entry.runtimeName));
+  await fs.mkdir(skillsHome, { recursive: true, mode: 0o700 });
+  const stagedSkillsRoot = await fs.lstat(skillsHome);
+  if (stagedSkillsRoot.isDirectory() && !stagedSkillsRoot.isSymbolicLink()) {
+    await fs.chmod(skillsHome, 0o700);
+  }
+  const sourceSkillsRoot = await fs.realpath(sourceSkillsHome).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  });
+  const managedSources = new Set(provenanceEntries.map((entry) => path.resolve(entry.source)));
+  const copiedEntries = await fs.readdir(skillsHome, { withFileTypes: true });
+  for (const copied of copiedEntries) {
+    if (!copied.isSymbolicLink()) continue;
+    const copiedPath = path.join(skillsHome, copied.name);
+    const originalPath = path.join(sourceSkillsRoot ?? skillsHome, copied.name);
+    const linkedPath = await fs.readlink(originalPath).catch(() => fs.readlink(copiedPath).catch(() => null));
+    if (!linkedPath) continue;
+    const resolvedTarget = path.resolve(path.dirname(originalPath), linkedPath);
+    const hasMaterializedProvenance = await hasProprioMaterializedSkillProvenance(resolvedTarget);
+    if (managedSources.has(resolvedTarget) || hasMaterializedProvenance) {
+      await fs.unlink(copiedPath);
+    }
+  }
+  const selectedEntries = selectAvailableProprioRuntimeSkillEntries(entries, desiredSkillNames);
+  // OpenCode persists skill tool paths from discovery results. Point discovery
+  // directly at stable runtime sources so a resumed turn doesn't reference the
+  // per-run config directory that is cleaned up after this invocation.
+  const selectedPaths = selectedEntries.map((entry) => path.resolve(entry.source));
+  const selectedPathSet = new Set(selectedPaths);
+  const filterExistingPaths = async (value: unknown): Promise<string[]> => {
+    const paths = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+    const filtered: string[] = [];
+    const seen = new Set<string>();
+    for (const configuredPath of paths) {
+      const resolvedPath = configuredPath.startsWith("~/")
+        ? path.resolve(runtimeEnv.HOME || os.homedir(), configuredPath.slice(2))
+        : path.resolve(cwd, configuredPath);
+      if (managedSources.has(resolvedPath) && !selectedPathSet.has(resolvedPath)) continue;
+      if (!selectedPathSet.has(resolvedPath) && await hasProprioMaterializedSkillProvenance(resolvedPath)) continue;
+      if (seen.has(resolvedPath)) continue;
+      seen.add(resolvedPath);
+      filtered.push(configuredPath);
+    }
+    for (const selectedPath of selectedPaths) {
+      if (seen.has(selectedPath)) continue;
+      seen.add(selectedPath);
+      filtered.push(selectedPath);
+    }
+    return filtered;
+  };
+  const runtimeConfigPath = path.join(runtimeConfigHome, "opencode", "opencode.json");
+  const runtimeConfig = await fs.readFile(runtimeConfigPath, "utf8").then((raw) => JSON.parse(raw) as Record<string, unknown>);
+  const currentSkills = runtimeConfig.skills && typeof runtimeConfig.skills === "object" && !Array.isArray(runtimeConfig.skills)
+    ? runtimeConfig.skills as Record<string, unknown>
+    : {};
+  const inlineConfigContent = runtimeEnv.OPENCODE_CONFIG_CONTENT;
+  let inlineConfig: Record<string, unknown> | null = null;
+  if (inlineConfigContent) {
+    try {
+      const parsed: unknown = JSON.parse(inlineConfigContent);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        inlineConfig = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Keep OpenCode's normal invalid-inline-config error behavior.
+    }
+  }
+  const inlineSkills = inlineConfig?.skills && typeof inlineConfig.skills === "object" && !Array.isArray(inlineConfig.skills)
+    ? inlineConfig.skills as Record<string, unknown>
+    : {};
+  const configuredPaths = [
+    ...(Array.isArray(currentSkills.paths) ? currentSkills.paths : []),
+    ...(Array.isArray(inlineSkills.paths) ? inlineSkills.paths : []),
+  ];
+  const selectedAndOperatorPaths = await filterExistingPaths(configuredPaths);
+  runtimeConfig.skills = { ...currentSkills, paths: selectedAndOperatorPaths };
+  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(runtimeConfig, null, 2)}\n`, "utf8");
+
+  if (inlineConfig) {
+    runtimeEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      ...inlineConfig,
+      skills: { ...inlineSkills, paths: selectedAndOperatorPaths },
+    });
   }
 }
 
@@ -291,8 +377,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   await ensureAdapterExecutionTargetLocalWorkspace(executionTarget, cwd);
   const openCodeSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
+  const hasExplicitSkillInventory = hasExplicitProprioRuntimeSkillInventory(config);
   const desiredOpenCodeSkillNames = resolveLegacyProprioDesiredSkillNames(config, openCodeSkillEntries);
-  const hasExplicitSkillInventory = Array.isArray(config.proprioRuntimeSkills);
+  const bundledOpenCodeSkillEntries = !executionTargetIsRemote && hasExplicitSkillInventory
+    ? await readProprioRuntimeSkillEntries({}, __moduleDir)
+    : [];
   if (!executionTargetIsRemote && !hasExplicitSkillInventory) {
     await ensureOpenCodeSkillsInjected(
       onLog,
@@ -376,8 +465,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (!executionTargetIsRemote && hasExplicitSkillInventory) {
       await stageOpenCodeSkillsInRuntimeConfig(
         openCodeSkillEntries,
+        [...openCodeSkillEntries, ...bundledOpenCodeSkillEntries],
         desiredOpenCodeSkillNames,
         preparedRuntimeConfig.env.XDG_CONFIG_HOME,
+        preparedRuntimeConfig.env,
+        path.join(
+          resolveOpenCodeConfigHome(env),
+          "opencode",
+          "skills",
+        ),
+        cwd,
       );
     }
     const runtimeEnv = Object.fromEntries(
@@ -426,6 +523,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (fromExtraArgs.length > 0) return fromExtraArgs;
       return asStringArray(config.args);
     })();
+    const attachOptionArgs = extraArgs.slice(0, extraArgs.indexOf("--") === -1 ? undefined : extraArgs.indexOf("--"));
+    if (hasExplicitSkillInventory &&
+      attachOptionArgs.some((arg) => arg === "--attach" || arg.startsWith("--attach="))) {
+      throw new Error("OpenCode --attach cannot honor an explicit per-run Proprio skill inventory.");
+    }
     let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
     let localSkillsDir: string | null = null;
     let remoteRuntimeRootDir: string | null = null;
