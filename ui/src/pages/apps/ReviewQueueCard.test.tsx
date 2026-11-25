@@ -183,4 +183,48 @@ describe("ReviewQueueCard", () => {
     expect(createTrustRuleFromActionRequestMock).not.toHaveBeenCalled();
     expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({ title: "Always allowed" }));
   });
+
+  it("surfaces a failed Allow once result instead of reporting success", async () => {
+    approveActionRequestMock.mockResolvedValue({
+      ...pendingRequest().request,
+      status: "failed",
+      error: "Approval could not be reconciled; refresh the review queue.",
+    });
+    await render();
+
+    await act(async () => {
+      buttonContaining("Allow once")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Couldn’t save that",
+      body: "Approval could not be reconciled; refresh the review queue.",
+      tone: "error",
+    }));
+    expect(pushToastMock).not.toHaveBeenCalledWith(expect.objectContaining({ title: "Allowed once" }));
+  });
+
+  it("surfaces a failed approval from the linked interaction card inline", async () => {
+    const interaction = structuredClone(pendingToolActionLongProposalInteraction);
+    const item = pendingRequest();
+    listActionRequestsMock.mockResolvedValue({ actionRequests: [{ ...item, request: { ...item.request, interactionId: interaction.id } }] });
+    listInteractionsMock.mockResolvedValue([interaction]);
+    approveActionRequestMock.mockResolvedValue({
+      ...item.request,
+      status: "failed",
+      error: "The provider outcome is still being reconciled.",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={client}><TooltipProvider><ThemeProvider>
+      <ReviewQueueCard emptyState="reassure" />
+    </ThemeProvider></TooltipProvider></QueryClientProvider>));
+    await flushReact();
+    await vi.waitFor(() => expect(container.querySelector("details")).not.toBeNull());
+    await act(async () => { buttonContaining("Approve & run")!.click(); });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("The provider outcome is still being reconciled."));
+  });
 });

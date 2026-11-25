@@ -110,8 +110,18 @@ function ReviewRow({
     if (item.request.issueId) queryClient.invalidateQueries({ queryKey: queryKeys.issues.interactions(item.request.issueId) });
   };
 
+  async function approve(rememberAction: boolean) {
+    const result = await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction);
+    if (result.status === "failed") {
+      throw new Error(result.error?.trim() || "The approved action failed. Refresh the review queue to see its latest status.");
+    }
+    if (result.status !== "approved" && result.status !== "executing" && result.status !== "executed") {
+      throw new Error("The approval did not complete. Refresh the review queue to check its latest status.");
+    }
+  }
+
   const allowOnce = useMutation({
-    mutationFn: () => toolsApi.approveActionRequest(companyId, item.request.id),
+    mutationFn: () => approve(false),
     onMutate: () => setResolving("allow"),
     onSuccess: () => {
       pushToast({ title: "Allowed once", body: `${actionLabel(item)} can run this time.`, tone: "success" });
@@ -125,9 +135,7 @@ function ReviewRow({
   });
 
   const alwaysAllow = useMutation({
-    mutationFn: async () => {
-      return toolsApi.approveActionRequest(companyId, item.request.id, true);
-    },
+    mutationFn: () => approve(true),
     onMutate: () => setResolving("always"),
     onSuccess: () => {
       pushToast({
@@ -136,7 +144,6 @@ function ReviewRow({
         tone: "success",
       });
       invalidate();
-      queryClient.invalidateQueries({ queryKey: queryKeys.tools.trustRules(companyId) });
     },
     onError: (error) => {
       invalidate();
@@ -162,8 +169,11 @@ function ReviewRow({
   if (linkedInteraction) return <IssueThreadInteractionCard
     interaction={linkedInteraction}
     onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
-      try { await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction); }
-      finally { invalidate(); }
+      try {
+        await approve(rememberAction ?? false);
+      } finally {
+        invalidate();
+      }
     }}
     onRejectInteraction={async (_interaction, reason) => {
       try { await toolsApi.declineActionRequest(companyId, item.request.id, reason); }
