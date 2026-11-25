@@ -13,6 +13,9 @@ const PAGE_SIZE = 200;
 const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
 const MAX_ACTIVE_COMPANY_SNAPSHOTS = 128;
 const MAX_ACTIVE_PRINCIPAL_SNAPSHOTS = 32;
+// Releasing a full membership can detoast up to 20,000 UUIDs. Keep one create
+// from rewriting the maximum company population in a single statement.
+const MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE = 8;
 const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
 const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
 const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
@@ -192,13 +195,21 @@ function assertRetainedWindow(scope: ExportScope, from: Date) {
   }
 }
 
+async function lockExportCompany(tx: DbTransaction, companyId: string) {
+  // Company deletion locks the company before cascading to snapshots and
+  // receipts. Acquire the receipt's foreign-key lock in the same order.
+  const [company] = await tx.select({ id: companies.id }).from(companies)
+    .where(eq(companies.id, companyId)).for("key share");
+  if (!company) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
+}
+
 async function cleanExpiredSnapshots(tx: DbTransaction, companyId: string, now: Date) {
   const markerCutoff = new Date(now.getTime() - EXPIRED_SNAPSHOT_MARKER_TTL_MS);
   const ordinals = [asc(managedAuditExports.expiresAt), asc(managedAuditExports.id)] as const;
   const pastMarkerRetention = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
     .where(and(eq(managedAuditExports.companyId, companyId), lte(managedAuditExports.expiresAt, markerCutoff)))
     .orderBy(...ordinals)
-    .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+    .limit(MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE);
   await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, pastMarkerRetention));
 
   // Keep the owner, source epoch and expiration long enough to distinguish an
@@ -210,7 +221,7 @@ async function cleanExpiredSnapshots(tx: DbTransaction, companyId: string, now: 
       lte(managedAuditExports.expiresAt, now),
       sql`cardinality(${managedAuditExports.eventIds}) > 0`,
     )).orderBy(...ordinals)
-    .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+    .limit(MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE);
   await tx.update(managedAuditExports).set({ eventIds: [] })
     .where(inArray(managedAuditExports.id, recentExpirations));
 }
@@ -221,19 +232,49 @@ async function snapshotLimitReached(tx: DbTransaction, condition: SQL | undefine
   return Boolean(boundary);
 }
 
-async function retireSupersededSnapshots(tx: DbTransaction, scope: ExportScope, now: Date) {
+async function retireSupersededSnapshots(
+  tx: DbTransaction,
+  scope: ExportScope,
+  now: Date,
+  userId: string,
+) {
   const superseded = tx.select({ id: managedAuditExports.id }).from(managedAuditExports).where(and(
     eq(managedAuditExports.companyId, scope.companyId),
     gt(managedAuditExports.expiresAt, now),
+    eq(managedAuditExports.invalidated, false),
     or(
       ne(managedAuditExports.sourceEpoch, scope.sourceEpoch),
       scope.retainAfter ? lt(managedAuditExports.from, scope.retainAfter) : undefined,
     ),
   )).orderBy(asc(managedAuditExports.expiresAt), asc(managedAuditExports.id)).limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
-  // Retire superseded memberships even if the cutoff or epoch later rolls
-  // back. The retained row still explains the current epoch or cutoff conflict.
-  await tx.update(managedAuditExports).set({ expiresAt: now, eventIds: [] })
-    .where(inArray(managedAuditExports.id, superseded));
+  // `invalidated` is a durable terminal marker that is independent of the
+  // snapshot clock. Keep the original expiration so ordinary expiry responses
+  // and marker cleanup retain their existing precedence and retention window.
+  const retired = await tx.update(managedAuditExports).set({ invalidated: true })
+    .where(and(inArray(managedAuditExports.id, superseded), eq(managedAuditExports.invalidated, false)))
+    .returning({ id: managedAuditExports.id });
+  if (retired.length > 0) {
+    await tx.insert(managedAuditTransitionReceipts).values({
+      companyId: scope.companyId,
+      actorId: userId,
+      transition: "company_exports_retired",
+      recordCount: retired.length,
+      source: "tool_gateway",
+      createdAt: sql`clock_timestamp()`,
+    });
+  }
+}
+
+async function releaseInvalidatedMemberships(tx: DbTransaction, companyId: string, now: Date) {
+  const memberships = tx.select({ id: managedAuditExports.id }).from(managedAuditExports).where(and(
+    eq(managedAuditExports.companyId, companyId),
+    eq(managedAuditExports.invalidated, true),
+    gt(managedAuditExports.expiresAt, now),
+    sql`cardinality(${managedAuditExports.eventIds}) > 0`,
+  )).orderBy(asc(managedAuditExports.expiresAt), asc(managedAuditExports.id))
+    .limit(MAX_SNAPSHOT_MEMBERSHIPS_RELEASED_PER_CREATE);
+  await tx.update(managedAuditExports).set({ eventIds: [] })
+    .where(inArray(managedAuditExports.id, memberships));
 }
 
 export async function createManagedAuditExport(
@@ -268,8 +309,10 @@ export async function createManagedAuditExport(
         reasonCode: "active_snapshot_limit",
       });
     }
+    await lockExportCompany(tx, scope.companyId);
     await cleanExpiredSnapshots(tx, scope.companyId, now);
-    await retireSupersededSnapshots(tx, scope, now);
+    await retireSupersededSnapshots(tx, scope, now, userId);
+    await releaseInvalidatedMemberships(tx, scope.companyId, now);
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
@@ -336,12 +379,7 @@ export async function readManagedAuditExportPage(
 ) {
   const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
-    // Acquire the company FK lock before the snapshot row. Company deletion
-    // locks the company first and then cascades into snapshots/receipts; using
-    // the same order prevents invalidation from deadlocking with deletion.
-    const [company] = await tx.select({ id: companies.id }).from(companies)
-      .where(eq(companies.id, scope.companyId)).for("key share");
-    if (!company) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
+    await lockExportCompany(tx, scope.companyId);
     const ownedSnapshot = and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),

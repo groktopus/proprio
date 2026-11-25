@@ -465,33 +465,79 @@ describePostgres("agent action audit routes", () => {
     const currentEpoch = randomUUID();
     const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
     const oldStart = "2026-07-17T00:00:00.000Z";
+    const originalExpiresAt = new Date(Date.now() + 60_000);
     const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
       Array.from({ length: 128 }, (_, index) => ({
         companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
         from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
-        eventIds: [randomUUID()], watermark: "fixture", expiresAt: new Date(Date.now() + 60_000),
+        eventIds: [], watermark: "fixture", expiresAt: originalExpiresAt,
       })),
     ).returning({ id: managedAuditExports.id });
+    // Make all 128 rows carry the supported maximum membership using real,
+    // distinct UUID values generated in PostgreSQL. This avoids sending a
+    // 40MB fixture over the test connection while preserving realistic array
+    // detoast and update work in the operation under test.
+    await db.execute(sql`
+      update managed_audit_exports
+      set event_ids = (
+        select array_agg(md5(value::text)::uuid order by value)
+        from generate_series(1, 20000) as generated(value)
+      )
+      where company_id = ${company.id}
+    `);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
+    vi.useFakeTimers({ toFake: ["Date"] });
     try {
+      const readerTime = Date.now();
+      vi.setSystemTime(readerTime + 5_000);
       await board.post(path).send(window).expect(201);
+      // Simulate a reader replica whose wall clock is behind the writer.
+      vi.setSystemTime(readerTime - 5_000);
       for (const [row, reasonCode] of [[oldEpochRow, "source_epoch_changed"], [oldRetentionRow, "retention_window_expired"]] as const) {
         const stale = await board.get(`${path}/${row.id}`).expect(409);
         expect(stale.body).toMatchObject({ details: { reasonCode } });
         expect(stale.body).not.toHaveProperty("eventCount");
-        const [marker] = await db.select({ eventIds: managedAuditExports.eventIds }).from(managedAuditExports)
+        const [marker] = await db.select({ invalidated: managedAuditExports.invalidated, expiresAt: managedAuditExports.expiresAt })
+          .from(managedAuditExports)
           .where(eq(managedAuditExports.id, row.id));
-        expect(marker.eventIds).toEqual([]);
+        expect(marker).toEqual({ invalidated: true, expiresAt: originalExpiresAt });
       }
+      const [retirementReceipt] = await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")));
+      expect(retirementReceipt).toMatchObject({
+        companyId: company.id,
+        actorId: userId,
+        recordCount: 128,
+        source: "tool_gateway",
+        exportId: null,
+      });
+      const storage = await db.select({
+        invalidated: managedAuditExports.invalidated,
+        eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
+      }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
+      expect(storage.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(8);
+      expect(storage.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(120);
+      await board.post(path).send(window).expect(201);
+      const nextBatch = await db.select({
+        invalidated: managedAuditExports.invalidated,
+        eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
+      }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
+      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(16);
+      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(112);
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
       expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
       expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
     } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });
