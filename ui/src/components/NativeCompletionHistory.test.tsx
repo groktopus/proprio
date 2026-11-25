@@ -50,6 +50,7 @@ describe("NativeCompletionHistory", () => {
         }],
         verificationAssessments: [{
           commandOrCheck: "pnpm test", claimStatus: "passed", outcome: "missing", reasonCode: "evidence_missing",
+          reportedReasonCode: null,
           detail: "No test receipt was found.", evidence: {
             kind: "event", outcome: "accepted", visibility: "missing", reasonCode: "missing_event",
             label: "Supporting record is missing.",
@@ -68,6 +69,7 @@ describe("NativeCompletionHistory", () => {
     act(() => root.render(<NativeCompletionHistory entries={history} isLoading={false} error={false} onRetry={vi.fn()} />));
 
     expect(container.textContent).toContain("All tests pass");
+    expect(container.textContent).toContain("Requirements revision 2");
     expect(container.textContent).toContain("Agent claim satisfied");
     expect(container.textContent).toContain("Policy assessment accepted");
     expect(container.textContent).toContain("Assessor policy assessor-v3");
@@ -77,5 +79,6 @@ describe("NativeCompletionHistory", () => {
     expect(container.textContent).toContain("This policy replaces an earlier requirement set.");
     expect(container.textContent).not.toContain("private-record-id");
     expect(container.textContent).not.toContain("prior-decision");
+    expect(container.querySelector("li > li")).toBeNull();
   });
 });

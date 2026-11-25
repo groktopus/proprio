@@ -2948,6 +2948,10 @@ function IssueDetailActivityTab({
     queryKey: queryKeys.issues.completionHistory(issueId),
     queryFn: () => activityApi.completionHistoryForIssue(issueId),
   });
+  const completionHistoryView = useQueryView(completionHistoryQuery);
+  const completionHistoryAccessDenied = completionHistoryView.errorKind === "auth"
+    || completionHistoryView.errorKind === "forbidden"
+    || completionHistoryView.errorKind === "not_found";
   const {
     data: linkedRuns,
     isLoading: linkedRunsLoading,
@@ -2992,10 +2996,10 @@ function IssueDetailActivityTab({
   return (
     <>
       <NativeCompletionHistory
-        entries={completionHistoryQuery.data}
-        isLoading={completionHistoryQuery.isLoading}
-        error={completionHistoryQuery.isError}
-        onRetry={() => { void completionHistoryQuery.refetch(); }}
+        entries={completionHistoryAccessDenied ? undefined : completionHistoryView.data}
+        isLoading={completionHistoryView.kind === "loading" || completionHistoryView.kind === "reconnecting"}
+        error={completionHistoryView.kind === "error"}
+        onRetry={completionHistoryView.retry}
       />
       <TaskExecutionCostSummary
         linkedRuns={linkedRuns}

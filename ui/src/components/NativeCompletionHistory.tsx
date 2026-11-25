@@ -1,5 +1,7 @@
 import type { NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
 import type { ReactNode } from "react";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { cn, formatDateTime } from "@/lib/utils";
 
 function label(value: string | null | undefined): string {
   if (!value) return "Not recorded";
@@ -12,13 +14,13 @@ function Status({ children }: { children: ReactNode }) {
 
 function EvidenceReference({ evidence }: { evidence: NativeCompletionEvidenceReference }) {
   return (
-    <li className="space-y-1">
+    <div className="space-y-1">
       <p className="text-sm">{evidence.label}</p>
       <div className="flex flex-wrap gap-2">
         <Status>Evidence {label(evidence.outcome)}</Status>
         <Status>Visibility {label(evidence.visibility)}</Status>
       </div>
-    </li>
+    </div>
   );
 }
 
@@ -36,7 +38,9 @@ function Criterion({ entry, criterion }: {
       </div>
       {assessment?.evidence.length ? (
         <ul className="space-y-2 pl-3">
-          {assessment.evidence.map((evidence, index) => <EvidenceReference key={`${evidence.kind}-${index}`} evidence={evidence} />)}
+          {assessment.evidence.map((evidence, index) => (
+            <li key={`${evidence.kind}-${index}`}><EvidenceReference evidence={evidence} /></li>
+          ))}
         </ul>
       ) : <p className="text-sm text-muted-foreground">No evidence reference recorded for this requirement.</p>}
     </li>
@@ -53,6 +57,7 @@ function Verification({ check }: {
         <Status>Check claim {label(check.claimStatus)}</Status>
         <Status>Evidence assessment {label(check.outcome)}</Status>
       </div>
+      {check.reportedReasonCode ? <p className="text-sm text-muted-foreground">Reported reason {label(check.reportedReasonCode)}</p> : null}
       {check.detail ? <p className="text-sm text-muted-foreground">{check.detail}</p> : null}
       {check.evidence ? <EvidenceReference evidence={check.evidence} /> : <p className="text-sm text-muted-foreground">No verification evidence reference recorded.</p>}
     </li>
@@ -66,8 +71,8 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
     <article className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
       <header className="space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h3 className="font-medium text-foreground">Native completion assessment</h3>
-          <time className="text-xs text-muted-foreground" dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
+          <h3 className="font-medium text-foreground">{assessment?.triggerKind === "native_attention" ? "Native attention assessment" : "Native completion assessment"}</h3>
+          <time className="font-mono text-xs text-muted-foreground" dateTime={entry.createdAt}>{formatDateTime(entry.createdAt)}</time>
         </div>
         {entry.result?.summary ? <p className="text-sm text-muted-foreground">{entry.result.summary}</p> : null}
       </header>
@@ -76,7 +81,7 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
         <section aria-label="Completion policy" className="space-y-2">
           <h4 className="text-sm font-medium">Completion policy</h4>
           <p className="text-sm text-muted-foreground">
-            Policy {entry.contract.policyVersion} · {label(entry.contract.risk)} risk · authority {label(entry.contract.completionAuthority)} · incomplete requirements {label(entry.contract.incompleteCriteriaPolicy)}
+            Requirements revision {entry.contract.revision} · Policy {entry.contract.policyVersion} · {label(entry.contract.risk)} risk · authority {label(entry.contract.completionAuthority)} · incomplete requirements {label(entry.contract.incompleteCriteriaPolicy)}
           </p>
           {entry.contract.supersedesContractId ? <p className="text-sm text-muted-foreground">This policy replaces an earlier requirement set.</p> : null}
           {criteria.length ? (
@@ -123,7 +128,7 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
             {label(entry.decision.applicationState)} · {label(entry.decision.fromStatus)} → {label(entry.decision.toStatus)} · {label(entry.decision.reasonCode)} · policy {entry.decision.policyVersion}
           </p>
           {entry.decision.statusAction ? <p className="text-sm text-muted-foreground">Action {label(entry.decision.statusAction)}</p> : null}
-          {entry.decision.appliedAt ? <p className="text-sm text-muted-foreground">Applied {new Date(entry.decision.appliedAt).toLocaleString()}</p> : null}
+          {entry.decision.appliedAt ? <p className="text-sm text-muted-foreground">Applied <time dateTime={entry.decision.appliedAt} className="font-mono">{formatDateTime(entry.decision.appliedAt)}</time></p> : null}
           {entry.decision.supersedesDecisionId ? <p className="text-sm text-muted-foreground">Supersedes an earlier status decision.</p> : null}
           {assessment?.supersedesAssessmentId || assessment?.priorDecisionId ? <p className="text-sm text-muted-foreground">This assessment supersedes an earlier assessment or decision.</p> : null}
         </section>
@@ -153,7 +158,7 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry }: 
         </div>
       ) : null}
       {!isLoading && !error && entries?.length === 0 ? <p className="text-sm text-muted-foreground">No native completion history recorded.</p> : null}
-      {entries?.length ? <div className="space-y-4">{entries.map(entry => <CompletionEntry key={entry.id} entry={entry} />)}</div> : null}
+      {entries?.length ? <div className={cn("min-w-0 space-y-4 wrap-anywhere", ANALYTICS_MASK_CLASS)}>{entries.map(entry => <CompletionEntry key={entry.id} entry={entry} />)}</div> : null}
     </section>
   );
 }
