@@ -190,20 +190,24 @@ Hosted stability and durable-work qualification passed for adapter head
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
 recovery cases. [Hosted adapter qualification](https://github.com/groktopus/proprio/actions/runs/45535156471)
 
-The Pi follow-up stages explicit runtime inventories in a fresh directory per
-run. The exact Node 24 execution test covers disjoint choices, an empty
-inventory, operator-supplied skill arguments, and cleanup after success and
-failure. The Codex follow-up reuses bundled discovery when the inventory is
-implicit. Its 14 execution tests and both adapter typechecks passed.
-[Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
+The Pi follow-up stages explicit local inventories in a fresh directory per
+run. Node 24 fixtures cover disjoint choices, an empty inventory, configured
+skill arguments and cleanup. Review identified a remaining stale-directory
+case on in-place SSH and requested direct Pi CLI evidence. Codex reuses
+bundled discovery when the inventory is implicit. Its 14 execution tests and
+both adapter typechecks passed. A review follow-up is strengthening the
+inventory test. [Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
 
-The Pi change covers Proprio skill discovery for explicit assignments.
-Other legacy local providers can still discover skills in shared homes.
-OpenCode's Claude directory filter also hides operator-owned Claude skills.
-Gemini's CLI home override moves provider state and resume data. Keep
-these provider-specific paths outside the isolated Pi qualification scope.
-[OpenCode source](https://github.com/anomalyco/opencode/blob/v1.18.34/packages/opencode/src/skill/index.ts)
-[Gemini configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md#environment-variables-and-env-files)
+OpenCode stages explicit local inventories in the private runtime config and
+reports managed assignments as run scoped. Its compatibility flag also hides
+operator-owned Claude skills auto-discovered in user and project folders.
+OpenCode native and explicitly configured paths still follow provider rules.
+Gemini locates managed links through the CLI home setting. Use separate
+absolute provider roots for separate Gemini state and resume data. The
+Cursor CLI documentation has no skill-only home setting. Separate whole
+provider homes require their own operator configuration.
+[OpenCode isolation](https://github.com/groktopus/proprio/pull/391)
+[Gemini provider home](https://github.com/groktopus/proprio/pull/390)
 
 Composition `928a3db8af5c69e0c7c9c37933e41f33b74fd792` against main
 `2363fe6f` passed 276 audit, reconstruction, OpenAPI, adapter and scheduling
@@ -213,6 +217,19 @@ main. The rerun used an isolated application home and temporary directory
 under a valid disposable Git root. Composition
 `abbeccfe4fec6a7de1605a70a16e9c27efed1813` added both adapter follow-ups to
 that base and passed 198 adapter, commentary and receipt recovery tests.
+Hosted Linux source qualification started against that exact composition
+and baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. Its build,
+managed rollout and rollback, and runner recovery results are pending.
+[Hosted composition qualification](https://github.com/groktopus/proprio/actions/runs/45555172910)
+
+Composition `b02e4f28eee960fbc91144bb0b45ff55c4486594` includes the
+Gemini and OpenCode updates. Node 24 and disposable PostgreSQL passed 78
+adapter, commentary and receipt recovery tests. The Gemini relative-home
+execution regression also passed. On that composition, concurrent retries
+repaired an interrupted audit retirement index build. They preserved the
+cleared and uncleared snapshots and recorded one migration receipt. The
+same recovery has a focused regression on the retirement PR's migration.
+[Audit retirement replay](https://github.com/groktopus/proprio/pull/392)
 
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
@@ -293,12 +310,12 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 ## Review order
 
 1. Review the governance coverage and the adapter prerequisite for commentary,
-   then review operator opt-in and the adapter follow-ups. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352) [#388](https://github.com/groktopus/proprio/pull/388) [#389](https://github.com/groktopus/proprio/pull/389)
+   then review operator opt-in and the adapter follow-ups. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352) [#388](https://github.com/groktopus/proprio/pull/388) [#389](https://github.com/groktopus/proprio/pull/389) [#390](https://github.com/groktopus/proprio/pull/390) [#391](https://github.com/groktopus/proprio/pull/391)
 2. Review older-restore deletion, the audit design and the run-visibility guard.
    These PRs target `main`. [#361](https://github.com/groktopus/proprio/pull/361) [#353](https://github.com/groktopus/proprio/pull/353) [#354](https://github.com/groktopus/proprio/pull/354)
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
 4. From checkpointed export, review the two dependent branches in their listed order.
-   - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384) → [#385](https://github.com/groktopus/proprio/pull/385) → [#386](https://github.com/groktopus/proprio/pull/386) → [#387](https://github.com/groktopus/proprio/pull/387)
+   - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384) → [#385](https://github.com/groktopus/proprio/pull/385) → [#386](https://github.com/groktopus/proprio/pull/386) → [#387](https://github.com/groktopus/proprio/pull/387). Review [#392](https://github.com/groktopus/proprio/pull/392) after #386.
    - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363)
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
