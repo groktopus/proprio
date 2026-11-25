@@ -1796,7 +1796,7 @@ export function createToolGatewayService(
         if (openIntent.length) {
           throw new ToolGatewayHttpError(409,
             "An equivalent managed MCP write has no terminal receipt. Reconcile it before starting another operation.",
-            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId, blockedBeforeDispatch: true });
         }
       }
       const [inserted] = await tx.insert(managedAuditEvents).values({
@@ -11538,7 +11538,10 @@ export function createToolGatewayService(
       return resultValidation.value;
     } catch (error) {
       if (error instanceof ManagedAuditCaptureError ||
-          (error instanceof ToolGatewayHttpError && error.reasonCode === "managed_dispatch_outcome_unknown")) throw error;
+          (error instanceof ToolGatewayHttpError && error.reasonCode === "managed_dispatch_outcome_unknown" &&
+            error.details.blockedBeforeDispatch !== true)) throw error;
+      // An earlier open intent can block this claim before a provider send.
+      // Settle this claim so the reviewer sees the reconciliation message.
       // The provider is still working on the approved action. Keep the
       // approval: the next execution attaches to the same task instead of
       // asking the person again or starting the work twice.
