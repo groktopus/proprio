@@ -812,6 +812,7 @@ export {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateAgentPermissionGrantSchema,
   type UpdateAgentPermissionGrant,
