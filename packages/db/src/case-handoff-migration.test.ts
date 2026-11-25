@@ -13,6 +13,10 @@ const migrations = await Promise.all(migrationNames.map(async name => {
   const body = await readFile(new URL(`./migrations/${name}`, import.meta.url), "utf8");
   return { name, body, hash: createHash("sha256").update(body).digest("hex") };
 }));
+const offerMigrationName = "0507_useful_leper_queen.sql";
+const offerMigrationHash = createHash("sha256")
+  .update(await readFile(new URL(`./migrations/${offerMigrationName}`, import.meta.url)))
+  .digest("hex");
 // Receipts written by feature checkouts before these migrations were renumbered
 // to follow master. Keep them as historical receipts, rather than rewriting them.
 const legacyHashes = [
@@ -92,7 +96,7 @@ describePostgres("case handoff migration upgrades", () => {
     const { sql, connectionString } = await database();
     await sql`DROP TABLE case_handoffs, case_access_sources`;
     await sql`ALTER TABLE cases DROP COLUMN work_issue_id, DROP COLUMN phase, DROP COLUMN handoff_version`;
-    await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash IN ${sql(migrations.map(row => row.hash))}`;
+    await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash IN ${sql([...migrations.map(row => row.hash), offerMigrationHash])}`;
     const row = await seed(sql);
     const before = await contentsWithoutRouting(sql);
     await applyPendingMigrations(connectionString);
@@ -103,6 +107,12 @@ describePostgres("case handoff migration upgrades", () => {
       .toEqual([{ source_kind: "issue", source_id: row.issueId }, { source_kind: "project", source_id: row.projectId }]);
     expect(await sql`SELECT count(*)::int AS count FROM case_handoffs`).toEqual([{ count: 0 }]);
     await expectActorContextColumn(sql);
+    expect(await sql`SELECT column_name, data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'case_handoffs'
+        AND column_name IN ('offer_contract', 'recipient_decision') ORDER BY column_name`).toEqual([
+      { column_name: "offer_contract", data_type: "jsonb", is_nullable: "YES" },
+      { column_name: "recipient_decision", data_type: "jsonb", is_nullable: "YES" },
+    ]);
     expect(await inspectMigrations(connectionString)).toMatchObject({ status: "upToDate" });
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
@@ -147,15 +157,21 @@ describePostgres("case handoff migration upgrades", () => {
       await sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES (${hash}, ${1792415648299 + index})`;
     }
     const before = await contents(sql), beforeGuards = await guards(sql);
+    // The historical checkout could not have an offer migration receipt. Let the
+    // normal upgrade restore the current guards after replaying the old SQL.
+    await sql`ALTER TABLE case_handoffs DROP COLUMN offer_contract, DROP COLUMN recipient_decision`;
+    await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash = ${offerMigrationHash}`;
     const beforeHistory = await sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`;
-    expect(await inspectMigrations(connectionString)).toMatchObject({ status: "needsMigrations", pendingMigrations: migrationNames });
+    expect(await inspectMigrations(connectionString)).toMatchObject({
+      status: "needsMigrations", pendingMigrations: [...migrationNames, offerMigrationName],
+    });
     await applyPendingMigrations(connectionString);
     expect(await contents(sql)).toEqual(before);
     expect(await guards(sql)).toEqual(beforeGuards);
     await expectActorContextColumn(sql);
     const afterHistory = await sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`;
     expect(afterHistory).toEqual(expect.arrayContaining(beforeHistory));
-    expect(afterHistory).toHaveLength(beforeHistory.length + migrations.length);
+    expect(afterHistory).toHaveLength(beforeHistory.length + migrations.length + 1);
     await applyPendingMigrations(connectionString);
     expect(await sql`SELECT * FROM drizzle.__drizzle_migrations ORDER BY id`).toEqual(afterHistory);
     expect(await inspectMigrations(connectionString)).toMatchObject({ status: "upToDate" });
