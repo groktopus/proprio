@@ -3047,6 +3047,18 @@ describe("renderProprioWakePrompt", () => {
     expect(prompt).toContain("PAP-1723 Finish blocker (todo)");
   });
 
+  it.each(["issue_blocker_stalled", "workspace_busy_retry"])("gives a diagnostic %s wake its investigation scope", (reason) => {
+    const prompt = renderProprioWakePrompt({
+      reason,
+      dependencyBlockedInteraction: true,
+      dependencyDiagnosis: true,
+      livenessContinuation: { instruction: "Inspect the required task." },
+    });
+    expect(prompt).toContain("investigate the stalled dependency, continue independent work");
+    expect(prompt).toContain("Keep the dependent work blocked until its requirements are met.");
+    expect(prompt).toContain("Inspect the required task.");
+  });
+
   it("renders loose review request instructions for execution handoffs", () => {
     const prompt = renderProprioWakePrompt({
       reason: "execution_review_requested",
