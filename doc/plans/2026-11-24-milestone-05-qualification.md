@@ -341,11 +341,15 @@ company. The hosted durable-work check passed on that exact head.
 The Apps review queue checks the approval result on the standalone and
 linked-interaction paths. Both show the reconciliation message for a failed
 action and preserve the distinction between approval and execution. The
-Always allow path indicates that the permission may still apply. Five UI
+Always allow path indicates that the permission may still apply. A mounted
+live region retains the failure when the reviewed row disappears. Five UI
 tests and the UI typecheck passed for the source at
-`0d5d5d869a49b4d80246e909bbd06fb620511b64`. An independent review confirmed
-the saved-approval correction. The live browser focus and screen-reader
-checks still need to run.
+`8c8adac71e7e90cfece165c16275e9f60c5a4e89`. Chromium verified keyboard
+activation, the failure text in the accessibility tree, and Tab navigation
+on Allow once, Always allow and linked reviews. Focus moved once when the
+reviewer stayed in the submitting row. Focus remained where the reviewer
+moved it during a pending response or after returning to a previously selected
+connection. A standalone screen reader announcement remains unverified.
 [Approval feedback](https://github.com/groktopus/proprio/pull/402)
 
 The authenticated tool-call OpenAPI contract documents the 409 reconciliation
@@ -382,6 +386,22 @@ failed invocation, its original idempotency key, one failure event and
 activity entry, and an open original intent with no new dispatch receipt.
 [Gateway review fixes](https://github.com/groktopus/proprio/pull/403)
 [Exact local review source](https://github.com/groktopus/proprio/commit/9909f614fe3bc379c16507645229afce6fc667ec)
+
+Composition `b04311c661f927c2a324f833d0344c9fd03e9d01` incorporates main
+`5e97a154d87317fc7a9aa051289974b02caf4827` and the reviewed Apps focus
+change. It passed 79 tests across OpenAPI, the dependency diagnosis view,
+wake diagnostics routes and Apps review. The OpenAPI generation check and
+one-connection authenticated reconstruction also passed. The main change
+added dependency diagnosis and investigation surfaces.
+[Dependency investigation](https://github.com/groktopus/proprio/pull/308)
+
+Composition `109847c866991fe061a658c818dc3607cf6cd126` also incorporates
+main `166175cc093a569eed60b59f6df70f6c10c43290`. That main update contains
+only the dependency restart test and its worker. The new restart test,
+one-connection authenticated reconstruction, and scoped UI typecheck passed
+on the composed source.
+[Dependency restart regression](https://github.com/groktopus/proprio/pull/309)
+[Current-main composition](https://github.com/groktopus/proprio/commit/109847c866991fe061a658c818dc3607cf6cd126)
 
 The authenticated reconstruction passed on the final local source with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
@@ -443,8 +463,9 @@ The release decision depends on the following checks.
 
 The reporting lock and SDK public-input checks reject `main` at
 `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. The committed lock SHA-256 is
-`535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`. The
-report policy lists
+`535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`. The same
+lock bytes remain on `166175cc093a569eed60b59f6df70f6c10c43290`. The report
+policy lists
 `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e`
 for both input and output. The last root lock change is the app lint dependency
 update at `7d7c3621`, which pins `oxlint@1.94.0` and its platform packages.
