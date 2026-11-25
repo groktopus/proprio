@@ -94,6 +94,10 @@ describe("native status authority", () => {
       statusAction: "preserve", toStatus: "in_progress", reasonCode: "case_handoff_waiting_for_release",
       effects: [{ kind: "release_checkout" }],
     });
+    expect(arbitrate({ caseHandoffAuthorized: true, caseHandoffAwaitingDecision: true })).toMatchObject({
+      statusAction: "preserve", toStatus: "in_progress", reasonCode: "case_handoff_waiting_for_decision",
+      effects: [{ kind: "release_checkout" }],
+    });
   });
 
   it("preserves the task status after a context compaction run", () => {

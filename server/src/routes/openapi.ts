@@ -253,6 +253,7 @@ import {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   // Instance settings
@@ -271,6 +272,7 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   retryWorkspaceExportSchema,
   reconstructWorkspaceSchema,
@@ -1543,6 +1545,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/members/{memberId}",
   "PATCH /api/companies/{companyId}/members/{memberId}/role-and-grants",
   "POST /api/companies/{companyId}/members/{memberId}/archive",
+  "GET /api/companies/{companyId}/members/{memberId}/archive-preview",
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
   "GET /api/companies/{companyId}/managed-agent-profiles",
@@ -7807,6 +7810,21 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/members/{memberId}/archive-preview",
+  tags: ["access"],
+  summary: "Preview task reassignment before archiving a company member",
+  description: "Board-only. Requires permission to manage company membership and authority to archive the selected member. Returns the number of open tasks assigned to that member.",
+  request: { params: archiveCompanyMemberPreviewParamsSchema },
+  responses: {
+    200: r.ok(z.object({ reassignmentIssueCount: z.number().int().nonnegative() })),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
   method: "patch",
   path: "/api/companies/{companyId}/members/{memberId}/permissions",
   tags: ["access"],
@@ -11683,6 +11701,29 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Get required dependency diagnosis and parent wake state",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Ask the current assignee to investigate a stalled dependency",
+  body: dependencyInvestigationSchema,
+  responses: {
+    200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: {
+      ...r.tooManyRequests,
+      headers: { "Retry-After": { description: "Seconds before the request may be retried", schema: { type: "integer", minimum: 1 } } },
+    },
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/issues/{id}/retry",
   tags: ["issues"],
@@ -13976,10 +14017,12 @@ registerCurrentRoute({
 // OpenAPI 3.0 cannot represent the shared validator's conditional refinement.
 // Derive separate creation/existing branches so discovery marks workflow text
 // required for case.create without requiring it for ordinary phase transfers.
+const { offer: _offer, ...caseHandoffTransferShape } = agentCaseHandoffSchema.shape;
+const caseHandoffTransferSchema = z.strictObject(caseHandoffTransferShape);
 const caseHandoffApiBodySchema = z.union([
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
   doneCaseHandoffSchema,
 ]);
 registry.registerPath({ method: "post", path: "/api/companies/{companyId}/case-handoffs", tags: ["Cases"],

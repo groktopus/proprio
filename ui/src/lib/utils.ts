@@ -13,6 +13,18 @@ export function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** Read the first finite numeric value from a provider usage record. */
+export function readUsageNumber(
+  usage: Record<string, unknown> | null | undefined,
+  ...keys: string[]
+): number {
+  for (const key of keys) {
+    const value = usage?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
 export function asBoolean(value: unknown, fallback: boolean) {
   return typeof value === "boolean" ? value : fallback;
 }

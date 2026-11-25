@@ -420,7 +420,7 @@ describe("Coordinator Inbox badge", () => {
     await act(async () => { await client.invalidateQueries({ queryKey: queryKeys.attention("company") }); });
     await flush();
     expect(decisionLink().querySelector('[data-slot="badge"]')).toBeNull();
-    expect(decisionLink().textContent).toBe("Inbox");
+    expect(decisionLink().textContent).toBe("Needs You");
   });
 
   it("announces only your outstanding count", async () => {

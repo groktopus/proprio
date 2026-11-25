@@ -8,16 +8,20 @@ export function prepareNpmReadme(readme, assetRef) {
   }
 
   const assetBaseUrl =
-    `https://raw.githubusercontent.com/groktopus/proprio/${assetRef}/doc/assets/`;
+    `https://raw.githubusercontent.com/groktopus/proprio/${assetRef}/`;
+  const brandGuideUrl =
+    `https://github.com/groktopus/proprio/blob/${assetRef}/docs/brand/README.md`;
 
-  return readme.replace(
-    /((?:src|srcset)=["'])([^"']*)(["'])/g,
-    (_match, prefix, value, suffix) =>
-      `${prefix}${value.replace(
-        /(^|,\s*)doc\/assets\//g,
-        `$1${assetBaseUrl}`,
-      )}${suffix}`,
-  );
+  return readme
+    .replace(
+      /((?:src|srcset)=["'])([^"']*)(["'])/g,
+      (_match, prefix, value, suffix) =>
+        `${prefix}${value.replace(
+          /(^|,\s*)(doc\/assets\/|docs\/brand\/)/g,
+          `$1${assetBaseUrl}$2`,
+        )}${suffix}`,
+    )
+    .replace(/\]\(docs\/brand\/README\.md\)/g, `](${brandGuideUrl})`);
 }
 
 const isDirectRun =

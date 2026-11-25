@@ -6,7 +6,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { isCaseHandoffSourceReleased } from "./heartbeat/case-handoff-lifecycle.js";
 import type { heartbeatService } from "./heartbeat.js";
 
-const PENDING = ["awaiting_release", "pending_dispatch"] as const;
+import { CASE_HANDOFF_OPEN_TRANSFER_STATES as PENDING } from "./case-handoff-states.js";
 const ACCEPTED = ["queued", "claimed", "running", "succeeded", "completed", "retrying", "scheduled_retry"];
 type Heartbeat = Pick<ReturnType<typeof heartbeatService>, "wakeup"> & {
   requestCaseHandoffYield?: (input: { runId: string; issueId: string; handoffId: string }) => Promise<unknown>;

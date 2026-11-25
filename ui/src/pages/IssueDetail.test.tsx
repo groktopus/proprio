@@ -112,6 +112,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   deleteAttachment: vi.fn(),
   upsertDocument: vi.fn(),
   getDocument: vi.fn(),
+  getCostSummary: vi.fn(),
   acceptInteraction: vi.fn(),
   rejectInteraction: vi.fn(),
 }));
@@ -1458,6 +1459,15 @@ describe("IssueDetail", () => {
     });
     mockIssuesApi.listAcceptedPlanDecompositions.mockResolvedValue([]);
     mockIssuesApi.getDocument.mockResolvedValue(null);
+    mockIssuesApi.getCostSummary.mockResolvedValue({
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      costCents: 0,
+      runtimeMs: 0,
+      runCount: 0,
+      issueCount: 0,
+    });
     mockOpenPanel.mockClear();
     mockClosePanel.mockClear();
     mockSetPanelVisible.mockClear();
@@ -2409,6 +2419,50 @@ describe("IssueDetail", () => {
     });
     expect(Array.from(document.body.querySelectorAll("button"))
       .some((button) => button.textContent?.trim() === "Show task activity")).toBe(false);
+  });
+
+  it("starts Activity cost totals alongside history and renders the consumer result", async () => {
+    const activity = createDeferred<unknown[]>();
+    const runs = createDeferred<unknown[]>();
+    const cost = createDeferred<unknown>();
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockActivityApi.forIssue.mockReturnValue(activity.promise);
+    mockActivityApi.runsForIssue.mockReturnValue(runs.promise);
+    mockIssuesApi.getCostSummary.mockReturnValue(cost.promise);
+
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => {
+      expect(mockActivityApi.forIssue).toHaveBeenCalledWith("issue-1");
+      expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("issue-1");
+      expect(mockIssuesApi.getCostSummary).toHaveBeenCalledWith("issue-1");
+    });
+    activity.resolve([]);
+    runs.resolve([{
+      runId: "run-cost",
+      status: "succeeded",
+      agentId: "agent-1",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:02.000Z",
+      usageJson: { inputTokens: 100, outputTokens: 50 },
+      resultJson: { costUsd: 0.0123 },
+    }]);
+    cost.resolve({
+      inputTokens: 200,
+      outputTokens: 100,
+      cachedInputTokens: 0,
+      costCents: 2,
+      runtimeMs: 2000,
+      runCount: 1,
+      issueCount: 2,
+    });
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Cost Summary");
+      expect(container.textContent).toContain("Including sub-tasks");
+      expect(container.textContent).toContain("2 tasks");
+    });
   });
 
   it("does not add a history disclosure when a second run is observed while the page stays open", async () => {
