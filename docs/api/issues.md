@@ -269,7 +269,9 @@ Repeating a saved request after a lost response acknowledges its existing claim.
 
 The response includes `accepted` and `message`. Read the diagnosis again to
 see the current wake state. An accepted request leaves the dependency open.
-Approval, budget, workspace and stop controls still apply.
+Approval, budget, workspace and stop controls still apply. Each Board viewer
+can submit up to 12 investigation requests per minute. A `429` response
+includes `Retry-After` in seconds.
 
 ## Comments
 

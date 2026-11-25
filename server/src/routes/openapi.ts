@@ -11714,7 +11714,13 @@ registerCurrentRoute({
   tags: ["issues"],
   summary: "Ask the current assignee to investigate a stalled dependency",
   body: dependencyInvestigationSchema,
-  responses: { 200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+  responses: {
+    200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: {
+      ...r.tooManyRequests,
+      headers: { "Retry-After": { description: "Seconds before the request may be retried", schema: { type: "integer", minimum: 1 } } },
+    },
+  },
 });
 
 registerCurrentRoute({

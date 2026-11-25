@@ -431,6 +431,22 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
     await request(app).post(path).send({ idempotencyKey: "stale-key" }).expect(403);
   });
 
+  it("rate-limits investigation requests independently for each Board viewer", async () => {
+    const company = await seedCompany(db);
+    const parent = await seedIssue(db, { companyId: company.id, title: "Parent" });
+    const first = createApp(db, { ...boardActor(company), userId: randomUUID() } as Express.Request["actor"]);
+    const second = createApp(db, { ...boardActor(company), userId: randomUUID() } as Express.Request["actor"]);
+    const path = `/api/issues/${parent.id}/dependency-investigation`;
+    const input = { idempotencyKey: "stale-request" };
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await request(first).post(path).send(input).expect(200);
+    }
+    const limited = await request(first).post(path).send(input).expect(429);
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(limited.body.error).toContain("investigation request limit");
+    await request(second).post(path).send(input).expect(200);
+  });
+
   it("acknowledges a saved request and retains the board audit actor after an interrupted response", async () => {
     const company = await seedCompany(db);
     const assignee = await seedAgent(db, company.id);

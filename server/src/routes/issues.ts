@@ -74,6 +74,7 @@ import {
 } from "../services/execution-recovery-resolution.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
@@ -2173,6 +2174,17 @@ function summarizeIssueRelationForActivity(relation: {
 }
 
 const defaultCompanySearchRateLimiter = createCompanySearchRateLimiter();
+
+const dependencyInvestigationRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 12,
+  keyGenerator: req => req.actor?.type === "board" && req.actor.userId
+    ? `board:${req.actor.userId}`
+    : ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0"),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Dependency investigation request limit exceeded" },
+});
 
 function companySearchRateLimitActor(req: Request, companyId: string) {
   if (req.actor.type === "agent") {
@@ -10127,7 +10139,7 @@ export function issueRoutes(
     res.end(JSON.stringify(dependencyDiagnosisForViewer(diagnosis, readable, mayInvestigate)));
   });
 
-  router.post("/issues/:id/dependency-investigation", validate(dependencyInvestigationSchema), async (req, res) => {
+  router.post("/issues/:id/dependency-investigation", dependencyInvestigationRateLimit, validate(dependencyInvestigationSchema), async (req, res) => {
     assertBoard(req);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
