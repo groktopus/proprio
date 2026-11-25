@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, ShieldQuestion, X } from "lucide-react";
 import type { ToolActionRequestListItem } from "@groktopus/shared";
@@ -38,6 +38,23 @@ export function ReviewQueueCard({
   plain?: boolean;
 }) {
   const { selectedCompanyId } = useCompany();
+  const feedbackRef = useRef<HTMLDivElement>(null);
+  const [failure, setFailure] = useState<{
+    companyId: string;
+    connectionId: string | undefined;
+    message: string;
+    moveFocus: boolean;
+  } | null>(null);
+  const visibleFailure = failure?.companyId === selectedCompanyId && failure.connectionId === connectionId
+    ? failure
+    : null;
+
+  const handledFailure = useRef<typeof failure>(null);
+  useEffect(() => {
+    if (!failure || handledFailure.current === failure) return;
+    handledFailure.current = failure;
+    if (visibleFailure?.moveFocus) feedbackRef.current?.focus();
+  }, [failure, visibleFailure]);
 
   const query = useQuery({
     queryKey: queryKeys.tools.actionRequests(selectedCompanyId ?? "__none__", "pending"),
@@ -56,30 +73,41 @@ export function ReviewQueueCard({
   if (query.isLoading || view.kind === "reconnecting") return null;
   if (view.kind === "error") return <QueryErrorState error={query.error} action="load connection reviews" onRetry={view.retry} retrying={view.isFetching} />;
 
-  if (items.length === 0) {
-    if (emptyState === "hidden") return null;
-    return (
-      <div className={plain ? "py-5 text-sm text-muted-foreground" : "rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"}>
-        Nothing is waiting for your OK right now.
-      </div>
-    );
-  }
-
   return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2">
-        <ShieldQuestion className="h-4 w-4 text-muted-foreground" />
-        <h2 className="text-sm font-bold text-foreground">{heading}</h2>
-        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
-          {items.length}
-        </span>
+    <>
+      <div ref={feedbackRef} aria-live="polite" aria-atomic="true" tabIndex={-1}
+        className={visibleFailure ? "mb-3 rounded-sm border border-destructive/60 bg-destructive/10 p-3 text-sm text-destructive" : undefined}>
+        {visibleFailure ? (
+          <>
+            <p className="font-semibold">Approved action failed</p>
+            <p>{visibleFailure.message}</p>
+          </>
+        ) : null}
       </div>
-      <div className="space-y-3">
-        {items.map((item) => (
-          <ReviewRow key={item.request.id} companyId={selectedCompanyId} item={item} plain={plain} />
-        ))}
-      </div>
-    </section>
+      {items.length === 0 ? (
+        emptyState === "reassure" ? (
+          <div className={plain ? "py-5 text-sm text-muted-foreground" : "rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"}>
+            Nothing is waiting for your OK right now.
+          </div>
+        ) : null
+      ) : (
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <ShieldQuestion className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-sm font-bold text-foreground">{heading}</h2>
+            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+              {items.length}
+            </span>
+          </div>
+          <div className="space-y-3">
+            {items.map((item) => (
+              <ReviewRow key={item.request.id} companyId={selectedCompanyId} item={item} plain={plain}
+                onFailure={(message, moveFocus) => setFailure({ companyId: selectedCompanyId, connectionId, message, moveFocus })} />
+            ))}
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
@@ -87,13 +115,16 @@ function ReviewRow({
   companyId,
   item,
   plain,
+  onFailure,
 }: {
   companyId: string;
   item: ToolActionRequestListItem;
   plain: boolean;
+  onFailure: (message: string, moveFocus: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToast();
+  const rowRef = useRef<HTMLDivElement>(null);
   const [resolving, setResolving] = useState<null | "allow" | "always" | "decline">(null);
 
   const interactionQuery = useQuery({
@@ -110,33 +141,45 @@ function ReviewRow({
     if (item.request.issueId) queryClient.invalidateQueries({ queryKey: queryKeys.issues.interactions(item.request.issueId) });
   };
 
-  const allowOnce = useMutation({
-    mutationFn: () => toolsApi.approveActionRequest(companyId, item.request.id),
-    onMutate: () => setResolving("allow"),
-    onSuccess: () => {
-      pushToast({ title: "Allowed once", body: `${actionLabel(item)} can run this time.`, tone: "success" });
-      invalidate();
-    },
-    onError: (error) => {
-      invalidate();
-      failToast(pushToast, error);
-    },
-    onSettled: () => setResolving(null),
-  });
+  async function approve(rememberAction: boolean) {
+    const result = await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction);
+    if (result.status === "failed") {
+      const reason = result.error?.trim() || "The gateway returned no failure details.";
+      return rememberAction ? `${reason} Future calls may still be allowed.` : reason;
+    }
+    if (result.status !== "approved" && result.status !== "executing" && result.status !== "executed") {
+      throw new Error("The approval did not complete. Refresh the review queue to check its latest status.");
+    }
+    return null;
+  }
 
-  const alwaysAllow = useMutation({
-    mutationFn: async () => {
-      return toolsApi.approveActionRequest(companyId, item.request.id, true);
+  function reportFailure(message: string, startedWithFocus: boolean) {
+    const activeElement = document.activeElement;
+    const moveFocus = Boolean(rowRef.current?.contains(activeElement))
+      || (startedWithFocus && activeElement === document.body);
+    onFailure(message, moveFocus);
+  }
+
+  const approveAction = useMutation({
+    mutationFn: approve,
+    onMutate: (rememberAction) => {
+      const startedWithFocus = Boolean(rowRef.current?.contains(document.activeElement));
+      setResolving(rememberAction ? "always" : "allow");
+      return startedWithFocus;
     },
-    onMutate: () => setResolving("always"),
-    onSuccess: () => {
-      pushToast({
-        title: "Always allowed",
-        body: `${actionLabel(item)} won’t ask again.`,
-        tone: "success",
-      });
+    onSuccess: (failure, rememberAction, startedWithFocus) => {
+      if (failure) {
+        reportFailure(failure, startedWithFocus ?? false);
+      } else if (rememberAction) {
+        pushToast({
+          title: "Always allowed",
+          body: `${actionLabel(item)} won’t ask again.`,
+          tone: "success",
+        });
+      } else {
+        pushToast({ title: "Allowed once", body: `${actionLabel(item)} can run this time.`, tone: "success" });
+      }
       invalidate();
-      queryClient.invalidateQueries({ queryKey: queryKeys.tools.trustRules(companyId) });
     },
     onError: (error) => {
       invalidate();
@@ -159,23 +202,32 @@ function ReviewRow({
     onSettled: () => setResolving(null),
   });
 
-  if (linkedInteraction) return <IssueThreadInteractionCard
-    interaction={linkedInteraction}
-    onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
-      try { await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction); }
-      finally { invalidate(); }
-    }}
-    onRejectInteraction={async (_interaction, reason) => {
-      try { await toolsApi.declineActionRequest(companyId, item.request.id, reason); }
-      finally { invalidate(); }
-    }}
-  />;
+  if (linkedInteraction) return (
+    <div ref={rowRef}>
+      <IssueThreadInteractionCard
+        interaction={linkedInteraction}
+        onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
+          const startedWithFocus = Boolean(rowRef.current?.contains(document.activeElement));
+          try {
+            const failure = await approve(rememberAction ?? false);
+            if (failure) reportFailure(failure, startedWithFocus);
+          } finally {
+            invalidate();
+          }
+        }}
+        onRejectInteraction={async (_interaction, reason) => {
+          try { await toolsApi.declineActionRequest(companyId, item.request.id, reason); }
+          finally { invalidate(); }
+        }}
+      />
+    </div>
+  );
 
   const busy = resolving !== null;
   const preview = item.request.previewMarkdown?.trim();
 
   return (
-    <div className={plain ? "py-3" : "rounded-xl border border-border bg-card p-4"}>
+    <div ref={rowRef} className={plain ? "py-3" : "rounded-xl border border-border bg-card p-4"}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
         <span className="font-bold text-foreground">{actionLabel(item)}</span>
         {item.applicationName && (
@@ -198,11 +250,11 @@ function ReviewRow({
 
       {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <p className="mt-2 text-xs text-muted-foreground">Always allow lets this agent use this action with different arguments on this connection, within the current project when present.</p> : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={() => allowOnce.mutate()} disabled={busy}>
+        <Button size="sm" onClick={() => approveAction.mutate(false)} disabled={busy}>
           {resolving === "allow" ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Check className="mr-1.5 h-3.5 w-3.5" />}
           Allow once
         </Button>
-        {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <Button size="sm" variant="outline" onClick={() => alwaysAllow.mutate()} disabled={busy}>
+        {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <Button size="sm" variant="outline" onClick={() => approveAction.mutate(true)} disabled={busy}>
           {resolving === "always" ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
           Always allow
         </Button> : null}

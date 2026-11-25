@@ -183,4 +183,86 @@ describe("ReviewQueueCard", () => {
     expect(createTrustRuleFromActionRequestMock).not.toHaveBeenCalled();
     expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({ title: "Always allowed" }));
   });
+
+  it("surfaces a failed Allow once result instead of reporting success", async () => {
+    approveActionRequestMock.mockImplementation(async () => {
+      listActionRequestsMock.mockResolvedValue({ actionRequests: [] });
+      return {
+        ...pendingRequest().request,
+        status: "failed",
+        error: "Approval could not be reconciled; refresh the review queue.",
+      };
+    });
+    await render();
+    const feedback = container.querySelector('[aria-live="polite"]')!;
+    expect(feedback.textContent).toBe("");
+    const button = buttonContaining("Allow once")!;
+    button.focus();
+
+    await act(async () => { button.click(); });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Nothing is waiting for your OK right now."));
+    expect(container.querySelector('[aria-live="polite"]')).toBe(feedback);
+    expect(feedback.textContent).toContain("Approval could not be reconciled; refresh the review queue.");
+    expect(document.activeElement).toBe(feedback);
+    expect(pushToastMock).not.toHaveBeenCalled();
+  });
+
+  it("shows that permission can remain after an Always allow action fails", async () => {
+    approveActionRequestMock.mockResolvedValue({
+      ...pendingRequest().request,
+      status: "failed",
+      error: "The provider outcome is still being reconciled.",
+    });
+    await render();
+
+    await act(async () => { buttonContaining("Always allow")!.click(); });
+    await flushReact();
+
+    expect(approveActionRequestMock).toHaveBeenCalledWith("company-1", "request-1", true);
+    await vi.waitFor(() => expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The provider outcome is still being reconciled. Future calls may still be allowed."));
+    expect(pushToastMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a settled failure without suggesting a retry when its reason is null", async () => {
+    approveActionRequestMock.mockResolvedValue({
+      ...pendingRequest().request,
+      status: "failed",
+      error: null,
+    });
+    await render();
+    await act(async () => { buttonContaining("Allow once")!.click(); });
+
+    await vi.waitFor(() => expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The gateway returned no failure details."));
+    expect(container.textContent).not.toMatch(/try again|refresh the review queue/i);
+  });
+
+  it("surfaces a failed approval from the linked interaction card inline", async () => {
+    const interaction = structuredClone(pendingToolActionLongProposalInteraction);
+    const item = pendingRequest();
+    listActionRequestsMock.mockResolvedValue({ actionRequests: [{ ...item, request: { ...item.request, interactionId: interaction.id } }] });
+    listInteractionsMock.mockResolvedValue([interaction]);
+    approveActionRequestMock.mockImplementation(async () => {
+      listActionRequestsMock.mockResolvedValue({ actionRequests: [] });
+      return {
+        ...item.request,
+        status: "failed",
+        error: "The provider outcome is still being reconciled.",
+      };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={client}><TooltipProvider><ThemeProvider>
+      <ReviewQueueCard emptyState="reassure" />
+    </ThemeProvider></TooltipProvider></QueryClientProvider>));
+    await flushReact();
+    await vi.waitFor(() => expect(container.querySelector("details")).not.toBeNull());
+    await act(async () => { buttonContaining("Approve & run")!.click(); });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Nothing is waiting for your OK right now."));
+    expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The provider outcome is still being reconciled.");
+  });
 });

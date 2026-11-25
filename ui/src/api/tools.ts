@@ -55,6 +55,7 @@ import type {
   ToolConnectionTestAgentAccessResponse,
   ToolConnectionTestCallResult,
   ToolConnectionTestCallStatus,
+  ToolActionApprovalResponse,
   ToolActionRequest,
   ToolActionRequestStatus,
   ToolActionRequestsResponse,
@@ -601,7 +602,7 @@ export const toolsApi = {
       `/companies/${companyId}/tools/action-requests?status=${encodeURIComponent(status)}`,
     ),
   approveActionRequest: (companyId: string, actionRequestId: string, rememberAction = false) =>
-    api.post<ToolActionRequest>(`/tool-gateway/action-requests/${actionRequestId}/approve`, { companyId, rememberAction }),
+    api.post<ToolActionApprovalResponse>(`/tool-gateway/action-requests/${actionRequestId}/approve`, { companyId, rememberAction }),
   declineActionRequest: (companyId: string, actionRequestId: string, reason?: string) =>
     api.post<ToolActionRequest>(`/tool-gateway/action-requests/${actionRequestId}/decline`, { companyId, reason }),
   createTrustRuleFromActionRequest: (
