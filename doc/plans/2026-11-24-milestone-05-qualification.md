@@ -113,3 +113,11 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 After a base PR lands, check the next PR's comparison and verify its current
 head against `main` when retargeting it. Rebase stacked branches as needed to
 keep each remaining comparison limited to its own change.
+
+The full OpenAPI route inventory also depends on the existing member
+archive-preview fix. Include it before qualifying the API changes against
+`main`. The disposable composition `8554a986893ce0604a7370ec6913ef5df451c15d`
+combined the reviewed milestone stack with the prerequisite head `266e02f7`.
+All 56 OpenAPI tests, generated API consistency, and the archive-preview
+route's malformed-ID and missing-member checks passed.
+[OpenAPI prerequisite](https://github.com/groktopus/proprio/pull/347)
