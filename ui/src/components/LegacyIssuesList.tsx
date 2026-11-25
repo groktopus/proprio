@@ -25,6 +25,7 @@ import { useIssueExternalObjectSummaries } from "../hooks/useIssueExternalObject
 import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
+  isKeyboardShortcutActivationTarget,
 } from "../lib/keyboardShortcuts";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
@@ -1497,6 +1498,7 @@ export function IssuesList({
           break;
         }
         case "Enter": {
+          if (isKeyboardShortcutActivationTarget(target)) return;
           const entry = st.flatNavEntries[currentIndex];
           if (!entry || entry.type !== "issue") return;
           e.preventDefault();
@@ -2059,6 +2061,7 @@ export function IssuesList({
                   const hasChildren = children.length > 0;
                   const totalDescendants = hasChildren ? countDescendants(issue.id, childMap) : 0;
                   const isExpanded = !viewState.collapsedParents.includes(issue.id);
+                  const disclosureLabel = isExpanded ? "Collapse sub-tasks" : "Expand sub-tasks";
                   const useDeferredRowRendering = !(hasChildren && isExpanded);
                   const issueProject = issue.projectId ? projectById.get(issue.projectId) ?? null : null;
                   const parentIssue = issue.parentId ? issueById.get(issue.parentId) ?? null : null;
@@ -2204,7 +2207,13 @@ export function IssuesList({
                         className={cn(isMutedIssue && "opacity-70", selectedNavKey === `issue:${issue.id}` && "bg-accent/50 hover:bg-accent/50")}
                         mobileLeading={
                           hasChildren ? (
-                            <button type="button" data-slot="icon-button" onClick={toggleCollapse}>
+                            <button
+                              type="button"
+                              data-slot="icon-button"
+                              aria-label={disclosureLabel}
+                              aria-expanded={isExpanded}
+                              onClick={toggleCollapse}
+                            >
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                             </button>
                           ) : (
@@ -2220,6 +2229,8 @@ export function IssuesList({
                                 type="button"
                                 data-slot="icon-button"
                                 className="relative z-10 hidden w-4 shrink-0 items-center justify-center sm:inline-flex"
+                                aria-label={disclosureLabel}
+                                aria-expanded={isExpanded}
                                 onClick={toggleCollapse}
                               >
                                 <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />

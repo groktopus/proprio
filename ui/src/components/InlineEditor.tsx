@@ -118,6 +118,8 @@ function OwnedInlineEditor({
   const readCurrentValueRef = useRef(readCurrentValue);
   readCurrentValueRef.current = readCurrentValue;
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreEditButtonFocus = useRef(false);
   const markdownRef = useRef<MarkdownEditorRef>(null);
   const autosaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blurCommitFrameRef = useRef<(() => void) | null>(null);
@@ -251,6 +253,9 @@ function OwnedInlineEditor({
       if (inputRef.current instanceof HTMLTextAreaElement) {
         autoSize(inputRef.current);
       }
+    } else if (restoreEditButtonFocus.current) {
+      restoreEditButtonFocus.current = false;
+      editButtonRef.current?.focus({ preventScroll: true });
     }
   }, [editing, autoSize]);
 
@@ -298,8 +303,13 @@ function OwnedInlineEditor({
     setEditing(false);
   }, [autosaveState, editing, multiline]);
 
+  const finishSingleLineEdit = useCallback((restoreFocus: boolean) => {
+    restoreEditButtonFocus.current = restoreFocus && document.activeElement === inputRef.current;
+    setEditing(false);
+  }, []);
+
   /** Save the draft if it changed. Never rejects; a failed save keeps the text. */
-  const commit = useCallback(async (nextValue = draft) => {
+  const commit = useCallback(async (nextValue = draft, restoreFocus = false) => {
     const valueToSave = nextValue.trim();
     const valueChanged = valueToSave !== value;
     const shouldSave = nullable
@@ -308,13 +318,13 @@ function OwnedInlineEditor({
     if (!shouldSave) {
       setDraft(value);
       if (draftKey) clearStoredDraft();
-      if (!multiline) setEditing(false);
+      if (!multiline) finishSingleLineEdit(restoreFocus);
       return;
     }
     const result = await runInlineAutosave(valueToSave);
     // A single-line edit stays open until it is saved, so its text is not lost.
-    if (!multiline && result.kind === "saved") setEditing(false);
-  }, [clearStoredDraft, draft, draftKey, multiline, nullable, runInlineAutosave, value]);
+    if (!multiline && result.kind === "saved") finishSingleLineEdit(restoreFocus);
+  }, [clearStoredDraft, draft, draftKey, finishSingleLineEdit, multiline, nullable, runInlineAutosave, value]);
 
   /** Multiline blur/submit: show autosave indicator when persisting */
   const finalizeMultilineBlurOrSubmit = useCallback(() => {
@@ -346,7 +356,7 @@ function OwnedInlineEditor({
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !multiline) {
       e.preventDefault();
-      void commit();
+      void commit(draft, true);
     }
     if (e.key === "Escape") {
       if (autosaveDebounceRef.current) {
@@ -364,7 +374,7 @@ function OwnedInlineEditor({
           document.activeElement.blur();
         }
       } else {
-        setEditing(false);
+        finishSingleLineEdit(true);
       }
     }
   }
@@ -551,9 +561,16 @@ function OwnedInlineEditor({
         !value && "text-muted-foreground italic",
         className,
       )}
-      onClick={() => setEditing(true)}
     >
-      {value || placeholder}
+      <button
+        ref={editButtonRef}
+        type="button"
+        aria-description="Edit"
+        className="block w-full cursor-pointer text-left"
+        onClick={() => setEditing(true)}
+      >
+        {value || placeholder}
+      </button>
     </DisplayTag>
     {autosaveState === "stalled" ? <button type="button" className="text-xs text-foreground underline" onClick={autosave.resendNow}>Retry saving</button> : null}
     </>
