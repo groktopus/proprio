@@ -135,6 +135,22 @@ async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope
   return userId;
 }
 
+async function writeManagedAuditTransitionReceipt(
+  tx: DbTransaction,
+  receipt: Omit<typeof managedAuditTransitionReceipts.$inferInsert, "createdAt"> & { createdAt?: Date | SQL },
+) {
+  try {
+    await tx.insert(managedAuditTransitionReceipts).values(receipt);
+  } catch (error) {
+    // The driver error may include every bound receipt field. Preserve only
+    // the SQLSTATE needed to keep retryable database failures retryable.
+    const code = postgresErrorCode(error);
+    const failure = new HttpError(500, "Managed audit transition receipt could not be recorded");
+    if (code === "57014" || code === "53300" || isTransientLockContention(error)) throw Object.assign(failure, { code });
+    throw failure;
+  }
+}
+
 async function visibleEvents(db: DbTransaction, { companyId, actor }: ExportScope) {
   const hasIssueAccess = (issueId: typeof managedAuditEvents.taskId | typeof heartbeatRuns.issueId) =>
     exists(db.select({ id: issues.id }).from(issues)
@@ -252,9 +268,9 @@ async function retireSupersededSnapshots(
   // and marker cleanup retain their existing precedence and retention window.
   const retired = await tx.update(managedAuditExports).set({ invalidated: true })
     .where(and(inArray(managedAuditExports.id, superseded), eq(managedAuditExports.invalidated, false)))
-    .returning({ id: managedAuditExports.id });
+    .returning({ transitioned: sql<number>`1` });
   if (retired.length > 0) {
-    await tx.insert(managedAuditTransitionReceipts).values({
+    await writeManagedAuditTransitionReceipt(tx, {
       companyId: scope.companyId,
       actorId: userId,
       transition: "company_exports_retired",
@@ -422,7 +438,7 @@ export async function readManagedAuditExportPage(
           .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
           .returning({ id: managedAuditExports.id });
         if (invalidated) {
-          await tx.insert(managedAuditTransitionReceipts).values({
+          await writeManagedAuditTransitionReceipt(tx, {
             companyId: scope.companyId,
             transition: "export_invalidated",
             actorId: userId,

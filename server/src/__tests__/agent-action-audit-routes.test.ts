@@ -1140,6 +1140,59 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("sanitizes protected transition receipt failures and preserves retryable SQLSTATEs", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const from = "2026-07-17T00:00:00.000Z";
+    const to = "2026-07-17T00:00:02.000Z";
+    const [event] = await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    }).returning({ id: managedAuditEvents.id });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    let renamed = false;
+    try {
+      const created = await board.post(path).send({ from, to }).expect(201);
+      const exportPath = `${path}/${created.body.exportId}`;
+      await board.get(exportPath).expect(200);
+      await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, event!.id));
+      await db.execute(sql`create function public.proprio_test_fail_managed_audit_receipt() returns trigger language plpgsql as $$ begin raise exception 'private receipt fixture' using errcode = '40001'; return new; end $$`);
+      await db.execute(sql`create trigger proprio_test_fail_managed_audit_receipt before insert on managed_audit_transition_receipts for each row execute function public.proprio_test_fail_managed_audit_receipt()`);
+      const retryable = await board.get(exportPath).expect(503);
+      expect(retryable.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      expect(retryable.text).not.toContain("private receipt fixture");
+      for (const privateValue of [company.id, userId, created.body.exportId]) expect(retryable.text).not.toContain(privateValue);
+      await db.execute(sql`drop trigger proprio_test_fail_managed_audit_receipt on managed_audit_transition_receipts`);
+      await db.execute(sql`drop function public.proprio_test_fail_managed_audit_receipt()`);
+
+      await db.execute(sql`alter table managed_audit_transition_receipts rename to unavailable_transition_receipts`);
+      renamed = true;
+      const unavailable = await board.get(exportPath).expect(500);
+      expect(unavailable.body).toMatchObject({ error: "Managed audit transition receipt could not be recorded" });
+      expect(unavailable.text).not.toContain(company.id);
+      expect(unavailable.text).not.toContain(userId);
+      expect(unavailable.text).not.toContain(created.body.exportId);
+    } finally {
+      if (renamed) {
+        await db.execute(sql`alter table unavailable_transition_receipts rename to managed_audit_transition_receipts`);
+      }
+      await db.execute(sql`drop trigger if exists proprio_test_fail_managed_audit_receipt on managed_audit_transition_receipts`);
+      await db.execute(sql`drop function if exists public.proprio_test_fail_managed_audit_receipt()`);
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+
   it("does not release a page from a repeatable-read snapshot after concurrent invalidation wins", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
