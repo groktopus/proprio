@@ -47,17 +47,18 @@ async function evidenceReference(db: Db, scope: { companyId: string; issueId: st
   const parsed = source.kind === "event" ? null : uuid(source.ref);
   if (source.kind === "event") {
     const cursor = Number(/^event:(\d+)$/.exec(source.ref)?.[1]);
-    if (Number.isSafeInteger(cursor) && cursor > 0) {
-      const [row] = await db.select({ id: heartbeatRunEvents.id })
-        .from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.companyId, scope.companyId), eq(heartbeatRunEvents.runId, scope.runId),
-          or(eq(heartbeatRunEvents.seq, cursor), eq(heartbeatRunEvents.sourceSeq, cursor)))).limit(1);
+    const eventId = Number(/^\d+$/.exec(source.durableRecordId ?? "")?.[0]);
+    const eventScope = and(eq(heartbeatRunEvents.companyId, scope.companyId), eq(heartbeatRunEvents.runId, scope.runId));
+    if (Number.isSafeInteger(eventId) && eventId > 0) {
+      const [row] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents)
+        .where(and(eventScope, eq(heartbeatRunEvents.id, eventId))).limit(1);
       if (row) recordId = String(row.id);
-      else {
-        const [otherRun] = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents)
-          .where(and(eq(heartbeatRunEvents.companyId, scope.companyId), ne(heartbeatRunEvents.runId, scope.runId),
-            or(eq(heartbeatRunEvents.seq, cursor), eq(heartbeatRunEvents.sourceSeq, cursor)))).limit(1);
-        existsInCompanyOtherScope = Boolean(otherRun);
-      }
+    } else if (!source.durableRecordId && source.outcome !== "missing" && Number.isSafeInteger(cursor) && cursor > 0) {
+      // Older assessments may only have a run-local cursor. Resolve it only
+      // when it identifies exactly one event within the assessment's run.
+      const rows = await db.select({ id: heartbeatRunEvents.id }).from(heartbeatRunEvents)
+        .where(and(eventScope, or(eq(heartbeatRunEvents.seq, cursor), eq(heartbeatRunEvents.sourceSeq, cursor)))).limit(2);
+      if (rows.length === 1) recordId = String(rows[0]!.id);
     }
   } else if (parsed) {
     if (source.kind === "work_product") {

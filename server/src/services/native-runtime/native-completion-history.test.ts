@@ -6,6 +6,7 @@ import {
   companies,
   completionContracts,
   heartbeatRuns,
+  heartbeatRunEvents,
   issueWorkProducts,
   issues,
   nativeRunResults,
@@ -57,10 +58,27 @@ describeEmbeddedPostgres("native completion history", () => {
     await ctx.db.insert(nativeRunResults).values({ id: resultId, companyId, issueId, runId, completionContractId: contractId,
       serverFingerprint: `result-${resultId}`, schemaStatus: "accepted", canonicalSha256: createHash("sha256").update(resultId).digest("hex"),
       resultJson: { result: { reportedWorkDisposition: "done", summary: `Revision ${input.revision} delivered` }, terminal: { runTerminalState: "succeeded" } } });
+    const eventEvidence = [];
+    if (input.evidence) {
+      const otherRunId = randomUUID();
+      await ctx.db.insert(heartbeatRuns).values({
+        id: otherRunId, companyId, agentId, status: "succeeded", scopeKind: "issue", issueId: privateIssueId,
+      });
+      const [assessed] = await ctx.db.insert(heartbeatRunEvents).values([
+        { companyId, agentId, runId, seq: 62, sourceSeq: 33, eventType: "assessment_event" },
+        { companyId, agentId, runId, seq: 33, eventType: "unrelated_event" },
+        { companyId, agentId, runId: otherRunId, seq: 34, eventType: "unrelated_other_run_event" },
+      ]).returning({ id: heartbeatRunEvents.id });
+      eventEvidence.push(
+        { ref: "event:33", kind: "event", outcome: "accepted", reasonCode: "control_plane_evidence_accepted", durableRecordId: String(assessed!.id) },
+        { ref: "event:34", kind: "event", outcome: "missing", reasonCode: "durable_run_event_missing", durableRecordId: null },
+      );
+    }
     const criterionAssessments = input.evidence ? [{ criterionId: "deliver", claimStatus: "satisfied", outcome: "missing", reasonCode: "criterion_evidence_missing",
       evidenceRefs: [
         { ref: `work_product:${visibleWorkProductId}`, kind: "work_product", outcome: "accepted", reasonCode: "work_product_authoritatively_accepted", durableRecordId: visibleWorkProductId },
         { ref: `work_product:${restrictedWorkProductId}`, kind: "work_product", outcome: "missing", reasonCode: "work_product_missing", durableRecordId: null },
+        ...eventEvidence,
       ] }] : [];
     await ctx.db.insert(workAssessments).values({ id: assessmentId, companyId, issueId, runId, contractId, resultId,
       triggerKind: "native_result", triggerRef: resultId, triggerCapability: "server_native_finalizer", triggerActorCompanyId: companyId,
@@ -73,7 +91,7 @@ describeEmbeddedPostgres("native completion history", () => {
       toStatus: "done", reasonCode: input.reason, decisionJson: { statusAction: "done", toStatus: "done", reasonCode: input.reason },
       decisionDigest: `decision-${decisionId}`, applicationState: "applied", supersedesDecisionId: input.supersedesDecisionId ?? null,
       appliedAt: new Date(Date.UTC(2026, 0, input.revision)) });
-    return { contractId, runId, resultId, assessmentId, decisionId };
+    return { contractId, runId, resultId, assessmentId, decisionId, assessedEventId: eventEvidence[0]?.durableRecordId };
   }
 
   it("joins policy-claim and evidence-backed decisions to exact criteria and keeps prior lineage discoverable", async () => {
@@ -102,6 +120,9 @@ describeEmbeddedPostgres("native completion history", () => {
     expect(refs[1]).not.toHaveProperty("recordId");
     expect(refs[1]).not.toHaveProperty("ref");
     expect(JSON.stringify(history)).not.toContain(restrictedWorkProductId);
+    expect(refs[2]).toMatchObject({ visibility: "available", outcome: "accepted", recordId: evidence.assessedEventId });
+    expect(refs[3]).toMatchObject({ visibility: "missing", outcome: "missing" });
+    expect(refs[3]).not.toHaveProperty("recordId");
     expect(history.every((item) => item.lineageGaps.length === 0)).toBe(true);
   });
 
