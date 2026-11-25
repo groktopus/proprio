@@ -542,13 +542,20 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
         return null;
       },
     };
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const release = createReleaseIssueExecution({
         issueLock: createPostgresWakeQueueAdapter(singleConnectionDb, deps),
         recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
       });
       const input = { companyId, runId, now: new Date(), suppressImmediateRecovery: true, resumeStrandedQueue: true };
-      expect((await release(input)).outcome.kind).toBe("promoted");
+      const promoted = await Promise.race([
+        release(input),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Deferred wake promotion stalled on one database connection")), 5_000);
+        }),
+      ]);
+      expect(promoted.outcome.kind).toBe("promoted");
       const [promotedWake] = await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
       expect(promotedWake).toMatchObject({ status: "queued", runId: expect.any(String) });
       const promotedRuns = await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
@@ -559,7 +566,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       expect((await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0])
         .toMatchObject({ status: "queued", runId: promotedWake!.runId });
     } finally {
-      await singleConnectionDb.$client.end({ timeout: 1 });
+      clearTimeout(timer);
+      await singleConnectionDb.$client.end({ timeout: 0 });
     }
   }, 30_000);
 
