@@ -172,6 +172,7 @@ const mockObserveCrossIssueInfluence = vi.hoisted(() => vi.fn(async () => null))
 const mockRetryWorkspaceExport = vi.hoisted(() => vi.fn());
 const mockRequestWorkspaceRecovery = vi.hoisted(() => vi.fn());
 const mockRequestTaskRetry = vi.hoisted(() => vi.fn());
+const mockDependencyInvestigation = vi.hoisted(() => vi.fn());
 const mockOnboardingFirstTaskDependenciesAllowed = vi.hoisted(() => vi.fn(async () => undefined));
 const mockGetExperimental = vi.hoisted(() => vi.fn());
 const mockResumeWorkspaceFinalization = vi.hoisted(() => vi.fn());
@@ -185,6 +186,10 @@ function registerRouteMocks() {
     }) };
   });
   vi.doMock("../services/task-retry.js", () => ({ requestTaskRetry: mockRequestTaskRetry }));
+  vi.doMock("../services/recovery/parent-dependency-diagnosis.js", () => ({
+    readParentDependencyDiagnosis: async () => null,
+    requestParentDependencyDiagnosis: mockDependencyInvestigation,
+  }));
   vi.doMock("../services/onboarding-first-task-admission.js", async () => ({
     ...await vi.importActual<typeof import("../services/onboarding-first-task-admission.js")>("../services/onboarding-first-task-admission.js"),
     assertOnboardingFirstTaskDependenciesAllowed: mockOnboardingFirstTaskDependenciesAllowed,
@@ -542,6 +547,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockChatRunRetries.prepareFailedChatRunRetry.mockReset();
     mockChatRunRetries.processFailedChatRunRetry.mockReset();
     mockRequestTaskRetry.mockReset().mockResolvedValue({ requestId: recoveryActionId, accepted: true, stale: false });
+    mockDependencyInvestigation.mockReset();
     mockGetExperimental.mockReset().mockResolvedValue({ enableAgentChat: true });
     mockAccessService.canUser.mockReset();
     mockAccessService.decide.mockReset();
@@ -912,6 +918,26 @@ describe("agent issue mutation checkout ownership", () => {
     }));
     expect(mockAccessService.decide).not.toHaveBeenCalledWith(expect.objectContaining({
       action: "issue:read",
+    }));
+  });
+
+  it("requires task mutation permission before requesting a dependency investigation", async () => {
+    const path = `/api/issues/${issueId}/dependency-investigation`;
+    const body = { idempotencyKey: "observed-diagnosis" };
+    expect((await request(createApp(peerActor())).post(path).send(body)).status).toBe(403);
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action !== "issue:mutate", action: input.action, reason: "test_gate", explanation: "Task is read-only.",
+    }));
+    expect((await request(createApp(boardActor())).post(path).send(body)).status).toBe(403);
+    expect(mockDependencyInvestigation).not.toHaveBeenCalled();
+
+    mockAccessService.decide.mockResolvedValue({ allowed: true, reason: "allow_test", explanation: "Allowed." });
+    mockDependencyInvestigation.mockResolvedValue({ accepted: false, message: "The task assignee changed." });
+    const stale = await request(createApp(boardActor())).post(path).send(body);
+    expect(stale.status, JSON.stringify(stale.body)).toBe(200);
+    expect(stale.body).toEqual({ accepted: false, message: "The task assignee changed." });
+    expect(mockDependencyInvestigation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId, issueId, actorId: "board-user", ...body,
     }));
   });
 

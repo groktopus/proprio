@@ -23,11 +23,21 @@ export type CrashPointDefinition = {
   invariants: readonly CrashPointInvariant[];
   /** What a run must go through first when one plain task does not reach the point. */
   prerequisite?: string;
+  /** This point needs a focused fixture beyond the default one-task suite. */
+  defaultSuite?: false;
 };
 
 export const CRASH_POINT_NAME_PATTERN = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.(before|after)_[a-z0-9_]+$/;
 
 export const CRASH_POINTS = {
+  "issue.dependency_diagnosis.after_claim_before_wake": {
+    description: "The parent dependency diagnosis claim is durable in activity_log; the keyed continuation wake has not been enqueued. Reconciliation must retry the same key and make one effective continuation.",
+    environments: ["local", "daytona"],
+    kinds: [],
+    invariants: ["I2", "I7"],
+    prerequisite: "an assigned parent with a required blocker that has no active execution or named wait",
+    defaultSuite: false,
+  },
   "remote_workspace.prepare.after_publish_before_provision": {
     description: "A run restored its remote workspace's saved version and published the root as its dirty epoch, with the unchanged baseline; no provisioning, runner command or agent process has started. Recovery must hand the workspace on at its saved version and keep the root, not abandon the epoch.",
     environments: ["daytona"],

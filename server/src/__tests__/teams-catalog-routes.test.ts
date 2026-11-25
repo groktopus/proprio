@@ -236,6 +236,7 @@ describe("teams catalog routes", () => {
       .post(`/api/companies/${companyId}/teams/catalog/ref/preview?ref=proprio%2Fbundled%2Fsoftware-development%2Fproduct-engineering`)
       .send({
         targetManagerSlug: "engineering-lead",
+        adapterOverrides: { ceo: { adapterType: "codex_local" } },
         sourcePolicy: { allowExternalSources: true },
       });
 
@@ -245,6 +246,7 @@ describe("teams catalog routes", () => {
       "proprio/bundled/software-development/product-engineering",
       expect.objectContaining({
         targetManagerSlug: "engineering-lead",
+        adapterOverrides: { ceo: { adapterType: "codex_local" } },
         sourcePolicy: { allowExternalSources: true },
         actor: expect.objectContaining({
           actorType: "user",

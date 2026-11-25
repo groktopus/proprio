@@ -30,7 +30,7 @@ import { dotRunnerBroker } from "../services/dot-runner-broker.js";
 import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { completeConnectionIntentSchema } from "@groktopus/shared";
-import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
+import { DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@groktopus/shared";
@@ -5969,13 +5969,22 @@ export function agentRoutes(
       return;
     }
     await assertCanResumeAgent(req, existing);
+    const expectedPauseReason = req.body?.expectedPauseReason;
+    if (expectedPauseReason !== undefined && expectedPauseReason !== "import") {
+      res.status(400).json({ error: "Unsupported resume precondition" });
+      return;
+    }
+    if (expectedPauseReason && existing.pauseReason !== expectedPauseReason) {
+      res.status(409).json({ error: "Agent pause state changed; reload before retrying" });
+      return;
+    }
     if (existing.orgChainHealth?.status === "invalid_org_chain") {
       res.status(409).json({
         error: existing.orgChainHealth?.repairGuidance ?? "Repair this agent's reporting chain before resuming it",
       });
       return;
     }
-    const agent = await svcLifecycle.resumeAgent(id);
+    const agent = await svcLifecycle.resumeAgent(id, expectedPauseReason ?? "user");
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
@@ -6233,6 +6242,12 @@ export function agentRoutes(
     source: HeartbeatSource | undefined;
     skippedResponse: (agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>, payload: Record<string, unknown> | null) => unknown | Promise<unknown>;
   };
+  const assertPublicWakeKey = (key: unknown) => {
+    if (typeof key === "string" && key.startsWith(DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX)) {
+      throw badRequest("Use the dependency investigation endpoint for a diagnosis request.");
+    }
+  };
+
   const handleWakeupRoute = async (
     req: Request,
     res: Response,
@@ -6426,6 +6441,7 @@ export function agentRoutes(
         ),
       );
     }
+    assertPublicWakeKey(req.body.idempotencyKey);
     const run = await heartbeat.wakeup(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
@@ -6582,6 +6598,7 @@ export function agentRoutes(
         : body.payload as Record<string, unknown>;
     }
     if (typeof body.idempotencyKey === "string" && body.idempotencyKey.length > 0) {
+      assertPublicWakeKey(body.idempotencyKey);
       wakeOpts.idempotencyKey = body.idempotencyKey;
     }
     const run = await heartbeat.wakeup(id, wakeOpts);

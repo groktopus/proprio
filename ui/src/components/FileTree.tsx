@@ -317,7 +317,7 @@ export function FileTree({
   }
 
   function handleRowKeyDown(event: KeyboardEvent<HTMLDivElement>, index: number, node: FileTreeNode) {
-    if (disabled) return;
+    if (disabled || event.target !== event.currentTarget) return;
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();
@@ -471,6 +471,7 @@ export function FileTree({
               </button>
             ) : <span className="size-4 shrink-0" aria-hidden="true" />)}
             {hasCheckbox ? (
+              // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The label preserves native checkbox activation and keeps it separate from the row click.
               <label className={cn("flex items-center", layout === "explorer" ? "size-4 shrink-0 justify-center" : "pl-2")} onClick={(event) => event.stopPropagation()}>
                 <input
                   type="checkbox"
