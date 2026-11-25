@@ -872,7 +872,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       {
         skillsHome: codexSkillsDir,
         skillsEntries: codexSkillEntries,
-        managedSkillEntries: runtimeSkillDigest && configuredHomeIsManaged
+        managedSkillEntries: runtimeSkillDigest && configuredHomeIsManaged && Array.isArray(config.proprioRuntimeSkills)
           ? [...codexSkillEntries, ...await readProprioRuntimeSkillEntries({}, __moduleDir)]
           : undefined,
         desiredSkillNames,
