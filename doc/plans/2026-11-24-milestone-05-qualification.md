@@ -268,6 +268,10 @@ deferred wake promotion still stalled with the single-connection setting.
 [Task-create transaction fix](https://github.com/groktopus/proprio/pull/393)
 [Wake delivery transaction fix](https://github.com/groktopus/proprio/pull/394)
 
+The hosted durable-work check passed on wake delivery head
+`f47472b3c18ea78a62cc82dfce9680ed39530157`.
+[Wake delivery CI](https://github.com/groktopus/proprio/actions/runs/45563179883)
+
 The updated migration replay test located the migration through the journal
 on both the retirement PR and its renumbered composition. It observed both
 calls waiting for the migration advisory lock before allowing either call
@@ -363,21 +367,32 @@ PostgreSQL and verifies that the original unresolved intent stays open.
 Six focused gateway tests and all 77 audit route and MCP Tasks tests
 passed on composed source `d87f64c97347ffa7db3dd8b744e62c63720b8f00`.
 The scoped server typecheck and generated OpenAPI check passed. Hosted
-Linux qualification for this revision is in progress.
-[Approved caller](https://github.com/groktopus/proprio/pull/403)
+Linux qualification passed all five cases on this source against
+`2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. Its retained report records zero
+observed data loss in active-run migration recovery.
 [Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45569138741)
+[Retained qualification report](https://github.com/groktopus/proprio/actions/runs/45569138741/artifacts/15002831958)
 
-The authenticated reconstruction passed on that revision with one database
-connection, Node 24.22.1, a local process adapter, and a synthetic loopback
-HTTP MCP target. The fixture used no model account. A separate company
+The final local review composition `9909f614fe3bc379c16507645229afce6fc667ec`
+passed nine focused gateway tests and the scoped server typecheck. It
+settles both approved and unapproved
+replacements blocked before dispatch. The no-approval regression verifies a
+failed invocation, its original idempotency key, one failure event and
+activity entry, and an open original intent with no new dispatch receipt.
+[Gateway review fixes](https://github.com/groktopus/proprio/pull/403)
+[Exact local review source](https://github.com/groktopus/proprio/commit/9909f614fe3bc379c16507645229afce6fc667ec)
+
+The authenticated reconstruction passed on the final local source with one
+database connection, Node 24.22.1, a local process adapter, and a synthetic
+loopback HTTP MCP target. The fixture used no model account. A separate company
 operator with audit access joined the evidence after recreating the controller
 against the same PostgreSQL database. These IDs refer to disposable data.
 
 | Case | Task | Run | Invocation | Action request | Observed outcome |
 | --- | --- | --- | --- | --- | --- |
-| Approved | `3ffed563-b44a-4ef7-9c15-5c6b52842b52` | `12f0526c-ac6b-4ebd-b062-69e3c585565b` | `40d6491f-bf45-4d9b-8c2c-2bfe598c81dd` | `d6a89dd0-b184-486c-964a-45c9a2fede68` | Success receipt and one target effect |
-| Denied | `f8f42113-8adf-479c-8854-374f1227e05c` | `3a91a4ae-2fab-4b47-993a-817b5c4d8ea4` | `0caea314-d1de-4375-ac8c-d25d3acf667a` | `a8fe4f10-8a17-42da-b515-08a80835e53d` | Denied with zero target effects |
-| Interrupted | `3d251cf3-6393-480b-a4bb-041e3deee5de` | `ae393db4-980c-471d-af5b-71547a312e10` | `e25f8731-5729-44ce-9d94-ceffcdcd7677` | `43d69fc6-2be9-40d8-9b95-ea0ee56eedbe` | Open intent and one durable target effect after the lost response |
+| Approved | `feff8024-1dce-48c8-b543-dc89b48c876f` | `fae362ef-1270-416a-9888-57d64691f77d` | `e57f2bf9-7f5e-468a-89c5-9d2c168d5353` | `b3a23b55-7b64-4965-9218-4d9d87f382c9` | Success receipt and one target effect |
+| Denied | `0b26d849-9ca2-4b5c-9339-a92b012745ff` | `b3382e10-6a0e-4482-8558-1aa1e87a6e52` | `b1d4114c-1cb8-4b81-9e6a-335d90dcdcb5` | `ef312478-0f31-4f72-81fd-3b573f4a85dd` | Denied with zero target effects |
+| Interrupted | `fc4fee6d-edcf-4c2f-b867-f4148d3556b9` | `20d2678d-cfcc-4e9b-861c-350ea142781f` | `327ca0bd-6bb4-442a-a2bb-96a152708552` | `62cf7a85-1737-44c3-affe-e17b858776e8` | Open intent and one durable target effect after the lost response |
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
