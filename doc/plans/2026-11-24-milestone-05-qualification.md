@@ -54,6 +54,25 @@ After the overlapping-export review changes, all 18 audit route tests passed
 again on composition `e575e1894a9e32e32fa75747b9b946c7aa87751e` with a
 single-connection default pool. [Reviewed export fixture](https://github.com/groktopus/proprio/pull/376#issuecomment-7150562031)
 
+
+The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
+disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
+All 112 tests passed across commentary delivery, durable receipt recovery,
+audit export, reconstruction and OpenAPI using Node 24.22.1 and isolated
+PostgreSQL. A broader native authority run identified a baseline test fixture
+that tried to insert a cross-company parent link. The fixture repair asserts the
+database rejects that link, then exercises the runner with valid records. The
+full 48-test native authority suite passed with this repair.
+[Adapter cleanup](https://github.com/groktopus/proprio/pull/373)
+[Commentary opt-in](https://github.com/groktopus/proprio/pull/352)
+[Continuation fixture repair](https://github.com/groktopus/proprio/pull/377)
+
+Disposable composition `d06aa5539146b225f7444ffe0c0c453afef91198`
+included current `main`, the milestone stack, and the two open test fixture
+repairs. All 230 tests passed across adapter utilities, native authority,
+commentary and receipt recovery on Node 24.22.1 with isolated PostgreSQL.
+[Snapshot order fixture repair](https://github.com/groktopus/proprio/pull/349)
+
 GitHub's Linux source qualification passed for reconstruction PR head
 `9ac8fffe7fed9114b04ded567802a6381790b0f8` with baseline `6e6ebf51`. It covered
 locked install, source and Runner builds, managed update and rollback, a fresh
@@ -114,10 +133,10 @@ After a base PR lands, check the next PR's comparison and verify its current
 head against `main` when retargeting it. Rebase stacked branches as needed to
 keep each remaining comparison limited to its own change.
 
-The full OpenAPI route inventory also depends on the existing member
-archive-preview fix. Include it before qualifying the API changes against
-`main`. The disposable composition `8554a986893ce0604a7370ec6913ef5df451c15d`
-combined the reviewed milestone stack with the prerequisite head `266e02f7`.
-All 56 OpenAPI tests, generated API consistency, and the archive-preview
-route's malformed-ID and missing-member checks passed.
+The member archive-preview fix passed hosted checks and merged to `main` as
+`37fc31e233d75442f783d9cf888cf250ec58bf16`. The earlier disposable
+composition `8554a986893ce0604a7370ec6913ef5df451c15d` included its source
+head and passed all 56 OpenAPI tests, generated API consistency, and the
+archive-preview route's malformed-ID and missing-member checks.
 [OpenAPI prerequisite](https://github.com/groktopus/proprio/pull/347)
+[Hosted smoke](https://github.com/groktopus/proprio/actions/runs/45531492632/job/138933277965)
