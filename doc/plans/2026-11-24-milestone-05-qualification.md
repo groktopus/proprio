@@ -78,9 +78,13 @@ retains earlier source revisions, disposable identifiers, and detailed checks.
    Rehearse each check in the milestone table on the selected deployment.
    Retain the artifact and observation window, and record the known-good
    revision and recovery outcome.
-4. Record engineering/QA, operating owner, documentation, governance, and
-   independent target review. The release maintainer records the go/no-go and
-   links the shipped output and observation result before closing the plan.
+4. During the agreed observation window, review evidence backlog, missing
+   provenance, authority decisions, and reconciliation outcomes. Publish the
+   coverage and its limits in the operator notes.
+5. Record engineering/QA, operating owner, documentation, governance, and
+   independent target review. The operating owner records remaining risks.
+   The release maintainer records the go/no-go and links the shipped output
+   and observation result before closing the plan.
 
 ## Lock and provenance hold
 
