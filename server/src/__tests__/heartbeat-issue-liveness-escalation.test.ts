@@ -574,6 +574,69 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       && wake.payload?.sourceRunId === sourceRun!.id)).toHaveLength(0);
   });
 
+  it("delivers a terminal tool action with one ordinary connection and retries without duplicate wakes", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db.insert(companies).values({ id: companyId, name: "Single pool review", issuePrefix });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Review Agent", role: "engineer", status: "idle", adapterType: "codex_local",
+      adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: false } }, permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Review an approved action", status: "in_review", priority: "medium",
+      assigneeAgentId: agentId, issueNumber: 1, identifier: `${issuePrefix}-1`,
+    });
+    const [interaction] = await db.insert(issueThreadInteractions).values({
+      companyId, issueId, kind: "request_confirmation", status: "accepted", createdByAgentId: agentId,
+      payload: { version: 1, prompt: "Run the tool?" }, result: { version: 1, outcome: "accepted" }, resolvedAt: new Date(),
+    }).returning();
+    const [invocation] = await db.insert(toolInvocations).values({
+      companyId, agentId, issueId, toolName: "create_issue", approvalState: "approved", status: "succeeded",
+    }).returning();
+    const [request] = await db.insert(toolActionRequests).values({
+      companyId, invocationId: invocation!.id, issueId, interactionId: interaction!.id, status: "executed",
+      canonicalArgumentsHash: "hash", canonicalArgumentsSummary: { type: "object" } as never,
+      requestedByAgentId: agentId, decidedByUserId: "reviewer", decidedAt: new Date(), resolvedAt: new Date(),
+    }).returning();
+    await db.insert(toolActionDeliveries).values({
+      actionRequestId: request!.id, companyId, issueId, interactionId: interaction!.id,
+    });
+
+    const singleConnectionDb = createDb(externalUrl ?? tempDb!.connectionString, { maxConnections: 1 });
+    try {
+      const wakeup = async (agentId: string, input: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]) => {
+        if (!input) throw new Error("tool action delivery did not request a wake");
+        const [wake] = await singleConnectionDb.insert(agentWakeupRequests).values({
+          companyId, agentId, source: "automation", reason: "issue_commented",
+          idempotencyKey: input.idempotencyKey ?? null, requestedByActorType: "user",
+          requestedByActorId: "reviewer", payload: input.payload ?? {},
+        }).onConflictDoNothing().returning();
+        return wake ?? null;
+      };
+      const delivery = toolActionDeliveryService(singleConnectionDb, { wakeup } as never);
+      expect(await delivery.deliver(request!.id)).toBe(true);
+      const [receipt] = await singleConnectionDb.select().from(toolActionDeliveries)
+        .where(eq(toolActionDeliveries.actionRequestId, request!.id));
+      expect(receipt?.deliveredAt).toBeInstanceOf(Date);
+      const wakes = await singleConnectionDb.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.idempotencyKey, `tool-action-response:${request!.id}`),
+      ));
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]?.payload?.toolActionRequestIds).toEqual([request!.id]);
+
+      expect(await delivery.deliver(request!.id)).toBe(false);
+      expect(await singleConnectionDb.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.idempotencyKey, `tool-action-response:${request!.id}`),
+      ))).toHaveLength(1);
+    } finally {
+      await singleConnectionDb.$client.end({ timeout: 1 });
+    }
+  });
+
   it.each(["undelivered", "delivered_with_queued_continuation", "delivered_with_listed_wake", "pending_card", "terminated_assignee", "delivered_and_consumed"] as const)(
     "reads the accepted tool review continuation as a review path only while it can still run (%s)",
     async (state) => {

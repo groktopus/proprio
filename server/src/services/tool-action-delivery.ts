@@ -21,6 +21,7 @@ import {
   toolActionDeliveries,
   toolConnections,
   toolApplications,
+  withDedicatedDbConnection,
   type Db,
 } from "@groktopus/db";
 import type { heartbeatService } from "./heartbeat.js";
@@ -42,7 +43,7 @@ export function toolActionDeliveryService(
   heartbeat: Pick<ReturnType<typeof heartbeatService>, "wakeup">,
 ) {
   async function deliver(actionRequestId: string) {
-    return db.transaction(async (tx) => {
+    return withDedicatedDbConnection(db, (deliveryDb) => deliveryDb.transaction(async (tx) => {
       const [source] = await tx
         .select()
         .from(toolActionDeliveries)
@@ -208,7 +209,7 @@ export function toolActionDeliveryService(
       const idempotencyKey = `tool-action-response:${first.request.id}`;
       const existing = async () =>
         (
-          await db
+          await tx
             .select({
               id: agentWakeupRequests.id,
               payload: agentWakeupRequests.payload,
@@ -359,7 +360,7 @@ export function toolActionDeliveryService(
         .set({ deliveredAt: new Date() })
         .where(inArray(toolActionDeliveries.actionRequestId, acknowledgedIds));
       return true;
-    });
+    }));
   }
   return {
     deliver,
