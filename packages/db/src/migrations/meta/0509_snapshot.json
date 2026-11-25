@@ -45979,7 +45979,7 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
-      "isRLSEnabled": false
+      "isRLSEnabled": true
     },
     "public.managed_audit_exports": {
       "name": "managed_audit_exports",

@@ -5,6 +5,7 @@ import { conflict, forbidden, HttpError, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
+import { isTransientLockContention, postgresErrorCode } from "./transient-lock-contention.js";
 
 const PAGE_SIZE = 200;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -208,9 +209,13 @@ export async function readManagedAuditExportPage(
           itemCount: events.length,
           createdAt: sql`clock_timestamp()`,
         });
-      } catch {
-        // Do not attach the driver error: its parameters include private scope IDs.
-        throw new HttpError(500, "Managed audit page access could not be recorded");
+      } catch (error) {
+        // The driver error contains private metadata. Preserve only the
+        // SQLSTATE used to decide whether the caller can retry unchanged.
+        const code = postgresErrorCode(error);
+        const failure = new HttpError(500, "Managed audit page access could not be recorded");
+        if (code === "57014" || isTransientLockContention(error)) throw Object.assign(failure, { code });
+        throw failure;
       }
     }
     return {

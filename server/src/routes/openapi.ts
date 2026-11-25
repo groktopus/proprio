@@ -1476,6 +1476,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/workload-identity/rotation",
   "POST /api/companies/{companyId}/audit/managed-exports",
   "GET /api/companies/{companyId}/audit/managed-exports/{exportId}",
+  "HEAD /api/companies/{companyId}/audit/managed-exports/{exportId}",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding/greeting",
   "PATCH /api/agents/{id}/permission-grants",
@@ -6486,18 +6487,18 @@ registry.registerPath({
   path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
   tags: ["activity"],
   summary: "Validate a managed audit export page without releasing it",
-  description: "Returns the same status as GET without a body or page-access record.",
+  description: "Validates the snapshot and cursor without a response body or page-access record.",
   request: {
     params: managedAuditExportParamsSchema,
     query: managedAuditExportPageQuerySchema,
   },
   responses: {
     200: { description: "The managed audit page is available; no body is returned" },
-    400: { description: "Invalid cursor or identifiers", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export requires reconciliation", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    400: { description: "Invalid cursor or identifiers" },
+    401: { description: "Unauthorized" },
+    403: { description: "Forbidden" },
+    404: { description: "Export not found" },
+    409: { description: "Export requires reconciliation" },
   },
 });
 

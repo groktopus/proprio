@@ -53,8 +53,10 @@ reconcile before opening a new export. The server commits an access record
 before releasing each successful page, including a replay. The record holds the
 company, operator, export ID, page offset, item count and access time. Storage
 operators can review it by company and export ID in
-`managed_audit_export_page_access`. Keep access to this table restricted because
-offsets and counts can disclose private evidence. The record survives snapshot
+`managed_audit_export_page_access` through the authorized database operator
+role. The migration revokes Data API role grants and enables row-level
+security. The table owner retains access. Offsets and counts can disclose
+private evidence. The record survives snapshot
 expiry. The storage owner applies the deployment's audit retention policy to
 these records and any database backups that contain them.
 

@@ -327,6 +327,10 @@ export function activityRoutes(db: Db) {
     if (!query.success) throw badRequest("Invalid managed audit export cursor");
     res.set("Cache-Control", "no-store");
     const page = await readManagedAuditExportPage(db, scope, params.data.exportId, query.data.cursor, recordAccess);
+    if (!recordAccess) {
+      res.status(200).end();
+      return;
+    }
     // Bypass Express freshness handling: an authenticated GET must return the
     // body whose successful release is represented by the access receipt.
     res.type("application/json").status(200).end(JSON.stringify(page));

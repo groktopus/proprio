@@ -1,3 +1,4 @@
+-- proprio:migration-compat online_compatible: The privilege statements affect only the table created by this migration. The previous release does not read or write it.
 CREATE TABLE "managed_audit_export_page_access" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"company_id" uuid NOT NULL,

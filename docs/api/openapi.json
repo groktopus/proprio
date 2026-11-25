@@ -62784,155 +62784,25 @@
           "activity"
         ],
         "summary": "Validate a managed audit export page without releasing it",
-        "description": "Returns the same status as GET without a body or page-access record.",
+        "description": "Validates the snapshot and cursor without a response body or page-access record.",
         "responses": {
           "200": {
             "description": "The managed audit page is available; no body is returned"
           },
           "400": {
-            "description": "Invalid cursor or identifiers",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": "object",
-                      "properties": {
-                        "reasonCode": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "reasonCode"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "error"
-                  ]
-                }
-              }
-            }
+            "description": "Invalid cursor or identifiers"
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": "object",
-                      "properties": {
-                        "reasonCode": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "reasonCode"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "error"
-                  ]
-                }
-              }
-            }
+            "description": "Unauthorized"
           },
           "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": "object",
-                      "properties": {
-                        "reasonCode": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "reasonCode"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "error"
-                  ]
-                }
-              }
-            }
+            "description": "Forbidden"
           },
           "404": {
-            "description": "Export not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": "object",
-                      "properties": {
-                        "reasonCode": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "reasonCode"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "error"
-                  ]
-                }
-              }
-            }
+            "description": "Export not found"
           },
           "409": {
-            "description": "Export requires reconciliation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string"
-                    },
-                    "details": {
-                      "type": "object",
-                      "properties": {
-                        "reasonCode": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "reasonCode"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "error"
-                  ]
-                }
-              }
-            }
+            "description": "Export requires reconciliation"
           }
         },
         "parameters": [
@@ -62968,13 +62838,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       },
       "get": {
