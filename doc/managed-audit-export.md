@@ -29,8 +29,8 @@ Keep this boundary outside the database rollback domain.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
 3. Persist each page's event IDs under this export ID, even if all its payloads
    were already archived. This preserves membership for the snapshot count and
-   watermark. Deduplicate archived events by `(source, event ID)`; event IDs can
-   remain stable across a restore and source-epoch rotation. Bind the export ID
+   watermark. Deduplicate archived events by `(source, event ID)`, which remains
+   stable for events carried across a restore and source-epoch rotation. Bind the export ID
    and resume checkpoint to the source epoch. Persist the page's payloads and
    IDs before advancing the checkpoint to the returned `nextCursor`. If a crash
    occurs before advancing it, replay the same page idempotently. A repeated
@@ -59,20 +59,18 @@ receipts to establish what a managed action changed.
 For periodic collection, re-export a bounded overlapping lookback using a new
 export ID. Set `from` to the latest of the desired lookback start,
 `PROPRIO_MANAGED_AUDIT_CAPTURE_FROM`, and `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER`
-when configured. Create an export only when that `from` precedes `to`; otherwise
-record the uncollected interval for later reconciliation. Keep the source epoch,
+when configured. Create an export only when that `from` precedes `to`. Record any
+portion of the desired interval left outside the request for reconciliation.
+Keep the source epoch,
 export ID, bounds, count, watermark, page membership and cursor together. If a
 snapshot expires, reconcile its checkpoint before opening a fresh export.
 
-Do not treat a completed snapshot as proof that its time interval is final: a
-covered gateway transaction can commit after the snapshot was created while
-carrying an earlier `occurredAt`, and an adjacent interval will exclude it. A
-fresh overlapping snapshot can find it while the source row remains available.
-The watermark proves membership and delivery of one frozen snapshot only; it is
-not a commit-ordered high-water mark and gives no upper bound on late commits.
-Overlap reduces this exposure but does not guarantee completeness for arbitrarily
-delayed transactions. Reconcile affected intervals against source or target
-evidence when completeness is required.
+A covered gateway transaction can commit after the snapshot was created while
+carrying an earlier `occurredAt`. An adjacent interval will exclude it. A fresh
+overlapping snapshot can find it while the source row remains available. The
+watermark verifies membership and delivery for one frozen snapshot. If a
+transaction commits after its event time has passed out of the lookback,
+reconcile the affected interval against source or target evidence.
 
 ## Restore qualification and limits
 
