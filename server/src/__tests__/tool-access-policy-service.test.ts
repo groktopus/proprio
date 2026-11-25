@@ -9,6 +9,7 @@ import {
   createDb,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
   projects,
   toolAccessAuditEvents,
@@ -29,7 +30,8 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { toolAccessPolicyService } from "../services/tool-access-policy.js";
+import { mergeDelegatedPolicyEvaluations, toolAccessPolicyService } from "../services/tool-access-policy.js";
+import { toToolPolicyRunProvenance } from "../services/tool-access/activity/projection.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool-gateway.js";
 import { canonicalToolArguments, signToolArguments } from "../services/tool-content-guards.js";
@@ -225,6 +227,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(managedAuditEvents);
     await db.delete(toolRateLimitCounters);
     await db.delete(toolActionRequests);
     await db.delete(toolInvocations);
@@ -812,6 +815,8 @@ describeEmbeddedPostgres("tool access policy service", () => {
   it("records approval-required invocations and action requests with matched policy IDs", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
+    const issue = await createIssue(db, company.id);
+    const run = await createRun(db, company.id, agent.id, { issueId: issue.id });
     const { connection } = await createTool(db, company.id);
     const policy = await db.insert(toolPolicies).values({
       companyId: company.id,
@@ -823,6 +828,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const input = {
       companyId: company.id,
       actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id, issueId: issue.id },
       request: {
         connectionId: connection.id,
         toolName: "send_email",
@@ -831,10 +837,11 @@ describeEmbeddedPostgres("tool access policy service", () => {
       },
     };
 
-    const decision = await toolAccessPolicyService(db).decide(input);
+    const decision = await toolAccessPolicyService(db).decide(input, { capturePolicyProvenance: true });
     const recorded = await toolAccessPolicyService(db).recordInvocation(input, decision);
     await toolAccessPolicyService(db).writeAudit(input, decision);
     const [callEvent] = await db.select().from(toolCallEvents);
+    const [managedEvent] = await db.select().from(managedAuditEvents);
 
     expect(decision).toMatchObject({
       allowed: false,
@@ -852,6 +859,9 @@ describeEmbeddedPostgres("tool access policy service", () => {
       status: "awaiting_approval",
       matchedPolicyIds: [policy.id],
     });
+    expect(recorded.invocation.policyExplanation?.explicitMatchedPolicies).toEqual([
+      expect.objectContaining({ policyId: policy.id, principalRole: "actor", selected: true }),
+    ]);
     expect(callEvent).toMatchObject({
       eventType: "policy_decision",
       outcome: "pending",
@@ -859,6 +869,100 @@ describeEmbeddedPostgres("tool access policy service", () => {
       matchedPolicyIds: [policy.id],
       requestSummary: expect.objectContaining({ summary: expect.any(String) }),
     });
+    expect(managedEvent).toMatchObject({
+      companyId: company.id,
+      source: "tool_gateway",
+      schemaVersion: 1,
+      eventType: "invocation_decision_recorded",
+      phase: "policy_decision",
+      occurredAt: recorded.invocation.createdAt,
+      runId: run.id,
+      taskId: issue.id,
+      invocationId: recorded.invocation.id,
+      requestId: recorded.actionRequest!.id,
+      connectionId: connection.id,
+      actorType: "agent",
+      actorId: agent.id,
+      decision: "require_approval",
+      status: "awaiting_approval",
+      reasonCode: "requires_approval_policy",
+    });
+    expect(JSON.stringify(managedEvent)).not.toContain("ship it");
+    expect(managedEvent).not.toHaveProperty("argumentsSummary");
+    expect(callEvent?.metadata).not.toHaveProperty("policyExplanation.explicitMatchedPolicies");
+    expect(JSON.stringify(callEvent.metadata)).not.toContain("explicitMatchedPolicies");
+    expect(JSON.stringify(callEvent.metadata)).not.toContain("revisionFingerprint");
+  });
+
+  it("keeps the original matched-policy snapshot through an admission recheck and run read", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const run = await createRun(db, company.id, agent.id);
+    const { connection, catalogEntry } = await createTool(db, company.id);
+    const policy = await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review email sends",
+      description: "This description must not be copied into policy history.",
+      policyType: "require_approval",
+      priority: 37,
+      selectors: { toolName: "send_email" },
+      conditions: { arguments: { fieldEquals: { body: "SENSITIVE_RAW_ARGUMENT" } } },
+    }).returning().then(rows => rows[0]!);
+    const laterCandidate = await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Later matching candidate",
+      policyType: "allow",
+      priority: 99,
+      selectors: { toolName: "send_email" },
+    }).returning().then(rows => rows[0]!);
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id },
+      request: {
+        connectionId: connection.id,
+        catalogEntryId: catalogEntry.id,
+        toolName: "send_email",
+        arguments: { body: "SENSITIVE_RAW_ARGUMENT" },
+        sideEffecting: true,
+      },
+    };
+    const policyService = toolAccessPolicyService(db);
+    const originalDecision = await policyService.decide(input, { capturePolicyProvenance: true });
+    const originalSnapshot = (originalDecision.policyExplanation?.explicitMatchedPolicies as Array<{ revisionFingerprint: string }> | undefined)?.[0];
+    const repeatedDecision = await policyService.decide(input, { capturePolicyProvenance: true });
+    expect((repeatedDecision.policyExplanation?.explicitMatchedPolicies as Array<{ revisionFingerprint: string }> | undefined)?.[0]?.revisionFingerprint)
+      .toBe(originalSnapshot?.revisionFingerprint);
+    const recorded = await policyService.recordInvocation(input, originalDecision);
+    await db.update(toolInvocations).set({ approvalState: "approved" })
+      .where(eq(toolInvocations.id, recorded.invocation.id));
+    await db.update(toolPolicies).set({ name: "Edited policy", policyType: "allow", updatedAt: new Date(Date.now() + 1_000) })
+      .where(eq(toolPolicies.id, policy.id));
+
+    const recheck = await policyService.admitInvocation(input, recorded.invocation.id);
+    expect(recheck).toMatchObject({ decision: "allow" });
+    expect(recheck.policyExplanation?.explicitMatchedPolicies).toBeUndefined();
+
+    const runLookup = await toolAccessService(db).getRunDecisionLookup(company.id, run.id);
+    const provenance = runLookup.decisions[0]!.policyProvenance;
+    expect(provenance).toMatchObject({
+      captureStatus: "recorded",
+      policies: [expect.objectContaining({
+        policyId: policy.id,
+        policyType: "require_approval",
+        priority: 37,
+        revisionUpdatedAt: expect.any(String),
+        revisionFingerprint: expect.any(String),
+        decisionReason: "requires_approval_policy",
+        principalRole: "actor",
+        selected: true,
+      })],
+    });
+    expect(provenance.policies.map(snapshot => snapshot.policyId)).not.toContain(laterCandidate.id);
+    expect(JSON.stringify(provenance)).not.toContain("SENSITIVE_RAW_ARGUMENT");
+    expect(JSON.stringify(provenance)).not.toContain("must not be copied");
+    expect(JSON.stringify(provenance)).not.toContain("Review email sends");
+    expect(JSON.stringify(provenance)).not.toContain("send_email");
   });
 
   it("replays side-effecting calls with the same idempotency key instead of creating a new invocation", async () => {
@@ -885,6 +989,41 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(first.replayed).toBe(false);
     expect(replay.replayed).toBe(true);
     expect(replay.invocation.id).toBe(first.invocation.id);
+    expect(await db.select().from(managedAuditEvents)).toHaveLength(1);
+  });
+
+  it("rolls back invocation and approval request if minimized capture fails", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { connection } = await createTool(db, company.id);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review writes",
+      policyType: "require_approval",
+      selectors: { toolName: "send_email" },
+    });
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      request: { connectionId: connection.id, toolName: "send_email", arguments: { body: "private payload" } },
+    };
+    const decision = await toolAccessPolicyService(db).decide(input);
+    const suffix = randomUUID().replaceAll("-", "");
+    const functionName = `managed_audit_capture_failure_${suffix}`;
+    const triggerName = `managed_audit_capture_failure_${suffix}`;
+    await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'managed audit capture fault'; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`));
+    try {
+      await expect(toolAccessPolicyService(db).recordInvocation(input, decision)).rejects.toThrow(/managed_audit_events/);
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(0);
+      expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+      await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+    }
   });
 
   it("derives a canonical idempotency key for side-effecting calls without caller-supplied keys", async () => {
@@ -1469,9 +1608,13 @@ describeEmbeddedPostgres("tool access policy service", () => {
       priority: 2,
     }).returning();
 
-    const redactDecision = await toolAccessPolicyService(db).decide(sendEmailDecisionInput(company, agent, connection, catalogEntry));
+    const service = toolAccessPolicyService(db);
+    const input = sendEmailDecisionInput(company, agent, connection, catalogEntry);
+    const redactDecision = await service.decide(input, { capturePolicyProvenance: true });
+    const redactInvocation = await service.recordInvocation(input, redactDecision);
     await db.update(toolPolicies).set({ enabled: false }).where(eq(toolPolicies.id, redactPolicy!.id));
-    const validateDecision = await toolAccessPolicyService(db).decide(sendEmailDecisionInput(company, agent, connection, catalogEntry));
+    const validateDecision = await service.decide(input, { capturePolicyProvenance: true });
+    const validateInvocation = await service.recordInvocation(input, validateDecision);
 
     expect(redactDecision).toMatchObject({
       allowed: false,
@@ -1485,6 +1628,18 @@ describeEmbeddedPostgres("tool access policy service", () => {
       reasonCode: "deny_policy_block",
       matchedPolicyIds: [validatePolicy!.id],
     });
+    expect(toToolPolicyRunProvenance(redactInvocation.invocation).policies[0]).toMatchObject({
+      policyId: redactPolicy!.id, policyType: "redact", decisionReason: "deny_policy_block",
+    });
+    expect(toToolPolicyRunProvenance(validateInvocation.invocation).policies[0]).toMatchObject({
+      policyId: validatePolicy!.id, policyType: "validate", decisionReason: "deny_policy_block",
+    });
+    const delegated = mergeDelegatedPolicyEvaluations({ chosen: validateDecision, caller: redactDecision,
+      target: validateDecision, selectedRole: "caller" });
+    expect(delegated.policyExplanation?.explicitMatchedPolicies).toEqual(expect.arrayContaining([
+      expect.objectContaining({ policyId: redactPolicy!.id, principalRole: "caller", selected: true }),
+      expect.objectContaining({ policyId: validatePolicy!.id, principalRole: "target", selected: false }),
+    ]));
   });
 
   it("fails closed for legacy condition-bearing policies", async () => {
@@ -1590,10 +1745,10 @@ describeEmbeddedPostgres("tool access policy service", () => {
         batchApproval: { enabled: true, maxBatchSize: 5, windowSeconds: 3600 },
       },
     });
-    const decision = await toolAccessPolicyService(db).decide({
-      ...first.decisionInput,
-      consumeRateLimit: true,
-    });
+    const service = toolAccessPolicyService(db);
+    const decisionInput = { ...first.decisionInput, consumeRateLimit: true };
+    const decision = await service.decide(decisionInput, { capturePolicyProvenance: true });
+    const repeatDecision = await service.decide(decisionInput, { capturePolicyProvenance: true });
     const [updatedRule] = await db.select().from(toolPolicies).where(eq(toolPolicies.id, trustRule.id));
     const trustConfig = updatedRule.config as { trustRule?: { hitCount?: number; lastHitAt?: string | null } };
     const trustEvents = await db.select().from(toolCallEvents);
@@ -1615,8 +1770,13 @@ describeEmbeddedPostgres("tool access policy service", () => {
       reasonCode: "allow_trust_rule",
       matchedPolicyIds: [trustRule.id],
     });
-    expect(trustConfig.trustRule?.hitCount).toBe(1);
+    expect(trustConfig.trustRule?.hitCount).toBe(2);
     expect(trustConfig.trustRule?.lastHitAt).toEqual(expect.any(String));
+    const firstSnapshot = (decision.policyExplanation?.explicitMatchedPolicies as Array<Record<string, unknown>>)[0];
+    const repeatSnapshot = (repeatDecision.policyExplanation?.explicitMatchedPolicies as Array<Record<string, unknown>>)[0];
+    expect(firstSnapshot).toMatchObject({ policyId: trustRule.id, decisionReason: "allow_trust_rule", principalRole: "actor", selected: true });
+    expect(repeatSnapshot?.revisionFingerprint).toBe(firstSnapshot?.revisionFingerprint);
+    expect(repeatSnapshot?.revisionUpdatedAt).toBe(firstSnapshot?.revisionUpdatedAt);
     expect(trustEvents.some((event) => event.eventType === "trust_rule_created")).toBe(true);
     expect(trustEvents.some((event) => event.eventType === "trust_rule_used")).toBe(true);
   });

@@ -1,5 +1,5 @@
 import type { ConnectionManagementContext } from "./connection-management.js";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { boundRunIssueIdSql } from "./run-task-binding.js";
 import type { ToolApprovalClaim } from "./tool-approval-execution.js";
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
@@ -8,6 +8,7 @@ import {
   agents,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
   projects,
   routines,
@@ -48,6 +49,7 @@ import type {
 } from "@groktopus/shared";
 import { toolPolicyConditionsSchema } from "@groktopus/shared";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
+import { resolveDecisionSigningSecret } from "./decision-signing.js";
 import {
   effectiveToolProfileBindings,
   isConnectionAccessProfile,
@@ -62,6 +64,7 @@ import {
   type CompiledPolicySelector,
   type PolicySelectorIndex,
 } from "./tool-access/policy-selector-index.js";
+import { isRecord } from "./tool-access/records.js";
 
 class RejectedInvocationAdmission extends Error {
   constructor(readonly decision: ToolAccessDecision) {
@@ -131,10 +134,6 @@ const SENSITIVE_KEY_RE =
   /(^|[_-])(api[_-]?key|authorization|bearer|client[_-]?secret|cookie|credential|jwt|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|token)($|[_-])/i;
 const SECRET_VALUE_RE = /\b(sk-[a-z0-9_-]{12,}|ghp_[a-z0-9_]{12,}|xox[baprs]-[a-z0-9-]{12,}|bearer\s+[a-z0-9._-]{12,})\b/i;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
 function nonBlankString(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -164,6 +163,30 @@ export type ToolAccessDecisionCache = Map<string, Promise<unknown>>;
 
 export function createToolAccessDecisionCache(): ToolAccessDecisionCache {
   return new Map();
+}
+
+/** Add roles to snapshots only when a delegated call is being recorded. */
+export function mergeDelegatedPolicyEvaluations(input: {
+  chosen: ToolAccessDecision;
+  caller: ToolAccessDecision | null;
+  target: ToolAccessDecision;
+  selectedRole: "caller" | "target";
+}): ToolAccessDecision {
+  const evaluations = [
+    ...(input.caller ? [{ role: "caller" as const, decision: input.caller }] : []),
+    { role: "target" as const, decision: input.target },
+  ];
+  const snapshots = evaluations.flatMap(({ role, decision }) => {
+    const values = decision.policyExplanation?.explicitMatchedPolicies;
+    if (!Array.isArray(values)) return [];
+    return values.filter(isRecord).map(value => ({ ...value, principalRole: role,
+      selected: role === input.selectedRole }));
+  });
+  if (!snapshots.length) return input.chosen;
+  return { ...input.chosen, policyExplanation: {
+    ...input.chosen.policyExplanation,
+    explicitMatchedPolicies: snapshots,
+  } };
 }
 
 function cachedRead<T>(
@@ -219,6 +242,12 @@ function isoDateOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function policyExplanationForAudit(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const { explicitMatchedPolicies: _evaluationSnapshots, ...publicExplanation } = value;
+  return publicExplanation;
 }
 
 function policyConfig(policy: typeof toolPolicies.$inferSelect): TrustRuleConfig {
@@ -332,6 +361,39 @@ function auditOutcome(accessDecision: ToolAccessDecision): "pending" | "success"
   if (accessDecision.decision === "require_approval") return "pending";
   if (accessDecision.decision === "defer_runtime") return "timeout";
   return "denied";
+}
+
+function policyEvaluationSnapshot(
+  policy: typeof toolPolicies.$inferSelect,
+  decisionReason: string,
+  signingSecret: string,
+) {
+  const revisionUpdatedAt = policy.updatedAt.toISOString();
+  const config = policyConfig(policy);
+  const trustRule = policy.policyType === "trust_rule" && isRecord(config.trustRule)
+    ? Object.fromEntries(Object.entries(config.trustRule).filter(([key]) => key !== "hitCount" && key !== "lastHitAt"))
+    : config.trustRule;
+  const revision = stableStringify({
+    policyId: policy.id,
+    policyType: policy.policyType,
+    priority: policy.priority,
+    enabled: policy.enabled,
+    selectors: policy.selectors,
+    conditions: policy.conditions,
+    config: policy.policyType === "trust_rule" ? { ...config, trustRule } : policy.config,
+  });
+  return {
+    policyId: policy.id,
+    policyType: policy.policyType,
+    priority: policy.priority,
+    revisionUpdatedAt,
+    revisionFingerprint: createHmac("sha256", signingSecret)
+      .update("tool-policy-revision-v1:").update(revision).digest("hex"),
+    decisionReason,
+    evaluatedAt: new Date().toISOString(),
+    principalRole: "actor" as const,
+    selected: false,
+  };
 }
 
 function summarizeAndRedact(value: unknown, normalizeSensitiveKeys = true): RedactionResult {
@@ -1426,7 +1488,8 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     };
     await db
       .update(toolPolicies)
-      .set({ config: { ...config, trustRule: nextRule }, updatedAt: now })
+      // Usage counters are operational bookkeeping, not a policy revision.
+      .set({ config: { ...config, trustRule: nextRule } })
       .where(eq(toolPolicies.id, policy.id));
     await db.insert(toolAccessAuditEvents).values({
       companyId: ctx.companyId,
@@ -1581,18 +1644,21 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
    */
   async function decide(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision } = {},
+    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision; capturePolicyProvenance?: boolean } = {},
   ): Promise<ToolAccessDecision> {
     const consumedRateAdmissions: ConsumedRateAdmission[] = [];
     const result = await decideInternal(input, options, consumedRateAdmissions);
-    return consumedRateAdmissions.length ? { ...result,
-      policyExplanation: { ...result.policyExplanation, consumedRateAdmissions },
+    const withProvenance = options.capturePolicyProvenance === true ? { ...result,
+      policyExplanation: { ...result.policyExplanation, explicitMatchedPolicies: result.policyExplanation?.explicitMatchedPolicies ?? [] },
     } : result;
+    return consumedRateAdmissions.length ? { ...withProvenance,
+      policyExplanation: { ...withProvenance.policyExplanation, consumedRateAdmissions },
+    } : withProvenance;
   }
 
   async function decideInternal(
     input: ToolAccessDecisionInput,
-    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision },
+    options: { cache?: ToolAccessDecisionCache; admittedInvocationId?: string; admittedPreviewHash?: string; sharedRateDecision?: ToolAccessDecision; capturePolicyProvenance?: boolean },
     consumedRateAdmissions: ConsumedRateAdmission[],
   ): Promise<ToolAccessDecision> {
     // A decision that consumes a rate limit can also record a trust-rule hit
@@ -1627,13 +1693,39 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     const enabledPolicies = await cachedRead(cache, `enabled-policies:${ctx.companyId}`, async () => indexEnabledToolPolicies(
       await db.select().from(toolPolicies).where(and(eq(toolPolicies.companyId, ctx.companyId), eq(toolPolicies.enabled, true))).orderBy(asc(toolPolicies.priority), asc(toolPolicies.createdAt))));
     const policyMatch = matchEnabledToolPolicies(enabledPolicies, ctx);
+    const ratePoliciesEvaluated = new Set<string>();
+    const policyDecision = (
+      kind: ToolPolicyDecision,
+      reasonCode: ToolAccessReasonCode,
+      explanation: string,
+      matchedPolicyIds: string[],
+      extra: Partial<ToolAccessDecision> = {},
+    ) => {
+      const decisiveIds = new Set(matchedPolicyIds);
+      const policiesForSnapshot = options.capturePolicyProvenance === true
+        ? ("unsupportedConditions" in policyMatch ? [policyMatch.unsupportedConditions] : policyMatch.matching)
+          .filter(({ policy }) => decisiveIds.has(policy.id) || ratePoliciesEvaluated.has(policy.id))
+        : null;
+      const policyProvenanceSecret = policiesForSnapshot?.length ? resolveDecisionSigningSecret() : null;
+      const explicitMatchedPolicies = policiesForSnapshot?.map(({ policy }) => ({
+        ...policyEvaluationSnapshot(policy,
+          decisiveIds.has(policy.id) ? reasonCode : "rate_limit_enforced", policyProvenanceSecret!),
+        selected: decisiveIds.has(policy.id),
+      })) ?? null;
+      return decision(kind, reasonCode, explanation, effectiveProfileIds, matchedPolicyIds, {
+        ...extra,
+        ...(explicitMatchedPolicies ? { policyExplanation: {
+          ...(isRecord(extra.policyExplanation) ? extra.policyExplanation : {}),
+          explicitMatchedPolicies,
+        } } : {}),
+      });
+    };
     if ("unsupportedConditions" in policyMatch) {
       const { policy, issues } = policyMatch.unsupportedConditions;
-      return decision(
+      return policyDecision(
         "deny",
         "deny_policy_block",
         "Tool access denied because a matching policy uses unsupported runtime conditions.",
-        effectiveProfileIds,
         [policy.id],
         {
           redactionPlan: redaction.redactionPlan,
@@ -1656,29 +1748,28 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         conditionsMatched: conditionEvaluation.matchedGroups,
       };
       if (unsupportedRuntimePolicyType(policy.policyType)) {
-        return decision(
+        return policyDecision(
           "deny",
           "deny_policy_block",
           "Tool access denied because a matching policy uses unsupported runtime semantics.",
-          effectiveProfileIds,
           [policy.id],
           { redactionPlan: redaction.redactionPlan, policyExplanation },
         );
       }
       if (policy.policyType === "block") {
-        return decision("deny", "deny_policy_block", policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("deny", "deny_policy_block", policy.description ?? "Tool access is blocked by policy.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "rate_limit") {
         if (!rateLimitRule(policy)) {
-          return decision(
+          return policyDecision(
             "deny",
             "deny_policy_block",
             "Tool access denied because a matching rate-limit policy has invalid runtime config.",
-            effectiveProfileIds,
             [policy.id],
             { redactionPlan: redaction.redactionPlan, policyExplanation },
           );
         }
+        ratePoliciesEvaluated.add(policy.id);
         const versionHash = ratePolicyVersionHash(policy);
         if (admittedRates?.some(admission => admission.policyId === policy.id && admission.versionHash === versionHash)) continue;
         // Paired caller/target checks for one delegated test share a slot only
@@ -1692,7 +1783,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         }
         const state = await enforceRateLimit(policy, ctx, input.consumeRateLimit === true);
         if (state?.limited) {
-          return decision("rate_limited", "rate_limited", "Tool access rate limit exceeded.", effectiveProfileIds, [policy.id], { rateLimitState: state, redactionPlan: redaction.redactionPlan, policyExplanation });
+          return policyDecision("rate_limited", "rate_limited", "Tool access rate limit exceeded.", [policy.id], { rateLimitState: state, redactionPlan: redaction.redactionPlan, policyExplanation });
         }
         if (state && input.consumeRateLimit === true) consumedRateAdmissions.push({ policyId: policy.id, versionHash, bucketKey: state.bucketKey });
         continue;
@@ -1703,14 +1794,13 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         if (!argumentFiltersMatch(rule.argumentFilters, ctx)) continue;
         // Remembered permissions cannot override an explicit block. Preserve
         // priority semantics for ordinary allow/require-approval policies.
-        if (explicitBlock) return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
+        if (explicitBlock) return policyDecision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
 
         if (trustRuleNeedsReview(policy, ctx)) {
-          return decision(
+          return policyDecision(
             "require_approval",
             "requires_review_changed_tool",
             "Tool definition changed or was quarantined after this trust rule was created; review is required.",
-            effectiveProfileIds,
             [policy.id],
             { redactionPlan: redaction.redactionPlan, policyExplanation },
           );
@@ -1718,19 +1808,19 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         if (input.consumeRateLimit === true && !options.admittedInvocationId) {
           await recordTrustRuleHit(policy, ctx, redaction);
         }
-        return decision("allow", "allow_trust_rule", policy.description ?? "Tool access allowed by trust rule.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("allow", "allow_trust_rule", policy.description ?? "Tool access allowed by trust rule.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "require_approval") {
         // The connection's Ask first control restricts an existing action grant;
         // it must never grant access to agents outside that connection's profile.
         if (["app_gallery_finish", "connection_intent"].includes(String(policy.config?.source)) && !permittedByProfile) continue;
         if (policy.config?.source === "connection_intent" && explicitBlock) {
-          return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
+          return policyDecision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", [explicitBlock.policy.id], { redactionPlan: redaction.redactionPlan });
         }
-        return decision("require_approval", "requires_approval_policy", policy.description ?? "Tool access requires approval.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("require_approval", "requires_approval_policy", policy.description ?? "Tool access requires approval.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
       if (policy.policyType === "allow") {
-        return decision("allow", "allow_policy", "Tool access allowed by policy.", effectiveProfileIds, [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
+        return policyDecision("allow", "allow_policy", "Tool access allowed by policy.", [policy.id], { redactionPlan: redaction.redactionPlan, policyExplanation });
       }
     }
     // A connection's profile decides which of its actions agents may call. An
@@ -1746,7 +1836,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       || profileState.entries.some((entry) => entry.connectionId === ctx.connectionId || profileEntryMatches(entry, ctx))
     );
     if (await explicitGrant(ctx, cache, { toolTargetedOnly: governedByConnectionProfile })) {
-      return decision("allow", "allow_explicit_grant", "Tool access allowed by explicit grant.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+      return policyDecision("allow", "allow_explicit_grant", "Tool access allowed by explicit grant.", [], { redactionPlan: redaction.redactionPlan });
     }
 
     const entriesByProfile = new Map<string, Array<typeof toolProfileEntries.$inferSelect>>();
@@ -1760,11 +1850,11 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       const matchingEntries = entries.filter((entry) => profileEntryMatches(entry, ctx));
       if (matchingEntries.some((entry) => entry.effect === "exclude")) continue;
       if (profile.defaultAction === "allow" || matchingEntries.some((entry) => entry.effect === "include")) {
-        return decision("allow", "allow_profile", "Tool access allowed by effective profile.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+        return policyDecision("allow", "allow_profile", "Tool access allowed by effective profile.", [], { redactionPlan: redaction.redactionPlan });
       }
     }
 
-    return decision("deny", "deny_default", "No effective tool profile, grant, or allow policy permits this call.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+    return policyDecision("deny", "deny_default", "No effective tool profile, grant, or allow policy permits this call.", [], { redactionPlan: redaction.redactionPlan });
   }
 
   async function writeAudit(
@@ -1817,7 +1907,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           riskLevel: ctx.riskLevel,
           argumentsSummary: redaction.summary,
           redactionPlan: redaction.redactionPlan,
-          policyExplanation: accessDecision.policyExplanation ?? null,
+          policyExplanation: policyExplanationForAudit(accessDecision.policyExplanation),
           rateLimitState: accessDecision.rateLimitState ?? null,
         },
       }).returning();
@@ -1846,7 +1936,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           legacyAuditEventId: legacyAuditEvent.id,
           effectiveProfileIds: accessDecision.effectiveProfileIds,
           explanation: accessDecision.explanation,
-          policyExplanation: accessDecision.policyExplanation ?? null,
+          policyExplanation: policyExplanationForAudit(accessDecision.policyExplanation),
           providerType: ctx.providerType,
           applicationKey: ctx.applicationKey,
           upstreamToolName: ctx.upstreamToolName,
@@ -1860,11 +1950,18 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     }
   }
 
-  async function recordInvocation(input: ToolAccessDecisionInput, accessDecision: ToolAccessDecision) {
+  async function recordInvocation(
+    input: ToolAccessDecisionInput,
+    accessDecision: ToolAccessDecision,
+    evaluate?: (transaction: Db) => Promise<ToolAccessDecision>,
+  ) {
     const loaded = await loadContext(input);
     if (!loaded.ok) throw new Error("Cannot record invocation for invalid tool access context");
     const { ctx, redaction } = loaded;
-    const requestIdentityHash = input.request.sideEffecting || accessDecision.decision === "require_approval"
+    // When the decision is evaluated in the write transaction, calculate the
+    // stable request identity up front so the replay lookup still happens
+    // before rate-limit consumption.
+    const requestIdentityHash = input.request.sideEffecting || evaluate || accessDecision.decision === "require_approval"
       ? toolRequestIdentityHash(input.request.arguments, options.toolActionSigningSecret)
       : null;
     const argumentsHash = input.request.sideEffecting ? requestIdentityHash! : ctx.argumentsHash;
@@ -1875,7 +1972,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         eq(toolInvocations.companyId, input.companyId),
         eq(toolInvocations.idempotencyKey, idempotencyKey),
       ));
-      if (existing) return { invocation: existing, replayed: true, actionRequest: null };
+      if (existing) return { invocation: existing, replayed: true, actionRequest: null, decision: accessDecision };
     }
     if (input.request.sideEffecting && input.request.idempotencyKey == null) {
       // Before complete request identities, default keys used shortened and
@@ -1899,7 +1996,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         // Its digest covers the full request when it differs from its preview.
         if (legacy.argumentsSummary?.sha256 && legacy.argumentsHash === requestIdentityHash
             && legacy.argumentsHash !== legacy.argumentsSummary.sha256) {
-          return { invocation: legacy, replayed: true, actionRequest: null };
+          return { invocation: legacy, replayed: true, actionRequest: null, decision: accessDecision };
         }
         const [actionRequest] = await db.select({ signedArguments: toolActionRequests.signedArguments })
           .from(toolActionRequests).where(and(eq(toolActionRequests.companyId, input.companyId),
@@ -1913,64 +2010,104 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           { reasonCode: "legacy_tool_idempotency_unverifiable", invocationId: legacy.id },
         );
         if (canonicalToolArguments(original.arguments) === canonicalToolArguments(input.request.arguments)) {
-          return { invocation: legacy, replayed: true, actionRequest: null };
+          return { invocation: legacy, replayed: true, actionRequest: null, decision: accessDecision };
         }
       }
     }
-    const status = accessDecision.decision === "allow"
-      ? "authorized"
-      : accessDecision.decision === "require_approval"
-        ? "awaiting_approval"
-        : accessDecision.decision === "rate_limited"
-          ? "rate_limited"
-          : "denied";
-    const [invocation] = await db.insert(toolInvocations).values({
-      companyId: ctx.companyId,
-      idempotencyKey,
-      actorType: ctx.actorType,
-      actorId: ctx.actorId,
-      agentId: ctx.agentId,
-      issueId: ctx.issueId,
-      runId: ctx.heartbeatRunId,
-      gatewayId: ctx.gatewayId,
-      ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
-        where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
-          and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
-      applicationId: ctx.applicationId,
-      connectionId: ctx.connectionId,
-      catalogEntryId: ctx.catalogEntryId,
-      catalogVersionHash: ctx.catalogVersionHash,
-      catalogSchemaHash: ctx.catalogSchemaHash,
-      providerType: ctx.providerType,
-      applicationKey: ctx.applicationKey,
-      upstreamToolName: ctx.upstreamToolName,
-      riskLevel: ctx.riskLevel,
-      toolName: ctx.toolName,
-      argumentsHash,
-      argumentsSummary: redaction.summary,
-      policyDecision: accessDecision.decision,
-      policyExplanation: accessDecision.policyExplanation ?? null,
-      matchedPolicyIds: accessDecision.matchedPolicyIds,
-      approvalState: accessDecision.decision === "require_approval" ? "pending" : "not_required",
-      status,
-      errorCode: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.reasonCode,
-      errorMessage: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.explanation,
-      completedAt: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : new Date(),
-    }).returning();
-    let actionRequest = null;
-    if (accessDecision.decision === "require_approval") {
-      [actionRequest] = await db.insert(toolActionRequests).values({
-        companyId: ctx.companyId,
-        invocationId: invocation.id,
-        issueId: ctx.issueId,
-        status: "pending",
-        canonicalArgumentsHash: requestIdentityHash!,
-        canonicalArgumentsSummary: redaction.summary,
-        requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
-        requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
-      }).returning();
+    let captureInsertFailed = false;
+    let recorded: {
+      invocation: typeof toolInvocations.$inferSelect;
+      actionRequest: typeof toolActionRequests.$inferSelect | null;
+      decision: ToolAccessDecision;
+    };
+    try {
+      recorded = await db.transaction(async (tx) => {
+        const decision = evaluate ? await evaluate(tx as unknown as Db) : accessDecision;
+        const status = decision.decision === "allow"
+          ? "authorized"
+          : decision.decision === "require_approval"
+            ? "awaiting_approval"
+            : decision.decision === "rate_limited"
+              ? "rate_limited"
+              : "denied";
+        const [invocation] = await tx.insert(toolInvocations).values({
+          companyId: ctx.companyId,
+          idempotencyKey,
+          actorType: ctx.actorType,
+          actorId: ctx.actorId,
+          agentId: ctx.agentId,
+          issueId: ctx.issueId,
+          runId: ctx.heartbeatRunId,
+          gatewayId: ctx.gatewayId,
+          ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
+            where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
+              and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
+          applicationId: ctx.applicationId,
+          connectionId: ctx.connectionId,
+          catalogEntryId: ctx.catalogEntryId,
+          catalogVersionHash: ctx.catalogVersionHash,
+          catalogSchemaHash: ctx.catalogSchemaHash,
+          providerType: ctx.providerType,
+          applicationKey: ctx.applicationKey,
+          upstreamToolName: ctx.upstreamToolName,
+          riskLevel: ctx.riskLevel,
+          toolName: ctx.toolName,
+          argumentsHash,
+          argumentsSummary: redaction.summary,
+          policyDecision: decision.decision,
+          policyExplanation: decision.policyExplanation ?? null,
+          matchedPolicyIds: decision.matchedPolicyIds,
+          approvalState: decision.decision === "require_approval" ? "pending" : "not_required",
+          status,
+          errorCode: decision.allowed || decision.decision === "require_approval" ? null : decision.reasonCode,
+          errorMessage: decision.allowed || decision.decision === "require_approval" ? null : decision.explanation,
+          completedAt: decision.allowed || decision.decision === "require_approval" ? null : new Date(),
+        }).returning();
+        let actionRequest = null;
+        if (decision.decision === "require_approval") {
+          [actionRequest] = await tx.insert(toolActionRequests).values({
+            companyId: ctx.companyId,
+            invocationId: invocation.id,
+            issueId: ctx.issueId,
+            status: "pending",
+            canonicalArgumentsHash: requestIdentityHash!,
+            canonicalArgumentsSummary: redaction.summary,
+            requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
+            requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
+          }).returning();
+        }
+        try {
+          await tx.insert(managedAuditEvents).values({
+            companyId: ctx.companyId,
+            source: "tool_gateway",
+            schemaVersion: 1,
+            eventType: "invocation_decision_recorded",
+            phase: "policy_decision",
+            occurredAt: invocation.createdAt,
+            runId: ctx.heartbeatRunId,
+            taskId: ctx.issueId,
+            invocationId: invocation.id,
+            requestId: actionRequest?.id ?? null,
+            connectionId: ctx.connectionId,
+            actorType: ctx.actorType,
+            actorId: ctx.actorId,
+            decision: decision.decision,
+            status: invocation.status,
+            reasonCode: decision.reasonCode,
+          });
+        } catch (error) {
+          captureInsertFailed = true;
+          throw error;
+        }
+        return { invocation, actionRequest, decision };
+      });
+    } catch (error) {
+      // Record the existing durable critical alert outside the failed
+      // transaction, while preserving the original capture error for callers.
+      if (captureInsertFailed) await recordToolRuntimeAuditWriteFailure(db, input.companyId);
+      throw error;
     }
-    return { invocation, replayed: false, actionRequest };
+    return { ...recorded, replayed: false };
   }
 
   async function matchingApprovedActionRequestCount(input: {

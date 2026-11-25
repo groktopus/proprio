@@ -1517,6 +1517,7 @@ export interface ToolCallEvent {
 
 export interface ToolRunDecision {
   invocation: ToolInvocation;
+  policyProvenance: ToolPolicyRunProvenance;
   actionRequest: ToolActionRequest | null;
   auditEvents: ToolCallEvent[];
   latestAuditEvent: ToolCallEvent | null;
@@ -1532,6 +1533,26 @@ export interface ToolRunDecision {
     status: ToolActionRequestStatus;
     previewMarkdown: string | null;
   } | null;
+}
+
+export interface ToolPolicyEvaluationSnapshot {
+  policyId: string;
+  /** Legacy policies remain reportable while their existing decisions still govern calls. */
+  policyType: ToolPolicyType | "redact" | "validate";
+  priority: number;
+  revisionUpdatedAt: string;
+  /** Keyed digest of decision-relevant rule fields. Raw selectors and conditions are never projected. */
+  revisionFingerprint: string;
+  decisionReason: string;
+  evaluatedAt: string;
+  principalRole: "actor" | "caller" | "target";
+  selected: boolean;
+}
+
+export interface ToolPolicyRunProvenance {
+  /** `unknown` is explicit for invocations created before evaluation snapshots were recorded. */
+  captureStatus: "recorded" | "unknown";
+  policies: ToolPolicyEvaluationSnapshot[];
 }
 
 export type ToolRunRuntimeProvenance =
