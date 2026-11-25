@@ -2269,7 +2269,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const rows = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
     expect(rows).toHaveLength(2);
     expect(rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: first.id, status: "resolved", evidence: firstEvidence }),
+      expect.objectContaining({ id: first.id, status: "cancelled", resolvedAt: expect.any(Date), evidence: firstEvidence }),
       expect.objectContaining({ id: second.id, status: "active", evidence: secondEvidence }),
     ]));
   });
