@@ -320,7 +320,25 @@ export async function readManagedAuditExportPage(
       ids: sql`${managedAuditExports.eventIds}[${offset + 1}:${offset + PAGE_SIZE}]`,
     }).from(managedAuditExports).where(ownedSnapshot);
     const events = snapshot.eventCount
-      ? await tx.select().from(managedAuditEvents).where(and(visible, sql`${managedAuditEvents.id} = any((${pageIds})::uuid[])`))
+      ? await tx.select({
+          id: managedAuditEvents.id,
+          companyId: managedAuditEvents.companyId,
+          source: managedAuditEvents.source,
+          schemaVersion: managedAuditEvents.schemaVersion,
+          eventType: managedAuditEvents.eventType,
+          phase: managedAuditEvents.phase,
+          occurredAt: managedAuditEvents.occurredAt,
+          runId: managedAuditEvents.runId,
+          taskId: managedAuditEvents.taskId,
+          invocationId: managedAuditEvents.invocationId,
+          requestId: managedAuditEvents.requestId,
+          connectionId: managedAuditEvents.connectionId,
+          actorType: managedAuditEvents.actorType,
+          actorId: managedAuditEvents.actorId,
+          decision: managedAuditEvents.decision,
+          status: managedAuditEvents.status,
+          reasonCode: managedAuditEvents.reasonCode,
+        }).from(managedAuditEvents).where(and(visible, sql`${managedAuditEvents.id} = any((${pageIds})::uuid[])`))
         .orderBy(asc(managedAuditEvents.id))
       : [];
     const deliveredThrough = offset + events.length;
