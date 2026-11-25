@@ -931,9 +931,13 @@ describe("openapi routes", () => {
     expect(
       JSON.stringify(res.body.paths["/api/tool-gateway/tools"].get),
     ).not.toContain("sessionToken");
-    expect(
-      JSON.stringify(res.body.paths["/api/tool-gateway/tools/call"].post),
-    ).not.toContain("sessionToken");
+    const gatewayCall = res.body.paths["/api/tool-gateway/tools/call"].post;
+    expect(JSON.stringify(gatewayCall)).not.toContain("sessionToken");
+    const conflict = gatewayCall.responses["409"];
+    expect(conflict.description).toContain("managed_dispatch_outcome_unknown");
+    const conflictProperties = conflict.content["application/json"].schema.properties;
+    expect(conflictProperties).toHaveProperty("reasonCode");
+    expect(conflictProperties).not.toHaveProperty("blockedBeforeDispatch");
   });
 
   it("publishes delegated chat configuration and human-only confirmation boundaries", () => {

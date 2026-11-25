@@ -635,6 +635,7 @@ const REMOTE_TOOL_CALL_WORKFLOW_REASON_CODES = new Set([
   "provider_task_cancelled",
   "provider_task_expired",
   "provider_task_failed",
+  "managed_dispatch_outcome_unknown",
 ]);
 
 const REMOTE_TOOL_CALL_PROTOCOL_REASON_CODES = new Set([
@@ -9390,6 +9391,8 @@ export function createToolGatewayService(
       // A deliberate workflow stop, such as a tool question for the user, keeps
       // its own reason even when the deadline passes while it is recorded.
       if (error instanceof ToolGatewayHttpError && REMOTE_TOOL_CALL_WORKFLOW_REASON_CODES.has(error.reasonCode)) {
+        if (error.reasonCode === "managed_dispatch_outcome_unknown" && controller.signal.aborted && mcpSession)
+          forgetMcpHttpSession(mcpSession);
         throw new ToolGatewayHttpError(error.status, error.message, error.reasonCode, {
           ...error.details,
           execution: error.details.execution ?? execution,
@@ -10936,6 +10939,7 @@ export function createToolGatewayService(
   }
 
   async function markApprovedActionFailed(input: {
+    companyId: string;
     actionRequestId: string;
     invocationId: string;
     claimUpdatedAt: Date;
@@ -10956,12 +10960,12 @@ export function createToolGatewayService(
       // consumer's claim, and a pre-dispatch failure cannot overwrite a call
       // that has already entered provider execution or completed successfully.
       const [invocation] = await tx
-        .select({ status: toolInvocations.status })
+        .select({ companyId: toolInvocations.companyId, status: toolInvocations.status })
         .from(toolInvocations)
-        .where(eq(toolInvocations.id, input.invocationId))
+        .where(and(eq(toolInvocations.id, input.invocationId), eq(toolInvocations.companyId, input.companyId)))
         .for("update")
         .limit(1);
-      if (invocation?.status !== input.expectedInvocationStatus) return false;
+      if (invocation?.companyId !== input.companyId || invocation.status !== input.expectedInvocationStatus) return false;
 
       const [actionRequest] = await tx
         .select({
@@ -10970,7 +10974,7 @@ export function createToolGatewayService(
           updatedAt: toolActionRequests.updatedAt,
         })
         .from(toolActionRequests)
-        .where(eq(toolActionRequests.id, input.actionRequestId))
+        .where(and(eq(toolActionRequests.id, input.actionRequestId), eq(toolActionRequests.companyId, input.companyId)))
         .for("update")
         .limit(1);
       if (
@@ -10994,6 +10998,7 @@ export function createToolGatewayService(
         .where(
           and(
             eq(toolInvocations.id, input.invocationId),
+            eq(toolInvocations.companyId, input.companyId),
             eq(toolInvocations.status, input.expectedInvocationStatus),
           ),
         );
@@ -11007,6 +11012,7 @@ export function createToolGatewayService(
         .where(
           and(
             eq(toolActionRequests.id, input.actionRequestId),
+            eq(toolActionRequests.companyId, input.companyId),
             eq(toolActionRequests.status, "executing"),
             eq(toolActionRequests.updatedAt, input.claimUpdatedAt),
           ),
@@ -11389,6 +11395,7 @@ export function createToolGatewayService(
         }
       } else if (isApprovalPreparationRejection(error)) {
         await markApprovedActionFailed({
+          companyId: claimed.companyId,
           actionRequestId: claimed.id,
           invocationId: invocation.id,
           claimUpdatedAt: claimed.updatedAt,
@@ -11556,6 +11563,7 @@ export function createToolGatewayService(
         throw error;
       }
       const { reasonCode } = await markApprovedActionFailed({
+        companyId: claimed.companyId,
         actionRequestId: claimed.id,
         invocationId: invocation.id,
         claimUpdatedAt: claimed.updatedAt,
@@ -14120,6 +14128,7 @@ export function createToolGatewayService(
             status: "executing",
           });
           await markApprovedActionFailed({
+            companyId: claimed.companyId,
             actionRequestId: claimed.id,
             invocationId: storedInvocation.id,
             claimUpdatedAt: claimed.updatedAt,
@@ -14662,8 +14671,71 @@ export function createToolGatewayService(
                 err.details,
               )
             : err;
-        if (normalizedError instanceof ManagedAuditCaptureError ||
-            (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown")) {
+        if (normalizedError instanceof ManagedAuditCaptureError) {
+          throw normalizedError;
+        }
+        if (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown") {
+          if (normalizedError.details.blockedBeforeDispatch === true) {
+            let settled = false;
+            if (approvedDispatchClaim) {
+              settled = (await markApprovedActionFailed({
+                companyId: session.companyId,
+                actionRequestId: approvedDispatchClaim.actionRequestId,
+                invocationId: approvedDispatchClaim.invocationId,
+                claimUpdatedAt: approvedDispatchClaim.claimedAt,
+                expectedInvocationStatus: "executing",
+                error: normalizedError,
+              })).settled;
+            } else {
+              const completedAt = new Date();
+              const [failedInvocation] = await db.update(toolInvocations).set({
+                status: "failed",
+                errorCode: normalizedError.reasonCode,
+                errorMessage: normalizedError.message,
+                completedAt,
+                updatedAt: completedAt,
+              }).where(and(
+                eq(toolInvocations.id, invocationId),
+                eq(toolInvocations.companyId, session.companyId),
+                eq(toolInvocations.status, "executing"),
+              )).returning({ id: toolInvocations.id });
+              settled = Boolean(failedInvocation);
+              if (settled) void emitConnectionInvoked(db, invocationId);
+            }
+            if (settled) {
+              await writeToolCallEvent({
+                invocationId,
+                actionRequestId: approvedDispatchClaim?.actionRequestId ?? null,
+                session,
+                eventType: "call_failed",
+                outcome: "failure",
+                toolName: tool.name,
+                policyDecision: "deny",
+                reasonCode: normalizedError.reasonCode,
+                argumentsSummary: effectiveArgumentsSummary,
+                metadata: { durationMs: Date.now() - startedAt },
+                tool,
+              });
+              await writeAudit({
+                session,
+                companyId: session.companyId,
+                agentId: session.agentId,
+                runId: session.runId,
+                issueId: session.issueId,
+                action: "tool_gateway.call_failed",
+                details: {
+                  invocationId,
+                  decision: "deny",
+                  reasonCode: normalizedError.reasonCode,
+                  tool: tool.name,
+                  ...toolAuditMetadata(tool),
+                  argumentsSummary: effectiveArgumentsSummary,
+                  durationMs: Date.now() - startedAt,
+                  error: normalizedError.message,
+                },
+              });
+            }
+          }
           throw normalizedError;
         }
         if (managedTerminalCommitted) throw normalizedError;

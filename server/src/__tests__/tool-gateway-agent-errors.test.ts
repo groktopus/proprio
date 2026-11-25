@@ -66,4 +66,21 @@ describe("tool errors returned to agents", () => {
     expect(response.body).not.toHaveProperty("execution");
     expect(JSON.stringify(response.body)).not.toContain("tool-gateway.ts");
   });
+
+  it("keeps public error details while hiding internal dispatch classification", async () => {
+    const gateway = { executeTool: async () => { throw new ToolGatewayHttpError(409,
+      "A previous operation is unresolved", "managed_dispatch_outcome_unknown",
+      { invocationId: "invocation-1", blockedBeforeDispatch: true }); } } as unknown as ToolGatewayService;
+    const app = express().use(express.json()).use(toolGatewayRoutes({} as Db, gateway));
+    const response = await request(app).post("/tool-gateway/tools/call").set("x-proprio-tool-gateway-token", "token")
+      .send({ tool: "mcp.demo:write", parameters: {} }).expect(409);
+    expect(response.body).toMatchObject({ reasonCode: "managed_dispatch_outcome_unknown", invocationId: "invocation-1" });
+    expect(response.body).not.toHaveProperty("blockedBeforeDispatch");
+
+    const mcpApp = express().use(express.json()).use(mcpGatewayProtocolRoutes(gateway));
+    const mcpResponse = await request(mcpApp).post("/mcp/gateways/gateway-1").set("Authorization", "Bearer token")
+      .send({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "mcp.demo:write", arguments: {} } }).expect(409);
+    expect(mcpResponse.body.error.data).toMatchObject({ reasonCode: "managed_dispatch_outcome_unknown", invocationId: "invocation-1" });
+    expect(mcpResponse.body.error.data).not.toHaveProperty("blockedBeforeDispatch");
+  });
 });

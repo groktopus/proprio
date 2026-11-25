@@ -1016,12 +1016,80 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         status: "failed",
         error: expect.stringContaining("Reconcile it before starting another operation"),
       });
-      expect(await db.select({ status: toolInvocations.status, errorCode: toolInvocations.errorCode })
-        .from(toolInvocations).where(eq(toolInvocations.id, replacementRequest!.invocationId)))
-        .toEqual([{ status: "failed", errorCode: "managed_dispatch_outcome_unknown" }]);
+      const directReplacement = await createIssueAndRun(db, company.id, agent.id);
+      const preDispatchSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: directReplacement.run.id, issueId: directReplacement.issue.id });
+      await expect(gateway.executeTool({ sessionToken: preDispatchSession.token, tool,
+        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" } }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [directRequest] = await db.select().from(toolActionRequests).where(and(
+        eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.status, "pending"),
+      ));
+      await commitToolActionReview(db, { companyId: company.id, issueId: directReplacement.issue.id,
+        interactionId: directRequest.interactionId!, actionRequestId: directRequest.id,
+        decision: "approved", actor: { userId: reviewer } });
+      const [openIntent] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId),
+        eq(managedAuditEvents.phase, "dispatch_intent"),
+      ));
+      const callAgainstOpenIntentLock = async <T,>(call: () => Promise<T>): Promise<T> => {
+        let releaseFingerprintLock!: () => void;
+        let fingerprintBlockerPid!: number;
+        let fingerprintLockAcquired!: () => void;
+        const fingerprintLockReady = new Promise<void>(resolve => { fingerprintLockAcquired = resolve; });
+        const fingerprintLockHeld = new Promise<void>(resolve => { releaseFingerprintLock = resolve; });
+        const fingerprintBlocker = db.transaction(async tx => {
+          const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+          fingerprintBlockerPid = backend!.pid;
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${openIntent.operationFingerprint!}, 0))`);
+          fingerprintLockAcquired();
+          await fingerprintLockHeld;
+        });
+        await fingerprintLockReady;
+        const pendingCall = call();
+        try {
+          await expect.poll(async () => {
+            const [activity] = await db.execute<{ count: number }>(sql`select count(*)::int as count from pg_stat_activity
+              where datname = current_database() and wait_event_type = 'Lock'
+                and ${fingerprintBlockerPid} = any(pg_blocking_pids(pid))`);
+            return activity?.count ?? 0;
+          }, { timeout: 2_000 }).toBeGreaterThan(0);
+          // The remote call's 1 ms deadline is armed before it tries this lock.
+          await new Promise(resolve => setTimeout(resolve, 10));
+        } finally {
+          releaseFingerprintLock();
+          await fingerprintBlocker;
+          await pendingCall.catch(() => undefined);
+        }
+        return pendingCall;
+      };
+      const directApprovedCall = await callAgainstOpenIntentLock(() => request(app).post("/api/tool-gateway/tools/call")
+        .set("x-proprio-tool-gateway-token", preDispatchSession.token)
+        .send({ tool, parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
+          timeoutMs: 1, approvedActionRequestId: directRequest!.id }).then(response => response));
+      expect(directApprovedCall.status).toBe(409);
+      expect(directApprovedCall.body).toMatchObject({ reasonCode: "managed_dispatch_outcome_unknown" });
+      expect(directApprovedCall.body).not.toHaveProperty("blockedBeforeDispatch");
+      expect(await db.select({ companyId: toolInvocations.companyId, status: toolInvocations.status, errorCode: toolInvocations.errorCode })
+        .from(toolInvocations).where(and(eq(toolInvocations.companyId, company.id), eq(toolInvocations.id, directRequest!.invocationId))))
+        .toEqual([{ companyId: company.id, status: "failed", errorCode: "managed_dispatch_outcome_unknown" }]);
+      expect(await db.select({ companyId: toolActionRequests.companyId, status: toolActionRequests.status }).from(toolActionRequests)
+        .where(and(eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.id, directRequest!.id))))
+        .toEqual([{ companyId: company.id, status: "failed" }]);
       expect(await db.select().from(managedAuditEvents).where(and(
-        eq(managedAuditEvents.invocationId, replacementRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+        eq(managedAuditEvents.invocationId, directRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
       ))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, directRequest!.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+      expect(await db.select().from(toolCallEvents).where(and(
+        eq(toolCallEvents.invocationId, directRequest!.invocationId), eq(toolCallEvents.eventType, "call_failed"),
+      ))).toHaveLength(1);
+      const failureAudits = await db.select().from(activityLog).where(and(
+        eq(activityLog.companyId, company.id), eq(activityLog.action, "tool_gateway.call_failed"),
+      ));
+      expect(failureAudits.filter(row => (row.details as Record<string, unknown>).invocationId === directRequest!.invocationId))
+        .toHaveLength(1);
       expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
       expect(await db.select().from(managedAuditEvents).where(and(
         eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
@@ -1035,11 +1103,45 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       const direct = await createIssueAndRun(db, company.id, agent.id);
       const directSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
         runId: direct.run.id, issueId: direct.issue.id });
-      await expect(gateway.executeTool({ sessionToken: directSession.token, tool,
-        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
-        idempotencyKey: "approved-ambiguous-direct-retry" })).rejects.toMatchObject({
-        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
-      });
+      const unapprovedResponse = await callAgainstOpenIntentLock(() => request(app).post("/api/tool-gateway/tools/call")
+        .set("x-proprio-tool-gateway-token", directSession.token)
+        .send({ tool, parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
+          timeoutMs: 1, idempotencyKey: "unapproved-blocked-retry" })
+        .then(response => response));
+      expect(unapprovedResponse.status).toBe(409);
+      expect(unapprovedResponse.body).toMatchObject({ reasonCode: "managed_dispatch_outcome_unknown" });
+      expect(unapprovedResponse.body).not.toHaveProperty("blockedBeforeDispatch");
+      const unapprovedInvocationId = unapprovedResponse.body.invocationId as string;
+      expect(await db.select({ companyId: toolInvocations.companyId, status: toolInvocations.status,
+        errorCode: toolInvocations.errorCode, idempotencyKey: toolInvocations.idempotencyKey })
+        .from(toolInvocations).where(and(eq(toolInvocations.companyId, company.id), eq(toolInvocations.id, unapprovedInvocationId))))
+        .toEqual([{ companyId: company.id, status: "failed", errorCode: "managed_dispatch_outcome_unknown",
+          idempotencyKey: "unapproved-blocked-retry" }]);
+      expect(await db.select().from(toolActionRequests).where(and(
+        eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.invocationId, unapprovedInvocationId),
+      ))).toHaveLength(0);
+      expect(await db.select().from(toolCallEvents).where(and(
+        eq(toolCallEvents.invocationId, unapprovedInvocationId), eq(toolCallEvents.eventType, "call_failed"),
+      ))).toHaveLength(1);
+      const unapprovedFailureAudits = await db.select().from(activityLog).where(and(
+        eq(activityLog.companyId, company.id), eq(activityLog.action, "tool_gateway.call_failed"),
+      ));
+      expect(unapprovedFailureAudits.filter(row => (row.details as Record<string, unknown>).invocationId === unapprovedInvocationId))
+        .toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.invocationId, unapprovedInvocationId),
+        eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.invocationId, unapprovedInvocationId),
+        eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
       expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
     } finally {
       await remote.close();
