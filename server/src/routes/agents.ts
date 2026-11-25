@@ -30,7 +30,7 @@ import { dotRunnerBroker } from "../services/dot-runner-broker.js";
 import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { completeConnectionIntentSchema } from "@groktopus/shared";
-import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
+import { DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@groktopus/shared";
@@ -6242,6 +6242,12 @@ export function agentRoutes(
     source: HeartbeatSource | undefined;
     skippedResponse: (agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>, payload: Record<string, unknown> | null) => unknown | Promise<unknown>;
   };
+  const assertPublicWakeKey = (key: unknown) => {
+    if (typeof key === "string" && key.startsWith(DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX)) {
+      throw badRequest("Use the dependency investigation endpoint for a diagnosis request.");
+    }
+  };
+
   const handleWakeupRoute = async (
     req: Request,
     res: Response,
@@ -6435,6 +6441,7 @@ export function agentRoutes(
         ),
       );
     }
+    assertPublicWakeKey(req.body.idempotencyKey);
     const run = await heartbeat.wakeup(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
@@ -6591,6 +6598,7 @@ export function agentRoutes(
         : body.payload as Record<string, unknown>;
     }
     if (typeof body.idempotencyKey === "string" && body.idempotencyKey.length > 0) {
+      assertPublicWakeKey(body.idempotencyKey);
       wakeOpts.idempotencyKey = body.idempotencyKey;
     }
     const run = await heartbeat.wakeup(id, wakeOpts);
