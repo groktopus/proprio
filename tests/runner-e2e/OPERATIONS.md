@@ -978,14 +978,21 @@ without registry resolution. The trusted report job controls report dependencies
 independently of the worker's target and lock artifact. An already-reviewed
 output lock is used unchanged. An unknown committed lock fails before install.
 
-The documented refresh path uses a repository-owner configured lockfile bot.
-Its workflow runs `prepare-report-lock.mjs --refresh` and includes the correction
-and hashes in a bot-generated PR. The same commit resyncs
-`source-sdk-public-inputs.json` from the committed `report-lock.json` output hash.
-The bot's automatic merge path applies to the exact generated commit when every
-added package version is at least three days old on npm. Other updates require
-maintainer review. In this checkout, the owner must provide the authorized
-refresh workflow before the trusted report job can accept a new lock.
+An unrecognized committed lock needs owner-approved recovery. A maintainer
+reviews the manifest and exact lock diff, verifies the frozen install, and
+records the reviewed input, patch, and output hashes through the approved
+update path. Sync `source-sdk-public-inputs.json` from the committed
+`report-lock.json` output hash. Verify the reporting lock and SDK inputs at the
+recovery revision. Use the current trusted writer rules for the proof files.
+[Maintainer-reviewed precedent](https://github.com/groktopus/proprio/pull/204)
+[Writer rules](../../.github/scripts/lockfile-trust.mjs)
+
+If the repository owner enables the lockfile bot, its workflow can refresh a
+reviewed base or a verified Dependabot lock. Plain `--refresh` rejects an
+unrecognized committed lock. The bot applies the release-age check to the
+exact generated commit. Added versions need verifiable npm publication and
+registry resolution. The age threshold applies outside the harness package
+allowlist. Changes that fail the automatic check need maintainer review.
 See the [test infrastructure guide](../../doc/test-infrastructure.md).
 
 Paid authorization and report jobs apply the reviewed offline correction. The

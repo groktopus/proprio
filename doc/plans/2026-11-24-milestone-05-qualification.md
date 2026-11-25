@@ -16,8 +16,8 @@ on the selected deployment image.
 | --- | --- | --- |
 | [#205](https://github.com/groktopus/proprio/issues/205) Governance evidence | The operator guide maps audit sources, join keys, access, retention, and gaps. [Guide](https://github.com/groktopus/proprio/pull/351) | Record the effective deployment, runner, tools, model, and data destinations. Have the reviewer follow one synthetic task through the documented views. |
 | [#103](https://github.com/groktopus/proprio/issues/103) Commentary defaults | The opt-in and adapter fixtures covered native and legacy discovery and writes, with earlier records still accessible. [Adapter prerequisite](https://github.com/groktopus/proprio/pull/373) [Operator opt-in](https://github.com/groktopus/proprio/pull/352) | Verify the configured default and opt-in on the selected runner. Record any legacy adapter behavior outside the release profile. |
-| [#150](https://github.com/groktopus/proprio/issues/150) Restore and deletion | Isolated PostgreSQL and MinIO fixtures verified manifest replay before startup, deletion of local bytes and active ciphertext, a durable tombstone, and access to unrelated evidence. Both Compose layouts reached the reconciliation command with cached images. [Restore results](https://github.com/groktopus/proprio/pull/361#issuecomment-7146200058) | Repeat the non-empty deletion replay on the selected image. Check object-version retention, pre-start denial, and cleanup evidence in the chosen topology. |
-| [#206](https://github.com/groktopus/proprio/issues/206) Independent audit export | Fixtures delivered 10,037 events beyond the CSV cap, resumed at the saved cursor, revalidated private visibility, and reconciled a rotated source epoch after restore. An overlapping collection caught a late commit. [Archive restore](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Overlap](https://github.com/groktopus/proprio/pull/376) | Repeat the export across pages and an interruption. Verify durable archive/checkpoint storage, watermark recovery, restricted rows, and conspicuous gaps. |
+| [#150](https://github.com/groktopus/proprio/issues/150) Restore and deletion | Isolated PostgreSQL and MinIO fixtures verified manifest replay before startup, deletion of local bytes and active ciphertext, a durable tombstone, and access to unrelated evidence. Both Compose layouts reached the reconciliation command with cached images and empty manifests. [Restore results](https://github.com/groktopus/proprio/pull/361#issuecomment-7146200058) | Replay a non-empty manifest on the selected image before users or runners resume. Verify that deleted evidence cannot be read or republished, unrelated evidence stays readable, and object cleanup or expiry and version retention are observable. |
+| [#206](https://github.com/groktopus/proprio/issues/206) Independent audit export | Fixtures delivered 10,037 events beyond the CSV cap, resumed at the saved cursor, revalidated private visibility, and reconciled a rotated source epoch after restore. An overlapping collection caught a late commit. [Archive restore](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Overlap](https://github.com/groktopus/proprio/pull/376) | Repeat multi-page export and interruption with independent archive/checkpoint storage. Restore an older database, verify that the rotated epoch rejects the saved checkpoint, and reconcile from the new epoch. Preserve permissible archive bytes and exclude expired or restricted records. Verify watermark recovery and conspicuous gaps. |
 | [#207](https://github.com/groktopus/proprio/issues/207) Historical policy and runtime | Authenticated fixtures retained the old rule fingerprint after policy edit and identified the admitted fallback model and pinned skill version after update. They exercised private-task and skill visibility. [Policy](https://github.com/groktopus/proprio/pull/363) [Runtime](https://github.com/groktopus/proprio/pull/358) | Refresh the trusted SDK lock, then verify both PRs' SDK checks and repeat the historical lookup with the selected runtime. |
 | [#208](https://github.com/groktopus/proprio/issues/208) Independent authority | A separate authenticated operator activated and revoked a scoped rule, and product audit evidence correlated the requester, reviewer, and effective calls. [Authority fixture](https://github.com/groktopus/proprio/pull/357) | Name the operator and reviewer. Verify request, activation, and revocation under the documented restriction posture. |
 | [#209](https://github.com/groktopus/proprio/issues/209) Reconstruction | The real controller processes and independent target produced nine audit events and effects of one for approval, zero for denial, and one for interruption. Readback succeeded after restarting the authenticated controller. [Reconstruction](https://github.com/groktopus/proprio/pull/407) | Repeat on the selected deployment. Record an independent target review and reconcile ambiguity before any retry. |
@@ -43,12 +43,15 @@ on the selected deployment image.
   the PR head. Droid stopped at its provider usage limit.
   [PR](https://github.com/groktopus/proprio/pull/407)
   [Combined source](https://github.com/groktopus/proprio/commit/31b5a8fbf368bb880ee1b36170bdf6baf1c348de)
+  After main added the former-owner regression in #330, reconstruction and
+  both controller-restart cases passed on the updated composition.
+  [Tested source](https://github.com/groktopus/proprio/commit/57f1cb8b98c9d577f4fb4215eb618dd945b46b6e)
 - **Observed outcome.** The completed export held nine events. The approval
   had four audit phases and one target effect. The denial had two phases and
   zero effects. The interrupted response had three phases, one durable effect,
   and an open dispatch intent. The fixture verified the export count and
   watermark against the creation receipt and sent no retry.
-  [Retained-evidence fixture](https://github.com/groktopus/proprio/pull/406)
+  [Production controller observation](#production-controller-observation)
 - **Gateway gaps.** The full gateway test file passed 125 cases and failed
   three GitHub connection/catalog cases on the hosted source revision. The
   same three failed on its baseline. Core's GitHub definition exposes
@@ -57,8 +60,11 @@ on the selected deployment image.
   local MCP. Provider-native calls and other connectors need separate
   qualification. [Test source](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
 
-The frozen snapshot checks membership, permissions, and watermark at read time.
-Its checksum cannot detect events absent before the snapshot was created.
+The server revalidates membership and permissions when reading a page.
+Before advancing a checkpoint, count the persisted rows and compute SHA-256
+over the UTF-8 JSON array of persisted event IDs in ascending ID order.
+Compare the count and digest with the creation receipt
+and pause on a mismatch. The checksum covers the frozen export membership.
 Record the capture window and producer coverage alongside the independent
 archive checkpoint. Account for late commits beyond the collection lookback.
 [Capture boundary](https://github.com/groktopus/proprio/pull/359)
@@ -66,6 +72,22 @@ archive checkpoint. Account for late commits beyond the collection lookback.
 
 The [verification history](https://github.com/groktopus/proprio/blob/ac3463b1ad609ade678e3a6ce6982922a964dc9a/doc/plans/2026-11-24-milestone-05-qualification.md)
 retains earlier source revisions, disposable identifiers, and detailed checks.
+
+### Production controller observation
+
+The retained local JSON for composition `31b5a8fb` recorded the following
+disposable IDs. The controller changed from PID `1764267` to `1764961`.
+The completed export was `bdad1e90-50b3-45ff-99af-8057abb9b3dc`, with
+nine events and watermark
+`1498dd3d719aa960a07db0a49db4b900135eafe1d9be65dd67cf2f13b9a29166`.
+The table reproduces the case correlations from that report. The JSON was
+retained locally.
+
+| Case | Task ID | Run ID | Invocation ID | Action request ID |
+| --- | --- | --- | --- | --- |
+| Approved | `4bb248a4-bea6-495f-96c9-d79279715170` | `fa0a3787-b0c8-42a0-a15b-8d6671c99973` | `0499714f-c2d2-4762-a1c5-2cdf2b11b622` | `421982a1-e25c-4753-b4b4-77fdd2623d69` |
+| Denied | `8a015125-c5e4-4979-a3cf-e37fc90b89c0` | `f3f76bd1-843e-471c-a715-07db583fa474` | `13476a01-fb37-4f6b-95b8-d28b367ecc50` | `aa290db3-7a3b-4a35-b14a-ad9899a6d17f` |
+| Interrupted | `cf8e0824-c378-4c3c-805e-7358db144dd5` | `904d5617-8bf9-4848-b0c5-2cddc0933b80` | `d704d468-1cee-4582-917a-f4136a787581` | `15470378-0f7c-43bb-96f1-97146511f38f` |
 
 ## Candidate and sign-off
 
@@ -91,7 +113,7 @@ retains earlier source revisions, disposable identifiers, and detailed checks.
 The reporting lock and SDK public-input checks reject `main` at
 `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. The committed lock SHA-256 is
 `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`. The same
-lock bytes remain on `c4592c7fc6e3720df77766905a2045e08c25218d`. The report
+lock bytes remain on `5963d46a4067a3b448dd49845d01c233393ff105`. The report
 policy lists
 `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e`
 for both input and output. The last root lock change is the app lint dependency
@@ -105,11 +127,20 @@ registration by itself leaves the current lock unrecognized. GitHub also
 showed no active refresh workflow, protected refresh environment or refresh
 branch at this revision.
 
-The release maintainer must arrange an approved trusted lock recovery with the
-repository owner. Provide the authorized workflow, protected environment and
-installed lockfile bot. Record the reviewed base or verified writer and rerun
-the frozen reporting check. After that refresh lands, resync public input pins
-and run the SDK checks for #358 and #363 on the exact candidate.
+For the current unrecognized lock, the release maintainer asks the repository
+owner to approve a recovery review of the exact committed dependency change.
+The maintainer-reviewed update in #204 shows what to record. Review the
+manifest and lock diff and verify a frozen install. Keep the current writer
+checks in effect. If the owner restores the authorized refresh workflow,
+provide a reviewed base or a verified Dependabot merge for the workflow to
+refresh. The present lock has neither. Have the authorized writer record the
+input, correction, and output in the proof and sync the SDK public-input
+registry to the committed output hash.
+
+Rerun the frozen reporting check and SDK input verification on the recovery
+revision. After that update lands, resync public inputs for #358 and #363 and
+run their SDK checks again on the exact candidate.
+[Maintainer-reviewed precedent](https://github.com/groktopus/proprio/pull/204)
 [Runner operations](../../tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
 
 ## Hold, recovery and resume
