@@ -169,6 +169,22 @@ page access records remain covered. Its composition
 passed all 89 audit, reconstruction and OpenAPI tests.
 [Response cleanup](https://github.com/groktopus/proprio/pull/387)
 
+Retirement review found that expiry cleanup also needs a durable terminal
+marker when the reading replica is behind the writer. The reviewed head
+`1698339a` passed all 35 route tests with one ordinary connection. The peak
+fixture exercised one marker deletion, three expiry clears and four retirement
+clears in one transaction. A cutoff rollback still returned a conflict for a
+retired row whose membership was gone. The same suite checks failed-create
+rollback, a bounded company lock wait and sanitized protected receipt errors.
+DB and server typechecks passed. [Reviewed retirement](https://github.com/groktopus/proprio/pull/386)
+
+The current-main composition `3d64f8c4510018e1ab8fd636a9cb2f4350eaecc7`
+passed 92 audit, reconstruction and OpenAPI tests. It regenerated the
+terminal cleanup migration as 0513 after the transition receipt migration.
+Migration safety, compatibility and generated OpenAPI checks passed. The
+response cleanup revision `d5d044cc` passed all 35 route tests with the
+reviewed retirement base.
+
 Hosted stability and durable-work qualification passed for adapter head
 `40aa561ef4a65d4bef7a925a20ec2901c3f6338b`. The retained report records that
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
