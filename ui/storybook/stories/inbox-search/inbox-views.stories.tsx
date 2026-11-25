@@ -15,8 +15,7 @@ const meta = {
   title:
     "Tasks and conversations/Inbox, decisions, and search/Personal task views",
   component: InboxHost,
-  args: { tab: "mine" },
-  parameters: { layout: "padded",
+  parameters: { layout: "padded", initialEntries: ["/PAP/inbox/mine"],
     proprio: {
       "capabilities": [
         "inbox-search/views"
@@ -28,12 +27,29 @@ const meta = {
     },
   },
   beforeEach: ({ parameters }) => {
+    let recovered = false;
+    const recover = () => { recovered = true; };
+    if (parameters.recoveryFixture) window.addEventListener("storybook:restore-inbox-read", recover);
     const api = prepareFixtureApi(
       [
         {
+          path: "/api/companies/company-storybook/inbox/mine",
+          read: () => ({
+            userId: "user-board",
+            issues: storybookIssues,
+            contextIssues: [],
+            failureRuns: [],
+            failureIssueIds: [],
+          }),
+        },
+        {
           path: "/api/companies/company-storybook/issues",
-          read: () =>
-            parameters.fixtureState === "empty" ? [] : storybookIssues,
+          read: () => {
+            if (parameters.recoveryFixture && !recovered) {
+              return Response.json({ error: "Fixture read unavailable" }, { status: 500 });
+            }
+            return parameters.fixtureState === "empty" ? [] : storybookIssues;
+          },
         },
         {
           path: /^\/api\/companies\/company-storybook\/(approvals|join-requests|heartbeat-runs)$/,
@@ -53,6 +69,7 @@ const meta = {
       },
     ]);
     return () => {
+      window.removeEventListener("storybook:restore-inbox-read", recover);
       flags.cleanup();
       api.cleanup();
     };
@@ -60,16 +77,18 @@ const meta = {
 } satisfies Meta<typeof InboxHost>;
 export default meta;
 type Story = StoryObj<typeof meta>;
-export const Mine: Story = { args: { tab: "mine" } };
-export const Recent: Story = { args: { tab: "recent" } };
-export const Unread: Story = { args: { tab: "unread" } };
-export const Blocked: Story = { args: { tab: "blocked" } };
+export const Mine: Story = { parameters: { initialEntries: ["/PAP/inbox/mine"] } };
+export const Recent: Story = { parameters: { initialEntries: ["/PAP/inbox/recent"] } };
+export const Unread: Story = { parameters: { initialEntries: ["/PAP/inbox/unread"] } };
+export const Blocked: Story = { parameters: { initialEntries: ["/PAP/inbox/blocked"] } };
 export const Empty: Story = {
-  args: { tab: "mine" },
-  parameters: { fixtureState: "empty" },
+  parameters: { initialEntries: ["/PAP/inbox/mine"], fixtureState: "empty" },
 };
 export const Loading: Story = { parameters: { fixtureState: "loading" } };
 export const Failed: Story = { parameters: { fixtureState: "failure" } };
+export const Recoverable: Story = {
+  parameters: { initialEntries: ["/PAP/inbox/unread"], recoveryFixture: true },
+};
 export const PermissionDenied: Story = {
   parameters: { fixtureState: "permission" },
 };

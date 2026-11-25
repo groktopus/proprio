@@ -65,6 +65,9 @@ export function EntityRow({
   secondaryRowClassName,
 }: EntityRowProps) {
   const isClickable = !!(to || onClick);
+  const actionOnly = !to && Boolean(onClick);
+  const Cell = actionOnly ? "span" : "div";
+  const Subtitle = actionOnly ? "span" : "p";
   const shellClasses = cn(
     // When a secondaryRow is present the shell stacks (main line + secondary
     // line); otherwise the shell itself is the single flex row.
@@ -77,8 +80,8 @@ export function EntityRow({
 
   const content = (
     <>
-      {leading && <div className="flex items-center gap-2 shrink-0">{leading}</div>}
-      <div
+      {leading && <Cell className="flex items-center gap-2 shrink-0">{leading}</Cell>}
+      <Cell
         className={cn(
           // `titlePriority` gives the name a floor so it ellipsizes instead of
           // collapsing to zero; otherwise the title may shrink to nothing.
@@ -87,7 +90,7 @@ export function EntityRow({
           titleClassName,
         )}
       >
-        <div className="flex items-center gap-2">
+        <Cell className="flex items-center gap-2">
           {identifier && (
             <span className="text-xs text-muted-foreground font-mono shrink-0 relative top-(--sz-1px)">
               {identifier}
@@ -97,11 +100,11 @@ export function EntityRow({
             {title}
           </span>
           {titleAccessory}
-        </div>
+        </Cell>
         {(subtitle || reserveSubtitleSpace) && (
-          <p
+          <Subtitle
             className={cn(
-              "text-xs text-muted-foreground mt-0.5 min-h-4",
+              "text-xs text-muted-foreground mt-0.5 block min-h-4",
               !subtitleClassName && "truncate",
               subtitleClassName,
               !subtitle && "invisible",
@@ -109,11 +112,11 @@ export function EntityRow({
             aria-hidden={!subtitle}
           >
             {subtitle}
-          </p>
+          </Subtitle>
         )}
-      </div>
+      </Cell>
       {meta && (
-        <div
+        <Cell
           className={cn(
             "flex items-center gap-2",
             // In title-priority mode the meta cluster yields (shrinks/wraps)
@@ -122,10 +125,10 @@ export function EntityRow({
           )}
         >
           {meta}
-        </div>
+        </Cell>
       )}
-      {meta && <div className={cn("flex-1", metaSpacerClassName)} />}
-      {trailing && <div className="flex items-center gap-2 shrink-0">{trailing}</div>}
+      {meta && <Cell className={cn("flex-1", metaSpacerClassName)} />}
+      {trailing && <Cell className="flex items-center gap-2 shrink-0">{trailing}</Cell>}
     </>
   );
 
@@ -134,8 +137,8 @@ export function EntityRow({
   // leading capsule). Without it, `content` is rendered directly (unchanged).
   const body = secondaryRow ? (
     <>
-      <div className="flex items-center gap-3">{content}</div>
-      <div className={cn("mt-1 pl-5", secondaryRowClassName)}>{secondaryRow}</div>
+      <Cell className="flex items-center gap-3">{content}</Cell>
+      <Cell className={cn("mt-1 pl-5", secondaryRowClassName)}>{secondaryRow}</Cell>
     </>
   ) : (
     content
@@ -149,9 +152,18 @@ export function EntityRow({
     );
   }
 
-  return (
-    <div className={shellClasses} onClick={onClick}>
-      {body}
-    </div>
-  );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={cn("w-full text-left focus-visible:outline-2 focus-visible:outline-ring", shellClasses)}
+        aria-pressed={selected}
+        onClick={onClick}
+      >
+        {body}
+      </button>
+    );
+  }
+
+  return <div className={shellClasses}>{body}</div>;
 }

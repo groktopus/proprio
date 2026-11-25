@@ -18,6 +18,7 @@ import { ApiError } from "../api/client";
 import { ConnectivityProvider, createConnectivityStore } from "../lib/connectivity";
 import { taskCollectionPreferencesStorageKey } from "../lib/task-collection-preferences";
 import { readIssueSortParams } from "../lib/issue-sort";
+import { queryKeys } from "../lib/queryKeys";
 
 const companyState = vi.hoisted(() => ({
   selectedCompanyId: "company-1",
@@ -321,7 +322,11 @@ function setDocumentScrollMetrics({
   Object.defineProperty(document.documentElement, "scrollHeight", { configurable: true, value: scrollHeight });
 }
 
-function renderWithQueryClient(node: ReactNode, container: HTMLDivElement) {
+function renderWithQueryClient(
+  node: ReactNode,
+  container: HTMLDivElement,
+  seedQuery?: (queryClient: QueryClient) => void,
+) {
   const root = createRoot(container);
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -330,6 +335,7 @@ function renderWithQueryClient(node: ReactNode, container: HTMLDivElement) {
       },
     },
   });
+  seedQuery?.(queryClient);
 
   act(() => {
     root.render(
@@ -631,7 +637,8 @@ describe("IssuesList", () => {
     act(() => root.unmount());
   });
 
-  it("names the compact disclosure and exposes both subtask states", async () => {
+  it.each([true, false])("names compact disclosures in both UI modes and exposes both subtask states (streamlined=%s)", async (streamlined) => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: streamlined });
     const parent = createIssue({ id: "parent", title: "Parent task" });
     const child = createIssue({ id: "child", parentId: parent.id, title: "Child task" });
     const { root } = renderWithQueryClient(
@@ -644,6 +651,7 @@ describe("IssuesList", () => {
         onUpdateIssue={() => undefined}
       />,
       container,
+      (queryClient) => queryClient.setQueryData(queryKeys.instance.experimentalSettings, { enableStreamlinedUi: streamlined }),
     );
     const disclosure = () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-leading"] button');
     try {

@@ -7,6 +7,8 @@ import type { AnchorHTMLAttributes } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CaseHandoffView, IssueCaseLink } from "@/api/cases";
+import { ApiError } from "@/api/client";
+import { queryKeys } from "@/lib/queryKeys";
 import { IssueCasesPanel } from "./IssueCasesPanel";
 
 function act(callback: () => void) {
@@ -63,7 +65,7 @@ const task = { id: "issue-1", identifier: "PAP-1", title: "Review launch", statu
 const decidedHandoff: CaseHandoffView = {
   workflowTransition: null,
   id: "handoff-1", companyId: "company-1", caseId: "c1", issueId: "issue-1", version: 2,
-  fromAgentId: null, destinationKind: "agent", toAgentId: null, phase: "verification",
+  fromAgentId: "source-agent", destinationKind: "agent", toAgentId: "recipient-agent", phase: "verification",
   instructions: "Review the saved requirements.", commentId: null, actorType: "user", actorId: "board-user",
   sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: 2,
   wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint",
@@ -71,12 +73,11 @@ const decidedHandoff: CaseHandoffView = {
     schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A verified launch post",
     prerequisites: ["Check the published source"],
     requirementRevision: { id: "requirement-revision-2", revision: 2, canonicalSha256: "sha256:revision" },
-    requirementsDigest: "sha256:requirements", workflowTransition: null,
-    decisionOwner: { type: "agent", id: "recipient-agent" }, accountableOwner: { type: "agent", id: "source-agent" },
+    requirementsDigest: "sha256:requirements", taskBrief: { title: task.title, description: null },
   },
   recipientDecision: { outcome: "accepted", actorType: "agent", actorId: "recipient-agent", handoffVersion: 2,
     requirementRevisionId: "requirement-revision-2", requirementsDigest: "sha256:requirements",
-    decidedAt: "2026-07-08T10:00:00.000Z", reasonCode: "requirements_accepted" },
+    decidedAt: "2026-07-08T10:00:00.000Z" },
   state: "delivered", attemptCount: 1, nextAttemptAt: "2026-07-08T10:00:00.000Z", leaseExpiresAt: null,
   lastErrorCode: null, lastError: null, createdAt: "2026-07-08T09:00:00.000Z",
   assignmentAppliedAt: "2026-07-08T09:30:00.000Z", deliveredAt: "2026-07-08T10:00:00.000Z",
@@ -86,6 +87,7 @@ const decidedHandoff: CaseHandoffView = {
 
 describe("IssueCasesPanel", () => {
   let container: HTMLDivElement;
+  let queryClient: QueryClient;
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -97,7 +99,7 @@ describe("IssueCasesPanel", () => {
 
   async function render() {
     const root = createRoot(container);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     act(() => {
       root.render(
         <QueryClientProvider client={queryClient}>
@@ -150,11 +152,38 @@ describe("IssueCasesPanel", () => {
     await flush();
     expect(mockCasesApi.listHandoffs).toHaveBeenCalledWith("c1", null);
     const history = container.querySelector('[aria-label="Case handoffs"]');
+    expect(history?.textContent).not.toContain("A verified launch post");
+    act(() => history?.querySelector("summary")?.click());
+    await flush();
     expect(history?.textContent).toContain("Expected deliverable: A verified launch post");
     expect(history?.textContent).toContain("Requirement revision 2");
-    expect(history?.textContent).toContain("Accepted · Requirements Accepted");
+    expect(history?.textContent).toContain("Accepted");
     expect(history?.querySelector('a[href="/issues/PAP-1"]')).not.toBeNull();
     act(() => root.unmount());
+  });
+
+  it.each([403, 404])("hides retained handoff details after a denied %s refresh", async (status) => {
+    mockInstanceApi.getExperimental.mockResolvedValue({ enableCases: true });
+    mockCasesApi.listForIssue.mockResolvedValue(links);
+    mockCasesApi.listHandoffs.mockResolvedValue({ items: [decidedHandoff], nextCursor: "older" });
+    const root = await render();
+    act(() => container.querySelector("summary")?.click());
+    await flush();
+    const history = container.querySelector('[aria-label="Case handoffs"]')!;
+    act(() => history.querySelector("summary")?.click());
+    await flush();
+    expect(history.textContent).toContain("A verified launch post");
+
+    mockCasesApi.listHandoffs.mockRejectedValue(new ApiError("Case no longer visible", status, {}));
+    await reactAct(async () => queryClient.invalidateQueries({ queryKey: queryKeys.cases.handoffs("c1") }));
+    await flush();
+    try {
+      expect(history.textContent).toContain("Handoffs couldn’t be loaded.");
+      expect(history.textContent).not.toContain("A verified launch post");
+      expect(history.textContent).not.toContain("Load older handoffs");
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it("renders nothing when enabled but no cases are linked", async () => {

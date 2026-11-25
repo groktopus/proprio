@@ -583,8 +583,14 @@ describe("openapi routes", () => {
     expect(paths.filter((path) => path.startsWith("/api/cases/{caseId}")).sort()).toEqual([
       "/api/cases/{caseId}/handoffs",
       "/api/cases/{caseId}/handoffs/{handoffId}/cancel",
+      "/api/cases/{caseId}/handoffs/{handoffId}/decision",
       "/api/cases/{caseId}/handoffs/{handoffId}/retry",
     ]);
+    const decision = spec.paths["/api/cases/{caseId}/handoffs/{handoffId}/decision"].post;
+    expect(decision.security).toEqual([{ AgentBearerAuth: [] }]);
+    expect(decision["x-proprio-authorization"]).toEqual({ actor: "agent" });
+    expect(decision.responses[422]).toBeDefined();
+    expect(decision.responses[429].headers["Retry-After"].schema).toMatchObject({ type: "integer", minimum: 1 });
     expect(spec.paths["/api/companies/{companyId}/cases"].post).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/case-handoffs"].post).toBeDefined();
     expect(spec.paths["/api/cases/{id}"].get).toBeDefined();
@@ -1379,6 +1385,21 @@ describe("openapi routes", () => {
       missingInSpec: [],
       extraInSpec: [],
       excludedRoutes: [...explicitOpenApiOperationCoverageExclusions].sort(),
+    });
+  });
+
+  it("documents the archive preview as a Board-only task count", () => {
+    const operation = loadSpecRoutes().spec.paths["/api/companies/{companyId}/members/{memberId}/archive-preview"].get;
+    expect(operation["x-proprio-authorization"]).toEqual({ actor: "board" });
+    expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+    expect(operation.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "companyId", in: "path", schema: { type: "string", format: "uuid" } }),
+      expect.objectContaining({ name: "memberId", in: "path", schema: { type: "string", format: "uuid" } }),
+    ]));
+    expect(operation.responses["400"]).toBeDefined();
+    expect(operation.responses["200"].content["application/json"].schema).toMatchObject({
+      required: ["reassignmentIssueCount"],
+      properties: { reassignmentIssueCount: { type: "integer", minimum: 0 } },
     });
   });
 

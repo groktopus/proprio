@@ -4,10 +4,11 @@ import { CaseDetail } from "@/pages/CaseDetail";
 import { CaseFieldsPanel, CaseFieldsTable } from "@/components/CaseFieldsPanel";
 import { IssueCasesPanel } from "@/components/IssueCasesPanel";
 import { instanceExperimentalSettingsSchema } from "@groktopus/shared";
-import { expect, within } from "storybook/test";
+import { expect, userEvent, within } from "storybook/test";
 import {
   caseItem,
   installCaseFixtures,
+  type CaseFixtureWorkflow,
 } from "../../support/capability-gaps/cases";
 import {
   prepareFixtureApi,
@@ -42,7 +43,7 @@ const meta = {
   beforeEach: ({ parameters }) => {
     const cleanup = installCaseFixtures(
       parameters.fixtureState as FixtureState,
-      parameters.fixtureWorkflow as "waiting" | "blocked" | undefined,
+      parameters.fixtureWorkflow as CaseFixtureWorkflow | undefined,
     );
     const flags = prepareFixtureApi([
       {
@@ -88,6 +89,26 @@ export const WorkflowBlocked: Story = {
     await expect(c.queryByRole("button", { name: "Cancel handoff" })).not.toBeInTheDocument();
   },
 };
+export const UnansweredOffer: Story = {
+  parameters: { fixtureWorkflow: "offer" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const state = await canvas.findByText("Waiting for recipient decision");
+    await userEvent.click(state.closest("summary")!);
+    await expect(await canvas.findByText("Offer requirements")).toBeVisible();
+    await expect(canvas.getByText("No recipient decision recorded.")).toBeVisible();
+  },
+};
+export const OfferClarification: Story = {
+  parameters: { fixtureWorkflow: "clarification" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const state = await canvas.findByText("Cancelled before transfer");
+    await userEvent.click(state.closest("summary")!);
+    await expect(await canvas.findByText("Clarification requested · Missing Prerequisite")).toBeVisible();
+    await expect(canvas.getByText("Please link the staging approval so I can finish verification.")).toBeVisible();
+  },
+};
 export const ActivityHistory: Story = {
   name: "Audit navigation",
   play: async ({ canvasElement }) => {
@@ -127,5 +148,16 @@ export const LinkedFromTask: Story = {
         name: /Release readiness/,
       }),
     ).toHaveAttribute("href", "/PAP/cases/PAP-C42");
+  },
+};
+export const TaskHandoffDecisions: Story = {
+  ...LinkedFromTask,
+  parameters: { fixtureWorkflow: "clarification" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByText("Show handoff decisions"));
+    const state = await canvas.findByText("Cancelled before transfer");
+    await userEvent.click(state.closest("summary")!);
+    await expect(await canvas.findByText("Clarification requested · Missing Prerequisite")).toBeVisible();
   },
 };

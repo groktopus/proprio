@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Layers, Package } from "lucide-react";
 import type { To } from "react-router-dom";
 import {
@@ -14,6 +14,7 @@ import { ArtifactEmptyGraphic } from "@/components/artifacts/v1/ArtifactEmptyGra
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { QueryErrorState, useQueryView } from "../components/QueryView";
+import { Button } from "@/components/ui/button";
 import { ArtifactCard } from "../components/artifacts/ArtifactCard";
 import { ArtifactGroupCard } from "../components/artifacts/ArtifactGroupCard";
 import { useSearchParams, Link } from "@/lib/router";
@@ -39,6 +40,7 @@ function parseKind(value: string | null): ArtifactKindFilter {
 }
 
 export function Artifacts() {
+  const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -52,6 +54,9 @@ export function Artifacts() {
   const groupIssueId = searchParams.get("groupIssueId") ?? undefined;
 
   const [draftQuery, setDraftQuery] = useState(query);
+  const [paginationFailure, setPaginationFailure] = useState<unknown>(null);
+  const [accessDeniedState, setAccessDeniedState] = useState(false);
+  const accessDeniedHandled = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const grouping = groupBy !== "none";
@@ -169,8 +174,12 @@ export function Artifacts() {
     [buildTo, groupBy],
   );
 
+  const artifactsQueryKey = useMemo(
+    () => queryKeys.artifacts.list(selectedCompanyId!, kind, query, groupBy, groupIssueId),
+    [selectedCompanyId, kind, query, groupBy, groupIssueId],
+  );
   const artifactsQuery = useInfiniteQuery({
-    queryKey: queryKeys.artifacts.list(selectedCompanyId!, kind, query, groupBy, groupIssueId),
+    queryKey: artifactsQueryKey,
     queryFn: ({ pageParam }) =>
       artifactsApi.list(selectedCompanyId!, {
         kind,
@@ -191,11 +200,50 @@ export function Artifacts() {
     hasNextPage,
     fetchNextPage,
   } = artifactsQuery;
+  const hasLoadedArtifactPages = (data?.pages.length ?? 0) > 0;
+  const paginationError = paginationFailure ?? (artifactsQuery.isFetchNextPageError ? artifactsQuery.error : null);
+  const nextPageError = paginationError !== null && hasLoadedArtifactPages;
+  const paginationStatus = paginationError && typeof paginationError === "object" && "status" in paginationError
+    ? (paginationError as { status?: unknown }).status
+    : null;
+  const paginationMessage = paginationError instanceof Error ? paginationError.message : "";
+  const accessDenied = accessDeniedState
+    || paginationStatus === 401
+    || paginationStatus === 403
+    || /\b(forbidden|unauthorized)\b/i.test(paginationMessage);
   const artifactsView = useQueryView(artifactsQuery);
 
   useEffect(() => {
+    if (artifactsQuery.isFetchNextPageError && artifactsQuery.error) {
+      setPaginationFailure((previous: unknown) => previous ?? artifactsQuery.error);
+    }
+  }, [artifactsQuery.error, artifactsQuery.isFetchNextPageError]);
+
+  const paginationScope = `${selectedCompanyId ?? ""}:${kind}:${query}:${groupBy}:${groupIssueId ?? ""}`;
+  useEffect(() => {
+    setPaginationFailure(null);
+    setAccessDeniedState(false);
+  }, [paginationScope]);
+
+  useEffect(() => {
+    if (!accessDenied) {
+      accessDeniedHandled.current = false;
+      return;
+    }
+    if (accessDeniedHandled.current) return;
+    accessDeniedHandled.current = true;
+    setAccessDeniedState(true);
+    void queryClient.removeQueries({ queryKey: artifactsQueryKey, exact: true });
+  }, [accessDenied, artifactsQueryKey, queryClient]);
+
+  const retryNextPage = useCallback(async () => {
+    const result = await fetchNextPage();
+    if (!result.isError) setPaginationFailure(null);
+  }, [fetchNextPage]);
+
+  useEffect(() => {
     const target = loadMoreRef.current;
-    if (!target || !hasNextPage || isFetchingNextPage) return;
+    if (!target || !hasNextPage || isFetchingNextPage || nextPageError) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         void fetchNextPage();
@@ -203,7 +251,7 @@ export function Artifacts() {
     }, { rootMargin: "320px 0px" });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, nextPageError]);
 
   const artifacts = useMemo(() => data?.pages.flatMap((page) => page.artifacts) ?? [], [data]);
   const groups = useMemo(
@@ -217,7 +265,7 @@ export function Artifacts() {
   const searching = query.length > 0;
 
   useEffect(() => {
-    if (viewingSelectedStack && selectedGroup) {
+    if (viewingSelectedStack && selectedGroup && !accessDenied) {
       setBreadcrumbs([
         { label: "Artifacts", href: "/artifacts" },
         { label: `${selectedGroup.issue.identifier} · ${selectedGroup.title}` },
@@ -225,7 +273,7 @@ export function Artifacts() {
     } else {
       setBreadcrumbs([{ label: "Artifacts" }]);
     }
-  }, [setBreadcrumbs, viewingSelectedStack, selectedGroup]);
+  }, [accessDenied, setBreadcrumbs, viewingSelectedStack, selectedGroup]);
 
   if (!selectedCompanyId) {
     return <EmptyState icon={Package} message="Select an organization to view artifacts." />;
@@ -279,9 +327,11 @@ export function Artifacts() {
 
       {/* Loaded artifacts stay on screen through a failed refetch; an outage
           before the first load shows the skeleton, a real failure shows copy. */}
-      {artifactsView.kind === "loading" || artifactsView.kind === "reconnecting" ? (
+      {accessDenied ? (
+        <QueryErrorState error={paginationError ?? { status: 403 }} action="load artifacts" />
+      ) : artifactsView.kind === "loading" || artifactsView.kind === "reconnecting" ? (
         <PageSkeleton variant="list" />
-      ) : artifactsView.kind === "error" ? (
+      ) : artifactsView.kind === "error" && !nextPageError ? (
         <QueryErrorState
           error={artifactsView.error}
           action="load artifacts"
@@ -319,7 +369,14 @@ export function Artifacts() {
                 ))}
           </ArtifactTileGrid>
           <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center pb-2 text-xs text-muted-foreground">
-            {isFetchingNextPage ? "Loading more artifacts..." : hasNextPage ? null : isFetching ? "Updating artifacts..." : null}
+            {isFetchingNextPage ? "Loading more artifacts..." : nextPageError ? (
+              <span role="alert" className="flex flex-wrap items-center justify-center gap-2">
+                <span>Couldn’t load more artifacts.</span>
+                <Button type="button" variant="outline" size="xs" onClick={() => void retryNextPage()}>
+                  Retry loading more artifacts
+                </Button>
+              </span>
+            ) : hasNextPage ? null : isFetching ? "Updating artifacts..." : null}
           </div>
         </>
       ) : (
@@ -336,6 +393,15 @@ export function Artifacts() {
           <div ref={loadMoreRef} className="flex min-h-10 items-center justify-center pb-2 text-xs text-muted-foreground">
             {isFetchingNextPage
               ? "Loading more artifacts..."
+              : nextPageError
+                ? (
+                  <span role="alert" className="flex flex-wrap items-center justify-center gap-2">
+                    <span>Couldn’t load more artifacts.</span>
+                      <Button type="button" variant="outline" size="xs" onClick={() => void retryNextPage()}>
+                      Retry loading more artifacts
+                    </Button>
+                  </span>
+                )
               : hasNextPage
                 ? null
                 : isFetching
