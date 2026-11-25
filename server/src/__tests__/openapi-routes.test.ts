@@ -1399,6 +1399,11 @@ describe("openapi routes", () => {
     const operation = loadSpecRoutes().spec.paths["/api/companies/{companyId}/members/{memberId}/archive-preview"].get;
     expect(operation["x-proprio-authorization"]).toEqual({ actor: "board" });
     expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+    expect(operation.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "companyId", in: "path", schema: { type: "string", format: "uuid" } }),
+      expect.objectContaining({ name: "memberId", in: "path", schema: { type: "string", format: "uuid" } }),
+    ]));
+    expect(operation.responses["400"]).toBeDefined();
     expect(operation.responses["200"].content["application/json"].schema).toMatchObject({
       required: ["reassignmentIssueCount"],
       properties: { reassignmentIssueCount: { type: "integer", minimum: 0 } },

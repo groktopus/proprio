@@ -254,6 +254,7 @@ import {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   // Instance settings
@@ -7854,11 +7855,11 @@ registry.registerPath({
   tags: ["access"],
   summary: "Preview task reassignment before archiving a company member",
   description: "Board-only. Requires permission to manage company membership and authority to archive the selected member. Returns the number of open tasks assigned to that member.",
-  request: { params: z.object({ companyId: z.string(), memberId: z.string() }) },
+  request: { params: archiveCompanyMemberPreviewParamsSchema },
   responses: {
     200: r.ok(z.object({ reassignmentIssueCount: z.number().int().nonnegative() })),
+    400: r.badRequest,
     401: r.unauthorized,
-    403: r.forbidden,
     404: r.notFound,
   },
 });
