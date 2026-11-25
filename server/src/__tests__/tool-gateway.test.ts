@@ -973,6 +973,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
           eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
         ));
         expect(dispatchIntents).toHaveLength(1);
+        const originalDispatchIntent = dispatchIntents[0]!;
         expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
         expect(await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
@@ -982,20 +983,22 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         expect(repeatedApproval.body).toMatchObject({ id: ambiguousRequest.id, status: "executing" });
         expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
 
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
         const sweep = await gateway.settleInterruptedActionReviews(new Date(Date.now() + 11 * 60_000));
         expect(sweep.scanned).toBeGreaterThanOrEqual(1);
         expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, ambiguousRequest.id)))
           .toEqual([expect.objectContaining({ status: "failed" })]);
         expect(await db.select().from(toolInvocations).where(eq(toolInvocations.id, ambiguousRequest.invocationId)))
           .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_execution_outcome_unknown" })]);
-        expect(await db.select().from(managedAuditEvents).where(and(
+        const sweptDispatchIntents = await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
-        ))).toHaveLength(1);
+        ));
+        expect(sweptDispatchIntents).toEqual([originalDispatchIntent]);
         expect(await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
         ))).toHaveLength(0);
       } finally {
-        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${triggerName} ON managed_audit_events`));
         await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
       }
 
