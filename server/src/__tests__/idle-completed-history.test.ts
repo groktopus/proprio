@@ -780,6 +780,7 @@ const DELETE_METHOD = "DELETE" as never;
       invocationId, interactionId, requestedByAgentId: f.agentId, canonicalArgumentsHash: "a".repeat(64), canonicalArgumentsSummary: { summary: "fixture" } });
     expect(await blocked("tool_action_requests")).toBe(true);
     await commitToolActionReview(db, { companyId: f.companyId, actionRequestId: requestId, decision: "rejected", actor: { userId: "local-board" } });
+    expect(await db.select().from(tables.managedAuditEvents).where(eq(tables.managedAuditEvents.invocationId, invocationId))).toHaveLength(0);
     expect(await blocked("tool_action_requests")).toBe(false);
     expect(await blocked("tool_action_deliveries")).toBe(true);
     await db.update(tables.issues).set({ status: "done" }).where(eq(tables.issues.id, f.issueId));

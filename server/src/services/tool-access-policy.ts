@@ -1861,11 +1861,18 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     }
   }
 
-  async function recordInvocation(input: ToolAccessDecisionInput, accessDecision: ToolAccessDecision) {
+  async function recordInvocation(
+    input: ToolAccessDecisionInput,
+    accessDecision: ToolAccessDecision,
+    evaluate?: (transaction: Db) => Promise<ToolAccessDecision>,
+  ) {
     const loaded = await loadContext(input);
     if (!loaded.ok) throw new Error("Cannot record invocation for invalid tool access context");
     const { ctx, redaction } = loaded;
-    const requestIdentityHash = input.request.sideEffecting || accessDecision.decision === "require_approval"
+    // When the decision is evaluated in the write transaction, calculate the
+    // stable request identity up front so the replay lookup still happens
+    // before rate-limit consumption.
+    const requestIdentityHash = input.request.sideEffecting || evaluate || accessDecision.decision === "require_approval"
       ? toolRequestIdentityHash(input.request.arguments, options.toolActionSigningSecret)
       : null;
     const argumentsHash = input.request.sideEffecting ? requestIdentityHash! : ctx.argumentsHash;
@@ -1876,7 +1883,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         eq(toolInvocations.companyId, input.companyId),
         eq(toolInvocations.idempotencyKey, idempotencyKey),
       ));
-      if (existing) return { invocation: existing, replayed: true, actionRequest: null };
+      if (existing) return { invocation: existing, replayed: true, actionRequest: null, decision: accessDecision };
     }
     if (input.request.sideEffecting && input.request.idempotencyKey == null) {
       // Before complete request identities, default keys used shortened and
@@ -1900,7 +1907,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         // Its digest covers the full request when it differs from its preview.
         if (legacy.argumentsSummary?.sha256 && legacy.argumentsHash === requestIdentityHash
             && legacy.argumentsHash !== legacy.argumentsSummary.sha256) {
-          return { invocation: legacy, replayed: true, actionRequest: null };
+          return { invocation: legacy, replayed: true, actionRequest: null, decision: accessDecision };
         }
         const [actionRequest] = await db.select({ signedArguments: toolActionRequests.signedArguments })
           .from(toolActionRequests).where(and(eq(toolActionRequests.companyId, input.companyId),
@@ -1914,84 +1921,103 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           { reasonCode: "legacy_tool_idempotency_unverifiable", invocationId: legacy.id },
         );
         if (canonicalToolArguments(original.arguments) === canonicalToolArguments(input.request.arguments)) {
-          return { invocation: legacy, replayed: true, actionRequest: null };
+          return { invocation: legacy, replayed: true, actionRequest: null, decision: accessDecision };
         }
       }
     }
-    const status = accessDecision.decision === "allow"
-      ? "authorized"
-      : accessDecision.decision === "require_approval"
-        ? "awaiting_approval"
-        : accessDecision.decision === "rate_limited"
-          ? "rate_limited"
-          : "denied";
-    const recorded = await db.transaction(async (tx) => {
-      const [invocation] = await tx.insert(toolInvocations).values({
-        companyId: ctx.companyId,
-        idempotencyKey,
-        actorType: ctx.actorType,
-        actorId: ctx.actorId,
-        agentId: ctx.agentId,
-        issueId: ctx.issueId,
-        runId: ctx.heartbeatRunId,
-        gatewayId: ctx.gatewayId,
-        ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
-          where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
-            and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
-        applicationId: ctx.applicationId,
-        connectionId: ctx.connectionId,
-        catalogEntryId: ctx.catalogEntryId,
-        catalogVersionHash: ctx.catalogVersionHash,
-        catalogSchemaHash: ctx.catalogSchemaHash,
-        providerType: ctx.providerType,
-        applicationKey: ctx.applicationKey,
-        upstreamToolName: ctx.upstreamToolName,
-        riskLevel: ctx.riskLevel,
-        toolName: ctx.toolName,
-        argumentsHash,
-        argumentsSummary: redaction.summary,
-        policyDecision: accessDecision.decision,
-        policyExplanation: accessDecision.policyExplanation ?? null,
-        matchedPolicyIds: accessDecision.matchedPolicyIds,
-        approvalState: accessDecision.decision === "require_approval" ? "pending" : "not_required",
-        status,
-        errorCode: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.reasonCode,
-        errorMessage: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : accessDecision.explanation,
-        completedAt: accessDecision.allowed || accessDecision.decision === "require_approval" ? null : new Date(),
-      }).returning();
-      let actionRequest = null;
-      if (accessDecision.decision === "require_approval") {
-        [actionRequest] = await tx.insert(toolActionRequests).values({
+    let captureInsertFailed = false;
+    let recorded: {
+      invocation: typeof toolInvocations.$inferSelect;
+      actionRequest: typeof toolActionRequests.$inferSelect | null;
+      decision: ToolAccessDecision;
+    };
+    try {
+      recorded = await db.transaction(async (tx) => {
+        const decision = evaluate ? await evaluate(tx as unknown as Db) : accessDecision;
+        const status = decision.decision === "allow"
+          ? "authorized"
+          : decision.decision === "require_approval"
+            ? "awaiting_approval"
+            : decision.decision === "rate_limited"
+              ? "rate_limited"
+              : "denied";
+        const [invocation] = await tx.insert(toolInvocations).values({
           companyId: ctx.companyId,
-          invocationId: invocation.id,
+          idempotencyKey,
+          actorType: ctx.actorType,
+          actorId: ctx.actorId,
+          agentId: ctx.agentId,
           issueId: ctx.issueId,
-          status: "pending",
-          canonicalArgumentsHash: requestIdentityHash!,
-          canonicalArgumentsSummary: redaction.summary,
-          requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
-          requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
+          runId: ctx.heartbeatRunId,
+          gatewayId: ctx.gatewayId,
+          ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
+            where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
+              and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),
+          applicationId: ctx.applicationId,
+          connectionId: ctx.connectionId,
+          catalogEntryId: ctx.catalogEntryId,
+          catalogVersionHash: ctx.catalogVersionHash,
+          catalogSchemaHash: ctx.catalogSchemaHash,
+          providerType: ctx.providerType,
+          applicationKey: ctx.applicationKey,
+          upstreamToolName: ctx.upstreamToolName,
+          riskLevel: ctx.riskLevel,
+          toolName: ctx.toolName,
+          argumentsHash,
+          argumentsSummary: redaction.summary,
+          policyDecision: decision.decision,
+          policyExplanation: decision.policyExplanation ?? null,
+          matchedPolicyIds: decision.matchedPolicyIds,
+          approvalState: decision.decision === "require_approval" ? "pending" : "not_required",
+          status,
+          errorCode: decision.allowed || decision.decision === "require_approval" ? null : decision.reasonCode,
+          errorMessage: decision.allowed || decision.decision === "require_approval" ? null : decision.explanation,
+          completedAt: decision.allowed || decision.decision === "require_approval" ? null : new Date(),
         }).returning();
-      }
-      await tx.insert(managedAuditEvents).values({
-        companyId: ctx.companyId,
-        source: "tool_gateway",
-        schemaVersion: 1,
-        eventType: "invocation_decision_recorded",
-        phase: "policy_decision",
-        occurredAt: invocation.createdAt,
-        runId: ctx.heartbeatRunId,
-        taskId: ctx.issueId,
-        invocationId: invocation.id,
-        requestId: actionRequest?.id ?? null,
-        connectionId: ctx.connectionId,
-        actorType: ctx.actorType,
-        actorId: ctx.actorId,
-        decision: accessDecision.decision,
-        status: invocation.status,
-        reasonCode: accessDecision.reasonCode,
+        let actionRequest = null;
+        if (decision.decision === "require_approval") {
+          [actionRequest] = await tx.insert(toolActionRequests).values({
+            companyId: ctx.companyId,
+            invocationId: invocation.id,
+            issueId: ctx.issueId,
+            status: "pending",
+            canonicalArgumentsHash: requestIdentityHash!,
+            canonicalArgumentsSummary: redaction.summary,
+            requestedByAgentId: ctx.actorType === "agent" ? ctx.actorId : null,
+            requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
+          }).returning();
+        }
+        try {
+          await tx.insert(managedAuditEvents).values({
+            companyId: ctx.companyId,
+            source: "tool_gateway",
+            schemaVersion: 1,
+            eventType: "invocation_decision_recorded",
+            phase: "policy_decision",
+            occurredAt: invocation.createdAt,
+            runId: ctx.heartbeatRunId,
+            taskId: ctx.issueId,
+            invocationId: invocation.id,
+            requestId: actionRequest?.id ?? null,
+            connectionId: ctx.connectionId,
+            actorType: ctx.actorType,
+            actorId: ctx.actorId,
+            decision: decision.decision,
+            status: invocation.status,
+            reasonCode: decision.reasonCode,
+          });
+        } catch (error) {
+          captureInsertFailed = true;
+          throw error;
+        }
+        return { invocation, actionRequest, decision };
       });
-      return { invocation, actionRequest };
-    });
+    } catch (error) {
+      // Record the existing durable critical alert outside the failed
+      // transaction, while preserving the original capture error for callers.
+      if (captureInsertFailed) await recordToolRuntimeAuditWriteFailure(db, input.companyId);
+      throw error;
+    }
     return { ...recorded, replayed: false };
   }
 
