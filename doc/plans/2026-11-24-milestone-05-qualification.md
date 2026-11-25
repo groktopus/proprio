@@ -247,6 +247,22 @@ baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0` and is in progress.
 [Replacement composition qualification](https://github.com/groktopus/proprio/actions/runs/45557310471)
 
 
+The standard-pool reconstruction and native receipt suites passed eight more
+tests on `df2439ef`. OpenAPI generation matched the checked-in schema. A
+single-connection stress run passed 98 other tests and timed out before
+the HTTP task-create response. The task-create fix returned HTTP 201 on
+the same route under stress and passed all 12 human-directed work tests.
+The stress replay then stalled in the tool-action wake delivery after
+approval. PostgreSQL showed an idle delivery transaction holding the one
+ordinary connection while the code tried a second ordinary-pool read.
+[Task-create transaction fix](https://github.com/groktopus/proprio/pull/393)
+
+The updated migration replay test located the migration through the journal
+on both the retirement PR and its renumbered composition. It observed both
+calls waiting for the migration advisory lock before allowing either call
+to repair the index. [Reviewed migration test](https://github.com/groktopus/proprio/pull/392)
+
+
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
 All 112 tests passed across commentary delivery, durable receipt recovery,
