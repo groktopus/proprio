@@ -405,9 +405,12 @@ on the composed source.
 [Dependency restart regression](https://github.com/groktopus/proprio/pull/309)
 [Current-main composition](https://github.com/groktopus/proprio/commit/109847c866991fe061a658c818dc3607cf6cd126)
 
-Hosted Linux source qualification is running for that composition against
-`166175cc093a569eed60b59f6df70f6c10c43290`.
-[Current-main hosted qualification](https://github.com/groktopus/proprio/actions/runs/45575479150)
+Hosted Linux source qualification passed all five cases on that composition
+against `166175cc093a569eed60b59f6df70f6c10c43290`. The retained report
+confirms both revisions and zero observed data loss during active-run
+migration recovery.
+[Hosted qualification](https://github.com/groktopus/proprio/actions/runs/45575479150)
+[Retained report](https://github.com/groktopus/proprio/actions/runs/45575479150/artifacts/15006360924)
 
 The subsequent review composition `0153750703bbb358692e5c8cb8fd77c3d18958bc`
 passed 139 audit export, MCP Tasks, OpenAPI and Apps queue tests, plus four
@@ -449,6 +452,10 @@ dependency investigation browser test change.
 [Transport classification](https://github.com/groktopus/proprio/pull/404)
 [Human approval fixtures](https://github.com/groktopus/proprio/pull/405)
 [Reviewed gateway composition](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
+
+Hosted Linux source qualification is running for the reviewed gateway
+composition against `166175cc093a569eed60b59f6df70f6c10c43290`.
+[Reviewed gateway hosted qualification](https://github.com/groktopus/proprio/actions/runs/45579778025)
 
 The authenticated reconstruction passed on the final local source with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
