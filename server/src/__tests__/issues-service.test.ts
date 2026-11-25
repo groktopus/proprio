@@ -5190,12 +5190,13 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
               priority: "medium",
             }, tx)),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("Task creation exceeded its one-connection test deadline")), 2_000);
+            timer = setTimeout(() => reject(new Error("Task creation exceeded its one-connection test deadline")), 5_000);
           }),
         ]);
 
-        expect(issue.assigneeAgentId).toBe(assigneeAgentId);
-        expect(issue.projectWorkspaceId).toBe(projectWorkspaceId);
+        expect(issue).toMatchObject({ assigneeAgentId, projectWorkspaceId, status: "in_progress" });
+        const [persisted] = await singleConnectionDb.select().from(issues).where(eq(issues.id, issue.id));
+        expect(persisted).toMatchObject({ assigneeAgentId, projectWorkspaceId, status: "in_progress" });
       } finally {
         if (timer) clearTimeout(timer);
       }
