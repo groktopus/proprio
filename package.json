@@ -105,16 +105,16 @@
     "verify": "node --import ./cli/node_modules/tsx/dist/loader.mjs scripts/ensure-workspace-package-links.ts && node scripts/local-verify.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
-    "agentmail": "^0.5.31",
+    "@playwright/test": "^1.65.1",
+    "agentmail": "^0.5.54",
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.2",
-    "oxc-parser": "0.127.0",
+    "oxc-parser": "0.159.0",
     "oxlint": "1.94.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3",
+    "vitest": "^5.1.1",
     "yaml": "^2.8.1",
-    "turbo": "2.11.10"
+    "turbo": "2.11.13"
   },
   "engines": {
     "node": ">=24.11.0"

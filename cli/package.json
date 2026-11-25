@@ -36,7 +36,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@clack/prompts": "^1.7.0",
+    "@clack/prompts": "^1.9.0",
     "@groktopus/adapter-claude-local": "workspace:*",
     "@groktopus/adapter-codex-local": "workspace:*",
     "@groktopus/adapter-cursor-cloud": "workspace:*",
@@ -52,14 +52,14 @@
     "@groktopus/server": "workspace:*",
     "@groktopus/shared": "workspace:*",
     "@groktopus/hermes-proprio-adapter": "workspace:*",
-    "drizzle-orm": "0.45.2",
-    "dotenv": "^17.4.2",
-    "commander": "^15.0.0",
+    "drizzle-orm": "0.45.4",
+    "dotenv": "^18.0.10",
+    "commander": "^15.1.0",
     "embedded-postgres": "^18.1.0-beta.16",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
