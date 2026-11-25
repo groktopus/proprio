@@ -87,6 +87,14 @@ against main `c1dc2a08` applied the protected receipt migration after dispatch
 and passed 82 export, reconstruction and OpenAPI tests with the default pool.
 [Reviewed page access](https://github.com/groktopus/proprio/pull/378)
 
+Capacity review added one queue entry per company, a fail-fast dedicated
+connection budget and a lease deadline. The exact head `85e65029` passed 57
+database admission, audit route and error-handler tests with one ordinary
+connection. Disposable composition `a104203e1822a51598d37d668d2a3090f83de867`
+against main `885ae5fb` passed 82 export, reconstruction and OpenAPI tests
+with the default pool. Generated OpenAPI and migration compatibility checks
+passed. [Reviewed capacity](https://github.com/groktopus/proprio/pull/379)
+
 Hosted stability and durable-work qualification passed for adapter head
 `40aa561ef4a65d4bef7a925a20ec2901c3f6338b`. The retained report records that
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
@@ -110,7 +118,7 @@ Disposable composition `d06aa5539146b225f7444ffe0c0c453afef91198`
 included current `main`, the milestone stack, and the two open test fixture
 repairs. All 230 tests passed across adapter utilities, native authority,
 commentary and receipt recovery on Node 24.22.1 with isolated PostgreSQL.
-[Snapshot order fixture repair](https://github.com/groktopus/proprio/pull/349)
+The snapshot-order fixture repair has since merged in `885ae5fb`. [Snapshot order fixture repair](https://github.com/groktopus/proprio/pull/349)
 
 GitHub's Linux source qualification passed for reconstruction PR head
 `9ac8fffe7fed9114b04ded567802a6381790b0f8` with baseline `6e6ebf51`. It covered
