@@ -606,16 +606,16 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
 
     const singleConnectionDb = createDb(externalUrl ?? tempDb!.connectionString, { maxConnections: 1 });
     try {
-      const wakeup = async (agentId: string, input: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1]) => {
+      const wakeup: ReturnType<typeof heartbeatService>["wakeup"] = async (agentId, input) => {
         if (!input) throw new Error("tool action delivery did not request a wake");
-        const [wake] = await singleConnectionDb.insert(agentWakeupRequests).values({
+        await singleConnectionDb.insert(agentWakeupRequests).values({
           companyId, agentId, source: "automation", reason: "issue_commented",
           idempotencyKey: input.idempotencyKey ?? null, requestedByActorType: "user",
           requestedByActorId: "reviewer", payload: input.payload ?? {},
-        }).onConflictDoNothing().returning();
-        return wake ?? null;
+        }).onConflictDoNothing();
+        return null;
       };
-      const delivery = toolActionDeliveryService(singleConnectionDb, { wakeup } as never);
+      const delivery = toolActionDeliveryService(singleConnectionDb, { wakeup });
       expect(await delivery.deliver(request!.id)).toBe(true);
       const [receipt] = await singleConnectionDb.select().from(toolActionDeliveries)
         .where(eq(toolActionDeliveries.actionRequestId, request!.id));
