@@ -277,15 +277,15 @@ describePostgres("agent action audit routes", () => {
     });
 
     try {
-      await inserted;
+      await Promise.race([inserted, lateTransaction]);
       const path = `/api/companies/${company.id}/audit/managed-exports`;
       const first = await board.post(path).send({ from, to: boundary }).expect(201);
-      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
       expect(first.body.eventCount).toBe(0);
-      expect(adjacent.body.eventCount).toBe(0);
 
       finishTransaction();
       await lateTransaction;
+      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
+      expect(adjacent.body.eventCount).toBe(0);
       const firstPage = await board.get(`${path}/${first.body.exportId}`).expect(200);
       const adjacentPage = await board.get(`${path}/${adjacent.body.exportId}`).expect(200);
       expect(firstPage.body.events).toEqual([]);
