@@ -138,18 +138,13 @@ function renderApiAccessNote(env: Record<string, string>): string {
   ].join("\n");
 }
 
-/**
- * Inject Proprio skills directly into the effective Gemini skills home.
- * This avoids needing GEMINI_CLI_HOME overrides, so the CLI naturally finds
- * both its auth credentials and the injected skills under the child HOME.
- */
 async function ensureGeminiSkillsInjected(
   onLog: AdapterExecutionContext["onLog"],
   skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
-  desiredSkillNames?: string[],
-  skillsHome = resolveGeminiSkillsHome({}),
+  desiredSkillNames: string[],
+  skillsHome: string,
 ): Promise<void> {
-  const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
+  const desiredSet = new Set(desiredSkillNames);
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
   if (selectedEntries.length === 0) return;
 
@@ -264,15 +259,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAdapterExecutionTargetLocalWorkspace(executionTarget, cwd);
   const geminiSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
   const desiredGeminiSkillNames = resolveLegacyProprioDesiredSkillNames(config, geminiSkillEntries);
-  if (!executionTargetIsRemote) {
-    await ensureGeminiSkillsInjected(
-      onLog,
-      geminiSkillEntries.filter((entry) => !isProprioSkillSourceMissing(entry)),
-      desiredGeminiSkillNames,
-      resolveGeminiSkillsHome(config),
-    );
-  }
-
   const envConfig = parseObject(config.env);
   const env: Record<string, string> = {
     ...buildProprioEnv(agent, ctx.agentIdentity),
@@ -330,6 +316,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env.PROPRIO_API_KEY = authToken;
   }
   const runtimeEnv = buildGeminiRuntimeEnv(env);
+  if (!executionTargetIsRemote) {
+    await ensureGeminiSkillsInjected(
+      onLog,
+      geminiSkillEntries.filter((entry) => !isProprioSkillSourceMissing(entry)),
+      desiredGeminiSkillNames,
+      resolveGeminiSkillsHome({ env: runtimeEnv }, effectiveExecutionCwd),
+    );
+  }
   const billingType = resolveGeminiBillingType(runtimeEnv);
   const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
     executionTarget,

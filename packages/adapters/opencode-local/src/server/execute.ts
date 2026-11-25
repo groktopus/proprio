@@ -225,6 +225,34 @@ async function buildOpenCodeSkillsDir(config: Record<string, unknown>): Promise<
   return target;
 }
 
+async function stageOpenCodeSkillsInRuntimeConfig(
+  entries: Awaited<ReturnType<typeof readProprioRuntimeSkillEntries>>,
+  desiredSkillNames: string[],
+  runtimeConfigHome: string,
+): Promise<void> {
+  const skillsHome = path.join(runtimeConfigHome, "opencode", "skills");
+  const existing = await fs.lstat(skillsHome).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  if (existing?.isSymbolicLink()) {
+    // The runtime config copy preserves symlinks. Copy the contents of a
+    // linked skill directory so new mounts never write through to its source.
+    const sourceHome = await fs.realpath(skillsHome).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await fs.unlink(skillsHome);
+    if (sourceHome) {
+      await fs.cp(sourceHome, skillsHome, { recursive: true, dereference: false });
+    }
+  }
+  await fs.mkdir(skillsHome, { recursive: true });
+  const desiredNames = new Set(desiredSkillNames);
+  for (const entry of entries) {
+    if (!desiredNames.has(entry.key) || isProprioSkillSourceMissing(entry)) continue;
+    await ensureProprioSkillSymlink(entry.source, path.join(skillsHome, entry.runtimeName));
+  }
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
@@ -264,7 +292,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAdapterExecutionTargetLocalWorkspace(executionTarget, cwd);
   const openCodeSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
   const desiredOpenCodeSkillNames = resolveLegacyProprioDesiredSkillNames(config, openCodeSkillEntries);
-  if (!executionTargetIsRemote) {
+  const hasExplicitSkillInventory = Array.isArray(config.proprioRuntimeSkills);
+  if (!executionTargetIsRemote && !hasExplicitSkillInventory) {
     await ensureOpenCodeSkillsInjected(
       onLog,
       openCodeSkillEntries,
@@ -328,6 +357,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // selection is already handled via the --model CLI flag.  Set after the
   // envConfig loop so user overrides cannot disable this guard.
   env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+  // Managed local runs carry an explicit inventory. Keep OpenCode's Claude
+  // compatibility discovery from adding skills from shared/global and project
+  // .claude/skills paths; native OpenCode and .agents skill discovery remains on.
+  if (!executionTargetIsRemote && hasExplicitSkillInventory) {
+    env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
+  }
   if (authToken) {
     env.PROPRIO_API_KEY = authToken;
   }
@@ -338,6 +373,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
+    if (!executionTargetIsRemote && hasExplicitSkillInventory) {
+      await stageOpenCodeSkillsInRuntimeConfig(
+        openCodeSkillEntries,
+        desiredOpenCodeSkillNames,
+        preparedRuntimeConfig.env.XDG_CONFIG_HOME,
+      );
+    }
     const runtimeEnv = Object.fromEntries(
       Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
