@@ -219,7 +219,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       }
 
       // Reuse the same config, PostgreSQL proxy, database and runtime control
-      // file. Startup recovery must finish the committed claim with one wake.
+      // file. Startup recovery must respect the task's current owner.
       await writeFile(control, "");
       restarted = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
       if (eligibleParentId) {
@@ -227,6 +227,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
           const rows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
           return rows.find(row => (row.payload as Record<string, unknown>).issueId === eligibleParentId) ?? null;
         }, row => row.reason === "issue_blocker_stalled", "The restarted controller did not diagnose the eligible parent");
+        expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(0);
         const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string }> }>(
           "GET", `/issues/${parentId}/diagnostics/wakes`);
         expect(diagnostics.events.some(event => event.kind === "wake_request" && event.reason === "issue_blocker_stalled")).toBe(false);
@@ -248,6 +249,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         eq(heartbeatRuns.wakeupRequestId, wake.id)));
       expect(run).toMatchObject({ status: "succeeded",
         contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
+      expect(await readFile(effectFile, "utf8")).toBe("invoked");
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
