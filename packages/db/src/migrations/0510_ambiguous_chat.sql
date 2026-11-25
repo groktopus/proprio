@@ -1,0 +1,1 @@
+ALTER TABLE "managed_audit_exports" ADD COLUMN "invalidated" boolean DEFAULT false NOT NULL;
