@@ -27,7 +27,13 @@ test("asks the parent assignee to investigate and reads its wake after reload", 
   const diagnosis = page.getByTestId("dependency-diagnosis-notice");
   await expect(diagnosis.getByRole("link", { name: new RegExp(child.title) })).toBeVisible();
   await expect(diagnosis).toContainText(parentAgent.name);
-  await diagnosis.getByRole("button", { name: "Ask assignee to investigate" }).click();
+  const [investigation] = await Promise.all([
+    page.waitForResponse(response => response.request().method() === "POST"
+      && new URL(response.url()).pathname === investigationPath),
+    diagnosis.getByRole("button", { name: "Ask assignee to investigate" }).click(),
+  ]);
+  expect(investigation.status()).toBe(202);
+  expect(await investigation.json()).toMatchObject({ accepted: true });
   await expect.poll(async () => json(await request.get(investigationPath)), { timeout: 20_000 }).toMatchObject({
     wake: { status: "completed" }, canInvestigate: false,
   });
@@ -36,5 +42,5 @@ test("asks the parent assignee to investigate and reads its wake after reload", 
   await expect(diagnosis.getByRole("button", { name: "Ask assignee to investigate" })).toHaveCount(0);
   const diagnostics = await json(await request.get(`/api/issues/${parent.id}/diagnostics/wakes`));
   expect(diagnostics.events.filter((event: { reason: string }) => event.reason === "issue_blocker_stalled"))
-    .toEqual([expect.objectContaining({ kind: "wake_request", status: "completed" })]);
+    .toEqual([expect.objectContaining({ kind: "wake_request", source: "on_demand", status: "completed" })]);
 });
