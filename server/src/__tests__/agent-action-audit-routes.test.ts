@@ -35,6 +35,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { readManagedAuditExportPage } from "../services/managed-audit-export.js";
+import * as transientLockContention from "../services/transient-lock-contention.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -582,7 +583,14 @@ describePostgres("agent action audit routes", () => {
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", retainAfter);
     const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
     const writerDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const observedPostgresErrors: unknown[] = [];
+    const postgresErrorCode = transientLockContention.postgresErrorCode;
+    const postgresErrorCodeSpy = vi.spyOn(transientLockContention, "postgresErrorCode").mockImplementation(error => {
+      observedPostgresErrors.push(error);
+      return postgresErrorCode(error);
+    });
     let held = false;
+    let lockPid = 0;
     let losingRequest: Promise<{ status: number; body: Record<string, unknown>; text: string }> | undefined;
     try {
       await db.insert(managedAuditExports).values(Array.from({ length: 31 }, () => ({
@@ -593,14 +601,17 @@ describePostgres("agent action audit routes", () => {
       await db.execute(sql`create function public.proprio_test_block_managed_export_insert() returns trigger language plpgsql as $$ begin if new.watermark not in ('quota-race-fixture', 'winning-concurrent-quota-writer') then perform pg_advisory_xact_lock(380380::bigint); end if; return new; end $$`);
       await db.execute(sql`create trigger proprio_test_block_managed_export_insert before insert on managed_audit_exports for each row execute function public.proprio_test_block_managed_export_insert()`);
       await lockDb.execute(sql`select pg_advisory_lock(${triggerKey}::bigint)`);
+      const [lockOwner] = await lockDb.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      lockPid = lockOwner!.pid;
       held = true;
 
-      const losingRequestStartedAt = performance.now();
       losingRequest = board.post(path).send(window).then(response => response);
       await vi.waitFor(async () => {
         const [waiting] = await db.execute<{ count: number }>(sql`
-          select count(*)::int as count from pg_locks
-          where locktype = 'advisory' and not granted and classid = 0 and objid = ${triggerKey}::oid
+          select count(*)::int as count from pg_locks lock
+          join pg_database database on database.oid = lock.database
+          where lock.locktype = 'advisory' and not lock.granted and lock.classid = 0 and lock.objid = ${triggerKey}::oid
+            and database.datname = current_database()
         `);
         expect(waiting.count).toBeGreaterThan(0);
       });
@@ -612,26 +623,26 @@ describePostgres("agent action audit routes", () => {
           watermark: "winning-concurrent-quota-writer", expiresAt: new Date(Date.now() + 60_000),
         });
       }, { isolationLevel: "serializable" });
-      const [routeWaiter] = await db.execute<{ count: number; ageMs: number }>(sql`
+      const [routeWaiter] = await db.execute<{ count: number; blockedByFixtureLock: boolean }>(sql`
         select count(*)::int as count,
-          coalesce(max(extract(epoch from now() - activity.query_start) * 1000), 0)::int as "ageMs"
+          coalesce(bool_and(${lockPid} = any(pg_blocking_pids(activity.pid))), false) as "blockedByFixtureLock"
         from pg_locks lock
         join pg_stat_activity activity using (pid)
+        join pg_database database on database.oid = lock.database
         where lock.locktype = 'advisory' and not lock.granted
           and lock.classid = 0 and lock.objid = ${triggerKey}::oid
+          and database.datname = current_database()
       `);
-      expect(routeWaiter).toMatchObject({ count: 1 });
-      // The exact HTTP writer is blocked on the test gate well before its
-      // five-second statement timeout, so its 503 after release is the
-      // serializable quota loser path, not a 57014 timeout.
-      expect(routeWaiter!.ageMs).toBeLessThan(4_000);
+      expect(routeWaiter).toMatchObject({ count: 1, blockedByFixtureLock: true });
       await lockDb.execute(sql`select pg_advisory_unlock(${triggerKey}::bigint)`);
       held = false;
 
       const response = await losingRequest;
-      expect(performance.now() - losingRequestStartedAt).toBeLessThan(4_500);
       expect(response.status, response.text).toBe(503);
       expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      const observedSqlStates = observedPostgresErrors.map(postgresErrorCode);
+      expect(observedSqlStates).toContain("40001");
+      expect(observedSqlStates).not.toContain("57014");
       const snapshots = await db.select().from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
       expect(snapshots).toHaveLength(32);
       expect(snapshots.filter(snapshot => snapshot.watermark === "winning-concurrent-quota-writer")).toHaveLength(1);
@@ -642,6 +653,7 @@ describePostgres("agent action audit routes", () => {
       await Promise.allSettled([losingRequest]);
       await db.execute(sql`drop trigger if exists proprio_test_block_managed_export_insert on managed_audit_exports`);
       await db.execute(sql`drop function if exists public.proprio_test_block_managed_export_insert()`);
+      postgresErrorCodeSpy.mockRestore();
       await writerDb.$client.end();
       await lockDb.$client.end();
       vi.unstubAllEnvs();

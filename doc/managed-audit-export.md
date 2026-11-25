@@ -94,6 +94,9 @@ Rolling out a changed limit does not rebalance existing active snapshots that
 still match the current source epoch and retention boundary. If the new limit
 is lower than an operator's existing count, new creation remains capped until
 the count falls below the limit through expiry or invalidation.
+Invalidating a snapshot immediately frees both its operator and company quota
+slots. Its thin invalidation marker remains available through the snapshot's
+original expiry and the marker-retention period after expiry.
 
 Successful creation retires snapshot memberships from older epochs or windows
 before the configured cutoff in bounded batches. Those snapshots stop using
