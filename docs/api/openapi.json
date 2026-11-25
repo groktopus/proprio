@@ -63217,7 +63217,7 @@
             }
           },
           "409": {
-            "description": "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
+            "description": "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. The owner receives snapshot_expired for at least 24 hours after expiry in the same source epoch. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
             "content": {
               "application/json": {
                 "schema": {
