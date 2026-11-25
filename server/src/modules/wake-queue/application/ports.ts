@@ -32,15 +32,16 @@ export type ReleaseTransactionResult = {
 };
 
 /**
- * The three host callbacks the release use case needs. These members do
- * not run on the module's own transaction, which is why two of them take
- * the transaction-scoped issue snapshot instead of an issue id.
+ * Storage-agnostic host callbacks used by the release use case. The use case
+ * calls them while its issue-execution transaction is open; the adapter owns
+ * binding any backing reads to that transaction. The application port passes
+ * the issue snapshot it already resolved instead of requiring another issue read.
  */
 export interface WakeQueueHost {
   /**
-   * Takes the transaction-scoped issue snapshot, not an issue id, so this
-   * port never re-reads the issue on a separate connection while the
-   * module's own transaction is open.
+   * Resolve the owner from the transaction-scoped issue snapshot and context.
+   * The host may read related ownership metadata, with the storage adapter
+   * keeping those reads in the release transaction.
    */
   resolveResponsibleUserId(input: {
     companyId: string;
@@ -55,9 +56,8 @@ export interface WakeQueueHost {
     existingRunResponsibleUserId: string | null;
   }): Promise<string | null>;
   /**
-   * Takes the transaction-scoped issue snapshot, not an issue id, so this
-   * port never re-reads the issue on a separate connection while the
-   * module's own transaction is open.
+   * Resolve routine metadata for the transaction-scoped issue snapshot.
+   * The host may read routine records through the transaction-bound adapter.
    */
   getRoutineEnv(input: {
     companyId: string;
