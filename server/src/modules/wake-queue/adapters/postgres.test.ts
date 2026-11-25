@@ -523,6 +523,46 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0].body).toBe(comment.body);
   });
 
+  it("promotes a deferred wake with host reads on the one-connection issue transaction", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, status: "blocked", assigneeAgentId: agentId });
+    const runId = await seedRun({ companyId, agentId, status: "succeeded", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({ companyId, agentId, issueId, requestedByActorId: "responsible-user" });
+    const singleConnectionDb = createDb(external ?? tempDb!.connectionString, { maxConnections: 1 });
+    const deps: WakeQueuePostgresAdapterDeps = {
+      resolveResponsibleUserId: async (_input, reader: Pick<Db, "select"> = singleConnectionDb) => {
+        await reader.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+        return "responsible-user";
+      },
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async (_input, reader: Pick<Db, "select"> = singleConnectionDb) => {
+        await reader.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+        return null;
+      },
+    };
+    try {
+      const release = createReleaseIssueExecution({
+        issueLock: createPostgresWakeQueueAdapter(singleConnectionDb, deps),
+        recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+      });
+      const input = { companyId, runId, now: new Date(), suppressImmediateRecovery: true, resumeStrandedQueue: true };
+      expect((await release(input)).outcome.kind).toBe("promoted");
+      const [promotedWake] = await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+      expect(promotedWake).toMatchObject({ status: "queued", runId: expect.any(String) });
+      const promotedRuns = await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      expect(promotedRuns).toHaveLength(2);
+
+      await release(input);
+      expect(await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(2);
+      expect((await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0])
+        .toMatchObject({ status: "queued", runId: promotedWake!.runId });
+    } finally {
+      await singleConnectionDb.$client.end({ timeout: 1 });
+    }
+  }, 30_000);
+
   it.each(["queued", "running", "scheduled_retry", "cancelled"])("preserves a stranded queue when another agent has a newer %s turn", async status => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
