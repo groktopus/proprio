@@ -2,6 +2,7 @@ import { createProviderStoppedBoundary } from "@groktopus/adapter-utils/provider
 import { createUsageCheckpointLog } from "@groktopus/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@groktopus/adapter-utils";
@@ -42,7 +43,7 @@ import {
   ensurePathInEnv,
   refreshProprioWorkspaceEnvForExecution,
   isProprioSkillSourceMissing,
-  readProprioRuntimeSkillEntries,
+  readProprioRuntimeSkillInventory,
   readProprioIssueWorkModeFromContext,
   resolveLegacyProprioDesiredSkillNames,
   removeMaintainerOnlySkillSymlinks,
@@ -55,6 +56,7 @@ import {
   DEFAULT_PROPRIO_CONVERSATION_PROMPT_TEMPLATE,
   runChildProcess,
   sanitizeInheritedProprioEnv,
+  type ProprioSkillEntry,
 } from "@groktopus/adapter-utils/server-utils";
 import { shellQuote } from "@groktopus/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl, createPiJsonlParser } from "./parse.js";
@@ -132,7 +134,7 @@ async function ensurePiSkillsInjected(
 }
 
 async function buildPiSkillsDir(
-  availableEntries: Array<{ key: string; runtimeName: string; source: string }>,
+  availableEntries: ProprioSkillEntry[],
   desiredSkillNames: string[],
 ): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-pi-skills-"));
@@ -281,8 +283,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ensureSessionsDir();
   }
 
-  const piSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
-  const hasExplicitRuntimeSkillInventory = Array.isArray(config.proprioRuntimeSkills);
+  const piSkillInventory = await readProprioRuntimeSkillInventory(config, __moduleDir);
+  const piSkillEntries = piSkillInventory.entries;
+  const hasExplicitRuntimeSkillInventory = piSkillInventory.explicit;
   const desiredPiSkillNames = resolveLegacyProprioDesiredSkillNames(config, piSkillEntries);
   if (!executionTargetIsRemote && !hasExplicitRuntimeSkillInventory) {
     await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
@@ -429,6 +432,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let remoteRuntimeRootDir: string | null = null;
     let localSkillsDir: string | null = null;
     let remoteSkillsDir: string | null = null;
+    const needsPrivateSshSkills = executionTarget?.kind === "remote"
+      && executionTarget.transport === "ssh"
+      && executionTarget.workspaceRealization?.mode === "in_place"
+      && !config.managedAiConnection
+      && hasExplicitRuntimeSkillInventory;
+    const skillsAssetKey = needsPrivateSshSkills
+      ? `skills-${randomUUID()}`
+      : "skills";
     let proprioBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetProprioBridge>> = null;
 
     try {
@@ -459,9 +470,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 localDir: attributionExtension.directory,
               },
               {
-                key: "skills",
+                key: skillsAssetKey,
                 localDir: localSkillsDir,
                 followSymlinks: true,
+                ...(needsPrivateSshSkills
+                  ? {
+                      restore: async ({ assetDir }: { assetDir: string }) => {
+                        const removed = await runAdapterExecutionTargetShellCommand(
+                          runId,
+                          executionTarget,
+                          `rm -rf -- ${shellQuote(assetDir)}`,
+                          { cwd, env: runtimeEnv, timeoutSec: 15, graceSec },
+                        );
+                        if (removed.exitCode !== 0 || removed.timedOut) {
+                          throw new Error("Pi run skill directory cleanup failed.");
+                        }
+                      },
+                    }
+                  : {}),
               },
               ...(localAgentConfigDir
                 ? [{
@@ -492,7 +518,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             env.HOME = preparedRemoteRuntime.runtimeRootDir;
           }
           remoteRuntimeRootDir = preparedRemoteRuntime.runtimeRootDir;
-          remoteSkillsDir = preparedRemoteRuntime.assetDirs.skills ?? null;
+          remoteSkillsDir = preparedRemoteRuntime.assetDirs[skillsAssetKey] ?? null;
           if (hasExplicitRuntimeSkillInventory && !remoteSkillsDir) {
             throw new Error("Pi runtime skills were not staged to the execution target.");
           }
@@ -505,6 +531,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         } catch (error) {
           await Promise.allSettled([
             restoreRemoteWorkspace?.(),
+            ...(needsPrivateSshSkills && !restoreRemoteWorkspace
+              ? [runAdapterExecutionTargetShellCommand(
+                  runId,
+                  executionTarget,
+                  `rm -rf -- ${shellQuote(path.posix.join(effectiveExecutionCwd, ".proprio-runtime", "pi", skillsAssetKey))}`,
+                  { cwd, env: runtimeEnv, timeoutSec: 15, graceSec },
+                )]
+              : []),
             localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
           ]);
           restoreRemoteWorkspace = null;
