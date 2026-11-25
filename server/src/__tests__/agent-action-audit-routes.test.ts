@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -372,17 +372,28 @@ describePostgres("agent action audit routes", () => {
       const afterCleanup = await board.get(exportPath).expect(409);
       expect(afterCleanup.body).toMatchObject({ details: { reasonCode: "snapshot_expired" } });
       expect(afterCleanup.body).not.toHaveProperty("eventCount");
-      const [marker] = await db.select({ expiresAt: managedAuditExports.expiresAt, eventIds: managedAuditExports.eventIds })
+      const [marker] = await db.select({ expiresAt: managedAuditExports.expiresAt, eventIds: managedAuditExports.eventIds,
+        invalidated: managedAuditExports.invalidated, membershipCleared: managedAuditExports.membershipCleared })
         .from(managedAuditExports).where(row);
-      expect(marker).toEqual({ expiresAt: expired, eventIds: [] });
+      expect(marker).toEqual({ expiresAt: expired, eventIds: [], invalidated: true, membershipCleared: true });
       expect((await otherBoard.get(exportPath).expect(404)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
 
-      await db.update(managedAuditExports).set({ expiresAt: new Date(0) }).where(row);
+      // An API replica behind the cleanup writer still sees an incomplete snapshot.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(expired.getTime() - 60_000);
+      expect((await board.get(exportPath).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      // An older writer may have cleared the array without setting a marker.
+      await db.update(managedAuditExports).set({ invalidated: false, membershipCleared: false }).where(row);
+      expect((await board.get(exportPath).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      await db.update(managedAuditExports).set({ expiresAt: new Date(expired.getTime() - 25 * 60 * 60 * 1000) }).where(row);
       await board.post(path).send(window).expect(201);
       expect((await board.get(exportPath).expect(404)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
     } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });
@@ -450,6 +461,144 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("rolls back retirement when a real export insert fails, then retries the retirement once", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const oldEpoch = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    const [oldSnapshot] = await db.insert(managedAuditExports).values({
+      companyId: company.id, userId, sourceEpoch: oldEpoch,
+      from: new Date(window.from), to: new Date(window.to), eventIds: [randomUUID()],
+      watermark: "retirement-rollback-fixture", expiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    try {
+      await db.execute(sql`
+        create function public.proprio_test_fail_managed_export_insert() returns trigger language plpgsql as $$
+        begin
+          if not exists (
+            select 1 from managed_audit_exports
+            where company_id = new.company_id and source_epoch <> new.source_epoch
+              and invalidated and cardinality(event_ids) = 0
+          ) or not exists (
+            select 1 from managed_audit_transition_receipts
+            where company_id = new.company_id and transition = 'company_exports_retired'
+          ) then
+            raise exception using errcode = '57014', message = 'fixture expected retirement before insert';
+          end if;
+          raise exception 'fixture export insert failure';
+        end $$`);
+      await db.execute(sql`create trigger proprio_test_fail_managed_export_insert before insert on managed_audit_exports for each row execute function public.proprio_test_fail_managed_export_insert()`);
+
+      const failed = await board.post(path).send(window);
+      expect(failed.status, failed.text).toBe(500);
+      const [afterFailure] = await db.select({ invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, oldSnapshot!.id));
+      expect(afterFailure).toEqual({ invalidated: false, eventIds: oldSnapshot!.eventIds });
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(0);
+
+      await db.execute(sql`drop trigger proprio_test_fail_managed_export_insert on managed_audit_exports`);
+      await db.execute(sql`drop function public.proprio_test_fail_managed_export_insert()`);
+      const retry = await board.post(path).send(window).expect(201);
+      expect(retry.body).toHaveProperty("exportId");
+      const [afterRetry] = await db.select({ invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, oldSnapshot!.id));
+      expect(afterRetry).toEqual({ invalidated: true, eventIds: [] });
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id)))
+        .toHaveLength(2);
+    } finally {
+      await db.execute(sql`drop trigger if exists proprio_test_fail_managed_export_insert on managed_audit_exports`);
+      await db.execute(sql`drop function if exists public.proprio_test_fail_managed_export_insert()`);
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("bounds a new export waiting on the company lock without committing retirement", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1, dedicatedConnectionMax: 1 });
+    const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const board = request(await createApp(requestDb, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const oldEpoch = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    const [oldSnapshot] = await db.insert(managedAuditExports).values({
+      companyId: company.id, userId, sourceEpoch: oldEpoch,
+      from: new Date(window.from), to: new Date(window.to), eventIds: [randomUUID()],
+      watermark: "company-lock-fixture", expiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    const release = Promise.withResolvers<void>();
+    const locked = Promise.withResolvers<void>();
+    let lock: Promise<unknown> | undefined;
+    let lockPid = 0;
+    let pending: Promise<{ status: number; body: Record<string, unknown> }> | undefined;
+    try {
+      lock = lockDb.transaction(async tx => {
+        await tx.execute(sql`select id from companies where id = ${company.id} for update`);
+        const [holder] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        lockPid = holder!.pid;
+        locked.resolve();
+        await release.promise;
+      });
+      await Promise.race([locked.promise, lock]);
+      pending = board.post(path).send(window).then(({ status, body }) => ({ status, body }));
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where datname = current_database() and query like '%companies%'
+            and ${lockPid} = any(pg_blocking_pids(pid))`);
+        expect(waiting).toHaveLength(1);
+      }, { timeout: 1_500, interval: 20 });
+      await board.get(`/api/companies/${company.id}/activity`).timeout({ deadline: 2_000 }).expect(200);
+      expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1);
+
+      const bounded = await pending;
+      expect(bounded).toMatchObject({ status: 503, body: { details: { reasonCode: "export_retry_required" } } });
+      const [whileBlocked] = await db.select({ invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, oldSnapshot!.id));
+      expect(whileBlocked).toEqual({ invalidated: false, eventIds: oldSnapshot!.eventIds });
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(0);
+
+      release.resolve();
+      await lock;
+      const retry = await board.post(path).send(window).expect(201);
+      expect(retry.body).toHaveProperty("exportId");
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([lock, pending]);
+      await Promise.all([lockDb.$client.end(), requestDb.$client.end()]);
+      vi.unstubAllEnvs();
+    }
+  }, 15_000);
+
   it("reclaims quota after an epoch or retention change while keeping old checkpoints fenced", async () => {
     const { company } = await seed();
     const userId = randomUUID();
@@ -468,13 +617,14 @@ describePostgres("agent action audit routes", () => {
     const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
     const oldStart = "2026-07-17T00:00:00.000Z";
     const originalExpiresAt = new Date(Date.now() + 60_000);
-    const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
+    const snapshotRows = await db.insert(managedAuditExports).values(
       Array.from({ length: 128 }, (_, index) => ({
         companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
         from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
         eventIds: [], watermark: "fixture", expiresAt: originalExpiresAt,
       })),
     ).returning({ id: managedAuditExports.id });
+    const [oldEpochRow, oldRetentionRow] = snapshotRows;
     // Make all 128 rows carry the supported maximum membership using real,
     // distinct UUID values generated in PostgreSQL. This avoids sending a
     // 40MB fixture over the test connection while preserving realistic array
@@ -487,6 +637,14 @@ describePostgres("agent action audit routes", () => {
       )
       where company_id = ${company.id}
     `);
+    // Purging a stale marker and clearing recent or retired memberships all
+    // spend the same eight-row budget.
+    const pastRetention = snapshotRows[2]!.id;
+    const recentlyExpiredIds = snapshotRows.slice(3, 6).map(row => row.id);
+    await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 25 * 60 * 60 * 1000) })
+      .where(eq(managedAuditExports.id, pastRetention));
+    await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(inArray(managedAuditExports.id, recentlyExpiredIds));
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
@@ -512,31 +670,41 @@ describePostgres("agent action audit routes", () => {
       expect(retirementReceipt).toMatchObject({
         companyId: company.id,
         actorId: userId,
-        recordCount: 128,
+        recordCount: 124,
         source: "tool_gateway",
         exportId: null,
       });
       const storage = await db.select({
+        id: managedAuditExports.id,
         invalidated: managedAuditExports.invalidated,
+        membershipCleared: managedAuditExports.membershipCleared,
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
-      expect(storage.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(8);
-      expect(storage.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(120);
+      const originalIds = new Set(snapshotRows.map(row => row.id));
+      expect(storage.some(row => row.id === pastRetention)).toBe(false);
+      expect(storage.filter(row => originalIds.has(row.id) && row.invalidated && row.membershipCleared && row.eventCount === 0)).toHaveLength(7);
+      expect(storage.filter(row => recentlyExpiredIds.includes(row.id) && row.membershipCleared)).toHaveLength(3);
+      const clearedRetired = storage.filter(row =>
+        originalIds.has(row.id) && row.invalidated && row.membershipCleared && !recentlyExpiredIds.includes(row.id));
+      expect(clearedRetired).toHaveLength(4);
+      expect(storage.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(120);
       await board.post(path).send(window).expect(201);
       const nextBatch = await db.select({
+        id: managedAuditExports.id,
         invalidated: managedAuditExports.invalidated,
+        membershipCleared: managedAuditExports.membershipCleared,
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
-      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(16);
-      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(112);
+      expect(nextBatch.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(15);
+      expect(nextBatch.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(112);
       expect(await db.select().from(managedAuditTransitionReceipts)
         .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
           eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
+      const [cleared] = await db.select({ sourceEpoch: managedAuditExports.sourceEpoch })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, clearedRetired[0]!.id));
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-      expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
-      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
-      expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", cleared!.sourceEpoch);
+      expect((await board.get(`${path}/${clearedRetired[0]!.id}`).expect(409)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
     } finally {
       vi.useRealTimers();
@@ -933,8 +1101,9 @@ describePostgres("agent action audit routes", () => {
       expect(resumed.body).not.toHaveProperty("events");
       const [snapshot] = await db.select({
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
+        membershipCleared: managedAuditExports.membershipCleared,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
-      expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
+      expect(snapshot).toEqual({ invalidated: true, eventIds: [], membershipCleared: true });
       expect((await db.select().from(activityLog))
         .filter(row => row.action === "audit.managed_export_invalidated")).toHaveLength(0);
       const receipts = await db.select().from(managedAuditTransitionReceipts)
@@ -1004,6 +1173,59 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("sanitizes protected transition receipt failures and preserves retryable SQLSTATEs", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const from = "2026-07-17T00:00:00.000Z";
+    const to = "2026-07-17T00:00:02.000Z";
+    const [event] = await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    }).returning({ id: managedAuditEvents.id });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    let renamed = false;
+    try {
+      const created = await board.post(path).send({ from, to }).expect(201);
+      const exportPath = `${path}/${created.body.exportId}`;
+      await board.get(exportPath).expect(200);
+      await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, event!.id));
+      await db.execute(sql`create function public.proprio_test_fail_managed_audit_receipt() returns trigger language plpgsql as $$ begin raise exception 'private receipt fixture' using errcode = '40001'; return new; end $$`);
+      await db.execute(sql`create trigger proprio_test_fail_managed_audit_receipt before insert on managed_audit_transition_receipts for each row execute function public.proprio_test_fail_managed_audit_receipt()`);
+      const retryable = await board.get(exportPath).expect(503);
+      expect(retryable.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      expect(retryable.text).not.toContain("private receipt fixture");
+      for (const privateValue of [company.id, userId, created.body.exportId]) expect(retryable.text).not.toContain(privateValue);
+      await db.execute(sql`drop trigger proprio_test_fail_managed_audit_receipt on managed_audit_transition_receipts`);
+      await db.execute(sql`drop function public.proprio_test_fail_managed_audit_receipt()`);
+
+      await db.execute(sql`alter table managed_audit_transition_receipts rename to unavailable_transition_receipts`);
+      renamed = true;
+      const unavailable = await board.get(exportPath).expect(500);
+      expect(unavailable.body).toMatchObject({ error: "Managed audit transition receipt could not be recorded" });
+      expect(unavailable.text).not.toContain(company.id);
+      expect(unavailable.text).not.toContain(userId);
+      expect(unavailable.text).not.toContain(created.body.exportId);
+    } finally {
+      if (renamed) {
+        await db.execute(sql`alter table unavailable_transition_receipts rename to managed_audit_transition_receipts`);
+      }
+      await db.execute(sql`drop trigger if exists proprio_test_fail_managed_audit_receipt on managed_audit_transition_receipts`);
+      await db.execute(sql`drop function if exists public.proprio_test_fail_managed_audit_receipt()`);
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+
   it("does not release a page from a repeatable-read snapshot after concurrent invalidation wins", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
@@ -1041,7 +1263,7 @@ describePostgres("agent action audit routes", () => {
         writerPid = owner!.pid;
         locked.resolve();
         await release.promise;
-        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [], membershipCleared: true })
           .where(eq(managedAuditExports.id, created.body.exportId));
       });
       await Promise.race([locked.promise, locker]);
@@ -1059,6 +1281,10 @@ describePostgres("agent action audit routes", () => {
       const response = await pendingRead;
       expect(response.status).toBe(503);
       expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      const [committedMarker] = await db.select({ invalidated: managedAuditExports.invalidated,
+        eventIds: managedAuditExports.eventIds, membershipCleared: managedAuditExports.membershipCleared })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
+      expect(committedMarker).toEqual({ invalidated: true, eventIds: [], membershipCleared: true });
       expect(await db.select().from(managedAuditExportPageAccess)
         .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId))).toHaveLength(0);
       await board.get(exportPath).expect(409);
