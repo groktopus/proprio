@@ -79,6 +79,14 @@ pool. A held PostgreSQL lock exercised export backpressure, a real statement
 timeout, continued ordinary request service and successful same-page retry.
 [Export capacity](https://github.com/groktopus/proprio/pull/379)
 
+After receipt review, exact heads `334d78a7` and `ff7ebb3b` verified
+database role isolation, bodyless HEAD responses and safe receipt-write
+failures. The latter passed all 25 export route tests with one ordinary
+connection. Composed revision `3c162006646e1bcc342ac797e425a11894ffc761`
+against main `c1dc2a08` applied the protected receipt migration after dispatch
+and passed 82 export, reconstruction and OpenAPI tests with the default pool.
+[Reviewed page access](https://github.com/groktopus/proprio/pull/378)
+
 Hosted stability and durable-work qualification passed for adapter head
 `40aa561ef4a65d4bef7a925a20ec2901c3f6338b`. The retained report records that
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
