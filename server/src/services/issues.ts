@@ -7706,7 +7706,7 @@ export function issueService(db: Db) {
     });
   }
 
-  async function assertAssignableUser(companyId: string, userId: string, runner: Pick<Db, "select"> = db) {
+  async function assertAssignableUser(companyId: string, userId: string, runner: DbReader = db) {
     const membership = await runner
       .select({ id: companyMemberships.id })
       .from(companyMemberships)
@@ -10674,7 +10674,7 @@ export function issueService(db: Db) {
         throw unprocessable("Issue can only have one assignee");
       }
       if (data.assigneeAgentId) {
-        await assertAssignableAgent(dbOrTx as Db, companyId, data.assigneeAgentId, {
+        await assertAssignableAgent(dbOrTx, companyId, data.assigneeAgentId, {
           kind: "work",
         });
       }
