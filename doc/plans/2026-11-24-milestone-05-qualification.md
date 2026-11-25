@@ -192,17 +192,21 @@ recovery cases. [Hosted adapter qualification](https://github.com/groktopus/prop
 
 The Pi follow-up stages explicit inventories in a fresh local directory or
 in a unique in-place SSH asset when the shared host supplies authentication.
-The reviewed head `f271fe60` passed 17 tests, including a credential-free Pi
-0.74.0 CLI check for ambient, selected and empty discovery. Pi extensions
+Head `c3ede10d` passed 17 tests, including a credential-free Pi 0.74.0 CLI
+check for ambient, selected and empty discovery. Its probe uses a disposable
+child home and waits for a complete RPC response. Pi extensions
 can add their own resources. Codex reuses bundled discovery when the
 inventory is implicit. The reviewed head `a59b7b0b` passed 14 execution tests.
 A representative bundled entry verified removal of a live deselected link.
 [Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
 
 OpenCode stages explicit local inventories in the private runtime config and
-reports managed assignments as run scoped. Its compatibility flag also hides
-operator-owned Claude skills auto-discovered in user and project folders.
-OpenCode native and explicitly configured paths still follow provider rules.
+reports managed assignments as run scoped. It filters older managed links
+from the private native config and resolves selected skills through canonical
+source paths. Its compatibility flag also hides operator-owned Claude skills
+auto-discovered in user and project folders. OpenCode native and explicitly
+configured paths still follow provider rules. The pinned OpenCode 1.19.6
+probe verified both selected and empty discovery.
 Gemini locates managed links through the CLI home setting. Use separate
 absolute provider roots for separate Gemini state and resume data. The
 Cursor CLI documentation has no skill-only home setting. Separate whole
@@ -268,6 +272,13 @@ The updated migration replay test located the migration through the journal
 on both the retirement PR and its renumbered composition. It observed both
 calls waiting for the migration advisory lock before allowing either call
 to repair the index. [Reviewed migration test](https://github.com/groktopus/proprio/pull/392)
+
+Composition `f94bf90f75493a35a41f71aa904b2072a0f8ab54` passed 111 focused
+tests on Node 24 and disposable PostgreSQL with the standard ordinary pool.
+The suite includes commentary, the pinned Pi and OpenCode probes, migration
+replay, synthetic audit reconstruction and native receipt recovery. This
+revision includes the reviewed adapter changes and both new pool fixes.
+
 
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
