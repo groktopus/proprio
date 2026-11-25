@@ -136041,6 +136041,31 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict. For managed_dispatch_outcome_unknown, reconcile the earlier provider outcome before retrying.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "reasonCode": {
+                      "type": "string"
+                    },
+                    "invocationId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "reasonCode"
+                  ]
+                }
+              }
+            }
           }
         },
         "requestBody": {
