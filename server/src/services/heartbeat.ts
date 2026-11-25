@@ -1260,7 +1260,7 @@ export function heartbeatService(
   }
 
   const wakeQueue = createWakeQueue(db, {
-    resolveResponsibleUserId: async (input) => {
+    resolveResponsibleUserId: async (input, reader) => {
       // `input.issue` is the wake-queue module's own transaction-scoped
       // snapshot; using it here, instead of re-reading the issue through
       // `getIssueExecutionContext`, keeps this read off a second connection
@@ -1281,25 +1281,25 @@ export function heartbeatService(
         source: input.source as WakeupOptions["source"],
         triggerDetail: input.triggerDetail as WakeupOptions["triggerDetail"],
         existingRunResponsibleUserId: input.existingRunResponsibleUserId,
-      });
+      }, reader);
     },
-    getRoutineEnv: async (input) => {
+    getRoutineEnv: async (input, reader) => {
       // Same reason as `resolveResponsibleUserId` above: use the passed-in
       // transaction-scoped issue snapshot instead of reading the issue again.
-      return getRoutineEnvForExecutionIssue(input.companyId, input.issue);
+      return getRoutineEnvForExecutionIssue(input.companyId, input.issue, reader);
     },
-    resolveSessionBeforeForWakeup: async (input) => {
+    resolveSessionBeforeForWakeup: async (input, reader) => {
       // Scoped to this port only, so a wake-queue agent id can never resolve
       // a session against another company's agent row. The shared `getAgent`
       // helper below has no company predicate, so this reads the agent
       // directly with the company named in its own `WHERE` clause.
-      const agent = await db
+      const agent = await reader
         .select()
         .from(agents)
         .where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
         .then((rows) => rows[0] ?? null);
       if (!agent) return null;
-      return resolveSessionBeforeForWakeup(agent, input.taskKey);
+      return resolveSessionBeforeForWakeup(agent, input.taskKey, reader);
     },
     // These four helpers stay in this file today; the wake-queue module
     // receives them here so it never imports this file, the service it is
