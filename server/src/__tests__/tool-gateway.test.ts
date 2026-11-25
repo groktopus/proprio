@@ -1014,7 +1014,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       expect(replacementRequest).toBeDefined();
       const replacementApproval = await request(app).post(`/api/tool-gateway/action-requests/${replacementRequest!.id}/approve`)
         .send({ companyId: company.id }).expect(200);
-      expect(replacementApproval.body).toMatchObject({ id: replacementRequest!.id });
+      expect(replacementApproval.body).toMatchObject({ id: replacementRequest!.id, status: "executing" });
       expect(await db.select().from(managedAuditEvents).where(and(
         eq(managedAuditEvents.invocationId, replacementRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
       ))).toHaveLength(0);
