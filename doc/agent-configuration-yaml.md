@@ -119,6 +119,16 @@ Skills accept a key string or `{ key, versionId }`; `versionId: null` follows
 the current version. An empty list unassigns skills through the normal sync
 API. These keys are organization-library references, not embedded skill source.
 
+Pi local runs with an explicit server runtime-skill inventory use a fresh
+per-run skill directory and pass `--no-skills` plus that directory through
+Pi's explicit `--skill` option. This includes an explicit empty inventory, so
+Pi does not discover skills left in its shared home for that run. Proprio
+removes the staged directory when execution ends. Existing links in
+`~/.pi/agent/skills` are left in place; they remain available to manual Pi
+sessions and legacy runs that do not receive an explicit inventory. Explicit
+operator `--skill` arguments in adapter `extraArgs` remain in effect, and Pi
+credentials/provider configuration continue to use their normal config paths.
+
 The `instructionsBundleMode`, `instructionsRootPath`, `instructionsEntryFile`,
 `instructionsFilePath`, and `proprioSkillSync` adapter keys are represented by
 the dedicated sections. Direct edits to those adapter keys are rejected so two

@@ -131,18 +131,25 @@ async function ensurePiSkillsInjected(
   }
 }
 
-async function buildPiSkillsDir(config: Record<string, unknown>): Promise<string> {
+async function buildPiSkillsDir(
+  availableEntries: Array<{ key: string; runtimeName: string; source: string }>,
+  desiredSkillNames: string[],
+): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-pi-skills-"));
   const target = path.join(tmp, "skills");
-  await fs.mkdir(target, { recursive: true });
-  const availableEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
-  const desiredNames = new Set(resolveLegacyProprioDesiredSkillNames(config, availableEntries));
-  for (const entry of availableEntries) {
-    if (!desiredNames.has(entry.key)) continue;
-    if (isProprioSkillSourceMissing(entry)) continue;
-    await fs.symlink(entry.source, path.join(target, entry.runtimeName));
+  try {
+    await fs.mkdir(target, { recursive: true });
+    const desiredNames = new Set(desiredSkillNames);
+    for (const entry of availableEntries) {
+      if (!desiredNames.has(entry.key)) continue;
+      if (isProprioSkillSourceMissing(entry)) continue;
+      await fs.symlink(entry.source, path.join(target, entry.runtimeName));
+    }
+    return target;
+  } catch (error) {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
-  return target;
 }
 
 function resolvePiBiller(env: Record<string, string>, provider: string | null): string {
@@ -275,8 +282,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const piSkillEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
+  const hasExplicitRuntimeSkillInventory = Array.isArray(config.proprioRuntimeSkills);
   const desiredPiSkillNames = resolveLegacyProprioDesiredSkillNames(config, piSkillEntries);
-  if (!executionTargetIsRemote) {
+  if (!executionTargetIsRemote && !hasExplicitRuntimeSkillInventory) {
     await ensurePiSkillsInjected(onLog, piSkillEntries, desiredPiSkillNames);
   }
 
@@ -424,9 +432,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let proprioBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetProprioBridge>> = null;
 
     try {
+      if (!executionTargetIsRemote && hasExplicitRuntimeSkillInventory) {
+        localSkillsDir = await buildPiSkillsDir(piSkillEntries, desiredPiSkillNames);
+      }
       if (executionTargetIsRemote) {
         try {
-          localSkillsDir = await buildPiSkillsDir(config);
+          localSkillsDir = await buildPiSkillsDir(piSkillEntries, desiredPiSkillNames);
           await onLog(
             "stdout",
             `[proprio] Syncing workspace and Pi runtime assets to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
@@ -482,6 +493,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           }
           remoteRuntimeRootDir = preparedRemoteRuntime.runtimeRootDir;
           remoteSkillsDir = preparedRemoteRuntime.assetDirs.skills ?? null;
+          if (hasExplicitRuntimeSkillInventory && !remoteSkillsDir) {
+            throw new Error("Pi runtime skills were not staged to the execution target.");
+          }
           const remoteAttributionDir = preparedRemoteRuntime.assetDirs.attribution;
           if (!remoteAttributionDir) throw new Error("Pi attribution extension was not staged to the execution target.");
           attributionExtensionPath = path.posix.join(remoteAttributionDir, "openrouter-attribution.mjs");
@@ -677,7 +691,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         args.push("--tools", "read,bash,edit,write,grep,find,ls");
         args.push("--session", sessionFile);
-        args.push("--skill", remoteSkillsDir ?? PI_AGENT_SKILLS_DIR);
+        // Explicit run inventories must not discover skills from Pi's shared
+        // home. Pi still honors explicit --skill roots, including operator
+        // roots supplied through extraArgs below.
+        if (hasExplicitRuntimeSkillInventory) args.push("--no-skills");
+        args.push(
+          "--skill",
+          remoteSkillsDir
+            ?? (hasExplicitRuntimeSkillInventory ? localSkillsDir : null)
+            ?? PI_AGENT_SKILLS_DIR,
+        );
 
         if (extraArgs.length > 0) args.push(...extraArgs);
         args.push("--extension", attributionExtensionPath);
