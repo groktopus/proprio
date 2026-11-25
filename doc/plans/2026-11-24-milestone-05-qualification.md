@@ -478,6 +478,18 @@ rehearsal and signoff.
 [Evidence fixture](https://github.com/groktopus/proprio/pull/406)
 [Exact evidence source](https://github.com/groktopus/proprio/commit/cf9548d1faefc0ac4a916f60aef71eddf952d924)
 
+Main subsequently advanced to `c4592c7fc6e3720df77766905a2045e08c25218d`.
+The only additions since the hosted run's baseline are the dependency
+investigation browser test and the dependency diagnosis controller-crash test.
+Both the one-connection audit reconstruction and the new controller-crash
+test passed together on composition
+`9719c5bcc48b22588312c70e051e490b8b0c1133` using Node 24.22.1 and
+disposable PostgreSQL. The new export again contained nine events with one,
+zero, and one observed target effects. The browser test sits outside these
+two local checks.
+[Controller-crash regression](https://github.com/groktopus/proprio/pull/329)
+[Exact tested composition](https://github.com/groktopus/proprio/commit/9719c5bcc48b22588312c70e051e490b8b0c1133)
+
 The earlier authenticated reconstruction also passed with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
 loopback HTTP MCP target. The fixture used no model account. A separate company
