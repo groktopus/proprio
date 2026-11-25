@@ -280,6 +280,17 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     };
   }
 
+  it("uses one packaged inventory read when the run has no explicit inventory", async () => {
+    await runTeardown({
+      sandboxAuth: "{}",
+      hostAuth: "{}",
+      managedHome: true,
+      env: { OPENAI_API_KEY: "provider-key" },
+      config: { proprioConnectorSkillDigest: "a".repeat(64) },
+    });
+    expect(readProprioRuntimeSkillEntries).toHaveBeenCalledTimes(1);
+  });
+
   it("reuses the discovered packaged inventory to remove a revoked skill from managed home", async () => {
     readProprioRuntimeSkillEntries.mockClear();
     const result = await runTeardown({
