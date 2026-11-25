@@ -652,15 +652,12 @@ describe("ProprioRunnerToolAuthority", () => {
     const hiddenChildIds = Array.from({ length: 101 }, () => randomUUID());
     await db.insert(companies).values({ id: otherCompanyId, name: "Other company", issuePrefix: "OTHER" });
     try {
-      const foreignChild = { id: foreignChildId, companyId: otherCompanyId, title: "Foreign child", status: "todo" };
-      await expect(db.insert(issues).values({ ...foreignChild, parentId: issueId }))
-        .rejects.toMatchObject({ cause: { code: "23503", constraint_name: "issues_parent_company_fk" } });
       await db.insert(issues).values({ id: foreignParentId, companyId: otherCompanyId, title: "Foreign parent" });
       await db.insert(issues).values([
         { id: completedChildId, companyId, parentId: issueId, title: "Existing completed draft", status: "done", assigneeAgentId: agentId },
         { id: activeChildId, companyId, parentId: issueId, title: "Existing active review", status: "in_progress", assigneeAgentId: agentId },
         { id: unrelatedId, companyId, title: "Unrelated task", status: "todo" },
-        { ...foreignChild, parentId: foreignParentId },
+        { id: foreignChildId, companyId: otherCompanyId, parentId: foreignParentId, title: "Foreign child", status: "todo" },
         // Hidden rows must neither enter context nor consume the visible child limit.
         ...hiddenChildIds.map((id) => ({ id, companyId, parentId: issueId, title: "Hidden child",
           hiddenAt: new Date(), createdAt: new Date(Date.now() + 1000) })),
