@@ -142,7 +142,8 @@ recipient run has an acknowledged Stop. Send `expectedHandoffVersion` and
 A newer or active run returns a conflict. Repeating the exact withdrawal
 returns the recorded result. The task waits on the board to inspect prior
 workspace and external effects and choose the next assignment. The Case
-history retains the original acceptance and the withdrawal receipt.
+history retains the original acceptance and the withdrawal receipt. A queued
+correction for the withdrawn handoff settles as skipped at admission.
 
 ## Board and verification
 

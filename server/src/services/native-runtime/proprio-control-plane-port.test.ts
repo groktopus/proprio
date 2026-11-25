@@ -2802,7 +2802,7 @@ describe("ProprioControlPlanePort conformance", () => {
     return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract };
   }
 
-  it.each(["current", "cancelled", "withdrawn"] as const)("handles an unpublished task document after a %s Case corrective wake", async caseState => {
+  it.each(["current", "cancelled", "withdrawn", "withdrawn before dispatch"] as const)("handles an unpublished task document after a %s Case corrective wake", async caseState => {
     const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
@@ -2830,6 +2830,29 @@ describe("ProprioControlPlanePort conformance", () => {
       adapterConfig: { provider: "opencode", model: "openrouter/test-model" } }).where(eq(agents.id, agentId));
     // Exercise normal wake admission while leaving execution to the conformance port.
     const heartbeat = heartbeatService(db, { runStartHandover: { isYielding: () => true, refreshIfStale: () => null } });
+    if (caseState === "withdrawn before dispatch") {
+      const userId = source!.responsibleUserId!;
+      const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
+        ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        nativeCancellation: { schema: "proprio.native-cancellation.v1", runId, companyId, issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+      } }).where(eq(heartbeatRuns.id, runId));
+      const board = { type: "board" as const, source: "local_implicit" as const, userId };
+      await expect(caseHandoffService(db).withdrawDelivered(board, caseId, handoffId,
+        { expectedHandoffVersion: 1, stoppedRunId: runId })).resolves.toMatchObject({ state: "cancelled" });
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ dispatched: 0 });
+      const [intent] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(intent).toMatchObject({ status: "skipped", runId: null });
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "case_handoff_superseded")))).toHaveLength(1);
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ scanned: 0, dispatched: 0 });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+      return;
+    }
     expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
       .toMatchObject({ dispatched: 1 });
     const [dispatchedRun] = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
