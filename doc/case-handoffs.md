@@ -85,6 +85,13 @@ The case remains open during review or user waits. Stop/cancel/reassignment
 invalidate the intent. Keep terminal intents outside agent-transfer mutation
 fencing, outgoing yield detection and recipient dispatch.
 
+Versioned offers depend on the recipient-decision pilot. Ordinary HTTP and
+native handoff calls cannot create them while that flow is disabled. An offer
+requires an authenticated native source run on the same task, a completion
+contract, and a native recipient who can already read the case. It preserves the
+source assignment and records the task brief and the completion-contract and
+workflow revisions. A task brief change or Stop cancels an unanswered offer.
+
 The board case list/detail pages are read-only. URL query parameters retain
 search/status/type/project filters through detail navigation; list paging and
 the `GET /api/companies/:companyId/cases/types` read use authorized server data.

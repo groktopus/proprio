@@ -50,7 +50,7 @@ function detail(): CaseDetailData {
 }
 
 function handoff(overrides: Partial<CaseHandoffView> = {}): CaseHandoffView {
-  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
+  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, offerContract: null, recipientDecision: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
 }
 
 async function settle() {
@@ -223,6 +223,18 @@ describe("read-only CaseDetail", () => {
     expect(handoffs.querySelectorAll('a[href="/issues/PAP-123"]')).toHaveLength(2);
     expect(container.textContent).toContain("Check the saved draft independently.");
     expect(cases.retryHandoff).not.toHaveBeenCalled(); expect(cases.cancelHandoff).not.toHaveBeenCalled(); expect(cases.patch).not.toHaveBeenCalled();
+  });
+
+  it("shows an unanswered offer as a recipient decision while the source owns the task", async () => {
+    const pending = handoff({ state: "offered" });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "implementation",
+      workIssue: { id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress",
+        statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer" }, pendingHandoff: pending });
+    cases.listHandoffs.mockResolvedValue({ items: [pending], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.textContent).toContain("Waiting for Verifier to decide on the offer."));
+    expect(container.querySelector('[aria-label="Case work"]')?.textContent).toContain("Writer");
+    expect(container.querySelector('[aria-label="Case handoffs"]')?.textContent).toContain("Waiting for recipient decision");
   });
 
   it("shows paused delivery without implying that the recipient is working", async () => {
