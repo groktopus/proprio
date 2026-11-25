@@ -235,6 +235,7 @@ async function stageOpenCodeSkillsInRuntimeConfig(
   runtimeConfigHome: string,
   runtimeEnv: Record<string, string>,
   sourceSkillsHome: string,
+  cwd: string,
 ): Promise<void> {
   const skillsHome = path.join(runtimeConfigHome, "opencode", "skills");
   const existing = await fs.lstat(skillsHome).catch((error: NodeJS.ErrnoException) => {
@@ -286,7 +287,9 @@ async function stageOpenCodeSkillsInRuntimeConfig(
     const filtered: string[] = [];
     const seen = new Set<string>();
     for (const configuredPath of paths) {
-      const resolvedPath = path.resolve(configuredPath);
+      const resolvedPath = configuredPath.startsWith("~/")
+        ? path.resolve(runtimeEnv.HOME || os.homedir(), configuredPath.slice(2))
+        : path.resolve(cwd, configuredPath);
       if (managedSources.has(resolvedPath) && !selectedPathSet.has(resolvedPath)) continue;
       if (!selectedPathSet.has(resolvedPath) && await hasProprioMaterializedSkillProvenance(resolvedPath)) continue;
       if (seen.has(resolvedPath)) continue;
@@ -309,7 +312,10 @@ async function stageOpenCodeSkillsInRuntimeConfig(
   let inlineConfig: Record<string, unknown> | null = null;
   if (inlineConfigContent) {
     try {
-      inlineConfig = JSON.parse(inlineConfigContent) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(inlineConfigContent);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        inlineConfig = parsed as Record<string, unknown>;
+      }
     } catch {
       // Keep OpenCode's normal invalid-inline-config error behavior.
     }
@@ -468,6 +474,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           "opencode",
           "skills",
         ),
+        cwd,
       );
     }
     const runtimeEnv = Object.fromEntries(
