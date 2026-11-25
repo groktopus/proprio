@@ -67,7 +67,7 @@ import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { inspectWorkspaceSource } from "../services/workspace-source-inspection.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "@groktopus/shared";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
@@ -4692,6 +4692,7 @@ export function issueRoutes(
         : input.activeRecoveryAction;
     if (!activeRecoveryAction) return null;
 
+    if (activeRecoveryAction.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE) return activeRecoveryAction;
     if (await hasUnverifiedNativeWorkspaceFinalizationOwner(db, activeRecoveryAction)) {
       return activeRecoveryAction;
     }
@@ -7443,6 +7444,10 @@ export function issueRoutes(
     >,
     input: { source: "issue_update" | "recovery_action_resolution" },
   ) {
+    if (activeRecoveryAction?.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE) {
+      assertBoard(req);
+      return true;
+    }
     if (req.actor.type !== "agent") return true;
     if (!activeRecoveryAction) return true;
 
@@ -10922,6 +10927,8 @@ export function issueRoutes(
             status: actionStatus,
             outcome: recordedOutcome,
             resolutionNote: resolutionNote ?? null,
+            boardConfirmedWithdrawalRelease: req.actor.type === "board"
+              && activeRecoveryAction.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE,
           },
           tx,
         );

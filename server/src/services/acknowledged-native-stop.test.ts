@@ -1,3 +1,4 @@
+import type { Db } from "@groktopus/db";
 import { requestedRunCancellation } from "./run-cancellation.js";
 import { expect, it } from "vitest";
 import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop, isAcknowledgedOperatorRunStop } from "./acknowledged-native-stop.js";
@@ -30,16 +31,19 @@ it.each([{ runId: "other" }, { companyId: "other" }, { issueId: "other" }, { dis
     nativeCancellation: { ...run.resultJson.nativeCancellation, ...change } } })).toBe(false);
 });
 
-it("accepts a finished operator Stop through the audited native receipt or the local controller acknowledgment", () => {
+it("requires a finished direct operator Stop and distinguishes interruption from acknowledgment", async () => {
+  const db = {} as Db;
   const finishedAt = new Date();
-  expect(isAcknowledgedOperatorRunStop({ ...run, finishedAt })).toBe(true);
   const cancellation = requestedRunCancellation(run.resultJson, "Cancelled by a board operator");
-  const local = { ...run, finishedAt, resultJson: { ...run.resultJson, nativeCancellation: undefined,
-    cancellation, executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() } } };
-  expect(isAcknowledgedOperatorRunStop(local)).toBe(true);
-  expect(isAcknowledgedOperatorRunStop({ ...local, finishedAt: null })).toBe(false);
-  expect(isAcknowledgedOperatorRunStop({ ...local, resultJson: { ...local.resultJson,
-    cancellation: { ...cancellation, source: "queued_message" } } })).toBe(false);
-  expect(isAcknowledgedOperatorRunStop({ ...local, resultJson: { ...local.resultJson,
-    executionCancellation: { state: "requested" } } })).toBe(false);
+  const local = { ...run, agentId: "agent", runtimeMode: "legacy" as const, finishedAt, processPid: null,
+    processGroupId: null, driverKind: null, runnerProfileJson: null, nativeSessionId: null, runnerInstanceId: null,
+    resultJson: { ...run.resultJson, nativeCancellation: undefined, cancellation,
+      executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() } } };
+  await expect(isAcknowledgedOperatorRunStop(db, local)).resolves.toBe(true);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, finishedAt: null })).resolves.toBe(false);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, resultJson: { ...local.resultJson,
+    cancellation: { ...cancellation, reason: "Cancelled by a board operator's subtree pause" } } })).resolves.toBe(false);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, runtimeMode: "native", resultJson: { ...local.resultJson,
+    nativeCancellation: run.resultJson.nativeCancellation,
+    executionCancellation: { state: "requested" } } })).resolves.toBe(false);
 });

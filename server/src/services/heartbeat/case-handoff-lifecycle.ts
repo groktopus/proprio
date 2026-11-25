@@ -1,4 +1,4 @@
-import { CASE_HANDOFF_CANCELLABLE_STATES, CASE_HANDOFF_SOURCE_FENCE_STATES } from "../case-handoff-states.js";
+import { CASE_HANDOFF_CANCELLABLE_STATES, caseHandoffSourceFenceCondition } from "../case-handoff-states.js";
 import { lstat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
@@ -121,7 +121,7 @@ export async function pendingCaseHandoffForRun(db: Db, runId: string, companyId?
   if (!scope) return null;
   return db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, scope), eq(caseHandoffs.sourceRunId, runId),
     eq(caseHandoffs.destinationKind, "agent"),
-    inArray(caseHandoffs.state, CASE_HANDOFF_SOURCE_FENCE_STATES)))
+    caseHandoffSourceFenceCondition()))
     .orderBy(caseHandoffs.createdAt).limit(1).then(rows => rows[0] ?? null);
 }
 

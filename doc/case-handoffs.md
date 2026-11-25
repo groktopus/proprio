@@ -137,13 +137,16 @@ result, assessment, and final reply remain in run history. The status decision
 records `case_handoff_superseded` at the task's current status.
 
 A board operator can withdraw the delivered handoff after the current
-recipient run has an acknowledged Stop. Send `expectedHandoffVersion` and
+recipient run has a recorded Stop and verified termination, or the controller
+confirms cancellation of a parked native retry. Send `expectedHandoffVersion` and
 `stoppedRunId` to `POST /api/cases/{caseId}/handoffs/{handoffId}/withdraw`.
 A newer or active run returns a conflict. Repeating the exact withdrawal
-returns the recorded result. The task waits on the board to inspect prior
-workspace and external effects and choose the next assignment. The Case
-history retains the original acceptance and the withdrawal receipt. A queued
-correction for the withdrawn handoff settles as skipped at admission.
+returns the recorded result. The withdrawal records a board-owned recovery
+hold. The board inspects prior workspace and external effects, resolves the
+hold, and chooses the next assignment. The hold blocks checkout and run
+admission, including dependency wakes. The Case history retains the original
+acceptance and the withdrawal receipt. A queued correction for the withdrawn
+handoff settles as skipped at admission.
 
 ## Board and verification
 

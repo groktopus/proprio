@@ -2835,6 +2835,7 @@ describe("ProprioControlPlanePort conformance", () => {
       const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
       await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
         ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
         nativeCancellation: { schema: "proprio.native-cancellation.v1", runId, companyId, issueId,
           scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
           intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
@@ -2876,6 +2877,7 @@ describe("ProprioControlPlanePort conformance", () => {
       const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
       await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
         ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
         nativeCancellation: { schema: "proprio.native-cancellation.v1", runId: followUpId, companyId, issueId,
           scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
           intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },

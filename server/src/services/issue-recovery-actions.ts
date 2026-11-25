@@ -5,10 +5,11 @@ import { notifyNativeRecoveryNotices } from "./native-recovery-notice-notificati
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
 import { writeExecutionControl } from "./execution-control-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
-import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, workspaceOperations } from "@groktopus/db";
-import { isUuidLike } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, isUuidLike, requiresExecutionReconciliation } from "@groktopus/shared";
+import { conflict } from "../errors.js";
 import type {
   IssueRecoveryAction,
   IssueRecoveryActionKind,
@@ -84,6 +85,7 @@ export type ResolveIssueRecoveryActionInput = {
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
   sourceTerminal?: boolean;
+  boardConfirmedWithdrawalRelease?: boolean;
 };
 
 export const SOURCE_TERMINAL_RESOLUTION = "source_terminal";
@@ -345,7 +347,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
   // status stays satisfied because only the new row is active at commit.
   async function supersedePriorAndInsert(
     input: UpsertIssueRecoveryActionInput,
-    priorActionId: string,
+    priorAction: Pick<IssueRecoveryActionRow, "id" | "cause">,
     ownerType: IssueRecoveryActionOwnerType,
     now: Date,
     retryCount: number,
@@ -369,7 +371,8 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
           })
           .where(
             and(
-              eq(issueRecoveryActions.id, priorActionId),
+              eq(issueRecoveryActions.id, priorAction.id),
+              eq(issueRecoveryActions.cause, priorAction.cause),
               inArray(issueRecoveryActions.status, [...ACTIVE_RECOVERY_ACTION_STATUSES]),
             ),
           )
@@ -397,7 +400,13 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
   ): Promise<IssueRecoveryAction> {
     const existing = await getActiveRow(input.companyId, input.sourceIssueId);
     const now = new Date();
-    if (existing && input.createOnly) return projectActiveRow(existing);
+    if (existing && input.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE && requiresExecutionReconciliation(existing.cause)) {
+      throw conflict("Resolve the task’s existing execution hold before withdrawing the handoff.",
+        { code: "case_handoff_withdrawal_existing_hold", recoveryActionId: existing.id });
+    }
+    if (existing && (input.createOnly || existing.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE)) {
+      return projectActiveRow(existing);
+    }
     if (!existing) {
       const [source] = await db.select({ status: issues.status }).from(issues)
         .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.sourceIssueId))).limit(1);
@@ -422,7 +431,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
         input.supersedeOnIdentityChange &&
         (existing.cause !== input.cause || existing.fingerprint !== input.fingerprint)
       ) {
-        return supersedePriorAndInsert(input, existing.id, ownerType, now, retryCount);
+        return supersedePriorAndInsert(input, existing, ownerType, now, retryCount);
       }
       // `maxAttempts` is an execution budget, not display metadata. Once the
       // same recovery identity consumes it, retain one inspectable board-owned
@@ -631,6 +640,9 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     ];
     if (input.actionId) {
       predicates.push(eq(issueRecoveryActions.id, input.actionId));
+    }
+    if (!input.actionId || !input.boardConfirmedWithdrawalRelease) {
+      predicates.push(ne(issueRecoveryActions.cause, CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE));
     }
     if (input.kind) {
       predicates.push(eq(issueRecoveryActions.kind, input.kind));

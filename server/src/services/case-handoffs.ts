@@ -6,7 +6,7 @@ import { assertAgentInteraction } from "./agent-interaction-policy.js";
 import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, completionContracts, heartbeatRuns, issues, projects } from "@groktopus/db";
-import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type CaseHandoffWithdrawalInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type CaseHandoffWithdrawalInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { casesDisabledError } from "./cases-disabled.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -19,6 +19,7 @@ import { assertActorCanReadCase, assertActorCanWriteCase, assertCaseTrustedForEx
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
+import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { documentService } from "./documents.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
@@ -26,7 +27,7 @@ import { resolveActorSourceTrustForIssue } from "./source-trust.js";
 import { nativeRuntimeSupportsCaseOfferDecision } from "./native-runtime/runtime-mode.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
 import { assertAcceptedOfferIsCurrent, assertOfferRequirementsCurrent, CaseHandoffRequirementsSuperseded, computeCaseHandoffRequirementsDigest, readAcceptedCaseHandoffOffer } from "./case-handoff-offer-authority.js";
-import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING } from "./case-handoff-states.js";
+import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING, CASE_HANDOFF_WITHDRAWN_AFTER_STOP } from "./case-handoff-states.js";
 import { completeTerminalCaseHandoffsForIssue, pendingCaseHandoffForRun } from "./heartbeat/case-handoff-lifecycle.js";
 import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHandoffCloudAuthority, lockCaseHandoffAuthorityRun, restoreCaseHandoffActor } from "./case-handoff-authority.js";
 
@@ -826,6 +827,7 @@ export function caseHandoffService(db: Db) {
     async withdrawDelivered(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffWithdrawalInput) {
       if (actor.type !== "board") throw forbidden("Only a board operator can withdraw delivered work");
       if (!isUuidLike(handoffId) || !isUuidLike(input.stoppedRunId)) throw notFound("Handoff not found");
+      const stoppedRunId = input.stoppedRunId.toLowerCase();
       const caseSnapshot = await visible(actor, caseId);
       const publications: ActivityPublication[] = [];
       const withdrawn = await db.transaction(async transaction => {
@@ -845,12 +847,12 @@ export function caseHandoffService(db: Db) {
         await assertActorCanReadCase(tx, actor, caseRow);
         await assertActorCanWriteCase(tx, actor, caseRow);
         await authorizeTerminalTask(tx, actor, issue);
-        if (row.state === "cancelled" && row.lastErrorCode === "operator_withdrawn_after_stop"
+        if (row.state === "cancelled" && row.lastErrorCode === CASE_HANDOFF_WITHDRAWN_AFTER_STOP
             && row.version === input.expectedHandoffVersion) {
           const [receipt] = await tx.select({ id: caseEvents.id }).from(caseEvents).where(and(
             eq(caseEvents.companyId, row.companyId), eq(caseEvents.caseId, row.caseId), eq(caseEvents.kind, "handoff_cancelled"),
             sql`${caseEvents.payload}->>'handoffId' = ${row.id}`,
-            sql`${caseEvents.payload}->>'stoppedRunId' = ${input.stoppedRunId}`,
+            sql`${caseEvents.payload}->>'stoppedRunId' = ${stoppedRunId}`,
           )).limit(1);
           if (receipt) return row;
         }
@@ -866,14 +868,14 @@ export function caseHandoffService(db: Db) {
         }
         const runScope = and(eq(heartbeatRuns.companyId, row.companyId), eq(boundRunIssueIdSql(), issue.id));
         const [stoppedRun] = await tx.select().from(heartbeatRuns).where(and(runScope,
-          eq(heartbeatRuns.id, input.stoppedRunId), eq(heartbeatRuns.agentId, row.toAgentId), eq(heartbeatRuns.status, "cancelled")))
+          eq(heartbeatRuns.id, stoppedRunId), eq(heartbeatRuns.agentId, row.toAgentId), eq(heartbeatRuns.status, "cancelled")))
           .for("share").limit(1);
-        const stoppedHandoffId = stoppedRun && isAcknowledgedOperatorRunStop(stoppedRun) ? await readCaseHandoffIdForNativeRun(tx, {
+        const stoppedHandoffId = stoppedRun && await isAcknowledgedOperatorRunStop(tx, stoppedRun) ? await readCaseHandoffIdForNativeRun(tx, {
           companyId: row.companyId, issueId: issue.id, runId: stoppedRun.id, contextSnapshot: stoppedRun.contextSnapshot,
         }) : null;
         if (!stoppedRun || stoppedHandoffId !== row.id) {
           throw conflict("Stop the recipient run and wait for its acknowledged Stop receipt before withdrawing this handoff.",
-            { code: "case_handoff_withdrawal_stop_required", runId: input.stoppedRunId });
+            { code: "case_handoff_withdrawal_stop_required", runId: stoppedRunId });
         }
         if ((issue.executionRunId && issue.executionRunId !== stoppedRun.id)
             || (issue.checkoutRunId && issue.checkoutRunId !== stoppedRun.id)) {
@@ -893,16 +895,22 @@ export function caseHandoffService(db: Db) {
 
         const now = new Date();
         const [updated] = await tx.update(caseHandoffs).set({ state: "cancelled", cancelledAt: now, leaseExpiresAt: null,
-          lastErrorCode: "operator_withdrawn_after_stop", lastError: "Withdrawn by board after acknowledged Stop", updatedAt: now })
+          lastErrorCode: CASE_HANDOFF_WITHDRAWN_AFTER_STOP, lastError: "Withdrawn by board after acknowledged Stop", updatedAt: now })
           .where(and(scope, eq(caseHandoffs.state, "delivered"), eq(caseHandoffs.version, input.expectedHandoffVersion))).returning();
         if (!updated) throw conflict("The delivered handoff changed while the withdrawal was being recorded.", { code: "case_handoff_withdrawal_stale" });
         const audit = { disposition: "delivered_proposal_withdrawn", stopProof: "acknowledged_operator_stop",
-          stoppedRunId: stoppedRun.id, nextOwner: "board", nextAction: "Inspect stopped work and any workspace or external effects, then explicitly assign the task or create a replacement handoff." };
+          stoppedRunId: stoppedRun.id, nextOwner: "board", nextAction: "Inspect stopped work and any workspace or external effects. Resolve this recovery hold before assigning the task or creating a replacement handoff." };
         await event(tx, updated, "handoff_cancelled", publications, actor, audit);
         const blockedIssue = await issueService(tx).update(issue.id, { status: "blocked",
           unblockDescriptor: { owner: "board", action: audit.nextAction }, companyGuard: row.companyId,
           actorUserId: actor.userId ?? null }, tx, publications, []);
         if (!blockedIssue) throw notFound("Task not found");
+        await issueRecoveryActionService(tx).upsertSourceScoped({
+          companyId: row.companyId, sourceIssueId: issue.id, kind: "active_run_watchdog",
+          cause: CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, ownerType: "board",
+          fingerprint: nativeSha256({ handoffId: row.id, stoppedRunId: stoppedRun.id }),
+          evidence: { runId: stoppedRun.id }, nextAction: audit.nextAction, supersedeOnIdentityChange: true,
+        });
         return updated;
       });
       publications.forEach(publishActivity);

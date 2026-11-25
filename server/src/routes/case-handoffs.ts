@@ -62,10 +62,7 @@ export function caseHandoffRoutes(db: Db) {
   router.post("/cases/:caseId/handoffs/:handoffId/retry", control("retry"));
   router.post("/cases/:caseId/handoffs/:handoffId/cancel", control("cancel"));
   router.post("/cases/:caseId/handoffs/:handoffId/withdraw", validate(caseHandoffWithdrawalSchema), async (req, res) => {
-    const caseId = req.params.caseId as string;
-    const row = await service.visible(req.actor, caseId);
-    if (!hasCompanyAccess(req, row.companyId)) throw notFound("Case not found");
-    assertCompanyAccess(req, row.companyId);
+    const caseId = await readableCaseId(req);
     res.json(await service.withdrawDelivered(req.actor, caseId, req.params.handoffId as string, req.body));
   });
   return router;

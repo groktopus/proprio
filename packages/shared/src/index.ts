@@ -3036,7 +3036,7 @@ export { ACCOUNT_HANDLE_MAX_LENGTH, toAccountHandle } from "./account-handle.js"
 export type { ExecutionContinuationEnvelope } from "./types/execution-continuation.js";
 export type { ExecutionAgentQueue, ExecutionProjection, ExecutionReconciliation, ExecutionBlocker, TaskInterruptionPresentation } from "./types/execution-projection.js";
 
-export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
+export { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
 export * from "./types/voice-sessions.js";
 export * from "./validators/voice-sessions.js";
 

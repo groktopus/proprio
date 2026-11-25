@@ -318,7 +318,7 @@ export type CancelRunOptions = {
 function runCancellationFenceSql(input: {
   cancellation: ReturnType<typeof requestedRunCancellation>;
   errorCode: string;
-  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId">;
+  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId"> & { operatorRunStop?: true };
   reassignmentStopRequested?: boolean;
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
@@ -1322,6 +1322,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const attribution = {
       cancelledByActorType: options.resultJson?.cancelledByActorType,
       cancelledByUserId: options.resultJson?.cancelledByUserId,
+      ...(options.resultJson?.operatorRunStop === true ? { operatorRunStop: true as const } : {}),
     };
     const handoffIssueId = run.nativeIssueId ?? run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
     const supersedesCaseHandoff = options.resultJson?.cancelledByActorType === "user" || options.errorCode === "issue_reassigned";
