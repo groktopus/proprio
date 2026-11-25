@@ -118,6 +118,19 @@ describe("issueRecoveryActionService", () => {
     expect(model.nextAction).toContain("Add or correct evidence for 1 task criterion");
   });
 
+  it("keeps an unknown Case recovery receipt and its stored guidance private", () => {
+    const row = makeRecoveryActionRow({
+      nextAction: "Read the private checklist",
+      evidence: {
+        runId: "task-run",
+        caseHandoffCompletion: { schema: "proprio.case-handoff-completion-recovery.v2", privateDetails: "Private evidence" },
+      },
+    });
+    const model = issueRecoveryActionReadModel(row as never);
+    expect(model.evidence).toEqual({ runId: "task-run" });
+    expect(model.nextAction).toBe("Review the task completion assessment.");
+  });
+
   it.each(["unrelated unique constraint", "other SQLSTATE", "cyclic cause"])("does not retry %s errors", async kind => {
     const constraint = "issue_recovery_actions_active_source_uq";
     const error: Error & { cause?: unknown } = new Error("Wrapped database failure");

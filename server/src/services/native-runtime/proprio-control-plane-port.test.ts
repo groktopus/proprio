@@ -2771,6 +2771,9 @@ describe("ProprioControlPlanePort conformance", () => {
       eq(completionContracts.id, sourceRun!.completionContractId!), eq(completionContracts.companyId, companyId),
       eq(completionContracts.issueId, issueId),
     ));
+    const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
+    const sourceAgentId = randomUUID();
+    await db.insert(agents).values({ id: sourceAgentId, companyId, name: "Handoff sender", adapterType: "proprio_runner", status: "idle" });
     const caseId = randomUUID(), handoffId = randomUUID();
     recoveryEvidenceCaseId = caseId;
     recoveryEvidenceHandoffId = handoffId;
@@ -2780,15 +2783,14 @@ describe("ProprioControlPlanePort conformance", () => {
     await db.update(heartbeatRuns).set({ contextSnapshot: { ...sourceRun!.contextSnapshot, caseHandoffId: handoffId } })
       .where(eq(heartbeatRuns.id, runId));
     await db.insert(caseHandoffs).values({ id: handoffId, companyId, caseId, issueId, version: 1,
-      fromAgentId: agentId, destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Deliver the result",
-      actorType: "agent", actorId: agentId, wakeupRequestId: randomUUID(), idempotencyKey: `native-completion-${handoffId}`,
+      fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Deliver the result",
+      actorType: "agent", actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: `native-completion-${handoffId}`,
       inputFingerprint: `native-completion-${handoffId}`,
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Complete task", prerequisites: [],
         requirementRevision: { id: acceptedContract!.id, revision: acceptedContract!.revision, canonicalSha256: acceptedContract!.canonicalSha256 },
-        requirementsDigest, workflowTransition: null, decisionOwner: { type: "agent", id: agentId }, accountableOwner: { type: "agent", id: agentId } },
-      recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
+        requirementsDigest, taskBrief: { title: "Create the service briefing", description: objective } },
+      recipientDecision: { outcome: "accepted", actorType: "agent", actorId: sourceAgentId, handoffVersion: 1,
         requirementRevisionId: acceptedContract!.id, requirementsDigest, decidedAt: new Date().toISOString() }, state: "delivered" });
-    const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
     await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, caseHandoffId: handoffId,
       executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));

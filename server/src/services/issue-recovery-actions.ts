@@ -49,11 +49,11 @@ function asRecord(value: unknown): Record<string, unknown> {
  * gap counts into the task recovery read model. */
 function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<string, unknown>; nextAction: string } {
   const evidence = { ...row.evidence };
+  if (!Object.hasOwn(evidence, "caseHandoffCompletion")) return { evidence, nextAction: readModelNextAction(row) };
   const receipt = asRecord(evidence.caseHandoffCompletion);
-  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") {
-    return { evidence, nextAction: readModelNextAction(row) };
-  }
   delete evidence.caseHandoffCompletion;
+  const fallback = "Review the task completion assessment.";
+  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") return { evidence, nextAction: fallback };
   const caseHandoff = asRecord(receipt.caseHandoff);
   const assessment = asRecord(receipt.assessment);
   const criteria = Array.isArray(assessment.criteriaNeedingWork)
@@ -61,7 +61,9 @@ function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<s
   const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
   const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
   const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
-  const prerequisiteCount = Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
+  const prerequisiteCount = typeof caseHandoff.prerequisiteCount === "number" && Number.isSafeInteger(caseHandoff.prerequisiteCount)
+    ? caseHandoff.prerequisiteCount
+    : Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
   evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: prerequisiteCount > 0 ? "review_in_case" : "none",
     unmetCriterionCount, evidenceIssueCount };
   const guidance = [
@@ -69,7 +71,7 @@ function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<s
     unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
     evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
   ].filter((item): item is string => Boolean(item));
-  return { evidence, nextAction: guidance.length ? `Review the task completion assessment. ${guidance.join(" ")}` : "Review the task completion assessment." };
+  return { evidence, nextAction: guidance.length ? `${fallback} ${guidance.join(" ")}` : fallback };
 }
 
 export type UpsertIssueRecoveryActionInput = {

@@ -16,12 +16,15 @@ describe("accepted case-handoff completion recovery evidence", () => {
   afterAll(async () => { await temporary?.cleanup(); });
 
   async function fixture() {
-    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), caseId = randomUUID();
+    const companyId = randomUUID(), agentId = randomUUID(), sourceAgentId = randomUUID(), issueId = randomUUID(), caseId = randomUUID();
     const runId = randomUUID(), contractId = randomUUID(), assessedContractId = randomUUID(), handoffId = randomUUID();
     const resultId = randomUUID(), assessmentId = randomUUID(), decisionId = randomUUID();
     const canonicalSha256 = `sha256:${"a".repeat(64)}`, requirementsDigest = "b".repeat(64);
     await db.insert(companies).values({ id: companyId, name: "Recovery evidence", issuePrefix: `E${companyId.slice(0, 6)}` });
-    await db.insert(agents).values({ id: agentId, companyId, name: "Recipient", adapterType: "proprio_runner", status: "active" });
+    await db.insert(agents).values([
+      { id: agentId, companyId, name: "Recipient", adapterType: "proprio_runner", status: "active" },
+      { id: sourceAgentId, companyId, name: "Sender", adapterType: "proprio_runner", status: "idle" },
+    ]);
     await db.insert(issues).values({ id: issueId, companyId, title: "Complete accepted handoff", status: "in_progress",
       workMode: "standard", assigneeAgentId: agentId });
     const contractJson = { revision: "1", objective: "Deliver the artifact", criteria: [
@@ -36,12 +39,12 @@ describe("accepted case-handoff completion recovery evidence", () => {
       createdByActorType: "agent", createdByActorId: agentId });
     await db.insert(cases).values({ id: caseId, companyId, handoffVersion: 2, caseNumber: 1, identifier: `C-${caseId.slice(0, 8)}`,
       caseType: "task", title: "Artifact delivery", workIssueId: issueId });
-    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: "Deliver artifact", prerequisites: [],
-      requirementRevision: { id: contractId, revision: 1, canonicalSha256 }, requirementsDigest, workflowTransition: null,
-      decisionOwner: { type: "agent" as const, id: agentId }, accountableOwner: { type: "agent" as const, id: agentId } };
-    await db.insert(caseHandoffs).values({ id: handoffId, companyId, caseId, issueId, version: 2, fromAgentId: agentId,
+    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: "Deliver artifact", prerequisites: ["Private prerequisite"],
+      requirementRevision: { id: contractId, revision: 1, canonicalSha256 }, requirementsDigest,
+      taskBrief: { title: "Complete accepted handoff", description: null } };
+    await db.insert(caseHandoffs).values({ id: handoffId, companyId, caseId, issueId, version: 2, fromAgentId: sourceAgentId,
       destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Deliver the artifact", actorType: "agent",
-      actorId: agentId, wakeupRequestId: randomUUID(), idempotencyKey: `handoff-${handoffId}`, inputFingerprint: "fingerprint",
+      actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: `handoff-${handoffId}`, inputFingerprint: "fingerprint",
       offerContract, recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 2,
         requirementRevisionId: contractId, requirementsDigest, decidedAt: new Date().toISOString() }, state: "delivered" });
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, runtimeMode: "native", nativeIssueId: issueId,
@@ -69,7 +72,7 @@ describe("accepted case-handoff completion recovery evidence", () => {
     const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" });
     expect(receipt).toMatchObject({
       schema: "proprio.case-handoff-completion-recovery.v1",
-      caseHandoff: { id: f.handoffId, version: 2, recipientAgentId: f.agentId,
+      caseHandoff: { id: f.handoffId, version: 2, recipientAgentId: f.agentId, prerequisiteCount: 1,
         acceptedRequirementRevision: { id: f.contractId, revision: 1 } },
       decision: { id: f.decisionId, recoveryCause: "completion_evidence_incomplete", statusDecisionReasonCode: "completion_evidence_incomplete" },
       assessment: { resultId: expect.any(String), assessedContractId: f.assessedContractId,
@@ -79,6 +82,7 @@ describe("accepted case-handoff completion recovery evidence", () => {
         ] }] },
     });
     expect(JSON.stringify(receipt)).not.toContain("event:5");
+    expect(JSON.stringify(receipt)).not.toContain("Private prerequisite");
 
     await db.update(caseHandoffs).set({ recipientDecision: { outcome: "accepted", actorType: "agent", actorId: randomUUID(),
       handoffVersion: 2, requirementRevisionId: f.contractId, requirementsDigest: "b".repeat(64), decidedAt: new Date().toISOString() } })
@@ -95,6 +99,17 @@ describe("accepted case-handoff completion recovery evidence", () => {
     await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
     await db.update(issues).set({ assigneeAgentId: f.agentId, assigneeUserId: null }).where(eq(issues.id, f.issueId));
     await db.update(caseHandoffs).set({ state: "cancelled" }).where(eq(caseHandoffs.id, f.handoffId));
+    await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
+  });
+
+  it("requires a nonempty bound digest for the accepted offer and decision", async () => {
+    const f = await fixture();
+    const [row] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.handoffId));
+    await db.update(caseHandoffs).set({
+      offerContract: { ...row!.offerContract!, requirementsDigest: "" },
+      recipientDecision: { ...row!.recipientDecision!, requirementsDigest: "" },
+    }).where(eq(caseHandoffs.id, f.handoffId));
+
     await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f, reasonCode: "completion_evidence_incomplete" })).resolves.toBeNull();
   });
 });

@@ -11,10 +11,9 @@ import {
   workAssessments,
 } from "@groktopus/db";
 
-type JsonRecord = Record<string, unknown>;
-const record = (value: unknown): JsonRecord => value && typeof value === "object" && !Array.isArray(value)
-  ? value as JsonRecord : {};
-const text = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
+import { record, text } from "./evidence-json.js";
+
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const uuid = (value: unknown): string | null => typeof value === "string"
   && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
 
@@ -24,7 +23,7 @@ const uuid = (value: unknown): string | null => typeof value === "string"
  * runs deliberately return null and retain their existing recovery receipt.
  */
 export async function readAcceptedCaseHandoffCompletionEvidence(input: {
-  db: Db;
+  db: Db | DbTransaction;
   companyId: string;
   issueId: string;
   runId: string;
@@ -35,7 +34,7 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
     completionContractId: heartbeatRuns.completionContractId, nativeIssueId: heartbeatRuns.nativeIssueId,
     companyId: heartbeatRuns.companyId }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
-    eq(heartbeatRuns.nativeIssueId, input.issueId),
+    eq(heartbeatRuns.nativeIssueId, input.issueId), eq(heartbeatRuns.runtimeMode, "native"),
   )).limit(1);
   const handoffId = uuid(record(run?.contextSnapshot).caseHandoffId);
   if (!run || !handoffId) return null;
@@ -78,13 +77,16 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
   const revision = record(offer.requirementRevision);
   const recipientDecision = record(handoff.recipientDecision);
   const acceptedRequirementRevisionId = uuid(revision.id);
-  if (recipientDecision.outcome !== "accepted"
+  const requirementsDigest = typeof offer.requirementsDigest === "string" ? offer.requirementsDigest : null;
+  if (offer.schema !== "proprio.case-handoff-offer.v1"
+      || !requirementsDigest || !/^[0-9a-f]{64}$/.test(requirementsDigest)
+      || recipientDecision.outcome !== "accepted"
       || recipientDecision.actorType !== "agent"
       || recipientDecision.actorId !== run.agentId
       || recipientDecision.handoffVersion !== handoff.version
       || !acceptedRequirementRevisionId
       || recipientDecision.requirementRevisionId !== acceptedRequirementRevisionId
-      || recipientDecision.requirementsDigest !== offer.requirementsDigest) return null;
+      || recipientDecision.requirementsDigest !== requirementsDigest) return null;
   const [acceptedRequirementRevision] = await input.db.select().from(completionContracts).where(and(
     eq(completionContracts.id, acceptedRequirementRevisionId), eq(completionContracts.companyId, input.companyId),
     eq(completionContracts.issueId, input.issueId),
@@ -117,7 +119,8 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
     caseHandoff: { id: handoff.id, version: handoff.version, state: handoff.state,
       acceptedRequirementRevision: { id: acceptedRequirementRevision.id, revision: acceptedRequirementRevision.revision,
         canonicalSha256: acceptedRequirementRevision.canonicalSha256 },
-      requirementsDigest: offer.requirementsDigest, recipientAgentId: run.agentId },
+      requirementsDigest, prerequisiteCount: Array.isArray(offer.prerequisites) ? offer.prerequisites.length : 0,
+      recipientAgentId: run.agentId },
     decision: { id: input.decisionId, recoveryCause: input.reasonCode, statusDecisionReasonCode: decision.reasonCode },
     assessment: { id: assessment.id, resultId: result.id, assessedContractId: assessedContract.id,
       assessedContractRevision: { id: assessedContract.id, revision: assessedContract.revision,
