@@ -22,6 +22,7 @@ import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { agentService } from "../services/agents.js";
 import { accessService } from "../services/access.js";
+import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { secretService } from "../services/secrets.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -1482,8 +1483,23 @@ describe("connection management with production default agents", () => {
       completionContract: { id: "contract", sha256: "saved", schemaVersion: "proprio.completion-contract.v1",
         contract: { revision: "1", objective: "fixture", criteria: [{ id: "objective", requirement: "fixture" }] } },
     }) } }).where(eq(heartbeatRuns.id, companyRun.id));
-    const [companyCall, privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
-      .values([null, privateIssue.id, null].map(issueId => ({
+    const [policy] = await server.db.insert(toolPolicies).values({
+      companyId: f.companyId, name: "Fixture read blocked", policyType: "block", priority: 10,
+      selectors: { toolName: "fixture_read" },
+    }).returning();
+    const policyService = toolAccessPolicyService(server.db, { toolActionSigningSecret: randomUUID() });
+    const invocationInput = {
+      companyId: f.companyId,
+      actor: { actorType: "agent" as const, actorId: f.agentId, agentId: f.agentId },
+      runContext: { heartbeatRunId: companyRun.id, issueId: f.issueId },
+      request: { toolName: "fixture_read", arguments: {}, sideEffecting: false },
+    };
+    const blocked = await policyService.decide(invocationInput, { capturePolicyProvenance: true });
+    expect(blocked).toMatchObject({ decision: "deny", matchedPolicyIds: [policy.id] });
+    const { invocation: companyCall } = await policyService.recordInvocation(invocationInput, blocked);
+    await server.db.update(toolPolicies).set({ priority: 20 }).where(eq(toolPolicies.id, policy.id));
+    const [privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
+      .values([privateIssue.id, null].map(issueId => ({
         companyId: f.companyId, runId: companyRun.id, issueId, toolName: "fixture_read",
       }))).returning();
     await server.db.insert(toolCallEvents).values({
@@ -1492,7 +1508,12 @@ describe("connection management with production default agents", () => {
     });
     const visible = await decisions(companyRun.id);
     expect(visible).toMatchObject({ status: 200, body: {
-      decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: companyCall.id }) })],
+      decisions: [expect.objectContaining({
+        invocation: expect.objectContaining({ id: companyCall.id }),
+        policyProvenance: { captureStatus: "recorded", policies: [expect.objectContaining({
+          policyId: policy.id, priority: 10, revisionFingerprint: expect.any(String),
+        })] },
+      })],
       runtimeProvenance: { source: "native_admission", provider: "codex", model: null,
         driverKind: "codex_app_server", driverVersion: "fixture-driver", runtimeContextDigest: context.aggregateDigest,
         skills: [{ key: visibleSkill.key, versionId: visibleVersion.id, bundleDigest: skillBundle.digest }] },
