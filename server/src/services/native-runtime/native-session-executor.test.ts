@@ -3418,7 +3418,7 @@ describe("remote provider pack manifest", () => {
         state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
         const recovered = state.createTransport.mock.calls.at(-1)![0];
         expect(recovered).toMatchObject({ providerPackAuthorityDigest: admitted.digest, runnerArtifact: artifact, adoptExistingRunner: { pid: 123 } });
-        expect(recovered.providerPackAuthorityDigest).not.toBe(next.digest);
+        expect(recovered).not.toMatchObject({ providerPackAuthorityDigest: next.digest });
         if (provider === "opencode") {
           const nativeIdentity = { ...remoteExecution.binding, sessionId: remoteExecution.session.normalizedSessionId! };
           const restored = { identity: () => nativeIdentity } as never;
