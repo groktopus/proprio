@@ -1,7 +1,7 @@
-import type { Db } from "@groktopus/db";
+import type { Db, DbTransaction } from "@groktopus/db";
 import { issues, heartbeatRuns } from "@groktopus/db";
-import { and, eq, inArray } from "drizzle-orm";
-import { canActorReadExecutionWorkspace, type AuthorizationActor, type AuthorizationDecision, type authorizationService } from "./authorization.js";
+import { and, eq, exists, inArray, or, sql, type SQLWrapper } from "drizzle-orm";
+import { canActorReadExecutionWorkspace, issuePrivacySqlCondition, type AuthorizationActor, type AuthorizationDecision, type authorizationService } from "./authorization.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 
 export const heartbeatRunReadAccessColumns = {
@@ -16,6 +16,23 @@ type RunIssueBinding = {
   scopeKind?: "company" | "issue" | null;
   issueId?: string | null;
 };
+
+/** SQL visibility for a run binding, with task privacy enforced for issue-scoped runs. */
+export function heartbeatRunReadSqlCondition(db: Db | DbTransaction, actor: AuthorizationActor, companyId: string, runId: SQLWrapper) {
+  const readableIssue = issuePrivacySqlCondition(actor);
+  return exists(db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    sql`${heartbeatRuns.id} = ${runId}`,
+    eq(heartbeatRuns.companyId, companyId),
+    or(
+      eq(heartbeatRuns.scopeKind, "company"),
+      exists(db.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, heartbeatRuns.issueId),
+        eq(issues.companyId, heartbeatRuns.companyId),
+        readableIssue,
+      ))),
+    ),
+  )));
+}
 
 export async function canActorReadHeartbeatRun(
   db: Db,

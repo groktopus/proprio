@@ -36,6 +36,7 @@ export {
   migratePostgresIfEmpty,
   type MigrationBootstrapResult,
   type Db,
+  type DbTransaction,
   afterTransactionCommit,
 } from "./client.js";
 export {

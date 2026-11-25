@@ -815,6 +815,19 @@ describe("openapi routes", () => {
     });
     expect(res.body.paths["/api/companies"].get.responses["403"]).toBeDefined();
     expect(res.body.paths["/api/companies"].get.responses["400"]).toBeDefined();
+    const boardSecurity = [{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }];
+    const createAuditExport = res.body.paths["/api/companies/{companyId}/audit/managed-exports"].post;
+    const readAuditExport = res.body.paths["/api/companies/{companyId}/audit/managed-exports/{exportId}"].get;
+    for (const operation of [createAuditExport, readAuditExport]) {
+      expect(operation.security).toEqual(boardSecurity);
+      expect(operation["x-proprio-authorization"]).toEqual({ actor: "board" });
+    }
+    expect(createAuditExport.responses["201"].content["application/json"].schema.properties)
+      .toHaveProperty("watermark");
+    expect(readAuditExport.responses["200"].content["application/json"].schema.properties)
+      .toMatchObject({ events: { type: "array" }, nextCursor: { nullable: true }, complete: { type: "boolean" } });
+    expect(readAuditExport.responses["409"].content["application/json"].schema.properties.details.properties)
+      .toHaveProperty("reasonCode");
     expect(
       res.body.paths["/api/companies"].post.responses["201"],
     ).toBeDefined();
