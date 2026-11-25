@@ -227,9 +227,9 @@ describe("runner API catalog", () => {
     const install = results.find(row => row.operationId === "POST /api/companies/{companyId}/teams/catalog/{catalogId}/install")!;
     const previewBody = preview.requestBody?.content["application/json"].schema;
     const installBody = install.requestBody?.content["application/json"].schema;
-    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object) } });
+    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object), adapterOverrides: expect.any(Object) } });
     expect(installBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), adapterOverrides: expect.any(Object), secretValues: expect.any(Object) } });
-    expect(previewBody.properties).not.toHaveProperty("adapterOverrides");
+    expect(previewBody.properties).not.toHaveProperty("secretValues");
   });
 
   it("discovers proposal revision without confusing it with hiring, approval decisions, or reads", () => {
