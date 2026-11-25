@@ -231,8 +231,7 @@ describe("read-only CaseDetail", () => {
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A tested implementation",
         prerequisites: ["Review the requirements", "Confirm the test fixture"],
         requirementRevision: { id: "contract-revision-7", revision: 7, canonicalSha256: "sha256:contract-hash" },
-        requirementsDigest: "sha256:requirements-digest", workflowTransition: null,
-        decisionOwner: { type: "agent" as const, id: "agent-2" }, accountableOwner: { type: "agent" as const, id: "agent-1" } },
+        requirementsDigest: "sha256:requirements-digest", taskBrief: { title: "Implement the launch", description: null } },
       recipientDecision: null });
     const ordinary = handoff({ id: "handoff-ordinary", phase: "verification", state: "awaiting_release", offerContract: null, recipientDecision: null });
     cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
@@ -242,9 +241,10 @@ describe("read-only CaseDetail", () => {
     render();
     await waitFor(() => {
       const section = container.querySelector('[aria-label="Case handoffs"]');
-      expect(section?.textContent).toContain("Offered · awaiting recipient decision");
+      expect(section?.textContent).toContain("Waiting for recipient decision");
     });
     const history = container.querySelector('[aria-label="Case handoffs"]')!;
+    expect(history.textContent).toContain("Offer requirements");
     expect(history.textContent).toContain("Expected deliverable: A tested implementation");
     expect(history.textContent).toContain("Review the requirements");
     expect(history.textContent).toContain("Confirm the test fixture");
@@ -269,7 +269,7 @@ describe("read-only CaseDetail", () => {
     const offered = handoff({ id: "handoff-decided", state: "cancelled", cancelledAt: decisionAt,
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A tested implementation", prerequisites: [],
         requirementRevision: { id: "contract-revision-7", revision: 7, canonicalSha256: "sha256:contract-hash" }, requirementsDigest: "sha256:requirements-digest",
-        workflowTransition: null, decisionOwner: { type: "agent", id: "agent-2" }, accountableOwner: { type: "agent", id: "agent-1" } },
+        taskBrief: { title: "Implement the launch", description: null } },
       recipientDecision: { outcome: "clarification", actorType: "agent", actorId: "agent-2", handoffVersion: 1,
         requirementRevisionId: "contract-revision-7", requirementsDigest: "sha256:requirements-digest", decidedAt: decisionAt, reasonCode: "missing_prerequisite" } });
     cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
@@ -281,6 +281,18 @@ describe("read-only CaseDetail", () => {
     expect(container.querySelector(`time[datetime="${decisionAt}"]`)).not.toBeNull();
     expect(container.textContent).not.toContain("No recipient decision recorded.");
     expect(cases.patch).not.toHaveBeenCalled();
+  });
+
+  it("shows an unanswered offer as a recipient decision while the source owns the task", async () => {
+    const pending = handoff({ state: "offered" });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "implementation",
+      workIssue: { id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress",
+        statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer" }, pendingHandoff: pending });
+    cases.listHandoffs.mockResolvedValue({ items: [pending], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.textContent).toContain("Waiting for Verifier to decide on the offer."));
+    expect(container.querySelector('[aria-label="Case work"]')?.textContent).toContain("Writer");
+    expect(container.querySelector('[aria-label="Case handoffs"]')?.textContent).toContain("Waiting for recipient decision");
   });
 
   it("shows paused delivery without implying that the recipient is working", async () => {

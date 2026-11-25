@@ -1,3 +1,5 @@
+import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
+import { assertAcceptedOfferIsCurrent } from "../case-handoff-offer-authority.js";
 import { canAdmitSessionGoalRecovery } from "./session-goal-recovery.js";
 import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
 import { QUEUED_MESSAGES_DELIVERED_REASON } from "../../modules/wake-queue/index.js";
@@ -1097,13 +1099,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       eq(caseHandoffs.wakeupRequestId, run.wakeupRequestId), eq(caseHandoffs.companyId, run.companyId),
     )).limit(1) : [];
     if (caseHandoffReceipt) {
-      const [current] = await db.select({ version: cases.handoffVersion, issueId: cases.workIssueId,
+      const [current] = await db.select({ version: cases.handoffVersion, issueId: cases.workIssueId, caseStatus: cases.status,
         agentId: issues.assigneeAgentId, statusVersion: issues.statusVersion }).from(cases)
         .innerJoin(issues, eq(issues.id, cases.workIssueId)).where(and(eq(cases.id, caseHandoffReceipt.caseId),
           eq(cases.companyId, run.companyId), eq(issues.companyId, run.companyId))).limit(1);
       if (!["pending_dispatch", "delivered"].includes(caseHandoffReceipt.state) || caseHandoffReceipt.toAgentId !== run.agentId ||
           !current || current.version !== caseHandoffReceipt.version || current.issueId !== caseHandoffReceipt.issueId ||
-          current.agentId !== run.agentId || (!run.startedAt && current.statusVersion !== caseHandoffReceipt.appliedIssueStatusVersion)) {
+          current.agentId !== run.agentId || (caseHandoffReceipt.offerContract && current.caseStatus === "cancelled") ||
+          (!run.startedAt && current.statusVersion !== caseHandoffReceipt.appliedIssueStatusVersion)) {
         const cancelled = await db.transaction(async tx => {
           const [currentRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
             .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "queued")))
@@ -1129,8 +1132,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const caseIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
     if (caseIssueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, run.companyId), eq(caseHandoffs.issueId, caseIssueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);
-      if (pending && (pending.wakeupRequestId !== run.wakeupRequestId || pending.state === "awaiting_release")) return null;
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1);
+      if (pending && (pending.wakeupRequestId !== run.wakeupRequestId || pending.state !== "pending_dispatch")) return null;
     }
     // Claim is the first execution boundary. startedAt survives same-run
     // retries; restart recovery may also enter executeRun already running.
@@ -1346,14 +1349,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
       // The run's wake request records who asked for it.
-      const blockerStallVerified = unresolvedBlockerCount > 0 && await verifyBlockerStallWake(db, {
-        companyId: run.companyId, issueId, contextSnapshot: context,
+      const blockerStallVerified = !context.dependencyDiagnosis && unresolvedBlockerCount > 0 && await verifyBlockerStallWake(db, {
+        companyId: run.companyId, issueId, runId: run.id, contextSnapshot: context,
         requestedByActorType: run.wakeupRequestId
           ? (await db.select({ actor: agentWakeupRequests.requestedByActorType }).from(agentWakeupRequests)
-            .where(eq(agentWakeupRequests.id, run.wakeupRequestId)).then(rows => rows[0]?.actor ?? null))
+            .where(and(eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.id, run.wakeupRequestId)))
+            .then(rows => rows[0]?.actor ?? null))
           : null,
       });
       if (
+        !context.dependencyDiagnosis &&
         unresolvedBlockerCount > 0 &&
         !allowsDependencyBlockedWake(
           context,
@@ -1427,24 +1432,24 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
         context.wakeReason !== "source_scoped_recovery_action";
       const [handoff] = issueId ? await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, run.companyId), eq(caseHandoffs.issueId, issueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1) : [];
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1) : [];
       const declined = (reason: string, predecessorRunId?: string) => {
         logger.info({ runId: run.id, agentId: run.agentId, companyId: run.companyId, issueId, reason,
           ...(predecessorRunId ? { predecessorRunId } : {}) }, "claimQueuedRun: queued run declined at the issue execution claim");
         return { ownsIssue, blocked: true };
       };
-      if (handoff && (handoff.wakeupRequestId !== run.wakeupRequestId || handoff.state === "awaiting_release"))
+      if (handoff && (handoff.wakeupRequestId !== run.wakeupRequestId || handoff.state !== "pending_dispatch"))
         return declined("case_handoff_pending");
       if (caseHandoffReceipt) {
         const [current] = await tx.select({ state: caseHandoffs.state, version: caseHandoffs.version,
-          currentVersion: cases.handoffVersion, workIssueId: cases.workIssueId,
+          currentVersion: cases.handoffVersion, workIssueId: cases.workIssueId, caseStatus: cases.status,
           appliedIssueStatusVersion: caseHandoffs.appliedIssueStatusVersion,
           toAgentId: caseHandoffs.toAgentId, wakeupRequestId: caseHandoffs.wakeupRequestId }).from(caseHandoffs)
           .innerJoin(cases, eq(cases.id, caseHandoffs.caseId)).where(and(eq(caseHandoffs.id, caseHandoffReceipt.id),
             eq(caseHandoffs.companyId, run.companyId))).limit(1);
         if (!current || !["pending_dispatch", "delivered"].includes(current.state) || current.version !== current.currentVersion ||
             current.workIssueId !== issueId || current.toAgentId !== run.agentId || current.wakeupRequestId !== run.wakeupRequestId ||
-            !ownsIssue || (!run.startedAt && current.appliedIssueStatusVersion !== owner?.statusVersion))
+            (caseHandoffReceipt.offerContract && current.caseStatus === "cancelled") || !ownsIssue || (!run.startedAt && current.appliedIssueStatusVersion !== owner?.statusVersion))
           return declined("case_handoff_superseded");
       }
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
@@ -2888,8 +2893,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     })) return null;
     if (issueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, agent.companyId), eq(caseHandoffs.issueId, issueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);
-      if (pending && opts.durableCaseHandoffRequest?.handoffId !== pending.id) return null;
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1);
+      if (pending && (pending.state === "offered" || opts.durableCaseHandoffRequest?.handoffId !== pending.id)) return null;
     }
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.
@@ -3701,14 +3706,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           );
           if (durableReceipt)
             return { kind: "durable" as const, receipt: durableReceipt };
-          if (caseRequest) {
-            const [handoff] = await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.id, caseRequest.handoffId),
-              eq(caseHandoffs.companyId, agent.companyId),
-              eq(caseHandoffs.issueId, caseRequest.issueId), eq(caseHandoffs.state, "pending_dispatch"),
-              eq(caseHandoffs.toAgentId, agentId), eq(caseHandoffs.wakeupRequestId, caseRequest.wakeupRequestId))).for("update");
-            if (!handoff || handoff.appliedIssueStatusVersion !== caseRequest.expectedIssueStatusVersion)
-              throw conflict("Case handoff delivery was superseded");
-          }
           const failedChatRetry = await authorizeFailedChatRunRetryWake(
             db,
             tx as unknown as Db,
@@ -3795,6 +3792,30 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // Durable chat authorization can write through this transaction. A missing
           // row has no lock, so the later read can also see a newly inserted issue.
           const issue = durableRequest || !lockedIssue ? await lockIssue() : lockedIssue;
+
+          if (caseRequest && issue) {
+            const handoffScope = and(eq(caseHandoffs.id, caseRequest.handoffId), eq(caseHandoffs.companyId, agent.companyId),
+              eq(caseHandoffs.issueId, issue.id), eq(caseHandoffs.state, "pending_dispatch"),
+              eq(caseHandoffs.toAgentId, agentId), eq(caseHandoffs.wakeupRequestId, caseRequest.wakeupRequestId));
+            const [snapshot] = await tx.select({ caseId: caseHandoffs.caseId }).from(caseHandoffs).where(handoffScope);
+            if (!snapshot) throw conflict("Case handoff delivery was superseded");
+            // Serialize against task changes and Case cancellation in issue → Case → handoff order.
+            const [caseRow] = await tx.select({ status: cases.status, version: cases.handoffVersion, workIssueId: cases.workIssueId })
+              .from(cases).where(and(eq(cases.id, snapshot.caseId), eq(cases.companyId, agent.companyId))).for("update");
+            const [handoff] = await tx.select().from(caseHandoffs).where(handoffScope).for("update");
+            if (!handoff || !caseRow || caseRow.version !== handoff.version || caseRow.workIssueId !== issue.id
+                || handoff.appliedIssueStatusVersion !== caseRequest.expectedIssueStatusVersion
+                || (handoff.offerContract && caseRow.status === "cancelled")) {
+              throw conflict("Case handoff delivery was superseded");
+            }
+            if (handoff.offerContract) {
+              const [brief] = await tx.select({ title: issues.title, description: issues.description }).from(issues).where(and(
+                eq(issues.id, issue.id), eq(issues.companyId, agent.companyId),
+              ));
+              if (!brief) throw conflict("Case handoff task no longer exists");
+              await assertAcceptedOfferIsCurrent(tx as unknown as Db, handoff, brief);
+            }
+          }
 
           if (!issue) {
             if (caseRequest) throw conflict("Case handoff task no longer exists");
@@ -4461,31 +4482,41 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // A stalled child or blocker (issue_blocker_stalled, once per stall)
           // is the other exception: the assignee must be able to re-delegate,
           // escalate or block with a reason while that dependency is stuck.
+          const diagnosisWake = Boolean(enrichedContextSnapshot.dependencyDiagnosis);
+          const stallVerified = (diagnosisWake || dependencyReadiness?.isDependencyReady === false)
+            && await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
+              contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType,
+              wakeupRequestId: executionWaitRequestId });
+          // A diagnostic request is bound to the stall that was observed.
+          // Resolution does not turn a stale request into an ordinary wake.
+          if (diagnosisWake && !stallVerified) return { kind: "skipped" as const };
+
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
             allowsDependencyBlockedWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-              await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
-                contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType }),
+              stallVerified,
               await isVerifiedDependencyInteractionResponse(tx, { companyId: issue.companyId,
                 issueId: issue.id, agentId, context: enrichedContextSnapshot }),
             );
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;
-            enrichedContextSnapshot.unresolvedBlockerIssueIds =
-              dependencyReadiness.unresolvedBlockerIssueIds;
-            enrichedContextSnapshot.unresolvedBlockerCount =
-              dependencyReadiness.unresolvedBlockerCount;
-            enrichedContextSnapshot.unresolvedBlockerSummaries =
-              await listUnresolvedBlockerSummaries(
-                tx,
-                issue.companyId,
-                issue.id,
-                dependencyReadiness.unresolvedBlockerIssueIds,
+            if (diagnosisWake) {
+              // The diagnosis already contains the path the recipient can read.
+              // The ordinary blocker summaries include restricted issue details.
+              delete enrichedContextSnapshot.unresolvedBlockerIssueIds;
+              delete enrichedContextSnapshot.unresolvedBlockerSummaries;
+              delete enrichedContextSnapshot.unresolvedBlockerCount;
+            } else {
+              enrichedContextSnapshot.unresolvedBlockerIssueIds = dependencyReadiness.unresolvedBlockerIssueIds;
+              enrichedContextSnapshot.unresolvedBlockerCount = dependencyReadiness.unresolvedBlockerCount;
+              enrichedContextSnapshot.unresolvedBlockerSummaries = await listUnresolvedBlockerSummaries(
+                tx, issue.companyId, issue.id, dependencyReadiness.unresolvedBlockerIssueIds,
               );
+            }
           }
 
           if (

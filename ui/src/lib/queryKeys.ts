@@ -399,6 +399,7 @@ export const queryKeys = {
     summaryBatch: (companyId: string, userId: string | null | undefined, sortedIds: readonly string[]) =>
       ["issues", companyId, "summaries", userId ?? "__local_board__", sortedIds] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
+    dependencyInvestigation: (issueId: string) => ["issues", "dependency-investigation", issueId] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
     acknowledgedComments: (issueId: string) => ["issues", "comments", issueId, "acknowledged"] as const,
     earlierComments: (issueId: string) => ["issues", "comments", issueId, "earlier"] as const,
@@ -725,6 +726,7 @@ export const queryKeys = {
     ) => ["company-search", companyId, q, scope, limit, offset] as const,
   },
   dashboard: (companyId: string) => ["dashboard", companyId] as const,
+  dashboardResumeReceipts: (companyId: string) => ["dashboard", companyId, "resume-receipts"] as const,
   attention: (companyId: string) => ["attention", companyId] as const,
   decisions: {
     list: (companyId: string, status?: string) =>
