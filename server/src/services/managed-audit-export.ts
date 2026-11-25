@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { conflict, forbidden, notFound } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
@@ -164,6 +164,7 @@ export async function readManagedAuditExportPage(
   scope: ExportScope,
   exportId: string,
   cursor?: string,
+  recordAccess = true,
 ) {
   return db.transaction(async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
@@ -197,13 +198,21 @@ export async function readManagedAuditExportPage(
         .orderBy(asc(managedAuditEvents.id))
       : [];
     const deliveredThrough = offset + events.length;
-    await tx.insert(managedAuditExportPageAccess).values({
-      companyId: scope.companyId,
-      exportId: snapshot.id,
-      userId,
-      pageOffset: offset,
-      itemCount: events.length,
-    });
+    if (recordAccess) {
+      try {
+        await tx.insert(managedAuditExportPageAccess).values({
+          companyId: scope.companyId,
+          exportId: snapshot.id,
+          userId,
+          pageOffset: offset,
+          itemCount: events.length,
+          createdAt: sql`clock_timestamp()`,
+        });
+      } catch {
+        // Do not attach the driver error: its parameters include private scope IDs.
+        throw new HttpError(500, "Managed audit page access could not be recorded");
+      }
+    }
     return {
       ...exportReceipt(snapshot),
       events,

@@ -207,8 +207,10 @@ describePostgres("agent action audit routes", () => {
         .where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId));
       expect(await pageAccess()).toHaveLength(0);
       expect((await anon.get(exportPath)).status).toBe(403);
+      await board.head(exportPath).expect(200);
+      expect(await pageAccess()).toHaveLength(0);
       await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
-      const first = await board.get(exportPath);
+      const first = await board.get(exportPath).set("If-None-Match", 'W/"anything"');
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
       expect((await board.get(exportPath)).body).toEqual(first.body);
@@ -240,6 +242,9 @@ describePostgres("agent action audit routes", () => {
       try {
         const auditWriteFailed = await board.get(exportPath).expect(500);
         expect(auditWriteFailed.body).not.toHaveProperty("events");
+        expect(auditWriteFailed.text).not.toContain(company.id);
+        expect(auditWriteFailed.text).not.toContain(receipt.body.exportId);
+        expect(auditWriteFailed.body).toMatchObject({ error: "Managed audit page access could not be recorded" });
       } finally {
         await db.execute(sql`alter table unavailable_page_access rename to managed_audit_export_page_access`);
       }

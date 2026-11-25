@@ -62779,11 +62779,210 @@
       }
     },
     "/api/companies/{companyId}/audit/managed-exports/{exportId}": {
+      "head": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Validate a managed audit export page without releasing it",
+        "description": "Returns the same status as GET without a body or page-access record.",
+        "responses": {
+          "200": {
+            "description": "The managed audit page is available; no body is returned"
+          },
+          "400": {
+            "description": "Invalid cursor or identifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Export not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Export requires reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exportId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 75
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      },
       "get": {
         "tags": [
           "activity"
         ],
         "summary": "Read a managed audit export page",
+        "description": "Responses are no-store. Each successful GET records a page release before returning its body, even when conditional request headers are supplied. HEAD validates the page without recording a release.",
         "responses": {
           "200": {
             "description": "Managed audit export page",
@@ -63059,6 +63258,35 @@
           },
           "409": {
             "description": "Export requires reconciliation. For retention_window_expired, open a new export beginning at or after the configured retention cutoff.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Page access could not be recorded; no page is released",
             "content": {
               "application/json": {
                 "schema": {

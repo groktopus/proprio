@@ -52,6 +52,10 @@ half-open interval given by the `from` and `to` timestamps.
 
 `GET /api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page.
 Use the preceding page's `nextCursor` as the `cursor` query parameter to resume.
+Responses are `no-store`; a GET returns its authenticated page body despite
+conditional request headers, and records access before releasing that body.
+HEAD validates the request without recording a page release. A page access
+record failure returns HTTP `500` with a fixed diagnostic and releases no page.
 Every page verifies access to all events in the snapshot. If any event is
 missing or no longer visible, the API returns HTTP `409` with
 `details.reasonCode` set to `snapshot_incomplete`. The response contains no
