@@ -457,10 +457,16 @@ dependency investigation browser test change.
 [Human approval fixtures](https://github.com/groktopus/proprio/pull/405)
 [Reviewed gateway composition](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
 
-Hosted Linux source qualification is running for the reviewed gateway
-composition against `166175cc093a569eed60b59f6df70f6c10c43290`. Update and
-rollback passed. The source build was running at the latest check.
+Hosted Linux source qualification passed for reviewed gateway composition
+`f69b90d6044ab0a874212e0670f532dbbd036479` against
+`166175cc093a569eed60b59f6df70f6c10c43290`. The retained report records five
+passing cases. They cover managed update and rollback, fresh-target
+restore, active-run migration, interruption and restart diagnostics, and
+browser task readback. Active-run migration recorded zero observed data
+loss and 580,302 ms of recovery time. The later full-controller audit
+fixture has separate exact-head and composition results below.
 [Reviewed gateway hosted qualification](https://github.com/groktopus/proprio/actions/runs/45579778025)
+[Retained acceptance report](https://github.com/groktopus/proprio/actions/runs/45579778025/artifacts/15007273531)
 
 The enhanced reconstruction fixture passed on composition
 `cf9548d1faefc0ac4a916f60aef71eddf952d924` with one PostgreSQL
@@ -499,8 +505,10 @@ handled the approvals. A new production controller process then served the
 export to the reviewer from the same database. The independent target
 observed one approved effect, zero denied effects, and one interrupted
 effect with no terminal outcome in the nine-event export. The dependency
-diagnosis crash regression passed in the same local run. This used a
-disposable source checkout, Node 24.22.1, and a loopback connector. The
+diagnosis crash regression passed in the same local run. The exact PR head
+and the composition passed the layered server typecheck. Focused Oxlint
+also passed. This used a disposable source checkout, Node 24.22.1, and a
+loopback connector. The
 selected-image restore and operator sign-off are still release gates.
 [Full-controller fixture](https://github.com/groktopus/proprio/pull/407)
 [Exact tested composition](https://github.com/groktopus/proprio/commit/31b5a8fbf368bb880ee1b36170bdf6baf1c348de)
