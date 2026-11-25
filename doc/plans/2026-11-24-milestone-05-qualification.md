@@ -340,6 +340,23 @@ passed for the UI source at `e64691e778d660e48b21130e322445c690255435`. The
 live browser focus and screen-reader checks still need to run.
 [Approval feedback](https://github.com/groktopus/proprio/pull/402)
 
+Composition `a176612803e5836ef31f56f858973cf05a7ecb53` passed 214 tests
+across audit routes, MCP Tasks, wake queue and the Apps review queue. The
+one-connection authenticated reconstruction and generated OpenAPI check
+also passed.
+
+The authenticated approved-caller follow-up settles the replacement claim
+only when the earlier intent blocked it before dispatch. It preserves the
+reconciliation reason across the remote deadline and omits the internal
+classification from the caller response. The regression holds the real
+fingerprint lock past the deadline, checks the failed replacement in
+PostgreSQL and verifies that the original unresolved intent stays open.
+Six focused gateway tests passed on composed source
+`d87f64c97347ffa7db3dd8b744e62c63720b8f00`. Hosted Linux qualification
+for this revision is in progress.
+[Approved caller](https://github.com/groktopus/proprio/pull/403)
+[Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45569138741)
+
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
 All 112 tests passed across commentary delivery, durable receipt recovery,
@@ -424,7 +441,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
 4. From checkpointed export, review the two dependent branches in their listed order.
    - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384) → [#385](https://github.com/groktopus/proprio/pull/385) → [#386](https://github.com/groktopus/proprio/pull/386) → [#387](https://github.com/groktopus/proprio/pull/387). Review [#392](https://github.com/groktopus/proprio/pull/392) after #386. Review [#396](https://github.com/groktopus/proprio/pull/396) and [#397](https://github.com/groktopus/proprio/pull/397) after #387.
-   - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363). Review [#400](https://github.com/groktopus/proprio/pull/400) after #366. Review [#398](https://github.com/groktopus/proprio/pull/398) → [#399](https://github.com/groktopus/proprio/pull/399) after #370. Review [#402](https://github.com/groktopus/proprio/pull/402) after #399.
+   - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363). Review [#400](https://github.com/groktopus/proprio/pull/400) after #366. Review [#398](https://github.com/groktopus/proprio/pull/398) → [#399](https://github.com/groktopus/proprio/pull/399) after #370. Review [#402](https://github.com/groktopus/proprio/pull/402) and [#403](https://github.com/groktopus/proprio/pull/403) after #399.
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
    both target historical policy; independent authority targets `main`. [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
