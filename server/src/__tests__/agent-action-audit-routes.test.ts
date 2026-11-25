@@ -382,6 +382,86 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("allows another auditor to collect when one owner reaches the principal snapshot limit", async () => {
+    const { company } = await seed();
+    const users = [randomUUID(), randomUUID()];
+    await db.insert(companyMemberships).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, membershipRole: "operator", status: "active",
+    })));
+    await db.insert(principalPermissionGrants).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, permissionKey: "audit:view_agent_actions",
+    })));
+    const [first, second] = await Promise.all(users.map(async userId =>
+      request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] })),
+    ));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    await db.insert(managedAuditExports).values(Array.from({ length: 32 }, () => ({
+      companyId: company.id, userId: users[0], sourceEpoch: epoch,
+      from: new Date(window.from), to: new Date(window.to), eventIds: [], watermark: "fixture",
+      expiresAt: new Date(Date.now() + 60_000),
+    })));
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      expect((await first.post(path).send(window).expect(429)).body)
+        .toMatchObject({ details: { reasonCode: "principal_snapshot_limit" } });
+      await second.post(path).send(window).expect(201);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reclaims quota after an epoch or retention change while keeping old checkpoints fenced", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, {
+      type: "board", source: "session", userId, companyIds: [company.id],
+    }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const oldEpoch = randomUUID();
+    const currentEpoch = randomUUID();
+    const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const oldStart = "2026-07-17T00:00:00.000Z";
+    const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
+      Array.from({ length: 128 }, (_, index) => ({
+        companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
+        from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
+        eventIds: [randomUUID()], watermark: "fixture", expiresAt: new Date(Date.now() + 60_000),
+      })),
+    ).returning({ id: managedAuditExports.id });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
+    try {
+      await board.post(path).send(window).expect(201);
+      for (const [row, reasonCode] of [[oldEpochRow, "source_epoch_changed"], [oldRetentionRow, "retention_window_expired"]] as const) {
+        const stale = await board.get(`${path}/${row.id}`).expect(409);
+        expect(stale.body).toMatchObject({ details: { reasonCode } });
+        expect(stale.body).not.toHaveProperty("eventCount");
+        const [marker] = await db.select({ eventIds: managedAuditExports.eventIds }).from(managedAuditExports)
+          .where(eq(managedAuditExports.id, row.id));
+        expect(marker.eventIds).toEqual([]);
+      }
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+      expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
+      expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reserves snapshot storage per company even when another database client sees the same last slot", async () => {
     const { company } = await seed();
     const { company: otherCompany } = await seed();
@@ -405,7 +485,8 @@ describePostgres("agent action audit routes", () => {
       expiresAt: new Date(Date.now() + 60_000),
     };
     const saved = await db.insert(managedAuditExports)
-      .values(Array.from({ length: 127 }, () => fields)).returning({ id: managedAuditExports.id });
+      .values(Array.from({ length: 127 }, () => ({ ...fields, userId: randomUUID() })))
+      .returning({ id: managedAuditExports.id });
     const [expired] = await db.insert(managedAuditExports).values({
       ...fields, expiresAt: new Date(0),
     }).returning({ id: managedAuditExports.id });
