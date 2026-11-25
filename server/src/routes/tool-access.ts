@@ -2931,10 +2931,15 @@ function connectorEnrollmentPrincipal(req: Request): string {
     assertBoardOrAgent(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string);
+    const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string, req.actor);
     const visible = await filterReadableDecisionTasks(db, req.actor, companyId, result.decisions);
-    res.json({ ...result, decisions: await filterConnectionManagementRows(db, req, "connections:audit", visible,
-      row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId })) });
+    const decisions = await filterConnectionManagementRows(db, req, "connections:audit", visible,
+      row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId }));
+    res.json({
+      ...result,
+      decisions,
+      runtimeProvenance: decisions.length > 0 ? result.runtimeProvenance : { source: "unknown" },
+    });
   });
 
   router.get("/companies/:companyId/tools/trust-rules", managementGuard("connections:profiles", "GET /companies/:companyId/tools/trust-rules", { personal: true }), async (req, res) => {

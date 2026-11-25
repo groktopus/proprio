@@ -1708,6 +1708,7 @@ export type {
   ToolRiskLevel,
   ToolRunDecision,
   ToolRunDecisionLookup,
+  ToolRunRuntimeProvenance,
   ToolRuntimeKind,
   ToolRuntimeHealthSummary,
   ToolRuntimeMetricSnapshot,

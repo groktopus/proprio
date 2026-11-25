@@ -125,7 +125,7 @@ export async function observeCardWork(ctx: ChatCatalogContext, recipe: CardRecip
   const run = workerRuns[0];
   const [instruction, overview, generation, decisions, comments, activity] = await Promise.all([
     ctx.input.api.get<InstructionFile>(`/api/agents/${recipe.workerId}/instructions-bundle/file?path=AGENTS.md`), ctx.input.api.get<BudgetOverview>(`${root(ctx)}/budgets/overview`),
-    ctx.input.api.get<Entity>(`/api/issues/${issueId}`), run ? ctx.input.api.get<ToolRunDecisionLookup>(`${root(ctx)}/tools/runs/${run.id}/decisions`) : Promise.resolve({ runId: "", decisions: [] }),
+    ctx.input.api.get<Entity>(`/api/issues/${issueId}`), run ? ctx.input.api.get<ToolRunDecisionLookup>(`${root(ctx)}/tools/runs/${run.id}/decisions`) : Promise.resolve({ runId: "", runtimeProvenance: { source: "unknown" as const }, decisions: [] }),
     ctx.input.api.get<Entity[]>(`/api/issues/${issueId}/comments?order=asc`), ctx.input.api.get<Array<Entity & { runId?: string }>>(`/api/issues/${issueId}/activity`),
   ]);
   return { recipe, instruction, runs, overview, generation, decisions, comments, activity, calls: cardChecklistCalls(ctx), checklistSource: structuredClone(owned.get(ctx)!.source) };

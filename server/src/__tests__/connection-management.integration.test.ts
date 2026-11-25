@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { and, eq, sql } from "drizzle-orm";
 import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
-import { createDb, authUsers, activityLog, agentApiKeys, companies, companySecrets, companySecretVersions, chatConversations, chatDeliveries, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, toolPolicies, toolRateLimitCounters, connectionGrants, connectionGrantMembers, connectionGrantDelegations, toolAccessAuditEvents, toolOauthStates, issueThreadInteractions, connectionIntentDeliveries, agents, companyMemberships, heartbeatRuns, issues, principalPermissionGrants, projects, toolApplications, toolConnections, toolConnectionInstalls, aiConnectionPools, toolMcpGateways, toolMcpGatewayTokens, toolActionRequests, toolCatalogEntries, toolInvocations, toolCallEvents, toolProfileEntries, toolProfiles, toolProfileBindings, plugins, adapterAuthSessions, environments, routines, chatGitHubReviews } from "@groktopus/db";
+import { createDb, authUsers, activityLog, agentApiKeys, companies, companySkills, companySkillVersions, companySkillSources, companySecrets, companySecretVersions, chatConversations, chatDeliveries, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, toolPolicies, toolRateLimitCounters, connectionGrants, connectionGrantMembers, connectionGrantDelegations, toolAccessAuditEvents, toolOauthStates, issueThreadInteractions, connectionIntentDeliveries, agents, companyMemberships, heartbeatRuns, issues, principalPermissionGrants, projects, toolApplications, toolConnections, toolConnectionInstalls, aiConnectionPools, toolMcpGateways, toolMcpGatewayTokens, toolActionRequests, toolCatalogEntries, toolInvocations, toolCallEvents, toolProfileEntries, toolProfiles, toolProfileBindings, plugins, adapterAuthSessions, environments, routines, chatGitHubReviews } from "@groktopus/db";
 import { findSatisfiedToolConnection, satisfiedConnectionIntentService } from "../services/satisfied-connection-intents.js";
 import { connectionManagementService, continuingConnectionManagement } from "../services/connection-management.js";
 import { aiConnectionService } from "../services/ai-connections.js";
@@ -22,10 +22,15 @@ import { getServerAdapter, registerServerAdapter, unregisterServerAdapter } from
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { agentService } from "../services/agents.js";
 import { accessService } from "../services/access.js";
+import { toolAccessPolicyService } from "../services/tool-access-policy.js";
+import { resolveProprioRunnerNativeProviderInput } from "../services/native-runtime/provider-profile.js";
 import { secretService } from "../services/secrets.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ProprioRunnerToolAuthority } from "../services/native-runtime/proprio-runner-tool-authority.js";
+import { buildNativeExecutionInput } from "../services/native-runtime/native-execution-input.js";
+import { nativeRuntimeContextFixture } from "../services/native-runtime/runtime-context.test-fixture.js";
+import { canonicalNativeRuntimeContextDigest, NATIVE_RUNTIME_ASSET_SCHEMA } from "../vendor/proprio-runner/index.js";
 import type { AuthorizationActor } from "../services/authorization.js";
 import type { ConnectionManagementResource } from "../services/connection-management-policy.js";
 
@@ -1625,10 +1630,65 @@ describe("connection management with production default agents", () => {
     expect(await decisions(randomUUID())).toEqual(hidden);
 
     const [companyRun] = await server.db.insert(heartbeatRuns).values({
-      companyId: f.companyId, agentId: f.agentId, status: "succeeded",
+      companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, nativeIssueId: f.issueId,
+      runtimeMode: "native", driverKind: "codex_app_server", driverVersion: "fixture-driver", status: "succeeded",
     }).returning();
-    const [companyCall, privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
-      .values([null, privateIssue.id, null].map(issueId => ({
+    const [companyIssue] = await server.db.select().from(issues).where(eq(issues.id, f.issueId));
+    const context = nativeRuntimeContextFixture();
+    const [restrictedSource] = await server.db.insert(companySkillSources).values({ companyId: f.companyId,
+      repositoryUrl: "https://skills.example/private.git", fullName: "fixture/private", trackingRef: "main",
+      accessScope: "projects" }).returning();
+    const [visibleSkill, hiddenSkill] = await server.db.insert(companySkills).values([
+      { companyId: f.companyId, key: "fixture/visible", slug: "fixture-visible", name: "Visible", markdown: "visible" },
+      { companyId: f.companyId, key: "fixture/hidden", slug: "fixture-hidden", name: "Hidden", markdown: "hidden", accessSourceId: restrictedSource.id },
+    ]).returning();
+    const [visibleVersion, hiddenVersion] = await server.db.insert(companySkillVersions).values([
+      { companyId: f.companyId, companySkillId: visibleSkill.id, revisionNumber: 1 },
+      { companyId: f.companyId, companySkillId: hiddenSkill.id, revisionNumber: 1 },
+    ]).returning();
+    await server.db.update(companySkills).set({ currentVersionId: visibleVersion.id }).where(eq(companySkills.id, visibleSkill.id));
+    const skillBundle = { schema: NATIVE_RUNTIME_ASSET_SCHEMA, digest: "b".repeat(64), manifestDigest: "c".repeat(64),
+      rootPath: "/must-not-leak", fileCount: 1, totalBytes: 1 };
+    context.skills = [
+      { key: visibleSkill.key, runtimeName: visibleSkill.key, versionId: visibleVersion.id, bundle: skillBundle },
+      { key: hiddenSkill.key, runtimeName: hiddenSkill.key, versionId: hiddenVersion.id, bundle: { ...skillBundle, digest: "d".repeat(64) } },
+    ];
+    context.aggregateDigest = canonicalNativeRuntimeContextDigest(context);
+    const effectiveProvider = resolveProprioRunnerNativeProviderInput({
+      companyId: f.companyId, backend: "codex_app_server", codexCliVersion: "0.160.0",
+      adapterConfig: { provider: "codex", model: "gpt-6.2-sol" },
+    });
+    expect(effectiveProvider.model).toBe("gpt-6.1-sol");
+    await server.db.update(heartbeatRuns).set({ runnerProfileJson: { nativeExecutionInput: buildNativeExecutionInput({
+      companyId: f.companyId, agentId: f.agentId, runId: companyRun.id,
+      issue: { id: companyIssue.id, identifier: companyIssue.identifier, title: companyIssue.title,
+        description: companyIssue.description, workMode: companyIssue.workMode },
+      taskPrompt: "Fixture task prompt that must not be returned", ...effectiveProvider, runtimeContext: context,
+      workspace: { id: companyRun.id, cwd: "/fixture/private", repoUrl: null, repoRef: null, branchName: null }, normalizedSessionId: null,
+      completionContract: { id: "contract", sha256: "saved", schemaVersion: "proprio.completion-contract.v1",
+        contract: { revision: "1", objective: "fixture", criteria: [{ id: "objective", requirement: "fixture" }] } },
+    }) } }).where(eq(heartbeatRuns.id, companyRun.id));
+    const [policy] = await server.db.insert(toolPolicies).values({
+      companyId: f.companyId, name: "Fixture read blocked", policyType: "block", priority: 10,
+      selectors: { toolName: "fixture_read" },
+    }).returning();
+    const policyService = toolAccessPolicyService(server.db, { toolActionSigningSecret: randomUUID() });
+    const invocationInput = {
+      companyId: f.companyId,
+      actor: { actorType: "agent" as const, actorId: f.agentId, agentId: f.agentId },
+      runContext: { heartbeatRunId: companyRun.id, issueId: f.issueId },
+      request: { toolName: "fixture_read", arguments: {}, sideEffecting: false },
+    };
+    const blocked = await policyService.decide(invocationInput, { capturePolicyProvenance: true });
+    expect(blocked).toMatchObject({ decision: "deny", matchedPolicyIds: [policy.id] });
+    const { invocation: companyCall } = await policyService.recordInvocation(invocationInput, blocked);
+    await server.db.update(toolPolicies).set({ priority: 20 }).where(eq(toolPolicies.id, policy.id));
+    const [nextSkillVersion] = await server.db.insert(companySkillVersions).values({
+      companyId: f.companyId, companySkillId: visibleSkill.id, revisionNumber: 2,
+    }).returning();
+    await server.db.update(companySkills).set({ currentVersionId: nextSkillVersion.id }).where(eq(companySkills.id, visibleSkill.id));
+    const [privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
+      .values([privateIssue.id, null].map(issueId => ({
         companyId: f.companyId, runId: companyRun.id, issueId, toolName: "fixture_read",
       }))).returning();
     await server.db.insert(toolCallEvents).values({
@@ -1637,8 +1697,31 @@ describe("connection management with production default agents", () => {
     });
     const visible = await decisions(companyRun.id);
     expect(visible).toMatchObject({ status: 200, body: {
-      decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: companyCall.id }) })],
+      decisions: [expect.objectContaining({
+        invocation: expect.objectContaining({ id: companyCall.id }),
+        policyProvenance: { captureStatus: "recorded", policies: [expect.objectContaining({
+          policyId: policy.id, priority: 10, revisionFingerprint: expect.any(String),
+        })] },
+      })],
+      runtimeProvenance: { source: "native_admission", provider: "codex", model: "gpt-6.1-sol",
+        driverKind: "codex_app_server", driverVersion: "fixture-driver", runtimeContextDigest: context.aggregateDigest,
+        skills: [{ key: visibleSkill.key, versionId: visibleVersion.id, bundleDigest: skillBundle.digest }] },
     } });
+    expect(JSON.stringify(visible.body.runtimeProvenance)).not.toMatch(/Fixture task prompt|credential|cwd|rootPath|fixture\/hidden|d{64}/);
+    const [admittedRun] = await server.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, companyRun.id));
+    const admittedInput = admittedRun.runnerProfileJson!.nativeExecutionInput as { binding: Record<string, unknown> };
+    await server.db.update(heartbeatRuns).set({ runnerProfileJson: { ...admittedRun.runnerProfileJson,
+      nativeExecutionInput: { ...admittedInput, binding: { ...admittedInput.binding, agentId: randomUUID() } } } })
+      .where(eq(heartbeatRuns.id, companyRun.id));
+    expect((await decisions(companyRun.id)).body.runtimeProvenance).toEqual({ source: "unknown" });
+
+    const [noVisibleDecisionRun] = await server.db.insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, status: "succeeded",
+    }).returning();
+    await server.db.insert(toolInvocations).values({ companyId: f.companyId, runId: noVisibleDecisionRun.id,
+      agentId: f.agentId, issueId: privateIssue.id, toolName: "private_only", policyDecision: "allow" });
+    const noVisibleDecision = await decisions(noVisibleDecisionRun.id);
+    expect(noVisibleDecision).toMatchObject({ status: 200, body: { decisions: [], runtimeProvenance: { source: "unknown" } } });
 
     await server.db.update(issues).set({ responsibleUserId: f.userId, assigneeAgentId: f.agentId })
       .where(eq(issues.id, privateIssue.id));
