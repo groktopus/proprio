@@ -128,11 +128,13 @@ describe("guarded remote HTTP fetch (PAP-17098 DNS rebinding)", () => {
       res.end(JSON.stringify({ ok: true }));
     });
     const network = routingSocketFactory({ [PUBLIC_ADDRESS]: upstream.port });
+    let requestStarts = 0;
     const options = {
       allowPrivateNetwork: false,
       lookup: async () => [{ address: PUBLIC_ADDRESS, family: 4 }],
       socketFactory: network.factory,
       error: guardError,
+      onRequestStart: () => { requestStarts += 1; },
     };
 
     await guardedRemoteHttpFetch(`http://${REBIND_HOST}/mcp`, {}, options);
@@ -141,6 +143,26 @@ describe("guarded remote HTTP fetch (PAP-17098 DNS rebinding)", () => {
     }, options);
 
     expect(seen).toEqual(["Proprio/1.0", "Caller/2.0"]);
+    expect(requestStarts).toBe(2);
+  });
+
+  it("does not start HTTP when the call already expired before dispatch", async () => {
+    const signal = AbortSignal.abort();
+    let requestStarted = false;
+    let transportInvoked = false;
+    const unpinnedFetch: typeof fetch = async () => {
+      transportInvoked = true;
+      return new Response();
+    };
+
+    await expect(guardedRemoteHttpFetch("http://127.0.0.1/mcp", { signal }, {
+      allowPrivateNetwork: true,
+      unpinnedFetch,
+      error: guardError,
+      onRequestStart: () => { requestStarted = true; },
+    })).rejects.toBe(signal.reason);
+    expect(requestStarted).toBe(false);
+    expect(transportInvoked).toBe(false);
   });
 
   it("turns a platform-fetch DNS cause into the stable DNS code", async () => {
@@ -245,13 +267,16 @@ describe("guarded remote HTTP fetch (PAP-17098 DNS rebinding)", () => {
       return socket;
     };
 
+    let requestStarted = false;
     await expect(guardedRemoteHttpFetch(`http://${REBIND_HOST}/mcp`, {}, {
       allowPrivateNetwork: false,
       lookup: async () => [{ address: PUBLIC_ADDRESS, family: 4 }],
       socketFactory: factory,
       error: guardError,
+      onRequestStart: () => { requestStarted = true; },
     })).rejects.toMatchObject({ code: "remote_http_private_endpoint" });
 
+    expect(requestStarted).toBe(false);
     expect(internal.requests).toHaveLength(0);
   });
 
