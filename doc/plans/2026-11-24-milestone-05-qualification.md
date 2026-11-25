@@ -22,6 +22,20 @@ Both Compose layouts reached the reconciliation CLI before application startup. 
 
 The export freezes the IDs and checksum of visible records in the declared capture window. It detects a missing or newly restricted member when it reads a page. The checksum cannot detect an event that was absent before the snapshot. Initial capture covers decisions recorded by the managed gateway policy transaction. Read-only virtual tool discovery is outside that capture path. The approval and dispatch slices add evidence for the documented remote MCP route. Record the deployed producer coverage alongside each archive checkpoint. [Capture boundary](https://github.com/groktopus/proprio/pull/359) [Export contract](https://github.com/groktopus/proprio/pull/360)
 
+- The connected MCP rollback fixture verified that an audit insert failure rolls back the invocation, approval request and rate charge before any provider send. A retry commits one rate charge and one event. The delegated test-call and legacy-plugin paths retain separate rate-accounting behavior. [Gateway rollback](https://github.com/groktopus/proprio/pull/359#issuecomment-7147343987)
+- All 16 audit route tests passed on `ebac201b` with disposable PostgreSQL and Node 24.22.1. They exercised 10,037 events, a persisted resume cursor, source epoch rotation, exact archive bytes after an older restore, and loss of visibility on a different page. The API checked all snapshot members before returning page data, count and watermark. [Restore contract](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Snapshot visibility](https://github.com/groktopus/proprio/pull/374#issuecomment-7147698734)
+- A focused export test verified that an orphaned event with a surviving private task cannot reveal its presence through a conflict response. The existing missing-binding fixture still reported incomplete delivery for an eligible event. [Private binding](https://github.com/groktopus/proprio/pull/375)
+- Three tests on `2b75d9b0` applied the combined migration and checked a task-bound write, a read-only call and the public export projection. The gateway persisted the provider correlation ID before dispatch, committed receipt before completion, and blocked a repeat mutation across a changed run and idempotency key. [Direct dispatch](https://github.com/groktopus/proprio/pull/366#issuecomment-7147826662)
+- The authenticated approval-route tests verified one provider send with a durable intent. Receipt failure and an expired elicitation round left the intent inspectable and blocked repeat approval from sending again. The separate authenticated `tools/call` continuation is still part of the shared dispatch integration. [Approved dispatch](https://github.com/groktopus/proprio/pull/370#issuecomment-7147722037)
+
+The later local composition `fde4bd2e4f71f2a121328188f2d68c879a851f36` passed
+eight focused tests and the layered server typecheck. It combined the reviewed
+reconstruction, independent authority, historical policy, direct call, retention,
+and export privacy branches. It captured historical policy in the same admission
+transaction as the rate charge and dispatch evidence. The reproduction used
+isolated PostgreSQL and a process adapter against a local synthetic MCP target.
+The approval-route result above came from a separate revision.
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
@@ -45,6 +59,6 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 
 - Governance evidence and commentary defaults. [#351](https://github.com/groktopus/proprio/pull/351) [#373](https://github.com/groktopus/proprio/pull/373) [#352](https://github.com/groktopus/proprio/pull/352)
 - Older restore deletion reconciliation. [#361](https://github.com/groktopus/proprio/pull/361)
-- Audit delivery design, capture, export and restore. [#353](https://github.com/groktopus/proprio/pull/353) [#359](https://github.com/groktopus/proprio/pull/359) [#360](https://github.com/groktopus/proprio/pull/360) [#362](https://github.com/groktopus/proprio/pull/362) [#366](https://github.com/groktopus/proprio/pull/366) [#369](https://github.com/groktopus/proprio/pull/369) [#370](https://github.com/groktopus/proprio/pull/370)
+- Audit delivery design, capture, export and restore. [#353](https://github.com/groktopus/proprio/pull/353) [#359](https://github.com/groktopus/proprio/pull/359) [#360](https://github.com/groktopus/proprio/pull/360) [#362](https://github.com/groktopus/proprio/pull/362) [#366](https://github.com/groktopus/proprio/pull/366) [#369](https://github.com/groktopus/proprio/pull/369) [#370](https://github.com/groktopus/proprio/pull/370) [#374](https://github.com/groktopus/proprio/pull/374) [#375](https://github.com/groktopus/proprio/pull/375)
 - Run visibility and historical provenance. [#354](https://github.com/groktopus/proprio/pull/354) [#358](https://github.com/groktopus/proprio/pull/358) [#363](https://github.com/groktopus/proprio/pull/363)
 - Independent authority review and action reconstruction. [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
