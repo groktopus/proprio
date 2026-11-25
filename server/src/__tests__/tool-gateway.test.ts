@@ -1016,11 +1016,65 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         status: "failed",
         error: expect.stringContaining("Reconcile it before starting another operation"),
       });
+      const directReplacement = await createIssueAndRun(db, company.id, agent.id);
+      const preDispatchSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: directReplacement.run.id, issueId: directReplacement.issue.id });
+      await expect(gateway.executeTool({ sessionToken: preDispatchSession.token, tool,
+        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" } }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [directRequest] = await db.select().from(toolActionRequests).where(and(
+        eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.status, "pending"),
+      ));
+      await commitToolActionReview(db, { companyId: company.id, issueId: directReplacement.issue.id,
+        interactionId: directRequest.interactionId!, actionRequestId: directRequest.id,
+        decision: "approved", actor: { userId: reviewer } });
+      const [openIntent] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId),
+        eq(managedAuditEvents.phase, "dispatch_intent"),
+      ));
+      let releaseFingerprintLock!: () => void;
+      let fingerprintLockAcquired!: () => void;
+      const fingerprintLockReady = new Promise<void>(resolve => { fingerprintLockAcquired = resolve; });
+      const fingerprintLockHeld = new Promise<void>(resolve => { releaseFingerprintLock = resolve; });
+      const fingerprintBlocker = db.transaction(async tx => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${openIntent.operationFingerprint!}, 0))`);
+        fingerprintLockAcquired();
+        await fingerprintLockHeld;
+      });
+      await fingerprintLockReady;
+      let blockedQueryCount = 0;
+      const directCall = request(app).post("/api/tool-gateway/tools/call")
+        .set("x-proprio-tool-gateway-token", preDispatchSession.token)
+        .send({ tool, parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
+          timeoutMs: 1, approvedActionRequestId: directRequest!.id }).then(response => response);
+      try {
+        for (let attempt = 0; attempt < 200 && blockedQueryCount === 0; attempt++) {
+          const [activity] = await db.execute<{ count: number }>(sql`select count(*)::int as count from pg_stat_activity
+            where wait_event_type = 'Lock' and query like '%pg_advisory_xact_lock%'`);
+          blockedQueryCount = activity?.count ?? 0;
+          if (blockedQueryCount === 0) await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        expect(blockedQueryCount).toBeGreaterThan(0);
+        // The remote MCP call's 1 ms deadline is armed before it tries to take
+        // this lock. Keep it blocked beyond that deadline before releasing it.
+        await new Promise(resolve => setTimeout(resolve, 10));
+      } finally {
+        releaseFingerprintLock();
+        await fingerprintBlocker;
+        await directCall.catch(() => undefined);
+      }
+      const directApprovedCall = await directCall;
+      expect(directApprovedCall.status).toBe(409);
+      expect(directApprovedCall.body).toMatchObject({ reasonCode: "managed_dispatch_outcome_unknown" });
+      expect(directApprovedCall.body).not.toHaveProperty("blockedBeforeDispatch");
       expect(await db.select({ status: toolInvocations.status, errorCode: toolInvocations.errorCode })
-        .from(toolInvocations).where(eq(toolInvocations.id, replacementRequest!.invocationId)))
+        .from(toolInvocations).where(eq(toolInvocations.id, directRequest!.invocationId)))
         .toEqual([{ status: "failed", errorCode: "managed_dispatch_outcome_unknown" }]);
+      expect(await db.select({ status: toolActionRequests.status }).from(toolActionRequests)
+        .where(eq(toolActionRequests.id, directRequest!.id)))
+        .toEqual([{ status: "failed" }]);
       expect(await db.select().from(managedAuditEvents).where(and(
-        eq(managedAuditEvents.invocationId, replacementRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+        eq(managedAuditEvents.invocationId, directRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
       ))).toHaveLength(0);
       expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
       expect(await db.select().from(managedAuditEvents).where(and(
