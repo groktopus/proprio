@@ -30,6 +30,7 @@ import {
   ensurePostgresDatabase,
   runDatabaseBackup,
   runDatabaseRestore,
+  withDedicatedDbConnection,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -332,17 +333,27 @@ describePostgres("agent action audit routes", () => {
     "keeps the ordinary pool available while an audit page waits for %s",
     async (tableName) => {
       const { company } = await seed();
+      const { company: secondCompany } = await seed();
       const userId = randomUUID();
-      await db.insert(companyMemberships).values({
-        companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-      });
-      await db.insert(principalPermissionGrants).values({
-        companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
-      });
-      const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+      const secondUserId = randomUUID();
+      const principals = [
+        { companyId: company.id, principalId: userId },
+        { companyId: secondCompany.id, principalId: secondUserId },
+      ];
+      await db.insert(companyMemberships).values(principals.map(principal => ({
+        ...principal, principalType: "user", membershipRole: "operator", status: "active",
+      })));
+      await db.insert(principalPermissionGrants).values(principals.map(principal => ({
+        ...principal, principalType: "user", permissionKey: "audit:view_agent_actions",
+      })));
+      const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1, dedicatedConnectionMax: 1 });
       const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
       const board = request(await createApp(requestDb, { type: "board", source: "session", userId, companyIds: [company.id] }));
+      const secondBoard = request(await createApp(requestDb, {
+        type: "board", source: "session", userId: secondUserId, companyIds: [secondCompany.id],
+      }));
       const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const secondPath = `/api/companies/${secondCompany.id}/audit/managed-exports`;
       const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
@@ -350,10 +361,18 @@ describePostgres("agent action audit routes", () => {
       const release = Promise.withResolvers<void>();
       let lock: Promise<void> | undefined;
       let pending: Promise<{ status: number; body: Record<string, unknown> }> | undefined;
+      const otherRequests: Array<Promise<{ status: number; body: Record<string, unknown> }>> = [];
       let completed = false;
       try {
         const saved = await board.post(path).send(window).expect(201);
         const exportPath = `${path}/${saved.body.exportId}`;
+        const secondSaved = await secondBoard.post(secondPath).send(window).expect(201);
+        const secondExport = `${secondPath}/${secondSaved.body.exportId}`;
+        await withDedicatedDbConnection(requestDb, async () => {
+          const unavailable = await board.get(exportPath).timeout({ deadline: 2_000 }).expect(503);
+          expect(unavailable.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+          expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1);
+        });
         const locked = Promise.withResolvers<void>();
         lock = lockDb.transaction(async tx => {
           await tx.execute(sql`lock table ${sql.identifier(tableName)} in access exclusive mode`);
@@ -369,6 +388,10 @@ describePostgres("agent action audit routes", () => {
 
         const busy = await board.get(exportPath).timeout({ deadline: 2_000 }).expect(429);
         expect(busy.body).toMatchObject({ details: { reasonCode: "export_busy" } });
+        for (let index = 0; index < 2; index++) {
+          otherRequests.push(secondBoard.get(secondExport).then(({ status, body }) => ({ status, body })));
+        }
+        expect(await Promise.race(otherRequests)).toMatchObject({ status: 429, body: { details: { reasonCode: "export_busy" } } });
         await board.get(`/api/companies/${company.id}/activity`).timeout({ deadline: 2_000 }).expect(200);
         expect(completed).toBe(false);
 
@@ -377,10 +400,12 @@ describePostgres("agent action audit routes", () => {
         expect(timedOut.body).not.toHaveProperty("events");
         release.resolve();
         await lock;
+        const outcomes = await Promise.all(otherRequests);
+        expect(outcomes.map(result => result.status).sort()).toEqual([200, 429]);
         await board.get(exportPath).expect(200);
       } finally {
         release.resolve();
-        await Promise.allSettled([lock, pending]);
+        await Promise.allSettled([lock, pending, ...otherRequests]);
         await Promise.all([lockDb.$client.end(), requestDb.$client.end()]);
         vi.unstubAllEnvs();
       }

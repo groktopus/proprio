@@ -9,6 +9,14 @@ export class HttpError extends Error {
   }
 }
 
+export class ManagedAuditExportUnavailableError extends HttpError {
+  constructor() {
+    super(503, "Managed audit export is temporarily unavailable. Retry this request.", {
+      reasonCode: "export_retry_required",
+    });
+  }
+}
+
 export function badRequest(message: string, details?: unknown) {
   return new HttpError(400, message, details);
 }

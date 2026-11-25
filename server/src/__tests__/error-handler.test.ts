@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpError } from "../errors.js";
+import { HttpError, ManagedAuditExportUnavailableError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { mcpDiscoveryHttpFailure, retainMcpConnectionFailure } from "../services/mcp-connection-failure.js";
 import { ObjectJournalBusyError } from "../services/object-byte-journal.js";
@@ -208,6 +208,21 @@ describe("errorHandler", () => {
     expect(res.json).toHaveBeenCalledWith({ error: "db exploded" });
     expect(res.err).toBe(err);
     expect(res.__errorContext?.error?.message).toBe("db exploded");
+  });
+
+  it("returns managed export retry guidance without crash telemetry", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    res.set = vi.fn().mockReturnValue(res);
+    errorHandler(new ManagedAuditExportUnavailableError(), req, res, vi.fn());
+
+    expect(res.set).toHaveBeenCalledWith("Retry-After", "1");
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      details: { reasonCode: "export_retry_required" },
+    }));
+    expect(telemetryMocks.trackErrorHandlerCrash).not.toHaveBeenCalled();
+    expect(captureExceptionMock).not.toHaveBeenCalled();
   });
 
   it("keeps HTTP failures and existing telemetry for proven external MCP outages while skipping Sentry", () => {

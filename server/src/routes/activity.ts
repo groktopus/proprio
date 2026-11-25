@@ -147,7 +147,7 @@ export function activityRoutes(db: Db) {
     throw forbidden("Missing permission: audit:view_agent_actions");
   }
 
-  async function managedAuditScope(req: import("express").Request, companyId: string) {
+  async function managedAuditScope(req: Request, res: Response, companyId: string) {
     await assertAgentAuditPermission(req, companyId);
     if (req.actor.source === "local_implicit" || !req.actor.userId) {
       throw forbidden("Managed audit exports require authenticated board access");
@@ -157,8 +157,11 @@ export function activityRoutes(db: Db) {
     const retainAfter = managedAuditTimestampSchema.optional()
       .safeParse(process.env.PROPRIO_MANAGED_AUDIT_RETAIN_AFTER);
     if (!epoch.success || !captureFrom.success || !retainAfter.success) throw forbidden("Managed audit export is unavailable");
+    const disconnect = new AbortController();
+    if (res.destroyed) disconnect.abort();
+    else res.once("close", () => disconnect.abort());
     return {
-      companyId, sourceEpoch: epoch.data, actor: req.actor,
+      companyId, sourceEpoch: epoch.data, actor: req.actor, signal: disconnect.signal,
       captureFrom: new Date(captureFrom.data),
       retainAfter: retainAfter.data ? new Date(retainAfter.data) : null,
     };
@@ -309,7 +312,7 @@ export function activityRoutes(db: Db) {
   router.post("/companies/:companyId/audit/managed-exports", async (req, res) => {
     const companyId = z.guid().safeParse(req.params.companyId);
     if (!companyId.success) throw badRequest("Company ID must be a UUID");
-    const scope = await managedAuditScope(req, companyId.data);
+    const scope = await managedAuditScope(req, res, companyId.data);
     const window = managedAuditExportWindowSchema.safeParse(req.body);
     if (!window.success) throw badRequest("An audit export requires from and to timestamps", window.error.issues);
     const from = new Date(window.data.from);
@@ -322,7 +325,7 @@ export function activityRoutes(db: Db) {
   const readManagedExportPage = async (req: Request, res: Response, recordAccess: boolean) => {
     const params = managedAuditExportParamsSchema.safeParse(req.params);
     if (!params.success) throw badRequest("Company and export IDs must be UUIDs");
-    const scope = await managedAuditScope(req, params.data.companyId);
+    const scope = await managedAuditScope(req, res, params.data.companyId);
     const query = managedAuditExportPageQuerySchema.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid managed audit export cursor");
     res.set("Cache-Control", "no-store");
