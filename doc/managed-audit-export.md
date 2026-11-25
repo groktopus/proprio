@@ -80,6 +80,12 @@ connection budget, an interrupted lease, or database contention returns
 cursor. Advance the checkpoint only after the page arrives and the collector
 persists its membership and payloads.
 
+A company can retain up to 128 active snapshots across all operators and API
+replicas. Creation returns `429 active_snapshot_limit` at the limit. Resume
+an existing snapshot or retry after an active snapshot expires. A new
+snapshot removes expired snapshot state in a bounded batch. Page access
+records follow their separate retention rules.
+
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.
