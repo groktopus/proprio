@@ -73,12 +73,52 @@ describe("NativeCompletionHistory", () => {
     expect(container.textContent).toContain("Agent claim satisfied");
     expect(container.textContent).toContain("Policy assessment accepted");
     expect(container.textContent).toContain("Assessor policy assessor-v3");
-    expect(container.textContent).toContain("Evidence verification failed");
+    expect(container.textContent).toContain("Evidence not verified");
     expect(container.textContent).toContain("No test receipt was found.");
     expect(container.textContent).toContain("Supersedes an earlier status decision.");
     expect(container.textContent).toContain("This policy replaces an earlier requirement set.");
     expect(container.textContent).not.toContain("private-record-id");
     expect(container.textContent).not.toContain("prior-decision");
     expect(container.querySelector("li > li")).toBeNull();
+  });
+
+  it("matches assessments to requirements with one pass over the saved criteria", () => {
+    const criterionCount = 120;
+    let identifierReads = 0;
+    const criteria = Array.from({ length: criterionCount }, (_, index) => ({
+      id: `criterion-${index}`, requirement: `Requirement ${index}`,
+    }));
+    const criteriaAssessments = [...criteria].reverse().map(criterion => ({
+      get criterionId() {
+        identifierReads += 1;
+        if (identifierReads > criterionCount) throw new Error("Repeatedly scanned completion assessments");
+        return criterion.id;
+      },
+      claimStatus: "satisfied" as const,
+      outcome: "accepted" as const,
+      reasonCode: "criterion_evidence_accepted",
+      evidence: [],
+    }));
+    const entry: NativeCompletionHistoryEntry = {
+      id: "large-assessment", createdAt: "2026-05-01T12:00:00.000Z", runId: "run-1",
+      contract: {
+        id: "contract-1", revision: 1, policyVersion: "policy-v1", risk: "standard",
+        completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+        criteria, supersedesContractId: null,
+      },
+      result: null, decision: null, lineageGaps: ["result", "decision"],
+      assessment: {
+        id: "large-assessment", policyVersion: "arbiter-v1", triggerKind: "native_result", summary: null,
+        reportedDisposition: null, allCriteriaSatisfied: true, verificationPassed: null,
+        criterionAssessments: criteriaAssessments, verificationAssessments: [], priorDecisionId: null,
+        supersedesAssessmentId: null,
+      },
+    };
+
+    act(() => root.render(<NativeCompletionHistory entries={[entry]} isLoading={false} error={false} onRetry={vi.fn()} />));
+
+    expect(identifierReads).toBe(criterionCount);
+    expect(container.querySelectorAll("section[aria-label='Completion policy'] li")).toHaveLength(criterionCount);
+    expect(container.textContent).toContain("Requirement 119");
   });
 });

@@ -1,4 +1,4 @@
-import type { NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
+import type { NativeCompletionCriterionAssessment, NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
 import type { ReactNode } from "react";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { cn, formatDateTime } from "@/lib/utils";
@@ -24,11 +24,10 @@ function EvidenceReference({ evidence }: { evidence: NativeCompletionEvidenceRef
   );
 }
 
-function Criterion({ entry, criterion }: {
-  entry: NativeCompletionHistoryEntry;
+function Criterion({ criterion, assessment }: {
   criterion: NonNullable<NativeCompletionHistoryEntry["contract"]>["criteria"][number];
+  assessment: NativeCompletionCriterionAssessment | undefined;
 }) {
-  const assessment = entry.assessment?.criterionAssessments.find(item => item.criterionId === criterion.id);
   return (
     <li className="space-y-2">
       <p className="font-medium text-foreground">{criterion.requirement}</p>
@@ -67,6 +66,11 @@ function Verification({ check }: {
 function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
   const criteria = entry.contract?.criteria ?? [];
   const assessment = entry.assessment;
+  const assessmentsByCriterion = new Map<string, NativeCompletionCriterionAssessment>();
+  for (const item of assessment?.criterionAssessments ?? []) {
+    const { criterionId } = item;
+    if (!assessmentsByCriterion.has(criterionId)) assessmentsByCriterion.set(criterionId, item);
+  }
   return (
     <article className="space-y-4 border-b border-border pb-4 last:border-b-0 last:pb-0">
       <header className="space-y-1">
@@ -86,7 +90,9 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
           {entry.contract.supersedesContractId ? <p className="text-sm text-muted-foreground">This policy replaces an earlier requirement set.</p> : null}
           {criteria.length ? (
             <ul className="space-y-3">
-              {criteria.map(criterion => <Criterion key={criterion.id} entry={entry} criterion={criterion} />)}
+              {criteria.map(criterion => (
+                <Criterion key={criterion.id} criterion={criterion} assessment={assessmentsByCriterion.get(criterion.id)} />
+              ))}
             </ul>
           ) : <p className="text-sm text-muted-foreground">No completion requirements were recorded.</p>}
         </section>
@@ -100,7 +106,7 @@ function CompletionEntry({ entry }: { entry: NativeCompletionHistoryEntry }) {
           </p>
           <div className="flex flex-wrap gap-2">
             <Status>Policy assessment {assessment.allCriteriaSatisfied === true ? "all requirements satisfied" : assessment.allCriteriaSatisfied === false ? "requirements not all satisfied" : "not recorded"}</Status>
-            <Status>Evidence verification {assessment.verificationPassed === true ? "passed" : assessment.verificationPassed === false ? "failed" : "not recorded"}</Status>
+            <Status>{assessment.verificationPassed === true ? "Evidence verified" : assessment.verificationPassed === false ? "Evidence not verified" : "Evidence verification not recorded"}</Status>
           </div>
           {assessment.summary ? <p className="text-sm text-muted-foreground">{assessment.summary}</p> : null}
           {assessment.verificationAssessments.length ? (
