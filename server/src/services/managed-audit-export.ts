@@ -103,7 +103,7 @@ async function runExportTransaction<T>(
     }, transactionOptions), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
     if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
-      || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
+      || ["40001", "57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
       throw new ManagedAuditExportUnavailableError();
     }
     throw error;
@@ -333,6 +333,7 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
+  const publications: ActivityPublication[] = [];
   const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     const ownedSnapshot = and(
@@ -340,7 +341,11 @@ export async function readManagedAuditExportPage(
       eq(managedAuditExports.companyId, scope.companyId),
       eq(managedAuditExports.userId, userId),
     );
-    const [snapshot] = await tx.select(snapshotColumns).from(managedAuditExports).where(ownedSnapshot);
+    // Coordinate validation, page receipts, and invalidation on the snapshot
+    // row. NO KEY UPDATE serializes competing readers without the lock-upgrade
+    // deadlocks that shared locks can cause when a reader invalidates.
+    const [snapshot] = await tx.select(snapshotColumns).from(managedAuditExports)
+      .where(ownedSnapshot).for("no key update");
     if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {
       throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
@@ -368,7 +373,21 @@ export async function readManagedAuditExportPage(
       if (available.eventCount !== snapshot.eventCount) {
         // Commit the invalidation before sending a conflict so any cursor for
         // this snapshot remains invalid after visibility or data is restored.
-        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] }).where(ownedSnapshot);
+        const [invalidated] = await tx.update(managedAuditExports)
+          .set({ invalidated: true, eventIds: [] })
+          .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
+          .returning({ id: managedAuditExports.id });
+        if (invalidated) {
+          await logActivity(tx as unknown as Db, {
+            companyId: scope.companyId,
+            actorType: "user",
+            actorId: userId,
+            action: "audit.managed_export_invalidated",
+            entityType: "company",
+            entityId: scope.companyId,
+            details: { exportId: invalidated.id, source: "tool_gateway" },
+          }, publications);
+        }
         return null;
       }
     }
@@ -425,6 +444,7 @@ export async function readManagedAuditExportPage(
       complete: deliveredThrough === snapshot.eventCount,
     };
   });
+  for (const publication of publications) publishActivity(publication);
   if (!page) {
     throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", {
       reasonCode: "snapshot_incomplete",
