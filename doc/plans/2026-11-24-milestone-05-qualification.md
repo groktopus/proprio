@@ -337,6 +337,8 @@ queue adapter tests and verifies that the child lookup binds the requested
 company. The hosted durable-work check passed on that exact head.
 [Wake queue test fixture](https://github.com/groktopus/proprio/pull/401)
 [Wake queue fixture CI](https://github.com/groktopus/proprio/actions/runs/45567960266)
+The later hosted stability and durable-work rerun also passed on that head.
+[Wake fixture rerun](https://github.com/groktopus/proprio/actions/runs/45568551197)
 
 The Apps review queue checks the approval result on the standalone and
 linked-interaction paths. Both show the reconciliation message for a failed
@@ -402,6 +404,51 @@ one-connection authenticated reconstruction, and scoped UI typecheck passed
 on the composed source.
 [Dependency restart regression](https://github.com/groktopus/proprio/pull/309)
 [Current-main composition](https://github.com/groktopus/proprio/commit/109847c866991fe061a658c818dc3607cf6cd126)
+
+Hosted Linux source qualification is running for that composition against
+`166175cc093a569eed60b59f6df70f6c10c43290`.
+[Current-main hosted qualification](https://github.com/groktopus/proprio/actions/runs/45575479150)
+
+The subsequent review composition `0153750703bbb358692e5c8cb8fd77c3d18958bc`
+passed 139 audit export, MCP Tasks, OpenAPI and Apps queue tests, plus four
+focused gateway cases and the generated OpenAPI check. The large snapshot
+test observed the full membership query waiting on its lock, kept another
+company's API responsive, and replayed after deleting an off-page event.
+Replay reported an incomplete snapshot without an additional page-access
+receipt. The collector guidance records both mixed-version limitations.
+[Rollout guidance](https://github.com/groktopus/proprio/pull/396)
+[20,000-event export](https://github.com/groktopus/proprio/pull/397)
+
+The interruption fixture removes the receipt fault before running the
+sweep and compares the complete original dispatch row after the sweep.
+The #398 slice still returns an executing replacement approval. The
+dependent #399 fix returns a failed replacement and its reconciliation
+message. Both exact heads passed the focused scenario. The MCP Tasks
+fixture observes the committed intent before the legacy send is rejected,
+then verifies one terminal outcome on the original invocation across all
+company receipts. The Apps API and service share the nullable approval
+response and report a settled failure without suggesting retry.
+[Interruption fixture](https://github.com/groktopus/proprio/pull/398)
+[Approval outcome](https://github.com/groktopus/proprio/pull/399)
+[MCP Tasks](https://github.com/groktopus/proprio/pull/400)
+[Approval feedback](https://github.com/groktopus/proprio/pull/402)
+
+A full gateway run on `01537507` exposed 14 failures. The corrections
+preserve definitive guard failures and keep an open intent after a write
+may have started. Five approval fixtures now exercise the authoritative
+human review transaction. A cancellation before HTTP handoff leaves the
+request unstarted. The cancellation regression failed before the fix and
+passed with the other 27 guarded transport tests at `6bc82a32`.
+
+On `f69b90d6044ab0a874212e0670f532dbbd036479`, the full gateway file
+passed 125 cases and failed three GitHub connection/catalog cases. The
+same three failed on exact main `166175cc093a569eed60b59f6df70f6c10c43290`.
+The one-connection reconstruction and scoped server typecheck passed. Main
+advanced to `27339f998b4d8e7ae95bbc14395979b9d134ee88` with only a
+dependency investigation browser test change.
+[Transport classification](https://github.com/groktopus/proprio/pull/404)
+[Human approval fixtures](https://github.com/groktopus/proprio/pull/405)
+[Reviewed gateway composition](https://github.com/groktopus/proprio/commit/f69b90d6044ab0a874212e0670f532dbbd036479)
 
 The authenticated reconstruction passed on the final local source with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
@@ -500,7 +547,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
 4. From checkpointed export, review the two dependent branches in their listed order.
    - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection, page access records, capacity limits, invalidation, expiry and quota recovery. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378) → [#379](https://github.com/groktopus/proprio/pull/379) → [#380](https://github.com/groktopus/proprio/pull/380) → [#381](https://github.com/groktopus/proprio/pull/381) → [#382](https://github.com/groktopus/proprio/pull/382) → [#383](https://github.com/groktopus/proprio/pull/383) → [#384](https://github.com/groktopus/proprio/pull/384) → [#385](https://github.com/groktopus/proprio/pull/385) → [#386](https://github.com/groktopus/proprio/pull/386) → [#387](https://github.com/groktopus/proprio/pull/387). Review [#392](https://github.com/groktopus/proprio/pull/392) after #386. Review [#396](https://github.com/groktopus/proprio/pull/396) and [#397](https://github.com/groktopus/proprio/pull/397) after #387.
-   - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363). Review [#400](https://github.com/groktopus/proprio/pull/400) after #366. Review [#398](https://github.com/groktopus/proprio/pull/398) → [#399](https://github.com/groktopus/proprio/pull/399) after #370. Review [#402](https://github.com/groktopus/proprio/pull/402) and [#403](https://github.com/groktopus/proprio/pull/403) after #399.
+   - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363). Review [#400](https://github.com/groktopus/proprio/pull/400) after #366. Review [#398](https://github.com/groktopus/proprio/pull/398) → [#399](https://github.com/groktopus/proprio/pull/399) after #370. Review [#402](https://github.com/groktopus/proprio/pull/402) and [#403](https://github.com/groktopus/proprio/pull/403) after #399. Review [#404](https://github.com/groktopus/proprio/pull/404) and [#405](https://github.com/groktopus/proprio/pull/405) after #403.
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
    both target historical policy; independent authority targets `main`. [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
