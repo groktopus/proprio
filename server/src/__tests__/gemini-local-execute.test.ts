@@ -81,11 +81,13 @@ async function createSkillDir(root: string, name: string): Promise<string> {
 }
 
 describe("gemini execute", () => {
-  it("injects runtime skills into the configured child HOME", async () => {
+  it("injects runtime skills into a GEMINI_CLI_HOME relative to the child workspace", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-gemini-configured-home-"));
     const processHome = path.join(root, "process-home");
     const configuredHome = path.join(root, "configured-home");
     const workspace = path.join(root, "workspace");
+    const relativeGeminiHome = path.basename(root);
+    const configuredGeminiHome = path.join(workspace, relativeGeminiHome);
     const commandPath = path.join(root, "gemini");
     const skillSource = await createSkillDir(path.join(root, "runtime-skills"), "proprio");
     await fs.mkdir(workspace, { recursive: true });
@@ -114,7 +116,7 @@ describe("gemini execute", () => {
           engine: "cli",
           command: commandPath,
           cwd: workspace,
-          env: { HOME: configuredHome },
+          env: { HOME: configuredHome, GEMINI_CLI_HOME: relativeGeminiHome },
           proprioRuntimeSkills: [{
             key: "groktopus/proprio/proprio",
             runtimeName: "proprio",
@@ -128,9 +130,10 @@ describe("gemini execute", () => {
       });
 
       expect(result.exitCode).toBe(0);
-      const installedSkill = path.join(configuredHome, ".gemini", "skills", "proprio");
+      const installedSkill = path.join(configuredGeminiHome, ".gemini", "skills", "proprio");
       expect((await fs.lstat(installedSkill)).isSymbolicLink()).toBe(true);
       expect(await fs.realpath(installedSkill)).toBe(await fs.realpath(skillSource));
+      await expect(fs.lstat(path.join(configuredHome, ".gemini", "skills", "proprio"))).rejects.toThrow();
       await expect(fs.lstat(path.join(processHome, ".gemini", "skills", "proprio"))).rejects.toThrow();
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
