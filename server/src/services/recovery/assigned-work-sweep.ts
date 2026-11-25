@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
 import type { WakeupOptions } from "../heartbeat/run-preparation.js";
 import { SESSION_GOAL_RECOVERY_OPEN_CONTROLS } from "../heartbeat/session-goal-recovery.js";
 import { createHash } from "node:crypto";
@@ -243,7 +244,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         sql`coalesce(${nativeRunFinalizations.failureDetail}->>'replacementDenied', '') <> 'explicit_user_continuation'`)),
       database.selectDistinct({ issueId: caseHandoffs.issueId }).from(caseHandoffs).where(and(eq(caseHandoffs.companyId, companyId),
         inArray(caseHandoffs.issueId, ids), eq(caseHandoffs.destinationKind, "agent"),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))),
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))),
       database.select({ taskKey: agentTaskSessions.taskKey, agentId: agentTaskSessions.agentId,
         sessionId: agentTaskSessions.id, revision: agentTaskSessions.goalRevision,
         goalStatus: agentTaskSessions.goalStatus, goalDesiredState: agentTaskSessions.goalDesiredState,

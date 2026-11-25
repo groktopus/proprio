@@ -14017,10 +14017,12 @@ registerCurrentRoute({
 // OpenAPI 3.0 cannot represent the shared validator's conditional refinement.
 // Derive separate creation/existing branches so discovery marks workflow text
 // required for case.create without requiring it for ordinary phase transfers.
+const { offer: _offer, ...caseHandoffTransferShape } = agentCaseHandoffSchema.shape;
+const caseHandoffTransferSchema = z.strictObject(caseHandoffTransferShape);
 const caseHandoffApiBodySchema = z.union([
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
   doneCaseHandoffSchema,
 ]);
 registry.registerPath({ method: "post", path: "/api/companies/{companyId}/case-handoffs", tags: ["Cases"],

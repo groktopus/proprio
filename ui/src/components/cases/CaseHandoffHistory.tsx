@@ -45,7 +45,8 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
   const terminal = handoff.destinationKind === "done";
   const settled = handoff.state === "delivered" || handoff.state === "completed";
   const stateLabel = handoff.state === "cancelled" ? (handoff.assignmentAppliedAt ? "Applied · delivery cancelled" : "Cancelled before transfer") : settled ? null
-    : terminal ? "Waiting for task completion" : handoff.assignmentAppliedAt ? "Applied · waiting for delivery" : "Pending transfer";
+    : terminal ? "Waiting for task completion" : handoff.state === "offered" ? "Waiting for recipient decision"
+    : handoff.assignmentAppliedAt ? "Applied · waiting for delivery" : "Pending transfer";
   const handoffTask = task?.id === handoff.issueId ? task : null;
   return <li>
     <details className="group">

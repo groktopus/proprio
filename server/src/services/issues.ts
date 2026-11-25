@@ -12258,6 +12258,11 @@ export function issueService(db: Db) {
         patch.goalId = goalBinding.goalId;
         patch.goalOrigin = goalBinding.goalOrigin;
         patch.goalOriginGoalId = goalBinding.goalId;
+        if ((patch.title !== undefined && patch.title !== receiptExisting.title)
+          || (patch.description !== undefined && patch.description !== receiptExisting.description)) {
+          await cancelCaseHandoffsForIssue(tx, { companyId: receiptExisting.companyId, issueId: id,
+            reason: "Task brief changed", unansweredOffersOnly: true, publications: activityPublications });
+        }
         // Ownership changes invalidate observed handoff versions even if status
         // stays the same, including an A -> B -> A assignment race.
         if (issueData.status === "done" || issueData.status === "cancelled") {

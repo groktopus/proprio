@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
 import { canAdmitSessionGoalRecovery } from "./session-goal-recovery.js";
 import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
 import { QUEUED_MESSAGES_DELIVERED_REASON } from "../../modules/wake-queue/index.js";
@@ -1129,8 +1130,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const caseIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
     if (caseIssueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, run.companyId), eq(caseHandoffs.issueId, caseIssueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);
-      if (pending && (pending.wakeupRequestId !== run.wakeupRequestId || pending.state === "awaiting_release")) return null;
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1);
+      if (pending && (pending.wakeupRequestId !== run.wakeupRequestId || pending.state !== "pending_dispatch")) return null;
     }
     // Claim is the first execution boundary. startedAt survives same-run
     // retries; restart recovery may also enter executeRun already running.
@@ -1429,13 +1430,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
         context.wakeReason !== "source_scoped_recovery_action";
       const [handoff] = issueId ? await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, run.companyId), eq(caseHandoffs.issueId, issueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1) : [];
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1) : [];
       const declined = (reason: string, predecessorRunId?: string) => {
         logger.info({ runId: run.id, agentId: run.agentId, companyId: run.companyId, issueId, reason,
           ...(predecessorRunId ? { predecessorRunId } : {}) }, "claimQueuedRun: queued run declined at the issue execution claim");
         return { ownsIssue, blocked: true };
       };
-      if (handoff && (handoff.wakeupRequestId !== run.wakeupRequestId || handoff.state === "awaiting_release"))
+      if (handoff && (handoff.wakeupRequestId !== run.wakeupRequestId || handoff.state !== "pending_dispatch"))
         return declined("case_handoff_pending");
       if (caseHandoffReceipt) {
         const [current] = await tx.select({ state: caseHandoffs.state, version: caseHandoffs.version,
@@ -2890,8 +2891,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     })) return null;
     if (issueId) {
       const [pending] = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, agent.companyId), eq(caseHandoffs.issueId, issueId),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))).limit(1);
-      if (pending && opts.durableCaseHandoffRequest?.handoffId !== pending.id) return null;
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))).limit(1);
+      if (pending && (pending.state === "offered" || opts.durableCaseHandoffRequest?.handoffId !== pending.id)) return null;
     }
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.

@@ -225,6 +225,18 @@ describe("read-only CaseDetail", () => {
     expect(cases.retryHandoff).not.toHaveBeenCalled(); expect(cases.cancelHandoff).not.toHaveBeenCalled(); expect(cases.patch).not.toHaveBeenCalled();
   });
 
+  it("shows an unanswered offer as a recipient decision while the source owns the task", async () => {
+    const pending = handoff({ state: "offered" });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "implementation",
+      workIssue: { id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress",
+        statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer" }, pendingHandoff: pending });
+    cases.listHandoffs.mockResolvedValue({ items: [pending], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.textContent).toContain("Waiting for Verifier to decide on the offer."));
+    expect(container.querySelector('[aria-label="Case work"]')?.textContent).toContain("Writer");
+    expect(container.querySelector('[aria-label="Case handoffs"]')?.textContent).toContain("Waiting for recipient decision");
+  });
+
   it("shows paused delivery without implying that the recipient is working", async () => {
     cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: { id: "task-1", identifier: "PAP-123", title: "Verify the launch", status: "todo", statusVersion: 2, assigneeAgentId: "agent-2", assigneeAgentName: "Verifier" }, pendingHandoff: handoff({ state: "pending_dispatch" }) });
     render(); await waitFor(() => expect(container.textContent).toContain("Verifier is paused."));

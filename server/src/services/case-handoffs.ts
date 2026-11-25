@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
@@ -12,7 +12,7 @@ import { parseNativeExecutionInput } from "../vendor/proprio-runner/index.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { persistActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationDeniedDetails, authorizationService, type AuthorizationActor } from "./authorization.js";
-import { assertActorCanReadCase, assertCaseTrustedForExecution, canActorReceiveCase, retainCaseAccessSource } from "./case-access.js";
+import { assertActorCanReadCase, assertCaseTrustedForExecution, canActorReadCase, canActorReceiveCase, retainCaseAccessSource } from "./case-access.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
@@ -20,27 +20,21 @@ import { documentService } from "./documents.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
+import { nativeSha256 } from "./native-runtime/canonical.js";
+import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING } from "./case-handoff-states.js";
 import { completeTerminalCaseHandoffsForIssue, pendingCaseHandoffForRun } from "./heartbeat/case-handoff-lifecycle.js";
 import { assertCaseHandoffDispatchAuthority, caseHandoffActorContext, loadCaseHandoffCloudAuthority, lockCaseHandoffAuthorityRun, restoreCaseHandoffActor } from "./case-handoff-authority.js";
 
 export type CaseHandoffRow = typeof caseHandoffs.$inferSelect;
 type CaseRow = typeof cases.$inferSelect;
 type IssueRow = typeof issues.$inferSelect;
-const PENDING = ["offered", "awaiting_release", "pending_dispatch", "awaiting_completion"] as const;
 
 function publicHandoff(row: CaseHandoffRow) {
   const { actorContext: _actorContext, workflowPrompt: _prompt, baseWorkflowDocumentRevisionId: _base, ...publicRow } = row;
   return publicRow;
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== undefined)
-    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
-  return JSON.stringify(value) ?? "null";
-}
-
-export interface CaseHandoffRequirementSnapshot {
+interface CaseHandoffRequirementSnapshot {
   taskTitle: string;
   taskDescription: string | null;
   phase: string;
@@ -49,11 +43,12 @@ export interface CaseHandoffRequirementSnapshot {
   prerequisites: string[];
   requirementRevision: { id: string; revision: number; canonicalSha256: string };
   workflowTransition: CaseWorkflowTransition | null;
+  workflowPromptDigest: string | null;
 }
 
 /** Stable digest for recipient decisions and later corrective-revision binding. */
 export function computeCaseHandoffRequirementsDigest(input: CaseHandoffRequirementSnapshot): string {
-  return createHash("sha256").update(canonical(input)).digest("hex");
+  return nativeSha256(input);
 }
 
 function identity(actor: AuthorizationActor) {
@@ -303,10 +298,18 @@ export function caseHandoffService(db: Db) {
         contract.revision !== offer.requirementRevision.revision || contract.canonicalSha256 !== offer.requirementRevision.canonicalSha256) {
       throw conflict("Versioned offer requirement revision changed; record a new offer");
     }
+    const workflowDocument = await documentService(tx).getIssueDocumentByKey(row.issueId, "workflow");
+    const expectedWorkflowRevision = row.assignmentAppliedAt
+      ? row.workflowTransition?.documentRevisionId ?? null
+      : row.baseWorkflowDocumentRevisionId;
+    if ((workflowDocument?.latestRevisionId ?? null) !== expectedWorkflowRevision) {
+      throw conflict("Versioned offer workflow changed; record a new offer");
+    }
     const digest = computeCaseHandoffRequirementsDigest({ taskTitle: issue.title, taskDescription: issue.description,
       phase: row.phase, instructions: row.instructions, expectedDeliverable: offer.expectedDeliverable,
       prerequisites: offer.prerequisites, requirementRevision: offer.requirementRevision,
-      workflowTransition: offer.workflowTransition });
+      workflowTransition: row.workflowTransition && { ...row.workflowTransition, documentRevisionId: row.baseWorkflowDocumentRevisionId },
+      workflowPromptDigest: row.workflowPrompt === null ? null : nativeSha256(row.workflowPrompt) });
     if (digest !== offer.requirementsDigest) throw conflict("Versioned offer requirements changed; record a new offer");
   }
 
@@ -409,11 +412,13 @@ export function caseHandoffService(db: Db) {
     async handoff(companyId: string, actor: AuthorizationActor, rawInput: HandoffCaseInput, options: {
       /** Transport-specific execution authority; called only for fresh intent inside the write transaction. */
       beforeAccept?: (tx: Db) => Promise<void>;
+      /** Enabled only by the assembled recipient-decision flow. */
+      enableVersionedOffers?: boolean;
     } = {}): Promise<HandoffCaseResult> {
       await assertEnabled(db);
       if (!companyAllowed(actor, companyId)) throw notFound("Company not found");
       const who = identity(actor), input = handoffCaseSchema.parse(rawInput);
-      const fingerprint = createHash("sha256").update(canonical(input)).digest("hex");
+      const fingerprint = nativeSha256(input);
       const publications: ActivityPublication[] = [];
       const outcome = await db.transaction(async transaction => {
         const tx = transaction as unknown as Db;
@@ -428,7 +433,14 @@ export function caseHandoffService(db: Db) {
           if (!issue) throw notFound("Task not found");
           return result(prior, issue, actor, true);
         }
+        if (input.to !== "done" && input.offer) {
+          if (!options.enableVersionedOffers) throw unprocessable("Versioned offers require the recipient-decision pilot");
+          if (actor.type !== "agent" || actor.source !== "agent_jwt") {
+            throw forbidden("Versioned offers require authenticated source run authority");
+          }
+        }
         await options.beforeAccept?.(tx);
+        let sourceAdapterType: string | null = null;
         let source: typeof heartbeatRuns.$inferSelect | null = null;
         let sourceIssue: IssueRow | null = null;
         if (actor.type === "agent" && actor.runId) {
@@ -449,8 +461,9 @@ export function caseHandoffService(db: Db) {
             const { assertExternalNativeRunAuthority } = await import("./native-runtime/external-native-authority.js");
             await withExternalAdmissionGuard(tx as unknown as ExternalAdmissionTransaction, companyId, actor.agentId!, () => assertExternalNativeRunAuthority(tx, execution, tx));
           }
-          const [sourceAgent] = await tx.select({ status: agents.status }).from(agents).where(and(eq(agents.id, actor.agentId!), eq(agents.companyId, companyId)));
+          const [sourceAgent] = await tx.select({ status: agents.status, adapterType: agents.adapterType }).from(agents).where(and(eq(agents.id, actor.agentId!), eq(agents.companyId, companyId)));
           if (!sourceAgent || ["paused", "terminated", "pending_approval", "error"].includes(sourceAgent.status)) throw forbidden("Source agent no longer has execution authority");
+          sourceAdapterType = sourceAgent.adapterType;
           if (!sourceIssue || sourceIssue.assigneeAgentId !== actor.agentId || sourceIssue.assigneeUserId || sourceIssue.executionRunId !== source.id) throw conflict("Source run no longer owns its task");
           if (sourceIssue && sourceIssue.workMode !== "standard") throw unprocessable("Case handoff is available in standard work mode");
         }
@@ -595,10 +608,7 @@ export function caseHandoffService(db: Db) {
               !sourceIssue || issue.id !== sourceIssue.id || sourceRunId !== source.id) {
             throw unprocessable("Versioned offers require an active native source task with a completion contract");
           }
-          const [sourceAgent] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
-            eq(agents.id, actor.agentId!), eq(agents.companyId, companyId),
-          )).limit(1);
-          if (sourceAgent?.adapterType !== "proprio_runner") {
+          if (sourceAdapterType !== "proprio_runner") {
             throw unprocessable("Versioned offers require a native Proprio source");
           }
           const [contract] = await tx.select().from(completionContracts).where(and(
@@ -612,17 +622,22 @@ export function caseHandoffService(db: Db) {
           if (!recipient || recipient.adapterType !== "proprio_runner") {
             throw unprocessable("Versioned offers require a native Proprio recipient");
           }
+          if (!await canActorReadCase(tx, { type: "agent", agentId: input.toAgentId, companyId,
+            onBehalfOfUserId: issue.responsibleUserId ?? actor.onBehalfOfUserId,
+            authorizingUserId: actor.authorizingUserId }, caseRow!)) {
+            throw forbidden("Versioned offer recipients must already be able to read the case");
+          }
           const requirementRevision = { id: contract.id, revision: contract.revision, canonicalSha256: contract.canonicalSha256 };
           const snapshot: CaseHandoffRequirementSnapshot = {
             taskTitle: issue.title, taskDescription: issue.description, phase: input.phase, instructions: input.instructions,
             expectedDeliverable: input.offer.expectedDeliverable, prerequisites: input.offer.prerequisites,
             requirementRevision, workflowTransition: workflow.workflowTransition,
+            workflowPromptDigest: workflow.workflowPrompt === null ? null : nativeSha256(workflow.workflowPrompt),
           };
           offerContract = {
             schema: "proprio.case-handoff-offer.v1", ...input.offer, requirementRevision,
-            requirementsDigest: computeCaseHandoffRequirementsDigest(snapshot), workflowTransition: workflow.workflowTransition,
-            decisionOwner: { type: "agent", id: input.toAgentId },
-            accountableOwner: { type: "agent", id: actor.agentId! },
+            requirementsDigest: computeCaseHandoffRequirementsDigest(snapshot),
+            taskBrief: { title: snapshot.taskTitle, description: snapshot.taskDescription },
           };
         }
         const version = caseRow!.handoffVersion + 1;

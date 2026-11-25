@@ -19,9 +19,14 @@ describe("handoff_case input", () => {
     const existing = { ...base, case: { id: randomUUID() }, expectedHandoffVersion: 1 };
     expect(handoffCaseSchema.parse({ ...existing, offer })).toMatchObject({ offer });
     expect(handoffCaseSchema.parse(existing)).not.toHaveProperty("offer");
+    expect(handoffCaseSchema.safeParse({ ...kickoff, offer }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...kickoff, offer, bindIssueId: randomUUID(), expectedIssueStatusVersion: 0 }).success).toBe(true);
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, recipientId: randomUUID() } }).success).toBe(false);
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { expectedDeliverable: " " } }).success).toBe(false);
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: Array.from({ length: 21 }, () => "step") } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, expectedDeliverable: "null\u0000byte" } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["lone \uD800 surrogate"] } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["Valid astral text 🚀"] } }).success).toBe(true);
   });
   it("accepts a reusable workflow at kickoff and reserves routing for handoff", () => {
     const { workflow_document_text: _inline, ...input } = kickoff;
