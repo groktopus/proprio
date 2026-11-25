@@ -1574,6 +1574,7 @@ export type {
   ToolAppMetadataPreflightResult,
   ToolOAuthClientRegistrationSource,
   ToolOAuthStartResult,
+  ToolActionApprovalResponse,
   ToolActionRequest,
   ToolAccessDecision,
   ToolAccessDecisionInput,

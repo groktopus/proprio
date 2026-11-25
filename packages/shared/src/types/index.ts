@@ -520,6 +520,7 @@ export type {
   ResolvedWorkspaceResource,
 } from "./workspace-file-resource.js";
 export type {
+  ToolActionApprovalResponse,
   ToolActionRequest,
   ToolAccessDecision,
   ToolAccessDecisionInput,

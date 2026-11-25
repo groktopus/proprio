@@ -1480,6 +1480,11 @@ export interface ToolActionRequest {
   updatedAt: Date;
 }
 
+export interface ToolActionApprovalResponse extends ToolActionRequest {
+  resultSummary?: string | null;
+  error?: string | null;
+}
+
 export interface ToolCallEvent {
   id: string;
   companyId: string;

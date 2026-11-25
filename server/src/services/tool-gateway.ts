@@ -165,6 +165,7 @@ import type {
   SecretVersionSelector,
   ToolAccessDecision,
   ToolAccessDecisionInput,
+  ToolActionApprovalResponse,
   ToolConnectionTestCallStatus,
   ToolUpstreamPending,
   ToolConnectionTestCallStatusPhase,
@@ -13279,7 +13280,7 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       actor: { agentId?: string | null; userId?: string | null };
-    }) {
+    }): Promise<ToolActionApprovalResponse> {
       if (input.actor.agentId)
         throw new ToolGatewayHttpError(
           403,
