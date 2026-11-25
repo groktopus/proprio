@@ -92,12 +92,29 @@ describe("NativeCompletionHistory", () => {
       contract: { ...history[0]!.contract!, revision: 1, supersedesContractId: null },
     };
     act(() => root.render(<NativeCompletionHistory entries={[...history, earlier]} isLoading={false} error={false} onRetry={vi.fn()} />));
-    const related = container.querySelector("a[href^='#']");
-    expect(related?.textContent).toContain("Open earlier decision and evidence");
-    const linkedEntry = document.getElementById(related?.getAttribute("href")?.slice(1) ?? "");
-    expect(linkedEntry).toBe(container.querySelectorAll("article")[1]);
-    expect(related?.getAttribute("href")).not.toContain("prior-assessment");
+    const related = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Open earlier decision and assessment");
+    expect(related).toBeDefined();
+    act(() => related!.click());
+    expect(document.activeElement).toBe(container.querySelectorAll("article")[1]);
 
+    const separateAssessment: NativeCompletionHistoryEntry = {
+      ...earlier, id: "separate-assessment", assessment: { ...earlier.assessment!, id: "separate-assessment" }, decision: null,
+    };
+    const latest: NativeCompletionHistoryEntry = {
+      ...history[0]!, assessment: { ...history[0]!.assessment!, supersedesAssessmentId: "separate-assessment" },
+    };
+    act(() => root.render(<NativeCompletionHistory entries={[latest, earlier, separateAssessment]} isLoading={false} error={false} onRetry={vi.fn()} />));
+    const decisions = Array.from(container.querySelectorAll("button"));
+    const priorDecision = decisions.find(button => button.textContent === "Open earlier decision and evidence");
+    const priorAssessment = decisions.find(button => button.textContent === "Open earlier assessment");
+    expect(priorDecision).toBeDefined();
+    expect(priorAssessment).toBeDefined();
+    const before = window.location.href;
+    act(() => priorDecision!.click());
+    expect(document.activeElement).toBe(container.querySelectorAll("article")[1]);
+    act(() => priorAssessment!.click());
+    expect(document.activeElement).toBe(container.querySelectorAll("article")[2]);
+    expect(window.location.href).toBe(before);
   });
 
   it("matches assessments to requirements with one pass over the saved criteria", () => {
@@ -162,11 +179,11 @@ describe("NativeCompletionHistory", () => {
     act(() => root.render(<NativeCompletionHistory entries={entries} isLoading={false} error={false} onRetry={vi.fn()} />));
 
     expect(decisionIdsRead).toBe(entryCount);
-    expect(container.querySelectorAll("a[href^='#']")).toHaveLength(entryCount - 1);
+    expect(container.querySelectorAll("article button")).toHaveLength(entryCount - 1);
   });
 
   it("loads default Task Properties history on disclosure and hides it after access is denied", async () => {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
     const history = vi.spyOn(activityApi, "completionHistoryForIssue").mockResolvedValue([{
       id: "saved-assessment", runId: "saved-run", createdAt: "2026-05-01T12:00:00.000Z",
       result: {
@@ -188,7 +205,7 @@ describe("NativeCompletionHistory", () => {
       await act(async () => {
         await client.refetchQueries({ queryKey: queryKeys.issues.completionHistory("task-1") });
       });
-      expect(history).toHaveBeenCalledWith("task-1");
+      expect(history).toHaveBeenCalledWith("task-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(container.textContent).toContain("Private verification detail");
 
       history.mockRejectedValue(new ApiError("Forbidden", 403, null));
@@ -201,8 +218,40 @@ describe("NativeCompletionHistory", () => {
         expect(container.textContent).toContain("Completion history could not be loaded.");
         expect(container.textContent).not.toContain("Private verification detail");
       });
+      expect(client.getQueryData(queryKeys.issues.completionHistory("task-1"))).toEqual([]);
+      history.mockRejectedValue(new ApiError("Service unavailable", 503, null));
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: queryKeys.issues.activity("task-1") });
+      });
+      expect(container.textContent).not.toContain("Private verification detail");
     } finally {
       history.mockRestore();
+      client.clear();
+    }
+  });
+
+  it("waits for a fresh authorized read when reopening a cached disclosure", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } });
+    const readHistory = vi.spyOn(activityApi, "completionHistoryForIssue").mockImplementation(() => new Promise(() => {}));
+    client.setQueryData(queryKeys.issues.completionHistory("task-1"), [{
+      id: "old-assessment", createdAt: "2026-05-01T12:00:00.000Z", runId: "old-run",
+      result: { summary: "Previously readable evidence" },
+      contract: null, assessment: null, decision: null, lineageGaps: [],
+    }]);
+    try {
+      await act(async () => {
+        root.render(<QueryClientProvider client={client}><TaskCompletionHistoryDisclosure issueId="task-1" /></QueryClientProvider>);
+      });
+      await act(async () => {
+        const details = container.querySelector("details")!;
+        details.open = true;
+        details.dispatchEvent(new Event("toggle"));
+      });
+      expect(readHistory).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Loading completion history");
+      expect(container.textContent).not.toContain("Previously readable evidence");
+    } finally {
+      readHistory.mockRestore();
       client.clear();
     }
   });

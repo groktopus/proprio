@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test, expect, type APIResponse } from "@playwright/test";
 import { and, eq } from "../../server/node_modules/drizzle-orm/index.js";
 import { createDb, closeRegisteredClients, heartbeatRuns, issueRecoveryActions, issues, issueComments, agentWakeupRequests, authUsers, companyMemberships } from "../../packages/db/src/index.ts";
+
+import { readTestServerDatabaseUrl } from "./server-database-url";
 
 async function json(response: APIResponse) {
   expect(response.ok(), `${response.status()} ${await response.text()}`).toBe(true);
@@ -15,11 +17,7 @@ for (const action of ["task_retry", "retry_after_reload", "inbox_retry", "messag
   test(`legacy startup hold: ${action} reaches a new agent response`, async ({ page, request }) => {
     test.setTimeout(120_000);
     const root = await mkdtemp(path.join(os.tmpdir(), "legacy-recovery-browser-"));
-    const config = JSON.parse(await readFile(process.env.PROPRIO_E2E_SERVER_CONFIG!, "utf8"));
-    // Use the running test server's actual port, including fallback allocation.
-    const url = config.database.mode === "postgres" ? config.database.connectionString
-      : `postgres://proprio:proprio@127.0.0.1:${(await readFile(
-        path.join(config.database.embeddedPostgresDataDir, "postmaster.pid"), "utf8")).split("\n")[3]}/proprio`;
+    const url = await readTestServerDatabaseUrl();
     const db = createDb(url);
     const company = await json(await request.post("/api/companies", { data: { name: `Legacy recovery ${action} ${Date.now()}` } }));
     try {

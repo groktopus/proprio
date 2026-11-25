@@ -2441,6 +2441,7 @@ describe("IssueDetail", () => {
       expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("issue-1");
       expect(mockIssuesApi.getCostSummary).toHaveBeenCalledWith("issue-1");
     });
+    expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledWith("issue-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
     activity.resolve([]);
     runs.resolve([{
       runId: "run-cost",

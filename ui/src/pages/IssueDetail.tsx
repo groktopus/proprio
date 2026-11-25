@@ -84,7 +84,7 @@ import { SubtaskCancellationError, TaskCancellationDismissedError, useTaskCancel
 import { describeInteractionResolutionFailure, interactionResolutionErrorMessage } from "../lib/interaction-resolution-error";
 import { approvalsApi } from "../api/approvals";
 import { activityApi, type RunForIssue } from "../api/activity";
-import { TaskCompletionHistory } from "../components/NativeCompletionHistory";
+import { NativeCompletionHistory, useTaskCompletionHistory } from "../components/NativeCompletionHistory";
 import {
   fetchRecentIssueActivity,
   fetchRecentIssueRunWindow,
@@ -2939,6 +2939,7 @@ function IssueDetailActivityTab({
   handoffFocusSignal = 0,
   externalReferences,
 }: IssueDetailActivityTabProps) {
+  const completionHistory = useTaskCompletionHistory(issueId);
   const { data: activity, isLoading: activityLoading } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),
     queryFn: () => activityApi.forIssue(issueId),
@@ -2987,7 +2988,7 @@ function IssueDetailActivityTab({
 
   return (
     <>
-      <TaskCompletionHistory issueId={issueId} />
+      <NativeCompletionHistory {...completionHistory} />
       <TaskExecutionCostSummary
         linkedRuns={linkedRuns}
         issueTreeCostSummary={issueTreeCostSummary}
