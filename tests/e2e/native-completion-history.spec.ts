@@ -103,19 +103,26 @@ test("Task properties distinguish a completion claim from evidence assessment an
     expect(JSON.stringify(history)).not.toContain("Other-task private artifact");
     expect(await json(await request.get(`/api/issues/${task.id}`))).toMatchObject({ status: "in_progress" });
 
+    const historyReads: string[] = [];
+    page.on("request", browserRequest => {
+      if (browserRequest.url().includes("/completion-history")) historyReads.push(browserRequest.url());
+    });
     await page.goto(`/${company.issuePrefix}/issues/${task.identifier}`);
     await page.getByRole("button", { name: "Show properties" }).click();
     await page.getByRole("option", { name: "Properties", exact: true }).click();
     const historyDisclosure = page.getByText("Completion history", { exact: true });
     await expect(historyDisclosure).toBeVisible();
+    expect(historyReads).toEqual([]);
     await historyDisclosure.focus();
     await page.keyboard.press("Enter");
 
     const completionHistory = page.getByRole("region", { name: "Native completion history" });
     await expect(completionHistory).toBeVisible();
+    expect(historyReads).toHaveLength(1);
+    await expect(completionHistory.getByText(/Requirements revision 1/)).toBeVisible();
     await expect(completionHistory.getByText("Agent claim satisfied")).toBeVisible();
     await expect(completionHistory.getByText("Policy assessment missing")).toBeVisible();
-    await expect(completionHistory.getByText("Evidence verification failed")).toBeVisible();
+    await expect(completionHistory.getByText("Evidence not verified")).toBeVisible();
     await expect(completionHistory.getByRole("region", { name: "Status decision" })
       .getByText(/proposed · in progress → done · completion evidence incomplete · policy browser-assessor-v1/)).toBeVisible();
     await expect(completionHistory.getByText("Work product: Accepted same-task artifact")).toBeVisible();

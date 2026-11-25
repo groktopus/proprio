@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import type { NativeCompletionHistoryEntry } from "@groktopus/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NativeCompletionHistory } from "./NativeCompletionHistory";
+import { activityApi } from "@/api/activity";
+import { ApiError } from "@/api/client";
+import { queryKeys } from "@/lib/queryKeys";
+import { NativeCompletionHistory, TaskCompletionHistoryDisclosure } from "./NativeCompletionHistory";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,6 +54,7 @@ describe("NativeCompletionHistory", () => {
         }],
         verificationAssessments: [{
           commandOrCheck: "pnpm test", claimStatus: "passed", outcome: "missing", reasonCode: "evidence_missing",
+          reportedReasonCode: null,
           detail: "No test receipt was found.", evidence: {
             kind: "event", outcome: "accepted", visibility: "missing", reasonCode: "missing_event",
             label: "Supporting record is missing.",
@@ -68,15 +73,17 @@ describe("NativeCompletionHistory", () => {
     act(() => root.render(<NativeCompletionHistory entries={history} isLoading={false} error={false} onRetry={vi.fn()} />));
 
     expect(container.textContent).toContain("All tests pass");
+    expect(container.textContent).toContain("Requirements revision 2");
     expect(container.textContent).toContain("Agent claim satisfied");
     expect(container.textContent).toContain("Policy assessment accepted");
     expect(container.textContent).toContain("Assessor policy assessor-v3");
-    expect(container.textContent).toContain("Evidence verification failed");
+    expect(container.textContent).toContain("Evidence not verified");
     expect(container.textContent).toContain("No test receipt was found.");
     expect(container.textContent).toContain("Supersedes an earlier status decision.");
     expect(container.textContent).toContain("This policy replaces an earlier requirement set.");
     expect(container.textContent).not.toContain("private-record-id");
     expect(container.textContent).not.toContain("prior-decision");
+    expect(container.querySelector("li > li")).toBeNull();
 
     const earlier: NativeCompletionHistoryEntry = { ...history[0]!, id: "prior-assessment",
       assessment: { ...history[0]!.assessment!, id: "prior-assessment",
@@ -89,6 +96,114 @@ describe("NativeCompletionHistory", () => {
     expect(related?.textContent).toContain("Open earlier decision and evidence");
     const linkedEntry = document.getElementById(related?.getAttribute("href")?.slice(1) ?? "");
     expect(linkedEntry).toBe(container.querySelectorAll("article")[1]);
+    expect(related?.getAttribute("href")).not.toContain("prior-assessment");
 
+  });
+
+  it("matches assessments to requirements with one pass over the saved criteria", () => {
+    const criterionCount = 120;
+    let identifierReads = 0;
+    const criteria = Array.from({ length: criterionCount }, (_, index) => ({
+      id: `criterion-${index}`, requirement: `Requirement ${index}`,
+    }));
+    const criteriaAssessments = [...criteria].reverse().map(criterion => ({
+      get criterionId() {
+        identifierReads += 1;
+        if (identifierReads > criterionCount) throw new Error("Repeatedly scanned completion assessments");
+        return criterion.id;
+      },
+      claimStatus: "satisfied" as const,
+      outcome: "accepted" as const,
+      reasonCode: "criterion_evidence_accepted",
+      evidence: [],
+    }));
+    const entry: NativeCompletionHistoryEntry = {
+      id: "large-assessment", createdAt: "2026-05-01T12:00:00.000Z", runId: "run-1",
+      contract: {
+        id: "contract-1", revision: 1, policyVersion: "policy-v1", risk: "standard",
+        completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+        criteria, supersedesContractId: null,
+      },
+      result: null, decision: null, lineageGaps: ["result", "decision"],
+      assessment: {
+        id: "large-assessment", policyVersion: "arbiter-v1", triggerKind: "native_result", summary: null,
+        reportedDisposition: null, allCriteriaSatisfied: true, verificationPassed: null,
+        criterionAssessments: criteriaAssessments, verificationAssessments: [], priorDecisionId: null,
+        supersedesAssessmentId: null,
+      },
+    };
+
+    act(() => root.render(<NativeCompletionHistory entries={[entry]} isLoading={false} error={false} onRetry={vi.fn()} />));
+
+    expect(identifierReads).toBe(criterionCount);
+    expect(container.querySelectorAll("section[aria-label='Completion policy'] li")).toHaveLength(criterionCount);
+    expect(container.textContent).toContain("Requirement 119");
+  });
+
+  it("links a long decision history with one pass over the saved decisions", () => {
+    const entryCount = 180;
+    let decisionIdsRead = 0;
+    const entries: NativeCompletionHistoryEntry[] = Array.from({ length: entryCount }, (_, index) => ({
+      id: `assessment-${index}`, runId: `run-${index}`, createdAt: "2026-05-01T12:00:00.000Z",
+      contract: null, result: null, assessment: null, lineageGaps: [],
+      decision: {
+        get id() {
+          decisionIdsRead += 1;
+          if (decisionIdsRead > entryCount) throw new Error("Repeatedly scanned earlier completion decisions");
+          return `decision-${index}`;
+        },
+        applicationState: "proposed", fromStatus: "in_progress", toStatus: "done",
+        reasonCode: "completion_evidence_incomplete", statusAction: null, policyVersion: "arbiter-v1",
+        supersedesDecisionId: index + 1 < entryCount ? `decision-${index + 1}` : null,
+        createdAt: "2026-05-01T12:00:00.000Z", appliedAt: null,
+      },
+    }));
+
+    act(() => root.render(<NativeCompletionHistory entries={entries} isLoading={false} error={false} onRetry={vi.fn()} />));
+
+    expect(decisionIdsRead).toBe(entryCount);
+    expect(container.querySelectorAll("a[href^='#']")).toHaveLength(entryCount - 1);
+  });
+
+  it("loads default Task Properties history on disclosure and hides it after access is denied", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const history = vi.spyOn(activityApi, "completionHistoryForIssue").mockResolvedValue([{
+      id: "saved-assessment", runId: "saved-run", createdAt: "2026-05-01T12:00:00.000Z",
+      result: {
+        id: "result", disposition: "done", summary: "Private verification detail",
+        schemaStatus: "accepted", createdAt: "2026-05-01T12:00:00.000Z",
+      },
+      contract: null, assessment: null, decision: null, lineageGaps: [],
+    }]);
+    try {
+      await act(async () => {
+        root.render(<QueryClientProvider client={client}><TaskCompletionHistoryDisclosure issueId="task-1" /></QueryClientProvider>);
+      });
+      expect(history).not.toHaveBeenCalled();
+      await act(async () => {
+        const details = container.querySelector("details")!;
+        details.open = true;
+        details.dispatchEvent(new Event("toggle"));
+      });
+      await act(async () => {
+        await client.refetchQueries({ queryKey: queryKeys.issues.completionHistory("task-1") });
+      });
+      expect(history).toHaveBeenCalledWith("task-1");
+      expect(container.textContent).toContain("Private verification detail");
+
+      history.mockRejectedValue(new ApiError("Forbidden", 403, null));
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: queryKeys.issues.activity("task-1") });
+      });
+
+      await vi.waitFor(async () => {
+        await act(async () => {});
+        expect(container.textContent).toContain("Completion history could not be loaded.");
+        expect(container.textContent).not.toContain("Private verification detail");
+      });
+    } finally {
+      history.mockRestore();
+      client.clear();
+    }
   });
 });

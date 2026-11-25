@@ -2467,6 +2467,45 @@ describe("IssueDetail", () => {
     });
   });
 
+  it.each([401, 403, 404])("hides cached completion evidence after HTTP %i", async (status) => {
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockActivityApi.completionHistoryForIssue.mockResolvedValue([{
+      id: "assessment-1", runId: "run-1", createdAt: "2026-05-01T12:00:00.000Z",
+      result: { summary: "Private verification transcript" },
+      contract: null, assessment: null, decision: null, lineageGaps: [],
+    }]);
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => expect(container.textContent).toContain("Private verification transcript"));
+
+    mockActivityApi.completionHistoryForIssue.mockRejectedValue(new ApiError("Access denied", status, null));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.issues.completionHistory("issue-1") });
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Completion history could not be loaded.");
+      expect(container.textContent).not.toContain("Private verification transcript");
+    });
+  });
+
+  it("refreshes visible completion history with task Activity", async () => {
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity("issue-1") });
+    });
+
+    await waitForAssertion(() => expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledTimes(2));
+  });
+
   it("does not add a history disclosure when a second run is observed while the page stays open", async () => {
     queryClient.setQueryData(["issues", "history-expanded", "PAP-1"], false);
     mockIssuesApi.get.mockResolvedValue(createIssue());

@@ -11,11 +11,13 @@ export async function nativeCaseHandoffResult(db: Db, input: {
   const handoff = await pendingCaseHandoffForRun(db, input.runId);
   if (!handoff || handoff.issueId !== input.issueId) return null;
   const ref = `case-handoff:${handoff.id}`;
+  const awaitingDecision = handoff.state === "offered";
   return {
-    schema: "proprio.run_result.v1", reportedWorkDisposition: "yielded", summary: "Work handed off.",
+    schema: "proprio.run_result.v1", reportedWorkDisposition: "yielded",
+    summary: awaitingDecision ? "The handoff offer awaits a recipient decision." : "Work handed off.",
     completionClaim: { contractRevision: input.completionContract.revision, objectiveSatisfied: false,
       criteria: input.completionContract.criteria.map(criterion => ({ criterionId: criterion.id, status: "unknown", evidenceRefs: [ref] })),
-      remainingWork: [{ description: "The next agent continues the same task.", blocksCompletion: true }] },
+      remainingWork: [{ description: awaitingDecision ? "The recipient must decide whether to accept the offer." : "The next agent continues the same task.", blocksCompletion: true }] },
     evidence: [{ ref }], verification: [], attentionRequests: [], artifacts: [],
     continuation: { kind: "case_handoff", handoffId: handoff.id, summary: handoff.phase, idempotencyKey: `case-handoff:${handoff.id}` },
   };
