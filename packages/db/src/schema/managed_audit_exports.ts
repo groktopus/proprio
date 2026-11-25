@@ -28,4 +28,4 @@ export const managedAuditExportPageAccess = pgTable("managed_audit_export_page_a
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, table => [
   index("managed_audit_export_page_access_company_export_idx").on(table.companyId, table.exportId, table.createdAt),
-]);
+]).enableRLS();

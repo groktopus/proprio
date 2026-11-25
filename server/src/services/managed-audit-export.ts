@@ -207,6 +207,7 @@ export async function readManagedAuditExportPage(
   scope: ExportScope,
   exportId: string,
   cursor?: string,
+  recordAccess = true,
 ) {
   return runExportTransaction(db, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
@@ -254,13 +255,25 @@ export async function readManagedAuditExportPage(
         .orderBy(asc(managedAuditEvents.id))
       : [];
     const deliveredThrough = offset + events.length;
-    await tx.insert(managedAuditExportPageAccess).values({
-      companyId: scope.companyId,
-      exportId: snapshot.id,
-      userId,
-      pageOffset: offset,
-      itemCount: events.length,
-    });
+    if (recordAccess) {
+      try {
+        await tx.insert(managedAuditExportPageAccess).values({
+          companyId: scope.companyId,
+          exportId: snapshot.id,
+          userId,
+          pageOffset: offset,
+          itemCount: events.length,
+          createdAt: sql`clock_timestamp()`,
+        });
+      } catch (error) {
+        // The driver error contains private metadata. Preserve only the
+        // SQLSTATE used to decide whether the caller can retry unchanged.
+        const code = postgresErrorCode(error);
+        const failure = new HttpError(500, "Managed audit page access could not be recorded");
+        if (code === "57014" || isTransientLockContention(error)) throw Object.assign(failure, { code });
+        throw failure;
+      }
+    }
     return {
       ...exportReceipt(boundedSnapshot),
       events,

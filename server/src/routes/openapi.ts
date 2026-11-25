@@ -1476,6 +1476,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/workload-identity/rotation",
   "POST /api/companies/{companyId}/audit/managed-exports",
   "GET /api/companies/{companyId}/audit/managed-exports/{exportId}",
+  "HEAD /api/companies/{companyId}/audit/managed-exports/{exportId}",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding/greeting",
   "PATCH /api/agents/{id}/permission-grants",
@@ -6485,10 +6486,33 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "head",
+  path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
+  tags: ["activity"],
+  summary: "Validate a managed audit export page without releasing it",
+  description: "Validates the snapshot and cursor without a response body or page-access record.",
+  request: {
+    params: managedAuditExportParamsSchema,
+    query: managedAuditExportPageQuerySchema,
+  },
+  responses: {
+    200: { description: "The managed audit page is available; no body is returned" },
+    400: { description: "Invalid cursor or identifiers" },
+    401: { description: "Unauthorized" },
+    403: { description: "Forbidden" },
+    404: { description: "Export not found" },
+    409: { description: "Export requires reconciliation" },
+    429: { description: "An export operation is in progress. Retry with backoff." },
+    503: { description: "Export query timed out or encountered database contention. Retry the request." },
+  },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
   tags: ["activity"],
   summary: "Read a managed audit export page",
+  description: "Responses are no-store. Each successful GET records a page release before returning its body, even when conditional request headers are supplied. HEAD validates the page without recording a release.",
   request: {
     params: managedAuditExportParamsSchema,
     query: managedAuditExportPageQuerySchema,
@@ -6501,6 +6525,7 @@ registry.registerPath({
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export requires reconciliation. For retention_window_expired, open a new export beginning at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     429: { description: "An export operation is in progress. Retry the same cursor with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    500: { description: "Page access could not be recorded; no page is released", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     503: { description: "Export query timed out or encountered database contention. Retry the same cursor.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
