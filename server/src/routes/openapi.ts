@@ -13988,6 +13988,18 @@ registerCurrentRoute({
     400: r.badRequest,
     401: r.unauthorized,
     403: r.forbidden,
+    409: {
+      description: "Conflict. For managed_dispatch_outcome_unknown, reconcile the earlier provider outcome before retrying.",
+      content: {
+        "application/json": {
+          schema: z.object({
+            error: z.string(),
+            reasonCode: z.string(),
+            invocationId: z.string().optional(),
+          }),
+        },
+      },
+    },
   },
 });
 
