@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { authUsers, companies, toolActionRequests } from "@groktopus/db";
+import { authUsers, companies, principalPermissionGrants, toolActionRequests } from "@groktopus/db";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import type { ToolActionRequestListItem, ToolRunDecision } from "@groktopus/shared";
@@ -97,6 +97,10 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
 
   try {
     vi.stubEnv("PROPRIO_HOME", home);
+    const exportFrom = new Date().toISOString();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", exportFrom);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     const workspace = join(home, "runner");
     await mkdir(workspace);
     execFileSync("git", ["init", "-q", workspace]);
@@ -121,6 +125,9 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     });
     await access.ensureMembership(f.companyId, "user", reviewerId, "operator", "active");
     await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "operator", reviewerId);
+    await server.db.insert(principalPermissionGrants).values({
+      companyId: f.companyId, principalType: "user", principalId: reviewerId, permissionKey: "audit:view_agent_actions",
+    }).onConflictDoNothing();
     const reviewerCookie = await server.humanSession(reviewerId);
     const api = async (method: string, path: string, data?: unknown, session = cookie) => {
       const url = server!.apiUrl;
@@ -248,6 +255,13 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     await server.close();
     server = await startRunnerApiTestServer({ humanSessions: true, authPublicBaseUrl: origin, databaseUrl: database.connectionString });
     cookie = reviewerCookie;
+    const exportPath = `${companyPath}/audit/managed-exports`;
+    const snapshot = await api("POST", exportPath, { from: exportFrom, to: new Date().toISOString() });
+    expect(snapshot.status, JSON.stringify(snapshot.body)).toBe(201);
+    const page = await api("GET", `${exportPath}/${snapshot.body.exportId}`);
+    expect(page.status, JSON.stringify(page.body)).toBe(200);
+    expect(page.body).toMatchObject({ complete: true });
+    const events = page.body.events as Array<{ invocationId: string; phase: string; status: string }>;
     const fingerprints = new Map<string, string>();
     for (const [marker, ids] of cases) {
       const reviewerRuns = await api("GET", `/issues/${ids.issueId}/runs`);
@@ -275,15 +289,26 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
       expect(record.policyProvenance.policies.find(policy => policy.policyId === policyId)).toMatchObject({
         revisionFingerprint: ids.fingerprint, priority: ids.priority,
       });
+      const invocationEvents = events.filter(event => event.invocationId === ids.invocationId);
+      const phases = invocationEvents.map(event => event.phase).sort();
+      const expectedPhases = ["approval_resolution", "policy_decision"];
+      if (marker !== "denied") expectedPhases.push("dispatch_intent");
+      if (marker === "approved") expectedPhases.push("terminal_outcome");
+      expect(phases).toEqual(expectedPhases.sort());
+      for (const event of invocationEvents) {
+        expect(event).toMatchObject({ taskId: ids.issueId, runId: ids.runId, requestId: ids.requestId });
+        if (event.phase !== "policy_decision") expect(event).toMatchObject({ actorType: "user", actorId: ownerId });
+      }
       fingerprints.set(marker, fingerprint);
       if (marker === "denied") expect(record.invocation.status).toBe("denied");
       if (marker === "approved") {
         expect(record.invocation.status).toBe("succeeded");
+        expect(invocationEvents.find(event => event.phase === "terminal_outcome")?.status).toBe("succeeded");
         expect(record.auditEvents.some(event => event.invocationId === ids.invocationId && event.actionRequestId === ids.requestId && event.eventType === "call_completed" && event.outcome === "success")).toBe(true);
       }
       if (marker === "interrupted") {
-        expect(["failed", "timed_out"]).toContain(record.invocation.status);
-        expect(record.auditEvents.some(event => event.eventType === "call_failed")).toBe(true);
+        expect(record.invocation.status).toBe("executing");
+        expect(record.auditEvents.some(event => event.eventType === "call_failed" || event.eventType === "call_completed")).toBe(false);
       }
     }
     expect(fingerprints.get("approved")).not.toBe(fingerprints.get("denied"));
