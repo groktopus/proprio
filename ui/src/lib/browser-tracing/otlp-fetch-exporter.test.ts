@@ -23,7 +23,7 @@ describe("OtlpFetchExporter", () => {
     expect(result.code).toBe(0);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://api.honeycomb.io/v1/traces");
-    expect(init).toMatchObject({ method: "POST", keepalive: true, credentials: "omit" });
+    expect(init).toMatchObject({ method: "POST", keepalive: true, credentials: "omit", referrerPolicy: "no-referrer" });
     expect(init.headers).toEqual({ "content-type": "application/json", "x-honeycomb-team": "hcaik_test" });
     const body = JSON.parse(new TextDecoder().decode(init.body as Uint8Array));
     const span = body.resourceSpans[0].scopeSpans[0].spans[0];
