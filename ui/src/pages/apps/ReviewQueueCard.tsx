@@ -113,36 +113,30 @@ function ReviewRow({
   async function approve(rememberAction: boolean) {
     const result = await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction);
     if (result.status === "failed") {
-      throw new Error(result.error?.trim() || "The approved action failed. Refresh the review queue to see its latest status.");
+      const reason = result.error?.trim() || "Check the review queue for the latest status.";
+      return rememberAction ? `${reason} Future calls may still be allowed.` : reason;
     }
     if (result.status !== "approved" && result.status !== "executing" && result.status !== "executed") {
       throw new Error("The approval did not complete. Refresh the review queue to check its latest status.");
     }
+    return null;
   }
 
-  const allowOnce = useMutation({
-    mutationFn: () => approve(false),
-    onMutate: () => setResolving("allow"),
-    onSuccess: () => {
-      pushToast({ title: "Allowed once", body: `${actionLabel(item)} can run this time.`, tone: "success" });
-      invalidate();
-    },
-    onError: (error) => {
-      invalidate();
-      failToast(pushToast, error);
-    },
-    onSettled: () => setResolving(null),
-  });
-
-  const alwaysAllow = useMutation({
-    mutationFn: () => approve(true),
-    onMutate: () => setResolving("always"),
-    onSuccess: () => {
-      pushToast({
-        title: "Always allowed",
-        body: `${actionLabel(item)} won’t ask again.`,
-        tone: "success",
-      });
+  const approveAction = useMutation({
+    mutationFn: approve,
+    onMutate: (rememberAction) => setResolving(rememberAction ? "always" : "allow"),
+    onSuccess: (failure, rememberAction) => {
+      if (failure) {
+        pushToast({ title: "Approved action failed", body: failure, tone: "error" });
+      } else if (rememberAction) {
+        pushToast({
+          title: "Always allowed",
+          body: `${actionLabel(item)} won’t ask again.`,
+          tone: "success",
+        });
+      } else {
+        pushToast({ title: "Allowed once", body: `${actionLabel(item)} can run this time.`, tone: "success" });
+      }
       invalidate();
     },
     onError: (error) => {
@@ -170,7 +164,8 @@ function ReviewRow({
     interaction={linkedInteraction}
     onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
       try {
-        await approve(rememberAction ?? false);
+        const failure = await approve(rememberAction ?? false);
+        if (failure) throw new Error(`Approved action failed. ${failure}`);
       } finally {
         invalidate();
       }
@@ -208,11 +203,11 @@ function ReviewRow({
 
       {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <p className="mt-2 text-xs text-muted-foreground">Always allow lets this agent use this action with different arguments on this connection, within the current project when present.</p> : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={() => allowOnce.mutate()} disabled={busy}>
+        <Button size="sm" onClick={() => approveAction.mutate(false)} disabled={busy}>
           {resolving === "allow" ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Check className="mr-1.5 h-3.5 w-3.5" />}
           Allow once
         </Button>
-        {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <Button size="sm" variant="outline" onClick={() => alwaysAllow.mutate()} disabled={busy}>
+        {item.requestedByAgentId && item.connectionId && !item.request.approvalId ? <Button size="sm" variant="outline" onClick={() => approveAction.mutate(true)} disabled={busy}>
           {resolving === "always" ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
           Always allow
         </Button> : null}

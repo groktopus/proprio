@@ -199,11 +199,30 @@ describe("ReviewQueueCard", () => {
     await flushReact();
 
     expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Couldn’t save that",
+      title: "Approved action failed",
       body: "Approval could not be reconciled; refresh the review queue.",
       tone: "error",
     }));
     expect(pushToastMock).not.toHaveBeenCalledWith(expect.objectContaining({ title: "Allowed once" }));
+  });
+
+  it("shows that permission can remain after an Always allow action fails", async () => {
+    approveActionRequestMock.mockResolvedValue({
+      ...pendingRequest().request,
+      status: "failed",
+      error: "The provider outcome is still being reconciled.",
+    });
+    await render();
+
+    await act(async () => { buttonContaining("Always allow")!.click(); });
+    await flushReact();
+
+    expect(approveActionRequestMock).toHaveBeenCalledWith("company-1", "request-1", true);
+    expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Approved action failed",
+      body: "The provider outcome is still being reconciled. Future calls may still be allowed.",
+      tone: "error",
+    }));
   });
 
   it("surfaces a failed approval from the linked interaction card inline", async () => {
