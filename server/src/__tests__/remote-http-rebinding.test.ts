@@ -146,6 +146,25 @@ describe("guarded remote HTTP fetch (PAP-17098 DNS rebinding)", () => {
     expect(requestStarts).toBe(2);
   });
 
+  it("does not start HTTP when the call already expired before dispatch", async () => {
+    const signal = AbortSignal.abort();
+    let requestStarted = false;
+    let transportInvoked = false;
+    const unpinnedFetch: typeof fetch = async () => {
+      transportInvoked = true;
+      return new Response();
+    };
+
+    await expect(guardedRemoteHttpFetch("http://127.0.0.1/mcp", { signal }, {
+      allowPrivateNetwork: true,
+      unpinnedFetch,
+      error: guardError,
+      onRequestStart: () => { requestStarted = true; },
+    })).rejects.toBe(signal.reason);
+    expect(requestStarted).toBe(false);
+    expect(transportInvoked).toBe(false);
+  });
+
   it("turns a platform-fetch DNS cause into the stable DNS code", async () => {
     const cause = Object.assign(new Error("getaddrinfo ENOTFOUND missing.invalid"), {
       code: "ENOTFOUND",

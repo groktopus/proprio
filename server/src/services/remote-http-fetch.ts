@@ -104,6 +104,7 @@ export async function guardedRemoteHttpFetch(
   const platformFetch = options.unpinnedFetch ?? fetch;
   if (literalHost) {
     try {
+      init.signal?.throwIfAborted();
       options.onRequestStart?.();
       return await platformFetch(endpoint.toString(), { ...init, redirect: "manual" });
     } catch (error) {
@@ -311,6 +312,7 @@ async function sendRequest(input: {
 
   const requestFn = useTls ? httpsRequest : httpRequest;
   const message = await new Promise<IncomingMessage>((resolve, reject) => {
+    signal?.throwIfAborted();
     onRequestStart?.();
     const req = requestFn({
       method,
