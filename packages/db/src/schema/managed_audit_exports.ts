@@ -1,4 +1,4 @@
-import { index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 export const managedAuditExports = pgTable("managed_audit_exports", {
@@ -9,6 +9,7 @@ export const managedAuditExports = pgTable("managed_audit_exports", {
   from: timestamp("from_at", { withTimezone: true }).notNull(),
   to: timestamp("to_at", { withTimezone: true }).notNull(),
   eventIds: uuid("event_ids").array().notNull(),
+  invalidated: boolean("invalidated").notNull().default(false),
   watermark: text("watermark").notNull(),
   cursorSecret: uuid("cursor_secret").notNull().defaultRandom(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

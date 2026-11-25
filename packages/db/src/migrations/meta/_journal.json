@@ -3564,6 +3564,13 @@
       "when": 1795576318928,
       "tag": "0510_third_the_hand",
       "breakpoints": true
+    },
+    {
+      "idx": 511,
+      "version": "7",
+      "when": 1795578803005,
+      "tag": "0511_unknown_smasher",
+      "breakpoints": true
     }
   ]
 }
