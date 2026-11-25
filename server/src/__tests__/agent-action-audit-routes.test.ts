@@ -26,6 +26,7 @@ import {
   managedAuditEvents,
   managedAuditExportPageAccess,
   managedAuditExports,
+  managedAuditTransitionReceipts,
   principalPermissionGrants,
   ensurePostgresDatabase,
   runDatabaseBackup,
@@ -67,6 +68,7 @@ describePostgres("agent action audit routes", () => {
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(managedAuditExportPageAccess);
+    await db.delete(managedAuditTransitionReceipts);
     await db.delete(managedAuditExports);
     await db.delete(managedAuditEvents);
     await db.delete(caseEvents);
@@ -465,33 +467,79 @@ describePostgres("agent action audit routes", () => {
     const currentEpoch = randomUUID();
     const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
     const oldStart = "2026-07-17T00:00:00.000Z";
+    const originalExpiresAt = new Date(Date.now() + 60_000);
     const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
       Array.from({ length: 128 }, (_, index) => ({
         companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
         from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
-        eventIds: [randomUUID()], watermark: "fixture", expiresAt: new Date(Date.now() + 60_000),
+        eventIds: [], watermark: "fixture", expiresAt: originalExpiresAt,
       })),
     ).returning({ id: managedAuditExports.id });
+    // Make all 128 rows carry the supported maximum membership using real,
+    // distinct UUID values generated in PostgreSQL. This avoids sending a
+    // 40MB fixture over the test connection while preserving realistic array
+    // detoast and update work in the operation under test.
+    await db.execute(sql`
+      update managed_audit_exports
+      set event_ids = (
+        select array_agg(md5(value::text)::uuid order by value)
+        from generate_series(1, 20000) as generated(value)
+      )
+      where company_id = ${company.id}
+    `);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
+    vi.useFakeTimers({ toFake: ["Date"] });
     try {
+      const readerTime = Date.now();
+      vi.setSystemTime(readerTime + 5_000);
       await board.post(path).send(window).expect(201);
+      // Simulate a reader replica whose wall clock is behind the writer.
+      vi.setSystemTime(readerTime - 5_000);
       for (const [row, reasonCode] of [[oldEpochRow, "source_epoch_changed"], [oldRetentionRow, "retention_window_expired"]] as const) {
         const stale = await board.get(`${path}/${row.id}`).expect(409);
         expect(stale.body).toMatchObject({ details: { reasonCode } });
         expect(stale.body).not.toHaveProperty("eventCount");
-        const [marker] = await db.select({ eventIds: managedAuditExports.eventIds }).from(managedAuditExports)
+        const [marker] = await db.select({ invalidated: managedAuditExports.invalidated, expiresAt: managedAuditExports.expiresAt })
+          .from(managedAuditExports)
           .where(eq(managedAuditExports.id, row.id));
-        expect(marker.eventIds).toEqual([]);
+        expect(marker).toEqual({ invalidated: true, expiresAt: originalExpiresAt });
       }
+      const [retirementReceipt] = await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")));
+      expect(retirementReceipt).toMatchObject({
+        companyId: company.id,
+        actorId: userId,
+        recordCount: 128,
+        source: "tool_gateway",
+        exportId: null,
+      });
+      const storage = await db.select({
+        invalidated: managedAuditExports.invalidated,
+        eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
+      }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
+      expect(storage.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(8);
+      expect(storage.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(120);
+      await board.post(path).send(window).expect(201);
+      const nextBatch = await db.select({
+        invalidated: managedAuditExports.invalidated,
+        eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
+      }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
+      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(16);
+      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(112);
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
+          eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
       expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
       expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
-        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
     } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });
@@ -887,22 +935,70 @@ describePostgres("agent action audit routes", () => {
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
       expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
-      const invalidationAudits = (await db.select().from(activityLog))
-        .filter(row => row.action === "audit.managed_export_invalidated");
-      expect(invalidationAudits).toHaveLength(1);
-      expect(invalidationAudits[0]).toMatchObject({
+      expect((await db.select().from(activityLog))
+        .filter(row => row.action === "audit.managed_export_invalidated")).toHaveLength(0);
+      const receipts = await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.exportId, created.body.exportId));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({
         companyId: company.id,
-        actorType: "user",
+        transition: "export_invalidated",
         actorId: userId,
-        entityId: company.id,
-        details: { exportId: created.body.exportId, source: "tool_gateway" },
+        exportId: created.body.exportId,
+        recordCount: 1,
+        source: "tool_gateway",
       });
-      expect(invalidationAudits[0]?.details).not.toHaveProperty("eventIds");
-      expect(invalidationAudits[0]?.details).not.toHaveProperty("eventCount");
+      const [protection] = await db.execute<{
+        rls: boolean; public_grants: boolean; anon_select: boolean; authenticated_select: boolean;
+      }>(sql`select relation.relrowsecurity as rls,
+        exists(select 1 from aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) grant_entry
+          where grant_entry.grantee = 0) as public_grants,
+        coalesce((select has_table_privilege(role_entry.oid, relation.oid, 'select') from pg_roles role_entry where role_entry.rolname = 'anon'), false) as anon_select,
+        coalesce((select has_table_privilege(role_entry.oid, relation.oid, 'select') from pg_roles role_entry where role_entry.rolname = 'authenticated'), false) as authenticated_select
+        from pg_class relation where relation.oid = 'managed_audit_transition_receipts'::regclass`);
+      expect(protection).toEqual({ rls: true, public_grants: false, anon_select: false, authenticated_select: false });
 
+      // The public activity writer may accept a lookalike event, but it cannot
+      // alter or expose the protected server-authored receipt.
+      const forgedExportId = randomUUID();
+      const forgedActorId = randomUUID();
+      await board.post(`/api/companies/${company.id}/activity`).send({
+        actorType: "user", actorId: forgedActorId, action: "audit.managed_export_invalidated",
+        entityType: "company", entityId: company.id,
+        details: { exportId: forgedExportId, recordCount: 999_999 },
+      }).expect(201);
+      expect((await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.companyId, company.id))).map(row => row.recordCount)).toEqual([1]);
+      const activityView = await board.get(`/api/companies/${company.id}/activity`).expect(200);
+      const publicInvalidations = activityView.body.filter((row: { action: string }) => row.action === "audit.managed_export_invalidated");
+      expect(publicInvalidations).toHaveLength(1);
+      expect(publicInvalidations[0]?.actorId).toBe(forgedActorId);
+      expect(publicInvalidations[0]?.details).toMatchObject({ exportId: forgedExportId, recordCount: 999_999 });
+
+      await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 25 * 60 * 60 * 1000) })
+        .where(eq(managedAuditExports.id, created.body.exportId));
       const fresh = await board.post(path).send(window).expect(201);
       expect(fresh.body.eventCount).toBe(201);
       expect(fresh.body.exportId).not.toBe(created.body.exportId);
+      expect(await db.select().from(managedAuditExports)
+        .where(eq(managedAuditExports.id, created.body.exportId))).toHaveLength(0);
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.exportId, created.body.exportId))).toHaveLength(1);
+
+      // The company FK cascades only at actual company retirement; snapshots
+      // and expiration do not own this receipt.
+      const deletionCompany = (await db.insert(companies).values({ name: "Receipt cascade fixture" }).returning())[0]!;
+      await db.insert(managedAuditTransitionReceipts).values({
+        companyId: deletionCompany.id,
+        transition: "company_exports_retired",
+        actorId: userId,
+        exportId: null,
+        recordCount: 1,
+        source: "company_retirement",
+      });
+      await db.delete(companies).where(eq(companies.id, deletionCompany.id));
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.companyId, deletionCompany.id))).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -948,7 +1044,7 @@ describePostgres("agent action audit routes", () => {
         await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
           .where(eq(managedAuditExports.id, created.body.exportId));
       });
-      await locked.promise;
+      await Promise.race([locked.promise, locker]);
       pendingRead = board.get(exportPath).then(response => response);
       // Prove the HTTP transaction is blocked by this writer, rather than
       // relying on a timing delay before committing the competing update.

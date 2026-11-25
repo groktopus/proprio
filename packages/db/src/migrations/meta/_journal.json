@@ -3571,6 +3571,13 @@
       "when": 1795578803005,
       "tag": "0511_unknown_smasher",
       "breakpoints": true
+    },
+    {
+      "idx": 512,
+      "version": "7",
+      "when": 1795582096424,
+      "tag": "0512_secret_hawkeye",
+      "breakpoints": true
     }
   ]
 }
