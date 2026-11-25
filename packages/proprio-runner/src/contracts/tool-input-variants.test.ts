@@ -105,6 +105,21 @@ test("rejections name what is wrong and how to send it", () => {
   expect(toolInputVariantError("handoff_case", agent)).toBeNull();
 });
 
+test("handoff_case exposes a bounded opt-in offer and reserves it for agent handoffs", () => {
+  const validate = ajv.compile(current("handoff_case") as Record<string, unknown>);
+  const offer = { expectedDeliverable: "A tested implementation", prerequisites: ["Review the saved requirements"] };
+  const input = { ...agent, expectedHandoffVersion: 1, expectedIssueStatusVersion: 2, offer };
+  expect(validate(input)).toBe(true);
+  expect(toolInputVariantError("handoff_case", input)).toBeNull();
+  expect(validate({ ...input, offer: { expectedDeliverable: " " } })).toBe(false);
+  expect(validate({ ...input, offer: { expectedDeliverable: "no\u0000NUL" } })).toBe(false);
+  expect(validate({ ...input, offer: { ...offer, prerequisites: ["🧾".repeat(2_000)] } })).toBe(true);
+  expect(validate({ ...input, offer: { ...offer, prerequisites: ["🧾".repeat(2_001)] } })).toBe(false);
+  expect(validate({ ...input, offer: { ...offer, recipientId: B } })).toBe(false);
+  expect(validate({ ...input, offer: { ...offer, prerequisites: Array.from({ length: 21 }, () => "step") } })).toBe(false);
+  expect(toolInputVariantError("handoff_case", { ...done, offer })).toContain("does not accept offer");
+});
+
 test("the questions correction suggests a payload that is admitted", () => {
   const input = { ...ask, payload: structuredClone(QUESTIONS_PAYLOAD_EXAMPLE) };
   expect(ajv.compile(current("request_human_input") as Record<string, unknown>)(input)).toBe(true);
