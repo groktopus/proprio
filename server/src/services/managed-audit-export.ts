@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
+import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -197,6 +197,13 @@ export async function readManagedAuditExportPage(
         .orderBy(asc(managedAuditEvents.id))
       : [];
     const deliveredThrough = offset + events.length;
+    await tx.insert(managedAuditExportPageAccess).values({
+      companyId: scope.companyId,
+      exportId: snapshot.id,
+      userId,
+      pageOffset: offset,
+      itemCount: events.length,
+    });
     return {
       ...exportReceipt(snapshot),
       events,
