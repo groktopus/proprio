@@ -66,6 +66,12 @@ cover replay, interrupted delivery, receipt write failure and retention across
 snapshot expiry. All 22 export route tests passed with a single database
 connection. The server and database typechecks and migration compatibility
 check passed. [Page access records](https://github.com/groktopus/proprio/pull/378)
+The page-access and direct-dispatch branches both generated migration 0509.
+Land the dispatch migration first and regenerate the page access migration on
+the integrated base. Disposable composition
+`7e151da898b42629f3ba7b04919e5c28a55324e2` regenerated it as 0510. Its
+migration compatibility check and all 23 audit export and reconstruction tests
+passed. [Direct dispatch](https://github.com/groktopus/proprio/pull/366)
 
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
