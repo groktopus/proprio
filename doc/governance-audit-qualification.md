@@ -11,13 +11,16 @@ PROPRIO_AUDIT_RECONSTRUCTION_EVIDENCE_PATH=/tmp/proprio-audit-reconstruction-evi
   pnpm exec vitest run server/src/__tests__/managed-audit-reconstruction.integration.test.ts
 ```
 
-The fixture uses a separate reviewer with the operator role's default audit
-grant. Before approval, the reviewer sees the invocation and its policy
+The fixture uses a separate reviewer with the operator role and the managed
+audit grant. Before approval, the reviewer sees the invocation and its policy
 snapshot. After application restart, the reviewer starts from each issue, lists
 its runs, locates the invocation, and matches the action request, decision
 principal, unchanged policy fingerprint and priority, and call receipts. The
 operator changes policy priority after the first run. The successful case must
 have a `call_completed` success event linked to its invocation and request.
+The reviewer also reads a managed audit export after server recreation and
+matches its events to the task, invocation, run and human decision. The
+interrupted action retains its dispatch intent and stays unresolved.
 
 - The approved request calls the target once.
 - The declined request has zero target effects.
