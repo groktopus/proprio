@@ -12,6 +12,11 @@ admission record can exist for a request that an older writer already resolved.
 The retry returns that settled request. For any interval that includes older
 writers, check the existing approval and task records for resolution evidence.
 
+If an earlier managed write has no terminal receipt, the gateway can stop an
+equivalent replacement approval before sending a provider call. The replacement
+shows a failed outcome and directs the reviewer to reconcile the original
+intent with the provider before authorizing another attempt.
+
 ## Support Matrix
 
 | Transport | Local trusted | Hosted cloud / public authenticated | Notes |
