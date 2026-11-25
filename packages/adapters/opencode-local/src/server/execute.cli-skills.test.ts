@@ -38,24 +38,39 @@ it.skipIf(!openCodeCli)("discovers only the selected managed OpenCode skills at 
   const openCode = (args: string[], childEnv: Record<string, string>) =>
     execFileSync(openCodeCli!, args, { cwd: workspace, env: childEnv, encoding: "utf8", timeout: 10_000 });
   const discover = (childEnv: Record<string, string>) =>
-    (JSON.parse(openCode(["debug", "skill", "--pure"], childEnv)) as Array<{ name: string }>)
-      .map(skill => skill.name).sort();
+    JSON.parse(openCode(["debug", "skill", "--pure"], childEnv)) as Array<{ name: string; location: string }>;
+  const discoveredNames = (childEnv: Record<string, string>) => discover(childEnv).map(skill => skill.name).sort();
   try {
     await writeSkill(path.join(providerHome, ".claude", "skills"), "ambient");
     await writeSkill(path.join(workspace, ".claude", "skills"), "project-ambient");
-    await writeSkill(path.join(configHome, "opencode", "skills"), "native");
+    const nativeSkills = path.join(configHome, "opencode", "skills");
+    await writeSkill(nativeSkills, "native");
     const source = await writeSkill(path.join(root, "managed"), "selected");
+    const operatorSkillSource = await writeSkill(path.join(root, "operator-paths"), "path-native");
+    await fs.writeFile(path.join(source, ".proprio-materialized-skill.json"), '{"version":1}\n');
+    await fs.symlink(source, path.join(nativeSkills, "revoked-proprio"), "dir");
+    await fs.writeFile(path.join(configHome, "opencode", "opencode.json"), JSON.stringify({
+      skills: { paths: [operatorSkillSource] },
+    }), "utf8");
     expect(openCode(["--version"], env).trim()).toBe(runVersion);
-    expect(discover(env)).toEqual(["ambient", "customize-opencode", "native", "project-ambient"]);
+    expect(discoveredNames(env)).toEqual(["ambient", "customize-opencode", "native", "path-native", "project-ambient", "selected"]);
     const selected = { key: "company/selected", runtimeName: "selected", source };
     for (const inventory of [[selected], []]) {
       vi.mocked(runAdapterExecutionTargetProcess).mockImplementationOnce(async (_id, _target, _command, _args, opts) => {
-        expect(discover({
+        const discovered = discover({
           ...env,
           XDG_CONFIG_HOME: opts.env.XDG_CONFIG_HOME!,
           OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: opts.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS!,
           OPENCODE_DISABLE_PROJECT_CONFIG: opts.env.OPENCODE_DISABLE_PROJECT_CONFIG!,
-        })).toEqual(inventory.length ? ["customize-opencode", "native", "selected"] : ["customize-opencode", "native"]);
+        });
+        expect(discovered.map(skill => skill.name).sort())
+          .toEqual(inventory.length
+            ? ["customize-opencode", "native", "path-native", "selected"]
+            : ["customize-opencode", "native", "path-native"]);
+        expect(discovered.find(skill => skill.name === "selected")?.location)
+          .toBe(inventory.length ? path.join(source, "SKILL.md") : undefined);
+        expect(discovered.find(skill => skill.name === "path-native")?.location)
+          .toBe(path.join(operatorSkillSource, "SKILL.md"));
         return {
           exitCode: 0, signal: null, timedOut: false,
           stdout: '{"type":"text","sessionID":"test","part":{"text":"done"}}',

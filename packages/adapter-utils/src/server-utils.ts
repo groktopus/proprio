@@ -370,6 +370,24 @@ export function isProprioSkillSourceMissing(entry: ProprioSkillEntry) {
   return entry.sourceStatus === "missing";
 }
 
+export function hasExplicitProprioRuntimeSkillInventory(
+  config: Record<string, unknown>,
+): boolean {
+  return Array.isArray(config.proprioRuntimeSkills);
+}
+
+export function selectAvailableProprioRuntimeSkillEntries(
+  entries: ProprioSkillEntry[],
+  desiredSkillNames: string[],
+): ProprioSkillEntry[] {
+  const desired = new Set(desiredSkillNames);
+  return entries.filter((entry) => desired.has(entry.key) && !isProprioSkillSourceMissing(entry));
+}
+
+export async function hasProprioMaterializedSkillProvenance(source: string): Promise<boolean> {
+  return fs.access(path.join(source, MATERIALIZED_SKILL_SENTINEL)).then(() => true).catch(() => false);
+}
+
 function resolveProprioSkillMissingDetail(
   entry: ProprioSkillEntry,
   fallback: string,
@@ -4218,7 +4236,7 @@ export async function readProprioRuntimeSkillEntries(
     config.proprioRuntimeSkills,
   );
   // An explicit empty assignment must not fall back to every bundled skill.
-  if (Array.isArray(config.proprioRuntimeSkills)) return configuredEntries;
+  if (hasExplicitProprioRuntimeSkillInventory(config)) return configuredEntries;
   return listProprioSkillEntries(moduleDir, additionalCandidates);
 }
 
