@@ -35,6 +35,8 @@ import { trackRecentProject } from "@/lib/recent-projects";
 import { ExecutionBlockerNotice } from "../components/ExecutionBlockerNotice";
 import type { TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
+import { TaskExecutionCostSummary, useTaskExecutionCostSummary } from "@/components/task-detail/TaskExecutionCostSummary";
+import { useTaskExecutionHistory } from "@/components/task-detail/useTaskExecutionHistory";
 import { IssueCreatedFromNote } from "@/components/task-detail/IssueCreatedFromNote";
 import { EmailThreadProvider } from "../components/EmailMessageCard";
 import { EmailTaskActivity } from "../components/EmailTaskActivity";
@@ -217,10 +219,6 @@ import { modelStillUnavailableToast } from "../lib/model-retry-refusal";
 import {
   relativeTime,
   cn,
-  formatDurationMs,
-  formatTokens,
-  visibleRunCostUsd,
-  visibleRunTokenTotal,
 } from "../lib/utils";
 import { liveBlueBadge } from "../lib/status-colors";
 import { ApprovalCard } from "../components/ApprovalCard";
@@ -281,7 +279,6 @@ import { IssueGalleryContext } from "../context/IssueGalleryContext";
 import { useIssuePlanDocument } from "../hooks/useIssuePlanDocument";
 import { isOutdatedPlanConfirmation } from "../components/task-chat/interaction-thread-order";
 import { useTaskArtifactArrival } from "../hooks/useTaskArtifactArrival";
-import { IssueRunLedger } from "../components/IssueRunLedger";
 import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import type { MentionOption } from "../components/MarkdownEditor";
 import {
@@ -292,7 +289,7 @@ import {
   FileViewerProvider,
   useRequiredFileViewer,
 } from "../context/FileViewerContext";
-import { FileViewerSheet } from "../components/FileViewerSheet";
+import { DeferredOverlay } from "../components/DeferredOverlay";
 import { ArtifactFileChip } from "../components/ArtifactFileChip";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { StatusIcon } from "../components/StatusIcon";
@@ -611,15 +608,6 @@ function extractWorkspaceFileRefFromWorkProduct(workProduct: {
   if (!metadata) return null;
   const parsed = workspaceFileRefSchema.safeParse(metadata.resourceRef);
   return parsed.success ? parsed.data : null;
-}
-
-function usageNumber(usage: Record<string, unknown> | null, ...keys: string[]) {
-  if (!usage) return 0;
-  for (const key of keys) {
-    const value = usage[key];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
 }
 
 function truncate(text: string, max: number): string {
@@ -1388,6 +1376,12 @@ type IssueDetailChatTabProps = {
 };
 
 const DesignSandboxTaskThread = lazy(() => import("../components/design-sandbox/DesignSandboxTaskThread"));
+const IssueRunLedger = lazy(() =>
+  import("../components/IssueRunLedger").then((module) => ({ default: module.IssueRunLedger })),
+);
+const FileViewerSheet = lazy(() =>
+  import("../components/FileViewerSheet").then((module) => ({ default: module.FileViewerSheet })),
+);
 
 const IssueDetailChatTab = memo(function IssueDetailChatTab({
   executionBlocked,
@@ -1511,19 +1505,15 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     : TaskChatThread;
   const designSandbox = useDesignSandbox();
   const queryClient = useQueryClient();
-  const hasUnresolvedExplicitBlockers = (blockedBy ?? []).some(blocker => blocker.status !== "done" && blocker.status !== "cancelled");
+  const hasExplicitBlockers = (blockedBy?.length ?? 0) > 0;
   const dependencyDiagnosisQuery = useQuery({
     queryKey: queryKeys.issues.dependencyInvestigation(issueId),
     queryFn: () => issuesApi.getDependencyInvestigation(issueId),
-    enabled: dependencyDiagnosisReady && !!issueId && hasUnresolvedExplicitBlockers,
+    enabled: dependencyDiagnosisReady && !!issueId && hasExplicitBlockers,
     refetchOnWindowFocus: true,
-    refetchInterval: query => {
-      const status = query.state.data?.wake.status;
-      return status === "queued" || status === "running" || status === "deferred" ? 5_000 : false;
-    },
   });
-  const dependencyDiagnosis = hasUnresolvedExplicitBlockers ? dependencyDiagnosisQuery.data : null;
-  const dependencyDiagnosisError = hasUnresolvedExplicitBlockers && dependencyDiagnosisQuery.isError
+  const dependencyDiagnosis = hasExplicitBlockers ? dependencyDiagnosisQuery.data : null;
+  const dependencyDiagnosisError = hasExplicitBlockers && dependencyDiagnosisQuery.isError
     ? describeError(dependencyDiagnosisQuery.error).body
     : null;
   const issueQueryRef = queryIssueId ?? issueId;
@@ -2953,11 +2943,11 @@ function IssueDetailActivityTab({
     queryFn: () => activityApi.forIssue(issueId),
     placeholderData: keepPreviousDataForSameQueryTail<ActivityEvent[]>(issueId),
   });
-  const { data: linkedRuns, isLoading: linkedRunsLoading } = useQuery({
-    queryKey: queryKeys.issues.runs(issueId),
-    queryFn: () => activityApi.runsForIssue(issueId),
-    placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueId),
-  });
+  const {
+    data: linkedRuns,
+    isLoading: linkedRunsLoading,
+  } = useTaskExecutionHistory(issueId, { hasLiveRuns, issueStatus });
+  const { data: issueTreeCostSummary } = useTaskExecutionCostSummary(issueId);
   const { data: linkedApprovals } = useQuery({
     queryKey: queryKeys.issues.approvals(issueId),
     queryFn: () => issuesApi.listApprovals(issueId),
@@ -2986,91 +2976,9 @@ function IssueDetailActivityTab({
       ReturnType<typeof issuesApi.getDocument>
     > | null>(issueId),
   });
-  const { data: issueTreeCostSummary } = useQuery({
-    queryKey: queryKeys.issues.costSummary(issueId),
-    queryFn: () => issuesApi.getCostSummary(issueId),
-    placeholderData:
-      keepPreviousDataForSameQueryTail<
-        Awaited<ReturnType<typeof issuesApi.getCostSummary>>
-      >(issueId),
-  });
   const initialLoading =
     (activityLoading && activity === undefined) ||
     (linkedRunsLoading && linkedRuns === undefined);
-  const issueCostSummary = useMemo(() => {
-    let input = 0;
-    let output = 0;
-    let cached = 0;
-    let totalTokens = 0;
-    let cost = 0;
-    let runtimeMs = 0;
-    let runCount = 0;
-    let hasCost = false;
-    let hasTokens = false;
-    const nowMs = Date.now();
-
-    for (const run of linkedRuns ?? []) {
-      const usage = asRecord(run.usageJson);
-      const result = asRecord(run.resultJson);
-      const runInput = usageNumber(usage, "inputTokens", "input_tokens");
-      const runOutput = usageNumber(usage, "outputTokens", "output_tokens");
-      const runCached = usageNumber(
-        usage,
-        "cachedInputTokens",
-        "cached_input_tokens",
-        "cache_read_input_tokens",
-      );
-      const runCost = visibleRunCostUsd(usage, result);
-      if (runCost > 0) hasCost = true;
-      if (runInput + runOutput + runCached > 0) hasTokens = true;
-      input += runInput;
-      output += runOutput;
-      cached += runCached;
-      totalTokens += visibleRunTokenTotal(usage);
-      cost += runCost;
-
-      if (run.startedAt) {
-        const startMs = new Date(run.startedAt).getTime();
-        const endMs = run.finishedAt
-          ? new Date(run.finishedAt).getTime()
-          : nowMs;
-        if (
-          Number.isFinite(startMs) &&
-          Number.isFinite(endMs) &&
-          endMs >= startMs
-        ) {
-          runtimeMs += endMs - startMs;
-          runCount += 1;
-        }
-      }
-    }
-
-    return {
-      input,
-      output,
-      cached,
-      cost,
-      totalTokens,
-      hasCost,
-      hasTokens,
-      runtimeMs,
-      runCount,
-      hasRuntime: runtimeMs > 0,
-    };
-  }, [linkedRuns]);
-  const issueTreeCostTokens =
-    (issueTreeCostSummary?.inputTokens ?? 0) +
-    (issueTreeCostSummary?.cachedInputTokens ?? 0) +
-    (issueTreeCostSummary?.outputTokens ?? 0);
-  const hasIssueTreeCost =
-    !!issueTreeCostSummary &&
-    (issueTreeCostSummary.costCents > 0 ||
-      issueTreeCostTokens > 0 ||
-      issueTreeCostSummary.cachedInputTokens > 0 ||
-      issueTreeCostSummary.runtimeMs > 0 ||
-      issueTreeCostSummary.issueCount > 1);
-  const shouldShowCostSummary =
-    (linkedRuns && linkedRuns.length > 0) || hasIssueTreeCost;
 
   if (initialLoading) {
     return <IssueSectionSkeleton titleWidth="w-20" rows={4} />;
@@ -3078,165 +2986,96 @@ function IssueDetailActivityTab({
 
   return (
     <>
-      {shouldShowCostSummary && (
-        <div className="mb-3 px-3 py-2 rounded-lg border border-border">
-          <div className="text-sm font-medium text-muted-foreground mb-1">
-            Cost Summary
-          </div>
-          {!issueCostSummary.hasCost &&
-          !issueCostSummary.hasTokens &&
-          !hasIssueTreeCost ? (
-            <div className="text-xs text-muted-foreground">
-              No cost data yet.
-            </div>
-          ) : (
-            <div className="space-y-1 text-xs text-muted-foreground tabular-nums">
-              <div className="flex flex-wrap gap-3">
-                <span className="font-medium text-foreground">This task</span>
-                {issueCostSummary.hasCost ? (
-                  <span className="font-medium text-foreground">
-                    ${issueCostSummary.cost.toFixed(4)}
-                  </span>
-                ) : null}
-                {issueCostSummary.hasTokens ? (
-                  <span>
-                    Tokens {formatTokens(issueCostSummary.totalTokens)}
-                    {issueCostSummary.cached > 0
-                      ? ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)}, cached ${formatTokens(issueCostSummary.cached)})`
-                      : ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)})`}
-                  </span>
-                ) : null}
-                {issueCostSummary.hasRuntime ? (
-                  <span>
-                    Runtime {formatDurationMs(issueCostSummary.runtimeMs)}
-                    {` (${issueCostSummary.runCount} run${issueCostSummary.runCount === 1 ? "" : "s"})`}
-                  </span>
-                ) : null}
-                {!issueCostSummary.hasCost &&
-                !issueCostSummary.hasTokens &&
-                !issueCostSummary.hasRuntime ? (
-                  <span>No direct cost data.</span>
-                ) : null}
-              </div>
-              {hasIssueTreeCost && issueTreeCostSummary ? (
-                <div className="flex flex-wrap gap-3">
-                  <span className="font-medium text-foreground">
-                    Including sub-tasks{" "}
-                    {(issueTreeCostSummary.costCents / 100).toLocaleString(
-                      undefined,
-                      {
-                        style: "currency",
-                        currency: "USD",
-                        minimumFractionDigits: 4,
-                        maximumFractionDigits: 4,
-                      },
-                    )}
-                  </span>
-                  <span>
-                    Tokens {formatTokens(issueTreeCostTokens)}
-                    {issueTreeCostSummary.cachedInputTokens > 0
-                      ? ` (in ${formatTokens(issueTreeCostSummary.inputTokens)}, out ${formatTokens(issueTreeCostSummary.outputTokens)}, cached ${formatTokens(issueTreeCostSummary.cachedInputTokens)})`
-                      : ` (in ${formatTokens(issueTreeCostSummary.inputTokens)}, out ${formatTokens(issueTreeCostSummary.outputTokens)})`}
-                  </span>
-                  {issueTreeCostSummary.runCount > 0 ? (
-                    <span>
-                      Runtime {formatDurationMs(issueTreeCostSummary.runtimeMs)}
-                      {` (${issueTreeCostSummary.runCount} run${issueTreeCostSummary.runCount === 1 ? "" : "s"})`}
-                    </span>
-                  ) : null}
-                  <span>
-                    {issueTreeCostSummary.issueCount} task
-                    {issueTreeCostSummary.issueCount === 1 ? "" : "s"}
-                  </span>
-                </div>
-              ) : null}
-            </div>
-          )}
-        </div>
-      )}
+      <TaskExecutionCostSummary
+        linkedRuns={linkedRuns}
+        issueTreeCostSummary={issueTreeCostSummary}
+      />
       <div className="mb-3">
-        <IssueRunLedger
-          issueId={issueId}
-          companyId={companyId}
-          issueStatus={issueStatus}
-          childIssues={childIssues}
-          agentMap={agentMap}
-          hasLiveRuns={hasLiveRuns}
-          activityEvents={activity ?? []}
-          resolveUserLabel={(userId) =>
-            userProfileMap.get(userId)?.label ?? null
-          }
-          renderActivityEvent={(evt) => {
-            const tone = successfulRunHandoffActivityTone(evt.action);
-            const isHandoffWarning =
-              evt.action === SUCCESSFUL_RUN_HANDOFF_REQUIRED_ACTION ||
-              evt.action === SUCCESSFUL_RUN_HANDOFF_ESCALATED_ACTION;
-            return (
-              <div
-                className={cn(
-                  "space-y-1.5 rounded-lg border px-3 py-2 text-xs",
-                  tone.className,
-                )}
-              >
-                <div className="flex items-center gap-1.5">
-                  {isHandoffWarning ? (
-                    <AlertTriangle
-                      className={cn("h-3.5 w-3.5 shrink-0", tone.iconClassName)}
+        <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading runs…</p>}>
+          <IssueRunLedger
+            issueId={issueId}
+            companyId={companyId}
+            issueStatus={issueStatus}
+            childIssues={childIssues}
+            agentMap={agentMap}
+            hasLiveRuns={hasLiveRuns}
+            runs={linkedRuns}
+            activityEvents={activity ?? []}
+            resolveUserLabel={(userId) =>
+              userProfileMap.get(userId)?.label ?? null
+            }
+            renderActivityEvent={(evt) => {
+              const tone = successfulRunHandoffActivityTone(evt.action);
+              const isHandoffWarning =
+                evt.action === SUCCESSFUL_RUN_HANDOFF_REQUIRED_ACTION ||
+                evt.action === SUCCESSFUL_RUN_HANDOFF_ESCALATED_ACTION;
+              return (
+                <div
+                  className={cn(
+                    "space-y-1.5 rounded-lg border px-3 py-2 text-xs",
+                    tone.className,
+                  )}
+                >
+                  <div className="flex items-center gap-1.5">
+                    {isHandoffWarning ? (
+                      <AlertTriangle
+                        className={cn("h-3.5 w-3.5 shrink-0", tone.iconClassName)}
+                      />
+                    ) : null}
+                    <ActorIdentity
+                      evt={evt}
+                      agentMap={agentMap}
+                      userProfileMap={userProfileMap}
                     />
-                  ) : null}
-                  <ActorIdentity
-                    evt={evt}
-                    agentMap={agentMap}
-                    userProfileMap={userProfileMap}
+                    <span>
+                      {formatIssueActivityAction(evt.action, evt.details, {
+                        agentMap,
+                        userProfileMap,
+                        currentUserId,
+                      })}
+                    </span>
+                    <span className="ml-auto shrink-0">
+                      {relativeTime(evt.createdAt)}
+                    </span>
+                  </div>
+                  <IssueReferenceActivitySummary event={evt} />
+                  {/* Field-level who/what/why receipt for agent and board edits alike. */}
+                  <IssueFieldChangeReceipt
+                    event={evt}
+                    resolveAgentLabel={(agentId) =>
+                      agentMap.get(agentId)?.name ?? null
+                    }
+                    resolveUserLabel={(userId) =>
+                      userProfileMap.get(userId)?.label ?? null
+                    }
                   />
-                  <span>
-                    {formatIssueActivityAction(evt.action, evt.details, {
-                      agentMap,
-                      userProfileMap,
-                      currentUserId,
-                    })}
-                  </span>
-                  <span className="ml-auto shrink-0">
-                    {relativeTime(evt.createdAt)}
-                  </span>
+                  {/* A refused write explains itself here, not just in the API error. */}
+                  {(() => {
+                    const denial = issueWriteDenialForActivity(
+                      evt.action,
+                      evt.details,
+                      {
+                        actorLabel: evt.agentId
+                          ? (agentMap.get(evt.agentId)?.name ?? null)
+                          : null,
+                        responsibleUserName: evt.responsibleUserId
+                          ? (userProfileMap.get(evt.responsibleUserId)?.label ??
+                            null)
+                          : null,
+                      },
+                    );
+                    return denial ? (
+                      <IssueWriteDenialNotice
+                        code={denial.code}
+                        context={denial.context}
+                      />
+                    ) : null;
+                  })()}
                 </div>
-                <IssueReferenceActivitySummary event={evt} />
-                {/* Field-level who/what/why receipt for agent and board edits alike. */}
-                <IssueFieldChangeReceipt
-                  event={evt}
-                  resolveAgentLabel={(agentId) =>
-                    agentMap.get(agentId)?.name ?? null
-                  }
-                  resolveUserLabel={(userId) =>
-                    userProfileMap.get(userId)?.label ?? null
-                  }
-                />
-                {/* A refused write explains itself here, not just in the API error. */}
-                {(() => {
-                  const denial = issueWriteDenialForActivity(
-                    evt.action,
-                    evt.details,
-                    {
-                      actorLabel: evt.agentId
-                        ? (agentMap.get(evt.agentId)?.name ?? null)
-                        : null,
-                      responsibleUserName: evt.responsibleUserId
-                        ? (userProfileMap.get(evt.responsibleUserId)?.label ??
-                          null)
-                        : null,
-                    },
-                  );
-                  return denial ? (
-                    <IssueWriteDenialNotice
-                      code={denial.code}
-                      context={denial.context}
-                    />
-                  ) : null;
-                })()}
-              </div>
-            );
-          }}
-        />
+              );
+            }}
+          />
+        </Suspense>
       </div>
       <IssueContinuationHandoff
         document={continuationHandoff}
@@ -9282,19 +9121,20 @@ function IssueFileViewer({
 
   if (useSidePanel) return null;
 
+  function closeViewer() {
+    onPromptOpenChange(false);
+    viewer.close();
+  }
+
   return (
-    <FileViewerSheet
-      issueId={issueId}
-      companyId={companyId}
-      open={open}
-      showPromptWhenEmpty={showPromptWhenEmpty}
-      onOpenChange={(next) => {
-        if (!next) {
-          onPromptOpenChange(false);
-          // Clears any file view and browse state from the URL.
-          viewer.close();
-        }
-      }}
-    />
+    <DeferredOverlay requested={open} title="File preview" onClose={closeViewer}>
+      <FileViewerSheet
+        issueId={issueId}
+        companyId={companyId}
+        open={open}
+        showPromptWhenEmpty={showPromptWhenEmpty}
+        onOpenChange={(next) => { if (!next) closeViewer(); }}
+      />
+    </DeferredOverlay>
   );
 }

@@ -814,6 +814,7 @@ type ProprioWakePayload = {
   // Technical English with brief decision context.
   simplifiedEnglishInteractions: boolean;
   dependencyBlockedInteraction: boolean;
+  dependencyDiagnosis: boolean;
   treeHoldInteraction: boolean;
   activeTreeHold: ProprioWakeTreeHoldSummary | null;
   unresolvedBlockerIssueIds: string[];
@@ -1911,6 +1912,7 @@ export function normalizeProprioWakePayload(
       payload.dependencyBlockedInteraction,
       false,
     ),
+    dependencyDiagnosis: payload.dependencyDiagnosis === true,
     treeHoldInteraction: asBoolean(payload.treeHoldInteraction, false),
     activeTreeHold,
     unresolvedBlockerIssueIds,
@@ -2725,7 +2727,7 @@ function renderProprioWakePromptBody(
   if (normalized.dependencyBlockedInteraction) {
     lines.push("- dependency-blocked interaction: yes");
     lines.push(
-      normalized.reason === ISSUE_BLOCKER_STALLED_WAKE_REASON
+      normalized.dependencyDiagnosis || normalized.reason === ISSUE_BLOCKER_STALLED_WAKE_REASON
         ? "- execution scope: investigate the stalled dependency, continue independent work, or propose a replacement. Keep the dependent work blocked until its requirements are met."
         : "- execution scope: respond or triage the human comment; do not treat blocker-dependent deliverable work as unblocked",
     );

@@ -26,7 +26,7 @@ const diagnosis: DependencyDiagnosis = {
   dependencyPath: [
     { issueId: "child-id", identifier: "CHA-8", title: "Ship the migration", status: "blocked" },
   ],
-  cause: { kind: "retry_exhausted", issueId: "child-id", recoveryActionId: "recovery-id" },
+  cause: { kind: "retry_exhausted", issueId: "child-id" },
   nextOwner: { type: "board", name: "The board" },
   nextAction: "Ask the parent assignee to investigate.",
   wake: { idempotencyKey: "stable-wake-key", status: "not_requested" },
@@ -75,6 +75,21 @@ describe("DependencyDiagnosisNotice", () => {
     expect(notice.querySelector("button")?.textContent).toContain("Ask assignee to investigate");
   });
 
+  it("uses the authorized blocker task’s display status", async () => {
+    const node = await render(diagnosis);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={client}>
+          <DependencyDiagnosisNotice issueId="parent-id" canRequest
+            diagnosis={{ ...diagnosis, dependencyPath: [{ ...diagnosis.dependencyPath[0]!, status: "in_progress" }] }}
+            blockerSummaries={[{ id: "child-id", title: "Ship the migration", identifier: "CHA-8",
+              status: "in_progress", displayStatus: "monitoring", priority: "medium", assigneeAgentId: null, assigneeUserId: null }]} />
+        </QueryClientProvider>,
+      );
+    });
+    expect(node.querySelector("[aria-label='Dependency path']")?.textContent).toContain("(Monitoring)");
+  });
+
   it("reuses the server's idempotency key after a lost response and invalidates parent detail on acceptance", async () => {
     requestDependencyInvestigation.mockRejectedValueOnce(new Error("network unavailable"))
       .mockResolvedValueOnce({ accepted: true, message: "Accepted" });
@@ -83,18 +98,22 @@ describe("DependencyDiagnosisNotice", () => {
     const button = node.querySelector<HTMLButtonElement>("button")!;
 
     await act(async () => { button.click(); });
-    const retry = [...node.querySelectorAll("button")].find(item => item.textContent === "Try again")!;
+    const retry = await vi.waitFor(() => {
+      const button = [...node.querySelectorAll("button")].find(item => item.textContent === "Try again");
+      expect(button).toBeDefined();
+      return button!;
+    });
     expect(node.textContent).toContain("If the response was lost, retrying will use the same request.");
     await act(async () => { retry.click(); });
 
     expect(requestDependencyInvestigation).toHaveBeenNthCalledWith(1, "parent-id", { idempotencyKey: "stable-wake-key" });
     expect(requestDependencyInvestigation).toHaveBeenNthCalledWith(2, "parent-id", { idempotencyKey: "stable-wake-key" });
-    expect(node.textContent).toContain("Request accepted.");
+    await vi.waitFor(() => expect(node.textContent).toContain("Request accepted."));
     expect(client.getQueryState(queryKeys.issues.detail("parent-id"))?.isInvalidated).toBe(true);
     await act(async () => {
       root!.render(
         <QueryClientProvider client={client}>
-          <DependencyDiagnosisNotice issueId="parent-id" diagnosis={{
+          <DependencyDiagnosisNotice issueId="parent-id" canRequest diagnosis={{
             ...diagnosis, wake: { ...diagnosis.wake, status: "running" },
           }} />
         </QueryClientProvider>,
@@ -109,7 +128,23 @@ describe("DependencyDiagnosisNotice", () => {
     const node = await render(diagnosis);
     await act(async () => { node.querySelector("button")!.click(); });
 
-    expect(node.querySelector("[role='alert']")?.textContent).toBe("The task was reassigned.");
+    await vi.waitFor(() => expect(node.querySelector("[role='alert']")?.textContent).toBe("The task was reassigned."));
+  });
+
+  it("keeps a stale request refusal visible after the current diagnosis changes or clears", async () => {
+    requestDependencyInvestigation.mockResolvedValue({ accepted: false, message: "The task was reassigned." });
+    const node = await render(diagnosis);
+    await act(async () => { node.querySelector("button")!.click(); });
+    for (const current of [{ ...diagnosis, wake: { ...diagnosis.wake, idempotencyKey: "different-key" } }, null]) {
+      await act(async () => {
+        root!.render(
+          <QueryClientProvider client={client}>
+            <DependencyDiagnosisNotice issueId="parent-id" diagnosis={current} canRequest />
+          </QueryClientProvider>,
+        );
+      });
+      expect(node.querySelector("[role='alert']")?.textContent).toBe("The task was reassigned.");
+    }
   });
 
   it.each([

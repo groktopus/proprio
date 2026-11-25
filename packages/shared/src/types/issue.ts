@@ -635,9 +635,8 @@ export interface IssueUnblockDescriptor {
   action: string;
 }
 
-/** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
 export interface DependencyDiagnosis {
-  state: "no_execution_path" | "active" | "external_wait";
+  state: "no_execution_path" | "active" | "external_wait" | "restricted";
   dependencyPath: Array<{
     issueId: string;
     identifier: string | null;
@@ -647,18 +646,17 @@ export interface DependencyDiagnosis {
   cause: {
     kind: string;
     issueId: string | null;
-    recoveryActionId?: string;
   };
-  nextOwner: { type: "agent" | "user" | "board"; id?: string; name?: string };
+  nextOwner: { type: "agent" | "user" | "board"; name?: string };
   nextAction: string;
   wake: {
-    idempotencyKey: string;
+    idempotencyKey?: string;
     status: "not_requested" | "queued" | "running" | "deferred" | "refused" | "exhausted" | "completed";
-    wakeupRequestId?: string;
   };
   canInvestigate: boolean;
 }
 
+/** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
 export interface IssueBlockerStalledWakeContext {
   stalledIssueId: string;
   stalledIssueIdentifier: string | null;
@@ -1041,6 +1039,8 @@ export interface Issue {
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   executionBlocker?: ExecutionBlocker | null;
   interruption?: TaskInterruptionPresentation | null;
+  /** Whether the current Board viewer may request a Retry from this task detail. */
+  viewerCanRetry?: boolean;
   watchdog?: IssueWatchdogSummary | null;
   scheduledRetry?: IssueScheduledRetry | null;
   liveDescendantCount?: number;

@@ -19,6 +19,7 @@ import type {
   FeedbackVote,
   Issue,
   DependencyDiagnosis,
+  DependencyInvestigationInput,
   IssueAccessGrant,
   IssueAccessGrantSubjectType,
   IssueVisibility,
@@ -460,7 +461,7 @@ export const issuesApi = {
       presentation: import("@groktopus/shared").TaskInterruptionPresentation | null }>(`/issues/${issueId}/retry`, body),
   getDependencyInvestigation: (issueId: string) =>
     api.get<DependencyDiagnosis | null>(`/issues/${issueId}/dependency-investigation`, { cache: "no-store" }),
-  requestDependencyInvestigation: (issueId: string, body: { idempotencyKey: string }) =>
+  requestDependencyInvestigation: (issueId: string, body: DependencyInvestigationInput) =>
     api.post<{ accepted: boolean; message: string }>(`/issues/${issueId}/dependency-investigation`, body),
   recoverWorkspace: (id: string, data: { actionId: string; runId: string; idempotencyKey: string }) =>
     api.post<{ actionId: string; status: string }>(`/issues/${id}/recovery-actions/recover-workspace`, data),

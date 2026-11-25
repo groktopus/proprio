@@ -6868,7 +6868,7 @@ export function IssueChatThread({
                       }
                     />
                     <DependencyDiagnosisNotice issueId={issueId ?? ""} diagnosis={dependencyDiagnosis} canRequest={showComposer}
-                      diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
+                      blockerSummaries={blockedBy} diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
                     <StalledDependencyNotice stalled={stalledDependencies} />
                     <IssueAssigneePausedNotice
                       agent={assignedAgent}
@@ -6884,7 +6884,7 @@ export function IssueChatThread({
                     className="space-y-2"
                   >
                     <DependencyDiagnosisNotice issueId={issueId ?? ""} diagnosis={dependencyDiagnosis} canRequest={false}
-                      diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
+                      blockerSummaries={blockedBy} diagnosisError={dependencyDiagnosisError} onRetryDiagnosis={onRetryDependencyDiagnosis} />
                     <IssueAssigneePausedNotice
                       agent={assignedAgent}
                       issueStatus={issueStatus}
