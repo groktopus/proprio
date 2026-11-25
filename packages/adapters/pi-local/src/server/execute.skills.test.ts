@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { listPiSkills } from "./skills.js";
 
 const { runAdapterExecutionTargetProcess, ensurePiModelConfiguredAndAvailable } = vi.hoisted(() => ({
   runAdapterExecutionTargetProcess: vi.fn(),
@@ -49,9 +50,12 @@ async function makeSkill(root: string, name: string, content: string): Promise<s
 
 describe("Pi local explicit runtime skill isolation", () => {
   const tempDirs: string[] = [];
+  let home: string;
 
   beforeAll(async () => {
-    vi.stubEnv("HOME", "/tmp/proprio-pi-execute-skills-test-home");
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-pi-execute-skills-home-"));
+    tempDirs.push(home);
+    vi.stubEnv("HOME", home);
     ({ execute } = await import("./execute.js"));
   });
 
@@ -60,7 +64,27 @@ describe("Pi local explicit runtime skill isolation", () => {
   afterEach(async () => {
     vi.clearAllMocks();
     await Promise.all(tempDirs.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
-    await fs.rm("/tmp/proprio-pi-execute-skills-test-home", { recursive: true, force: true });
+  });
+
+  it("reports explicit run inventories as ephemeral mounts", async () => {
+    const snapshot = await listPiSkills({
+      agentId: "agent-1",
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        proprioRuntimeSkills: [{ key: "company/alpha", runtimeName: "alpha", source: "/skills/alpha" }],
+        proprioSkillSync: { desiredSkills: ["company/alpha"] },
+      },
+    });
+
+    expect(snapshot.mode).toBe("ephemeral");
+    expect(snapshot.entries).toContainEqual(expect.objectContaining({
+      key: "company/alpha",
+      desired: true,
+      state: "configured",
+      targetPath: null,
+      detail: "Mounted into a fresh Pi skill directory for each run.",
+    }));
   });
 
   it("mounts only each run's explicit skills, including an empty selection, and removes run roots", async () => {
@@ -122,7 +146,7 @@ describe("Pi local explicit runtime skill isolation", () => {
     for (const entry of observed) {
       await expect(fs.stat(path.dirname(entry.skillRoot))).rejects.toMatchObject({ code: "ENOENT" });
     }
-    await expect(fs.access("/tmp/proprio-pi-execute-skills-test-home/.pi/agent/skills"))
+    await expect(fs.access(path.join(home, ".pi", "agent", "skills")))
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 });

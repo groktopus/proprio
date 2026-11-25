@@ -128,6 +128,9 @@ removes the staged directory when execution ends. Existing links in
 sessions and legacy runs that do not receive an explicit inventory. Explicit
 operator `--skill` arguments in adapter `extraArgs` remain in effect, and Pi
 credentials/provider configuration continue to use their normal config paths.
+Pi extensions configured in its normal settings can also contribute skills
+through Pi's extension resource discovery; these extension-provided skills are
+outside the server runtime-skill inventory.
 
 The `instructionsBundleMode`, `instructionsRootPath`, `instructionsEntryFile`,
 `instructionsFilePath`, and `proprioSkillSync` adapter keys are represented by

@@ -4214,12 +4214,20 @@ export async function readProprioRuntimeSkillEntries(
   moduleDir: string,
   additionalCandidates: string[] = [],
 ): Promise<ProprioSkillEntry[]> {
+  return (await readProprioRuntimeSkillInventory(config, moduleDir, additionalCandidates)).entries;
+}
+
+export async function readProprioRuntimeSkillInventory(
+  config: Record<string, unknown>,
+  moduleDir: string,
+  additionalCandidates: string[] = [],
+): Promise<{ explicit: boolean; entries: ProprioSkillEntry[] }> {
   const configuredEntries = normalizeConfiguredProprioRuntimeSkills(
     config.proprioRuntimeSkills,
   );
   // An explicit empty assignment must not fall back to every bundled skill.
-  if (Array.isArray(config.proprioRuntimeSkills)) return configuredEntries;
-  return listProprioSkillEntries(moduleDir, additionalCandidates);
+  if (Array.isArray(config.proprioRuntimeSkills)) return { explicit: true, entries: configuredEntries };
+  return { explicit: false, entries: await listProprioSkillEntries(moduleDir, additionalCandidates) };
 }
 
 export async function readProprioSkillMarkdown(
