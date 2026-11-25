@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
@@ -23,6 +24,7 @@ describe("pinned Pi CLI skill discovery", () => {
           cwd: workspace,
           env: {
             PATH: process.env.PATH,
+            HOME: root,
             PI_CODING_AGENT_DIR: agentDir,
             PI_OFFLINE: "1",
             PI_TELEMETRY: "0",
@@ -32,7 +34,15 @@ describe("pinned Pi CLI skill discovery", () => {
           if (error) reject(error);
           else resolve({ stdout, stderr });
         });
-        child.stdin?.end(input);
+        if (input && child.stdout) {
+          const lines = createInterface({ input: child.stdout });
+          lines.on("line", (line) => {
+            if (line.includes('"id":"skills"')) child.stdin?.end();
+          });
+          child.stdin?.write(input);
+        } else {
+          child.stdin?.end();
+        }
       });
     }
     async function skills(flags: string[]) {
@@ -55,7 +65,7 @@ describe("pinned Pi CLI skill discovery", () => {
       const versionOutput = await cli(["--version"]);
       const version = (versionOutput.stdout || versionOutput.stderr).trim();
       expect(SANDBOX_INSTALL_COMMAND.endsWith(`@${version}`)).toBe(true);
-      expect(await skills([])).toContain("skill:previous");
+      expect(await skills([])).toEqual(["skill:previous"]);
       expect(await skills(["--no-skills", "--skill", selected])).toEqual(["skill:selected"]);
       expect(await skills(["--no-skills"])).toEqual([]);
     } finally {
