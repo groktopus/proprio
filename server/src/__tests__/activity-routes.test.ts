@@ -219,6 +219,24 @@ describe("activity routes", () => {
     expect(mockCompletionHistory.read).not.toHaveBeenCalled();
   });
 
+  it("rate-limits completion history before resolving the task or reading evidence", async () => {
+    mockIssueService.getByIdentifier.mockResolvedValue({ id: "issue-1", companyId: "company-1" });
+    mockCompletionHistory.read.mockResolvedValue([]);
+    const app = await createApp({ type: "agent", companyId: "company-1", agentId: "agent-1" });
+    const getHistory = () => requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const response = await getHistory();
+      expect(response.status).toBe(200);
+    }
+
+    const throttled = await getHistory();
+
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers["retry-after"])).toBeGreaterThan(0);
+    expect(mockIssueService.getByIdentifier).toHaveBeenCalledTimes(30);
+    expect(mockCompletionHistory.read).toHaveBeenCalledTimes(30);
+  });
+
   it("reads bounded input facts with the same issue access checks", async () => {
     const commentId = "11111111-1111-4111-8111-111111111111";
     mockIssueService.getByIdentifier.mockResolvedValue({ id: "issue-1", companyId: "company-1" });
