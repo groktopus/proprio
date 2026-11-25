@@ -236,6 +236,87 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
+  it("finds a late-committing event only through a fresh overlapping export", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const epoch = randomUUID();
+    const from = "2026-07-17T00:00:00.000Z";
+    const boundary = "2026-07-17T00:00:02.000Z";
+    const to = "2026-07-17T00:00:04.000Z";
+    const eventId = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+
+    let signalInserted!: () => void;
+    const inserted = new Promise<void>(resolve => { signalInserted = resolve; });
+    let finishTransaction!: () => void;
+    const transactionMayCommit = new Promise<void>(resolve => { finishTransaction = resolve; });
+    const lateTransaction = db.transaction(async tx => {
+      await tx.insert(managedAuditEvents).values({
+        id: eventId,
+        companyId: company.id,
+        source: "tool_gateway",
+        schemaVersion: 1,
+        eventType: "invocation_decision_recorded",
+        phase: "policy_decision",
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"),
+        invocationId: randomUUID(),
+        actorType: "agent",
+        actorId: agent.id,
+        decision: "allow",
+        status: "authorized",
+      });
+      signalInserted();
+      await transactionMayCommit;
+    });
+
+    try {
+      await Promise.race([inserted, lateTransaction]);
+      const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const first = await board.post(path).send({ from, to: boundary }).expect(201);
+      expect(first.body.eventCount).toBe(0);
+
+      finishTransaction();
+      await lateTransaction;
+      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
+      expect(adjacent.body.eventCount).toBe(0);
+      const firstPage = await board.get(`${path}/${first.body.exportId}`).expect(200);
+      const adjacentPage = await board.get(`${path}/${adjacent.body.exportId}`).expect(200);
+      expect(firstPage.body.events).toEqual([]);
+      expect(adjacentPage.body.events).toEqual([]);
+
+      const overlapping = await board.post(path).send({ from, to }).expect(201);
+      const overlapPage = await board.get(`${path}/${overlapping.body.exportId}`).expect(200);
+      expect(overlapPage.body.events).toMatchObject([{ id: eventId, source: "tool_gateway" }]);
+      expect(overlapPage.body.complete).toBe(true);
+
+      // A source epoch fences old export checkpoints, while stable event IDs
+      // still deduplicate archived evidence across epochs.
+      const nextEpoch = randomUUID();
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", nextEpoch);
+      expect((await board.get(`${path}/${overlapping.body.exportId}`)).body)
+        .toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
+      const nextEpochExport = await board.post(path).send({ from, to }).expect(201);
+      const nextEpochPage = await board.get(`${path}/${nextEpochExport.body.exportId}`).expect(200);
+      expect(nextEpochPage.body.events).toMatchObject([{ id: eventId, source: "tool_gateway" }]);
+      const archivedKeys = [overlapPage.body.events[0], nextEpochPage.body.events[0]]
+        .map(event => `${event.source}:${event.id}`);
+      expect(new Set(archivedKeys).size).toBe(1);
+    } finally {
+      finishTransaction();
+      vi.unstubAllEnvs();
+      await lateTransaction;
+    }
+  }, 45_000);
+
   it("invalidates a frozen audit export when evidence on another page loses visibility", async () => {
     const { company, agent, issue } = await seed();
     const userId = randomUUID();

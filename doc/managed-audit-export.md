@@ -28,11 +28,15 @@ Keep this boundary outside the database rollback domain.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
 3. Persist the page to separately governed storage. Deduplicate events by source
-   and ID. Then record the returned `nextCursor` and send it as `cursor` on the
-   next request. A repeated page uses the same event IDs.
-4. Confirm that the final page reports `complete`, the archived count equals
-   `eventCount`, and the watermark equals the SHA-256 of the compact JSON
-   array of archived event IDs in lexicographic order.
+   and stable event ID across source epochs. Event IDs can remain the same after
+   a database restore. Bind each export ID and resume checkpoint to its source
+   epoch. After epoch rotation, reconcile and create a fresh export.
+   Then record the returned `nextCursor` and send it as `cursor` on the next
+   request. A repeated page uses the same event IDs.
+4. Confirm that the final page reports `complete`. Count the distinct event IDs
+   received for this snapshot and compare the count to `eventCount`. Compare the
+   watermark to the SHA-256 of those IDs encoded as a compact JSON array in
+   lexicographic order.
 
 An export belongs to the creating operator and company. Company, audit and task
 access are checked for eligible events. For a missing task or run, snapshot
@@ -49,6 +53,17 @@ Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
 An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
+
+For periodic collection, re-export a bounded overlapping lookback using a new
+export ID, then deduplicate the archived events by `(source, event ID)`. Keep
+each snapshot's bounds, source epoch, count and watermark with its delivery
+checkpoint. A covered gateway transaction can commit after the snapshot was created
+while carrying an earlier `occurredAt`, and the next adjacent interval will
+exclude that event. A fresh overlapping snapshot can find it while the source
+row remains available. The watermark verifies membership and delivery for the
+frozen snapshot. Transactions that commit after the lookback has moved past
+their event time require separate reconciliation. Reconcile the affected
+interval against source or target evidence when completeness is required.
 
 ## Restore qualification and limits
 
