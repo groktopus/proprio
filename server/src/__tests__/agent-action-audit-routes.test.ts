@@ -414,6 +414,37 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("lets a collector replace snapshots whose memberships were permanently invalidated", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    await db.insert(managedAuditExports).values(Array.from({ length: 32 }, () => ({
+      companyId: company.id, userId, sourceEpoch: epoch,
+      from: new Date(window.from), to: new Date(window.to), eventIds: [], watermark: "invalidated-fixture",
+      expiresAt: new Date(Date.now() + 60_000), invalidated: true,
+    })));
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const replacement = await board.post(path).send(window).expect(201);
+      expect(replacement.body).toHaveProperty("exportId");
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id)))
+        .toHaveLength(33);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reclaims quota after an epoch or retention change while keeping old checkpoints fenced", async () => {
     const { company } = await seed();
     const userId = randomUUID();
@@ -564,6 +595,7 @@ describePostgres("agent action audit routes", () => {
       await lockDb.execute(sql`select pg_advisory_lock(${triggerKey}::bigint)`);
       held = true;
 
+      const losingRequestStartedAt = performance.now();
       losingRequest = board.post(path).send(window).then(response => response);
       await vi.waitFor(async () => {
         const [waiting] = await db.execute<{ count: number }>(sql`
@@ -580,10 +612,24 @@ describePostgres("agent action audit routes", () => {
           watermark: "winning-concurrent-quota-writer", expiresAt: new Date(Date.now() + 60_000),
         });
       }, { isolationLevel: "serializable" });
+      const [routeWaiter] = await db.execute<{ count: number; ageMs: number }>(sql`
+        select count(*)::int as count,
+          coalesce(max(extract(epoch from now() - activity.query_start) * 1000), 0)::int as "ageMs"
+        from pg_locks lock
+        join pg_stat_activity activity using (pid)
+        where lock.locktype = 'advisory' and not lock.granted
+          and lock.classid = 0 and lock.objid = ${triggerKey}::oid
+      `);
+      expect(routeWaiter).toMatchObject({ count: 1 });
+      // The exact HTTP writer is blocked on the test gate well before its
+      // five-second statement timeout, so its 503 after release is the
+      // serializable quota loser path, not a 57014 timeout.
+      expect(routeWaiter!.ageMs).toBeLessThan(4_000);
       await lockDb.execute(sql`select pg_advisory_unlock(${triggerKey}::bigint)`);
       held = false;
 
       const response = await losingRequest;
+      expect(performance.now() - losingRequestStartedAt).toBeLessThan(4_500);
       expect(response.status, response.text).toBe(503);
       expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
       const snapshots = await db.select().from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
