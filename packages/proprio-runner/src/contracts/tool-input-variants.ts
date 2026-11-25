@@ -35,9 +35,6 @@ function handoffCase(input: Input): string[] {
     if (target && has(target, "create")) problems.push(`With to: "done", case must contain only id, the existing case ID; a new case cannot be finished.`);
     return problems;
   }
-  if (has(input, "offer") && target && has(target, "create") && !has(input, "bindIssueId")) {
-    problems.push("An offer must reuse the source run's task. Send bindIssueId when creating the Case.");
-  }
   const missing = ["toAgentId", "phase"].filter(key => !has(input, key));
   if (missing.length) problems.push(`An agent handoff requires ${list(missing)}. To finish an existing case instead, send to: "done" with expectedHandoffVersion and expectedIssueStatusVersion.`);
   if (has(input, "workflowId") && has(input, "workflow_document_text")) {

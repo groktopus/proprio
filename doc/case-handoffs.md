@@ -86,17 +86,23 @@ invalidate the intent. Keep terminal intents outside agent-transfer mutation
 fencing, outgoing yield detection and recipient dispatch.
 
 Native `handoff_case` supports an opt-in `offer` for standard-mode native runs
-with the generic API tools available. The offer requires an authenticated source
-run on the same task, a completion contract, and a native recipient who can
-read the Case and use the decision API. The recipient can use `search_api` and
-`call_api` to read Case handoff history and record a decision. It preserves the
-source assignment and records the task brief and the completion-contract and
-workflow revisions. A task brief change, Stop, or Case cancellation closes an
-unanswered offer.
+with generic API tools and agent JWT signing available. The offer requires an
+authenticated source run on the same task, a completion contract, and a different
+native recipient who can read the Case and use the decision API. The recipient
+can use `search_api` and `call_api` to call
+`GET /api/companies/:companyId/case-handoff-offers`. The list contains routing
+metadata for the agent's own readable pending offers. Use the returned Case ID
+to read the requirements in Case handoff history. Follow the cursor until it is
+null, even when a page contains no readable items.
+
+The offer preserves the source assignment and records the task brief and the
+completion-contract and workflow revisions. A task brief change, Stop, or Case
+cancellation closes an unanswered offer.
 The named recipient can post a decision to `/api/cases/:caseId/handoffs/:handoffId/decision`
 using the observed handoff and completion-contract revisions. An identical reply
-returns the saved receipt. Acceptance waits for the normal source release and
-recipient admission checks. A stale offer closes when the recipient attempts a
+returns the saved decision metadata. The Case-scoped history retains any message
+sent with a clarification or decline. Acceptance waits for the normal source
+release and recipient admission checks. A stale offer closes when the recipient attempts a
 decision. If requirements change after assignment but before admission, the
 handoff remains held for the operator. Clarification or decline closes the offer
 and keeps the source assigned. The audit event records the category and elapsed

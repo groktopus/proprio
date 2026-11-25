@@ -28,11 +28,16 @@ export const CASE_HANDOFF_STATES = ["offered", "awaiting_release", "pending_disp
 export type CaseHandoffState = typeof CASE_HANDOFF_STATES[number];
 export type CaseHandoffDestinationKind = "agent" | "done";
 
+const wellFormedHandoffText = (value: string) => !value.includes("\u0000") && !/[\uD800-\uDFFF]/u.test(value);
 const handoffReceiptText = (maxLength: number) => z.string().trim().min(1).max(maxLength)
-  .refine(value => !value.includes("\u0000") && !/[\uD800-\uDFFF]/u.test(value), "Text must use valid Unicode and contain no NUL characters");
+  .refine(wellFormedHandoffText, "Text must use valid Unicode and contain no NUL characters");
+const handoffOfferText = (maxLength: number) => z.string().min(1)
+  .refine(value => [...value].length <= maxLength, `Text must contain at most ${maxLength} Unicode characters`)
+  .refine(wellFormedHandoffText, "Text must use valid Unicode and contain no NUL characters")
+  .pipe(z.string().trim().min(1));
 const caseHandoffOfferSchema = z.object({
-  expectedDeliverable: handoffReceiptText(8_000),
-  prerequisites: z.array(handoffReceiptText(2_000)).max(20).default([]),
+  expectedDeliverable: handoffOfferText(8_000),
+  prerequisites: z.array(handoffOfferText(2_000)).max(20).default([]),
 }).strict();
 type CaseHandoffOfferInput = z.infer<typeof caseHandoffOfferSchema>;
 export interface CaseHandoffOfferContract extends CaseHandoffOfferInput {

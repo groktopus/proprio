@@ -10,24 +10,34 @@ import { assertAuthenticated, assertCompanyAccess, hasCompanyAccess } from "./au
 
 const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(100).optional(), before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() });
 
+const listOffersSchema = listSchema.omit({ before: true });
+
 export function caseHandoffRoutes(db: Db) {
   const router = Router();
   const service = caseHandoffService(db);
-  const decisionRateLimit = rateLimit({
+  const handoffRateLimit = (limit: number, message: string) => rateLimit({
     windowMs: 60_000,
-    limit: 12,
+    limit,
     keyGenerator: req => req.actor?.type === "agent" && req.actor.companyId && req.actor.agentId
       ? `agent:${req.actor.companyId}:${req.actor.agentId}`
       : ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0"),
     standardHeaders: "draft-7",
     legacyHeaders: false,
-    message: { error: "Handoff decision request limit exceeded" },
+    message: { error: message },
   });
   router.post("/companies/:companyId/case-handoffs", validate(handoffCaseSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const result = await service.handoff(companyId, req.actor, req.body);
     res.status(result.replayed ? 200 : 202).json(result);
+  });
+  const listOffersRateLimit = handoffRateLimit(60, "Handoff offer list request limit exceeded");
+  const decisionRateLimit = handoffRateLimit(12, "Handoff decision request limit exceeded");
+  router.get("/companies/:companyId/case-handoff-offers", listOffersRateLimit, async (req, res) => {
+    assertAuthenticated(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await service.listRecipientOffers(req.actor, companyId, listOffersSchema.parse(req.query)));
   });
   async function readableCaseId(req: Request) {
     assertAuthenticated(req);

@@ -26,7 +26,8 @@ describe("handoff_case input", () => {
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: Array.from({ length: 21 }, () => "step") } }).success).toBe(false);
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, expectedDeliverable: "null\u0000byte" } }).success).toBe(false);
     expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["lone \uD800 surrogate"] } }).success).toBe(false);
-    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["Valid astral text 🚀"] } }).success).toBe(true);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["🧾".repeat(2_000)] } }).success).toBe(true);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["🧾".repeat(2_001)] } }).success).toBe(false);
   });
   it("accepts a reusable workflow at kickoff and reserves routing for handoff", () => {
     const { workflow_document_text: _inline, ...input } = kickoff;

@@ -268,8 +268,11 @@ describe("durable same-task case handoffs", () => {
       requirementRevisionId: f.contract.id };
     await recipientDecisionRequest(recipient, f).send({ ...input, message: "invalid\u0000text" }).expect(400);
     const result = await recipientDecisionRequest(recipient, f).send(input).expect(200);
-    expect(result.body).toMatchObject({ state: "cancelled", lastErrorCode: null,
-      recipientDecision: { outcome, reasonCode, actorId: f.engineer, message: input.message } });
+    expect(result.body).toMatchObject({ state: "cancelled", recipientDecision: { outcome, reasonCode, actorId: f.engineer } });
+    expect(result.body).not.toHaveProperty("offerContract");
+    expect(result.body.recipientDecision).not.toHaveProperty("message");
+    const history = await caseHandoffService(db).list(recipient, f.first.caseId);
+    expect(history.items[0]).toMatchObject({ lastErrorCode: null, recipientDecision: { message: input.message } });
     expect((await db.select().from(issues).where(eq(issues.id, f.first.taskId)))[0]!.assigneeAgentId).toBe(f.triage);
     const [audit] = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.first.caseId),
       eq(caseEvents.kind, "handoff_decision_recorded")));

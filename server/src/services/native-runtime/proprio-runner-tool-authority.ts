@@ -66,7 +66,7 @@ import {
 import { runnerApiToolsEnabled } from "./runner-api-rollout.js";
 import { openRunnerApiWorkspaceFile } from "./runner-api-files.js";
 import { basename } from "node:path";
-import { createLocalAgentJwt } from "../../agent-auth-jwt.js";
+import { canSignLocalAgentJwt, createLocalAgentJwt } from "../../agent-auth-jwt.js";
 import { getStorageService } from "../../storage/index.js";
 import type { StorageService } from "../../storage/types.js";
 import { assetService } from "../assets.js";
@@ -107,7 +107,7 @@ import {
   projects,
   issueThreadInteractions,
 } from "@groktopus/db";
-import { CAPABILITY_CANONICAL_OPERATIONS, CAPABILITY_SEMANTIC_TOOL_CATALOG, parseNativeExecutionInput, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError, toolInputVariantError } from "../../vendor/proprio-runner/index.js";
+import { CAPABILITY_CANONICAL_OPERATIONS, CAPABILITY_SEMANTIC_TOOL_CATALOG, HANDOFF_CASE_ORDINARY_DESCRIPTION, parseNativeExecutionInput, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError, toolInputVariantError } from "../../vendor/proprio-runner/index.js";
 import { agentService } from "../agents.js";
 import { approvalService } from "../approvals.js";
 import { documentService } from "../documents.js";
@@ -392,7 +392,7 @@ export class ProprioRunnerToolAuthority {
   constructor(readonly db: Db, readonly binding: Binding) {}
 
   #caseOffersEnabled() {
-    return !this.binding.museRuntime && Boolean(this.binding.apiUrl ?? process.env.PROPRIO_API_URL)
+    return !this.binding.museRuntime && canSignLocalAgentJwt() && Boolean(this.binding.apiUrl ?? process.env.PROPRIO_API_URL)
       && runnerApiToolsEnabled(this.binding.companyId, this.binding.apiToolsEnabled);
   }
 
@@ -438,7 +438,7 @@ export class ProprioRunnerToolAuthority {
       ).map((descriptor) => {
         if (descriptor.operationId === "handoff_case" && !this.#caseOffersEnabled()) {
           const { offer: _offer, ...properties } = descriptor.inputSchema.properties ?? {};
-          return { name: descriptor.operationId, description: descriptor.description,
+          return { name: descriptor.operationId, description: HANDOFF_CASE_ORDINARY_DESCRIPTION,
             inputSchema: { ...descriptor.inputSchema, properties } };
         }
         return {

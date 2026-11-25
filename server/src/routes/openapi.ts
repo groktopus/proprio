@@ -1762,7 +1762,8 @@ function resolveOperationAuthLevel(
   if (path === "/api/companies/{companyId}/grok-invitations"
       || /^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/grok-binding(?:\/(?:routine|verify|retry|stop|recover))?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
-  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision") return "agent";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision"
+    || key === "GET /api/companies/{companyId}/case-handoff-offers") return "agent";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/agents/me/chat/messages") return "agent_heartbeat";
   // An approved connected-app skill's file: an agent in an active run only.
@@ -14039,9 +14040,19 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
   summary: "Read a standalone case's handoff history", description: "Requires enableCases and access to all retained case permission sources.",
   request: { params: z.object({ caseId: z.string().uuid() }), query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(),
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+registry.registerPath({ method: "get", path: "/api/companies/{companyId}/case-handoff-offers", tags: ["Cases"],
+  summary: "List your pending case handoff offers",
+  description: "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",
+  request: { params: z.object({ companyId: z.string().uuid() }), query: z.object({
+    limit: z.coerce.number().int().min(1).max(100).optional(), cursor: z.string().max(400).optional(),
+  }) },
+  responses: { 200: r.ok(z.object({ items: z.array(z.object({
+    caseId: z.string().uuid(), handoffId: z.string().uuid(), handoffVersion: z.number().int(), createdAt: z.iso.datetime(),
+  })), nextCursor: z.string().nullable() })), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable,
+    429: r.tooManyRequests } });
 registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/decision", tags: ["Cases"],
   summary: "Record a recipient decision on a versioned handoff offer",
-  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
+  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The receipt contains decision metadata. Read the Case handoff history to see submitted messages. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffRecipientDecisionSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable,
     429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } } });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentWakeupRequests, caseAccessSources, caseDocuments, caseEvents, caseHandoffs, caseIssueLinks, cases, completionContracts, documents, heartbeatRuns, issues, pipelineCases, pipelines, pipelineStages, workflows } from "@groktopus/db";
+import { agents, agentWakeupRequests, authUsers, companyMemberships, caseAccessSources, caseDocuments, caseEvents, caseHandoffs, caseIssueLinks, cases, completionContracts, documents, heartbeatRuns, issues, pipelineCases, pipelines, pipelineStages, workflows } from "@groktopus/db";
 import { SYSTEM_ISSUE_DOCUMENT_KEYS } from "@groktopus/shared";
 import { startRunnerApiTestServer } from "../../__tests__/helpers/runner-api-server.js";
 import { instanceSettingsService } from "../instance-settings.js";
@@ -14,7 +14,7 @@ describe("native case tools through authenticated production routes", () => {
   const priorSecret = process.env.PROPRIO_AGENT_JWT_SECRET;
   beforeAll(async () => {
     process.env.PROPRIO_AGENT_JWT_SECRET = randomUUID();
-    server = await startRunnerApiTestServer();
+    server = await startRunnerApiTestServer({ humanSessions: true });
     await instanceSettingsService(server.db).updateExperimental({ enableCases: true });
   }, 60_000);
   afterAll(async () => {
@@ -134,7 +134,7 @@ describe("native case tools through authenticated production routes", () => {
     await server.db.insert(issues).values({ id: recipientIssueId, companyId: f.companyId, title: "Recipient's current work",
       status: "in_progress", assigneeAgentId: recipientId });
     await server.db.insert(heartbeatRuns).values({ id: recipientRunId, companyId: f.companyId, agentId: recipientId,
-      status: "running", runtimeMode: "native", nativeIssueId: recipientIssueId, invocationSource: "assignment",
+      status: "running", runtimeMode: "native", issueId: recipientIssueId, nativeIssueId: recipientIssueId, invocationSource: "assignment",
       triggerDetail: "system", contextSnapshot: { issueId: recipientIssueId } });
     await server.db.update(issues).set({ executionRunId: recipientRunId }).where(eq(issues.id, recipientIssueId));
     const [contract] = await server.db.insert(completionContracts).values({ companyId: f.companyId, issueId: f.issueId,
@@ -143,17 +143,36 @@ describe("native case tools through authenticated production routes", () => {
       contractJson: { objective: "Verify the task" }, canonicalSha256: "a".repeat(64), createdByActorType: "agent",
       createdByActorId: f.agentId }).returning();
     await server.db.update(heartbeatRuns).set({ completionContractId: contract.id }).where(eq(heartbeatRuns.id, f.runId));
-    const [sourceTask] = await server.db.select({ statusVersion: issues.statusVersion }).from(issues).where(eq(issues.id, f.issueId));
+    const [sourceTask] = await server.db.select({ statusVersion: issues.statusVersion, visibility: issues.visibility })
+      .from(issues).where(eq(issues.id, f.issueId));
     const input = { idempotencyKey: "native-offer", case: { id: f.record.id }, toAgentId: recipientId,
       phase: "verification", instructions: "Verify the report", expectedHandoffVersion: f.record.handoffVersion,
       expectedIssueStatusVersion: sourceTask.statusVersion,
       offer: { expectedDeliverable: "Reviewed report", prerequisites: ["Read the case"] } };
-    const handoffSchema = (authority: ProprioRunnerToolAuthority) => authority.definitions().find(tool => tool.name === "handoff_case")
-      ?.inputSchema as { properties: Record<string, unknown> };
-    expect(handoffSchema(f.authority).properties).not.toHaveProperty("offer");
+    const handoffTool = (authority: ProprioRunnerToolAuthority) =>
+      authority.definitions().find(tool => tool.name === "handoff_case") as { inputSchema: { properties: Record<string, unknown> }; description: string };
+    expect(handoffTool(f.authority).inputSchema.properties).not.toHaveProperty("offer");
+    expect(handoffTool(f.authority).description).not.toMatch(/offer|search_api/);
     await expect(f.call("handoff_case", input)).rejects.toThrow("recipient-decision pilot");
     const source = new ProprioRunnerToolAuthority(server.db, { ...f, casesEnabled: true, apiToolsEnabled: true });
-    expect(handoffSchema(source).properties).toHaveProperty("offer");
+    expect(handoffTool(source).inputSchema.properties).toHaveProperty("offer");
+    expect(handoffTool(source).description).toContain("list their pending Case handoff offers");
+    const sourceCall = (arguments_: Record<string, unknown>) => source.execute({ tool: "handoff_case", callId: randomUUID(), arguments: arguments_ });
+    await expect(sourceCall({ ...input, toAgentId: f.agentId.toUpperCase() })).rejects.toThrow("different recipient");
+    await expect(sourceCall({ ...input, case: { create: { caseType: "test", title: "Unbound offer" } },
+      workflow_document_text: "Workflow" })).rejects.toThrow("must reuse the source run's task");
+    const signingEnvironment = { PROPRIO_AGENT_JWT_SECRET: process.env.PROPRIO_AGENT_JWT_SECRET,
+      BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET };
+    try {
+      delete process.env.PROPRIO_AGENT_JWT_SECRET;
+      delete process.env.BETTER_AUTH_SECRET;
+      expect(handoffTool(source).inputSchema.properties).not.toHaveProperty("offer");
+      await expect(sourceCall(input)).rejects.toThrow("recipient-decision pilot");
+    } finally {
+      for (const [key, value] of Object.entries(signingEnvironment)) {
+        if (value !== undefined) process.env[key] = value;
+      }
+    }
     await server.db.update(agents).set({ adapterConfig: { provider: "muse" } }).where(eq(agents.id, recipientId));
     await expect(source.execute({ tool: "handoff_case", callId: randomUUID(), arguments: input }))
       .rejects.toThrow("does not support the offer decision API");
@@ -164,12 +183,34 @@ describe("native case tools through authenticated production routes", () => {
       handoffId: string; handoffVersion: number; state: string; callerMustYield: boolean;
     };
     expect(receipt).toMatchObject({ state: "offered", callerMustYield: true });
+    const listOperationId = "GET /api/companies/{companyId}/case-handoff-offers";
+    const listDiscovery = await recipient.execute({ tool: "search_api", callId: randomUUID(),
+      arguments: { query: "list your pending case handoff offers", limit: 10 } });
+    expect(listDiscovery).toMatchObject({ results: expect.arrayContaining([expect.objectContaining({
+      operationId: listOperationId, method: "GET", transport: "rest",
+    })]) });
+    const listOffers = (authority: ProprioRunnerToolAuthority) => authority.execute({ tool: "call_api", callId: randomUUID(),
+      arguments: { operationId: listOperationId, pathParams: { companyId: f.companyId } } });
+    const inbox = await listOffers(recipient) as { ok: boolean; data: { items: { caseId: string; handoffId: string }[]; nextCursor: string | null } };
+    expect(inbox).toMatchObject({ ok: true, data: { items: [{ caseId: f.record.id, handoffId: receipt.handoffId,
+      handoffVersion: receipt.handoffVersion, createdAt: expect.any(String) }], nextCursor: null } });
+    expect(Object.keys(inbox.data.items[0]).sort()).toEqual(["caseId", "createdAt", "handoffId", "handoffVersion"]);
+    expect(await listOffers(source)).toMatchObject({ ok: true, data: { items: [] } });
+    await server.db.update(issues).set({ visibility: "private" }).where(eq(issues.id, f.issueId));
+    try {
+      expect(await listOffers(recipient)).toMatchObject({ ok: true, data: { items: [] } });
+    } finally {
+      await server.db.update(issues).set({ visibility: sourceTask.visibility }).where(eq(issues.id, f.issueId));
+    }
+    const [{ caseId, handoffId }] = inbox.data.items;
     const operationId = "POST /api/cases/{caseId}/handoffs/{handoffId}/decision";
     const discovery = await recipient.execute({ tool: "search_api", callId: randomUUID(),
       arguments: { query: "record recipient decision on a versioned case handoff offer", limit: 10 } });
-    expect(discovery).toMatchObject({ results: expect.arrayContaining([expect.objectContaining({ operationId })]) });
+    expect(discovery).toMatchObject({ results: expect.arrayContaining([expect.objectContaining({
+      operationId, method: "POST", transport: "rest", callPolicy: "rest", allowedModes: ["standard"],
+    })]) });
     const history = await recipient.execute({ tool: "call_api", callId: randomUUID(), arguments: {
-      operationId: "GET /api/cases/{caseId}/handoffs", pathParams: { caseId: f.record.id },
+      operationId: "GET /api/cases/{caseId}/handoffs", pathParams: { caseId },
     } });
     expect(history).toMatchObject({ ok: true, data: { items: expect.arrayContaining([expect.objectContaining({
       id: receipt.handoffId, toAgentId: recipientId, state: "offered", offerContract: {
@@ -179,13 +220,31 @@ describe("native case tools through authenticated production routes", () => {
       },
     })]) } });
     const decision = await recipient.execute({ tool: "call_api", callId: randomUUID(), arguments: {
-      operationId, pathParams: { caseId: f.record.id, handoffId: receipt.handoffId }, body: {
+      operationId, pathParams: { caseId, handoffId }, body: {
         outcome: "accepted", expectedHandoffVersion: receipt.handoffVersion, requirementRevisionId: contract.id,
       },
     } });
     expect(decision).toMatchObject({ ok: true, data: { state: "awaiting_release", recipientDecision: {
       actorId: recipientId, outcome: "accepted", requirementRevisionId: contract.id,
     } } });
+    expect(await listOffers(recipient)).toMatchObject({ ok: true, data: { items: [] } });
+    const [recipientRun] = await server.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, recipientRunId));
+    const receipts = JSON.stringify(recipientRun.resultJson?.apiToolReceipts);
+    expect(receipts).toContain(contract.id);
+    expect(receipts).not.toMatch(/amber-fox|Verify runner API tools|offerContract/);
+
+    const readerId = randomUUID();
+    await server.db.insert(authUsers).values({ id: readerId, name: "Unrelated task reader",
+      email: `${readerId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await server.db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user",
+      principalId: readerId, membershipRole: "member", status: "active" });
+    await server.db.update(issues).set({ visibility: "private" }).where(eq(issues.id, f.issueId));
+    const headers = { Cookie: await server.humanSession(readerId) };
+    const caseHistory = await fetch(`${server.apiUrl}/api/cases/${caseId}/handoffs`, { headers });
+    expect(caseHistory.status).toBe(404);
+    const runTelemetry = await fetch(`${server.apiUrl}/api/heartbeat-runs/${recipientRunId}`, { headers });
+    expect(runTelemetry.status).toBe(200);
+    expect(await runTelemetry.text()).not.toMatch(/amber-fox|Verify runner API tools|offerContract/);
     const [task] = await server.db.select().from(issues).where(eq(issues.id, f.issueId));
     const [handoff] = await server.db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
     expect(task.assigneeAgentId).toBe(f.agentId);

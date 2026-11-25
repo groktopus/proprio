@@ -24,7 +24,7 @@
     "prpVersion": 1,
     "nativeExecutionVersion": 1,
     "catalogVersion": 1,
-    "catalogSha256": "sha256:1b764fe81aa7ed71c1202afc0278f8fb4db4ea372dfa51af16b68ca4aa8bb6ac",
+    "catalogSha256": "sha256:aa06b62befe282e9f5564a75b8b25e36615984fd3edded6d6a6721029ad42099",
     "driverContractVersion": 1,
     "driverKind": "proprio-deterministic",
     "driverVersion": "1.0.0"

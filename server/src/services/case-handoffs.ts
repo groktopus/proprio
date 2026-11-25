@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertAgentInteraction } from "./agent-interaction-policy.js";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, caseAccessSources, caseEvents, caseHandoffs, caseIssueLinks, cases, chatConversations, companies, completionContracts, heartbeatRuns, issues, projects } from "@groktopus/db";
 import { handoffCaseSchema, isUuidLike, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffRecipientDecisionInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult } from "@groktopus/shared";
@@ -12,7 +12,7 @@ import { parseNativeExecutionInput } from "../vendor/proprio-runner/index.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { persistActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationDeniedDetails, authorizationService, type AuthorizationActor } from "./authorization.js";
-import { assertActorCanReadCase, assertActorCanWriteCase, assertCaseTrustedForExecution, canActorReadCase, canActorReceiveCase, retainCaseAccessSource } from "./case-access.js";
+import { assertActorCanReadCase, assertActorCanWriteCase, assertCaseTrustedForExecution, canActorReadCase, canActorReceiveCase, caseReadSqlCondition, filterCasesForActor, retainCaseAccessSource } from "./case-access.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
@@ -20,6 +20,7 @@ import { documentService } from "./documents.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
+import { nativeRuntimeSupportsCaseOfferDecision } from "./native-runtime/runtime-mode.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
 import { assertAcceptedOfferIsCurrent, assertOfferRequirementsCurrent, CaseHandoffRequirementsSuperseded, computeCaseHandoffRequirementsDigest } from "./case-handoff-offer-authority.js";
 import { CASE_HANDOFF_CANCELLABLE_STATES as PENDING } from "./case-handoff-states.js";
@@ -33,6 +34,24 @@ type IssueRow = typeof issues.$inferSelect;
 function publicHandoff(row: CaseHandoffRow) {
   const { actorContext: _actorContext, workflowPrompt: _prompt, baseWorkflowDocumentRevisionId: _base, ...publicRow } = row;
   return publicRow;
+}
+
+type HandoffListOptions = { limit?: number; before?: string; cursor?: string };
+
+function handoffPageFilter(options: HandoffListOptions) {
+  if (options.cursor) {
+    try {
+      const parsed = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8"));
+      if (typeof parsed.at !== "string" || !Number.isFinite(new Date(parsed.at).getTime()) ||
+        typeof parsed.id !== "string" || !isUuidLike(parsed.id)) throw new Error();
+      return sql`(${caseHandoffs.createdAt}, ${caseHandoffs.id}) < (${parsed.at}::timestamptz, ${parsed.id}::uuid)`;
+    } catch { throw unprocessable("Invalid handoff cursor"); }
+  }
+  return options.before ? sql`${caseHandoffs.createdAt} < ${options.before}::timestamptz` : undefined;
+}
+
+function handoffNextCursor(row: { createdAt: Date; id: string } | undefined) {
+  return row ? Buffer.from(JSON.stringify({ at: row.createdAt.toISOString(), id: row.id })).toString("base64url") : null;
 }
 
 function identity(actor: AuthorizationActor) {
@@ -404,6 +423,9 @@ export function caseHandoffService(db: Db) {
           return result(prior, issue, actor, true);
         }
         if (input.to !== "done" && input.offer) {
+          if (actor.type === "agent" && input.toAgentId.toLowerCase() === actor.agentId?.toLowerCase()) {
+            throw unprocessable("A versioned offer must name a different recipient");
+          }
           if (!options.enableVersionedOffers) throw unprocessable("Versioned offers require the recipient-decision pilot");
           if (actor.type !== "agent" || actor.source !== "agent_jwt") {
             throw forbidden("Versioned offers require authenticated source run authority");
@@ -587,13 +609,15 @@ export function caseHandoffService(db: Db) {
             eq(completionContracts.issueId, issue.id),
           )).limit(1);
           if (!contract) throw unprocessable("Versioned offers require the source task's current completion contract");
-          const [recipient] = await tx.select({ adapterType: agents.adapterType, adapterConfig: agents.adapterConfig }).from(agents).where(and(
+          const [recipient] = await tx.select({ id: agents.id, companyId: agents.companyId, status: agents.status,
+            adapterType: agents.adapterType, adapterConfig: agents.adapterConfig, runtimeConfig: agents.runtimeConfig }).from(agents).where(and(
             eq(agents.id, input.toAgentId), eq(agents.companyId, companyId),
           )).limit(1);
           if (!recipient || recipient.adapterType !== "proprio_runner") {
             throw unprocessable("Versioned offers require a native Proprio recipient");
           }
-          if (recipient.adapterConfig?.provider === "muse") {
+          const settings = await instanceSettingsService(tx).getExperimental();
+          if (!nativeRuntimeSupportsCaseOfferDecision(recipient, issue.id, settings)) {
             throw unprocessable("The recipient's native runtime does not support the offer decision API");
           }
           if (!await canActorReadCase(tx, { type: "agent", agentId: input.toAgentId, companyId,
@@ -633,25 +657,36 @@ export function caseHandoffService(db: Db) {
       return outcome;
     },
 
-    async list(actor: AuthorizationActor, caseId: string, options: { limit?: number; before?: string; cursor?: string } = {}) {
-      await assertEnabled(db); await visible(actor, caseId);
-      let cursor: { at: string; id: string } | undefined;
-      if (options.cursor) {
-        try {
-          const parsed = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8"));
-          if (typeof parsed.at !== "string" || !Number.isFinite(new Date(parsed.at).getTime()) || typeof parsed.id !== "string" || !/^[0-9a-f-]{36}$/i.test(parsed.id)) throw new Error();
-          cursor = parsed;
-        } catch { throw unprocessable("Invalid handoff cursor"); }
+    async listRecipientOffers(actor: AuthorizationActor, companyId: string, options: HandoffListOptions = {}) {
+      if (actor.type !== "agent" || !actor.agentId || actor.companyId !== companyId) {
+        throw forbidden("Only agents can list their own handoff offers");
       }
+      await assertEnabled(db);
       const limit = Math.min(100, Math.max(1, options.limit ?? 25));
-      const rows = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.caseId, caseId),
-        cursor ? sql`(${caseHandoffs.createdAt}, ${caseHandoffs.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
-          : options.before ? sql`${caseHandoffs.createdAt} < ${options.before}::timestamptz` : undefined))
+      const rows = await db.select({ id: caseHandoffs.id, caseId: cases.id, handoffVersion: caseHandoffs.version,
+        createdAt: caseHandoffs.createdAt }).from(caseHandoffs)
+        .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, caseHandoffs.companyId),
+          eq(cases.workIssueId, caseHandoffs.issueId), eq(cases.handoffVersion, caseHandoffs.version)))
+        .where(and(eq(caseHandoffs.companyId, companyId), eq(caseHandoffs.toAgentId, actor.agentId),
+          eq(caseHandoffs.state, "offered"), ne(cases.status, "cancelled"), handoffPageFilter(options),
+          await caseReadSqlCondition(db, actor)))
+        .orderBy(desc(caseHandoffs.createdAt), desc(caseHandoffs.id)).limit(limit + 1);
+      const page = rows.slice(0, limit);
+      const readable = new Set((await filterCasesForActor(db, actor, page.map(row => ({ id: row.caseId })))).map(row => row.id));
+      return {
+        items: page.filter(row => readable.has(row.caseId)).map(({ id, ...row }) => ({ handoffId: id, ...row })),
+        nextCursor: handoffNextCursor(rows.length > limit ? page.at(-1) : undefined),
+      };
+    },
+
+    async list(actor: AuthorizationActor, caseId: string, options: HandoffListOptions = {}) {
+      await assertEnabled(db); await visible(actor, caseId);
+      const limit = Math.min(100, Math.max(1, options.limit ?? 25));
+      const rows = await db.select().from(caseHandoffs).where(and(eq(caseHandoffs.caseId, caseId), handoffPageFilter(options)))
         .orderBy(desc(caseHandoffs.createdAt), desc(caseHandoffs.id)).limit(limit + 1);
       const page = rows.slice(0, limit);
       const ids = [...new Set(page.flatMap(row => [row.toAgentId, row.fromAgentId].filter((id): id is string => !!id)))];
       const names = ids.length ? new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ids))).map(item => [item.id, item.name])) : new Map<string, string>();
-      const last = page.at(-1);
       let canControl = false;
       const active = page.find(row => PENDING.includes(row.state as typeof PENDING[number]));
       if (active) {
@@ -661,7 +696,7 @@ export function caseHandoffService(db: Db) {
         }
       }
       return { items: page.map(row => ({ ...publicHandoff(row), toAgentName: row.toAgentId ? names.get(row.toAgentId) ?? null : null, fromAgentName: row.fromAgentId ? names.get(row.fromAgentId) ?? null : null, canControl })),
-        nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ at: last.createdAt.toISOString(), id: last.id })).toString("base64url") : null, canControl };
+        nextCursor: handoffNextCursor(rows.length > limit ? page.at(-1) : undefined), canControl };
     },
 
     async recordRecipientDecision(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffRecipientDecisionInput) {
@@ -740,7 +775,10 @@ export function caseHandoffService(db: Db) {
       });
       publications.forEach(publishActivity);
       if ("superseded" in decided) throw decided.superseded;
-      return publicHandoff(decided);
+      const { id, version, state, recipientDecision } = decided;
+      if (!recipientDecision) throw new Error("Committed handoff decision is missing its receipt");
+      const { message: _message, ...decisionReceipt } = recipientDecision;
+      return { id, version, state, recipientDecision: decisionReceipt };
     },
 
     async retry(actor: AuthorizationActor, caseId: string, handoffId: string) {
