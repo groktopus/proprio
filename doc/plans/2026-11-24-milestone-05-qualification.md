@@ -26,15 +26,16 @@ The export freezes the IDs and checksum of visible records in the declared captu
 - All 16 audit route tests passed on `ebac201b` with disposable PostgreSQL and Node 24.22.1. They exercised 10,037 events, a persisted resume cursor, source epoch rotation, exact archive bytes after an older restore, and loss of visibility on a different page. The API checked all snapshot members before returning page data, count and watermark. [Restore contract](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Snapshot visibility](https://github.com/groktopus/proprio/pull/374#issuecomment-7147698734)
 - A focused export test verified that an orphaned event with a surviving private task cannot reveal its presence through a conflict response. The existing missing-binding fixture still reported incomplete delivery for an eligible event. [Private binding](https://github.com/groktopus/proprio/pull/375)
 - Three tests on `2b75d9b0` applied the combined migration and checked a task-bound write, a read-only call and the public export projection. The gateway persisted the provider correlation ID before dispatch, committed receipt before completion, and blocked a repeat mutation across a changed run and idempotency key. [Direct dispatch](https://github.com/groktopus/proprio/pull/366#issuecomment-7147826662)
-- The authenticated approval-route tests verified one provider send with a durable intent. Receipt failure and an expired elicitation round left the intent inspectable and blocked repeat approval from sending again. The separate authenticated `tools/call` continuation is still part of the shared dispatch integration. [Approved dispatch](https://github.com/groktopus/proprio/pull/370#issuecomment-7147722037)
+- Five tests and the layered server typecheck passed on `5bd23631`. The approval route and authenticated `tools/call` recorded and settled the approved action under the active claim. A same-agent direct retry with identical arguments, a replacement run, and a new key could not send again after an unresolved approved action. An expired elicitation round and a thrown transport error also preserved the unresolved intent. [Approved dispatch](https://github.com/groktopus/proprio/pull/370)
+- On `9ac8fffe`, an independent reviewer matched the exported policy decision, human approval and open dispatch intent for the interrupted action after server recreation. The `complete` field on a page signals that delivery reached the end of the frozen snapshot. The target ledger establishes the actual effect of the interrupted action. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
 
-The later local composition `fde4bd2e4f71f2a121328188f2d68c879a851f36` passed
-eight focused tests and the layered server typecheck. It combined the reviewed
-reconstruction, independent authority, historical policy, direct call, retention,
-and export privacy branches. It captured historical policy in the same admission
-transaction as the rate charge and dispatch evidence. The reproduction used
-isolated PostgreSQL and a process adapter against a local synthetic MCP target.
-The approval-route result above came from a separate revision.
+The latest local composition `b8be6b6f3cb1e1151651abef0f882448a7ec2546` passed
+14 focused tests on Linux with Node 24.22.1. It combined the reviewed
+reconstruction, independent authority, historical policy, direct and approved
+calls, retention and export privacy branches. The fixture used isolated
+PostgreSQL and a process adapter against a local synthetic MCP target. It
+captured historical policy in the transaction that writes the rate charge and
+managed admission record.
 
 The release decision depends on the following checks.
 
