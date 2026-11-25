@@ -144,7 +144,7 @@ function ReviewRow({
   async function approve(rememberAction: boolean) {
     const result = await toolsApi.approveActionRequest(companyId, item.request.id, rememberAction);
     if (result.status === "failed") {
-      const reason = result.error?.trim() || "Check the review queue for the latest status.";
+      const reason = result.error?.trim() || "The gateway returned no failure details.";
       return rememberAction ? `${reason} Future calls may still be allowed.` : reason;
     }
     if (result.status !== "approved" && result.status !== "executing" && result.status !== "executed") {

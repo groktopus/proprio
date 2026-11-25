@@ -225,6 +225,20 @@ describe("ReviewQueueCard", () => {
     expect(pushToastMock).not.toHaveBeenCalled();
   });
 
+  it("shows a settled failure without suggesting a retry when its reason is null", async () => {
+    approveActionRequestMock.mockResolvedValue({
+      ...pendingRequest().request,
+      status: "failed",
+      error: null,
+    });
+    await render();
+    await act(async () => { buttonContaining("Allow once")!.click(); });
+
+    await vi.waitFor(() => expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The gateway returned no failure details."));
+    expect(container.textContent).not.toMatch(/try again|refresh the review queue/i);
+  });
+
   it("surfaces a failed approval from the linked interaction card inline", async () => {
     const interaction = structuredClone(pendingToolActionLongProposalInteraction);
     const item = pendingRequest();
