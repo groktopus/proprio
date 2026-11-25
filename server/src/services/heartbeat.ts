@@ -1259,7 +1259,7 @@ export function heartbeatService(
   }
 
   const wakeQueue = createWakeQueue(db, {
-    resolveResponsibleUserId: async (input, reader = db) => {
+    resolveResponsibleUserId: async (input, reader) => {
       // `input.issue` is the wake-queue module's own transaction-scoped
       // snapshot; using it here, instead of re-reading the issue through
       // `getIssueExecutionContext`, keeps this read off a second connection
@@ -1282,12 +1282,12 @@ export function heartbeatService(
         existingRunResponsibleUserId: input.existingRunResponsibleUserId,
       }, reader);
     },
-    getRoutineEnv: async (input, reader = db) => {
+    getRoutineEnv: async (input, reader) => {
       // Same reason as `resolveResponsibleUserId` above: use the passed-in
       // transaction-scoped issue snapshot instead of reading the issue again.
       return getRoutineEnvForExecutionIssue(input.companyId, input.issue, reader);
     },
-    resolveSessionBeforeForWakeup: async (input, reader = db) => {
+    resolveSessionBeforeForWakeup: async (input, reader) => {
       // Scoped to this port only, so a wake-queue agent id can never resolve
       // a session against another company's agent row. The shared `getAgent`
       // helper below has no company predicate, so this reads the agent
