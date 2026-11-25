@@ -242,9 +242,13 @@ using the integrated migration number. Node 24 and disposable PostgreSQL
 passed 102 focused tests across adapters, commentary, receipt recovery and
 audit migration replay, including the pinned Pi CLI check. The capability
 contract, inventory, protocol coverage, and workflow traceability checks
-also passed. The replacement hosted qualification uses the same main
-baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0` and is in progress.
-[Replacement composition qualification](https://github.com/groktopus/proprio/actions/runs/45557310471)
+also passed. The replacement hosted run succeeded on that source and base
+`2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. Its retained report records
+passed managed update and rollback, fresh-target restore, active migration
+recovery, interruption diagnostics, and browser task readback. It reports
+zero observed data loss in the active-run migration case.
+[Hosted composition result](https://github.com/groktopus/proprio/actions/runs/45557310471)
+[Retained qualification report](https://github.com/groktopus/proprio/actions/runs/45557310471/artifacts/14998240145)
 
 
 The standard-pool reconstruction and native receipt suites passed eight more
@@ -255,7 +259,10 @@ the same route under stress and passed all 12 human-directed work tests.
 The stress replay then stalled in the tool-action wake delivery after
 approval. PostgreSQL showed an idle delivery transaction holding the one
 ordinary connection while the code tried a second ordinary-pool read.
+The delivery fix returned HTTP 200 from the approval route. A later
+deferred wake promotion still stalled with the single-connection setting.
 [Task-create transaction fix](https://github.com/groktopus/proprio/pull/393)
+[Wake delivery transaction fix](https://github.com/groktopus/proprio/pull/394)
 
 The updated migration replay test located the migration through the journal
 on both the retirement PR and its renumbered composition. It observed both
