@@ -587,11 +587,14 @@ export function caseHandoffService(db: Db) {
             eq(completionContracts.issueId, issue.id),
           )).limit(1);
           if (!contract) throw unprocessable("Versioned offers require the source task's current completion contract");
-          const [recipient] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+          const [recipient] = await tx.select({ adapterType: agents.adapterType, adapterConfig: agents.adapterConfig }).from(agents).where(and(
             eq(agents.id, input.toAgentId), eq(agents.companyId, companyId),
           )).limit(1);
           if (!recipient || recipient.adapterType !== "proprio_runner") {
             throw unprocessable("Versioned offers require a native Proprio recipient");
+          }
+          if (recipient.adapterConfig?.provider === "muse") {
+            throw unprocessable("The recipient's native runtime does not support the offer decision API");
           }
           if (!await canActorReadCase(tx, { type: "agent", agentId: input.toAgentId, companyId,
             onBehalfOfUserId: issue.responsibleUserId ?? actor.onBehalfOfUserId,

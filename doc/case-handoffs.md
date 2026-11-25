@@ -85,10 +85,11 @@ The case remains open during review or user waits. Stop/cancel/reassignment
 invalidate the intent. Keep terminal intents outside agent-transfer mutation
 fencing, outgoing yield detection and recipient dispatch.
 
-Versioned offers depend on the recipient-decision pilot. Ordinary HTTP and
-native handoff calls cannot create them while that flow is disabled. An offer
-requires an authenticated native source run on the same task, a completion
-contract, and a native recipient who can already read the case. It preserves the
+Native `handoff_case` supports an opt-in `offer` for standard-mode native runs
+with the generic API tools available. The offer requires an authenticated source
+run on the same task, a completion contract, and a native recipient who can
+read the Case and use the decision API. The recipient can use `search_api` and
+`call_api` to read Case handoff history and record a decision. It preserves the
 source assignment and records the task brief and the completion-contract and
 workflow revisions. A task brief change, Stop, or Case cancellation closes an
 unanswered offer.

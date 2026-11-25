@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentWakeupRequests, caseAccessSources, caseDocuments, caseEvents, caseHandoffs, caseIssueLinks, cases, documents, heartbeatRuns, issues, pipelineCases, pipelines, pipelineStages, workflows } from "@groktopus/db";
+import { agents, agentWakeupRequests, caseAccessSources, caseDocuments, caseEvents, caseHandoffs, caseIssueLinks, cases, completionContracts, documents, heartbeatRuns, issues, pipelineCases, pipelines, pipelineStages, workflows } from "@groktopus/db";
 import { SYSTEM_ISSUE_DOCUMENT_KEYS } from "@groktopus/shared";
 import { startRunnerApiTestServer } from "../../__tests__/helpers/runner-api-server.js";
 import { instanceSettingsService } from "../instance-settings.js";
@@ -122,6 +122,74 @@ describe("native case tools through authenticated production routes", () => {
       expect(await snapshot()).toEqual(before);
       expect(fetch).not.toHaveBeenCalled();
     } finally { fetch.mockRestore(); }
+  });
+
+  it("creates a versioned offer and records the named recipient's decision through native tools", async () => {
+    const f = await fixture();
+    const recipientId = randomUUID(), recipientIssueId = randomUUID(), recipientRunId = randomUUID();
+    await server.db.update(agents).set({ role: "ceo" }).where(eq(agents.id, f.agentId));
+    await server.db.insert(agents).values({ id: recipientId, companyId: f.companyId, name: "Recipient", role: "engineer",
+      reportsTo: f.agentId, adapterType: "proprio_runner", adapterConfig: { provider: "codex" }, status: "active",
+      runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } } });
+    await server.db.insert(issues).values({ id: recipientIssueId, companyId: f.companyId, title: "Recipient's current work",
+      status: "in_progress", assigneeAgentId: recipientId });
+    await server.db.insert(heartbeatRuns).values({ id: recipientRunId, companyId: f.companyId, agentId: recipientId,
+      status: "running", runtimeMode: "native", nativeIssueId: recipientIssueId, invocationSource: "assignment",
+      triggerDetail: "system", contextSnapshot: { issueId: recipientIssueId } });
+    await server.db.update(issues).set({ executionRunId: recipientRunId }).where(eq(issues.id, recipientIssueId));
+    const [contract] = await server.db.insert(completionContracts).values({ companyId: f.companyId, issueId: f.issueId,
+      revision: 1, schemaVersion: "proprio.completion-contract.v1", policyVersion: "test", risk: "standard",
+      completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+      contractJson: { objective: "Verify the task" }, canonicalSha256: "a".repeat(64), createdByActorType: "agent",
+      createdByActorId: f.agentId }).returning();
+    await server.db.update(heartbeatRuns).set({ completionContractId: contract.id }).where(eq(heartbeatRuns.id, f.runId));
+    const [sourceTask] = await server.db.select({ statusVersion: issues.statusVersion }).from(issues).where(eq(issues.id, f.issueId));
+    const input = { idempotencyKey: "native-offer", case: { id: f.record.id }, toAgentId: recipientId,
+      phase: "verification", instructions: "Verify the report", expectedHandoffVersion: f.record.handoffVersion,
+      expectedIssueStatusVersion: sourceTask.statusVersion,
+      offer: { expectedDeliverable: "Reviewed report", prerequisites: ["Read the case"] } };
+    const handoffSchema = (authority: ProprioRunnerToolAuthority) => authority.definitions().find(tool => tool.name === "handoff_case")
+      ?.inputSchema as { properties: Record<string, unknown> };
+    expect(handoffSchema(f.authority).properties).not.toHaveProperty("offer");
+    await expect(f.call("handoff_case", input)).rejects.toThrow("recipient-decision pilot");
+    const source = new ProprioRunnerToolAuthority(server.db, { ...f, casesEnabled: true, apiToolsEnabled: true });
+    expect(handoffSchema(source).properties).toHaveProperty("offer");
+    await server.db.update(agents).set({ adapterConfig: { provider: "muse" } }).where(eq(agents.id, recipientId));
+    await expect(source.execute({ tool: "handoff_case", callId: randomUUID(), arguments: input }))
+      .rejects.toThrow("does not support the offer decision API");
+    await server.db.update(agents).set({ adapterConfig: { provider: "codex" } }).where(eq(agents.id, recipientId));
+    const recipient = new ProprioRunnerToolAuthority(server.db, { ...f, agentId: recipientId, issueId: recipientIssueId,
+      runId: recipientRunId, casesEnabled: true, apiToolsEnabled: true });
+    const receipt = await source.execute({ tool: "handoff_case", callId: randomUUID(), arguments: input }) as {
+      handoffId: string; handoffVersion: number; state: string; callerMustYield: boolean;
+    };
+    expect(receipt).toMatchObject({ state: "offered", callerMustYield: true });
+    const operationId = "POST /api/cases/{caseId}/handoffs/{handoffId}/decision";
+    const discovery = await recipient.execute({ tool: "search_api", callId: randomUUID(),
+      arguments: { query: "record recipient decision on a versioned case handoff offer", limit: 10 } });
+    expect(discovery).toMatchObject({ results: expect.arrayContaining([expect.objectContaining({ operationId })]) });
+    const history = await recipient.execute({ tool: "call_api", callId: randomUUID(), arguments: {
+      operationId: "GET /api/cases/{caseId}/handoffs", pathParams: { caseId: f.record.id },
+    } });
+    expect(history).toMatchObject({ ok: true, data: { items: expect.arrayContaining([expect.objectContaining({
+      id: receipt.handoffId, toAgentId: recipientId, state: "offered", offerContract: {
+        ...input.offer, requirementRevision: { id: contract.id, revision: 1, canonicalSha256: "a".repeat(64) },
+        requirementsDigest: expect.any(String), taskBrief: { title: "Verify runner API tools", description: "Fixture marker: amber-fox." },
+        schema: "proprio.case-handoff-offer.v1",
+      },
+    })]) } });
+    const decision = await recipient.execute({ tool: "call_api", callId: randomUUID(), arguments: {
+      operationId, pathParams: { caseId: f.record.id, handoffId: receipt.handoffId }, body: {
+        outcome: "accepted", expectedHandoffVersion: receipt.handoffVersion, requirementRevisionId: contract.id,
+      },
+    } });
+    expect(decision).toMatchObject({ ok: true, data: { state: "awaiting_release", recipientDecision: {
+      actorId: recipientId, outcome: "accepted", requirementRevisionId: contract.id,
+    } } });
+    const [task] = await server.db.select().from(issues).where(eq(issues.id, f.issueId));
+    const [handoff] = await server.db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
+    expect(task.assigneeAgentId).toBe(f.agentId);
+    expect(await server.db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, handoff.wakeupRequestId))).toHaveLength(0);
   });
 
   it("exposes case facts and creation without a second document tool surface", async () => {
