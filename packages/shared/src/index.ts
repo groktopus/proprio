@@ -1,5 +1,5 @@
 export type { InboxMineSnapshot, InboxSourceError } from "./types/inbox-mine.js";
-export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
+export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffRecipientDecisionSchema, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
 export * from "./slack-app-manifest.js";
 export * from "./analytics-consent.js";
 export * from "./routine-suggestions.js";
@@ -490,6 +490,7 @@ export {
   ISSUE_RECOVERY_ACTION_STATUSES,
   ISSUE_RECOVERY_ACTION_OWNER_TYPES,
   ISSUE_BLOCKER_STALLED_WAKE_REASON,
+  DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX,
   ISSUE_BLOCKER_STALL_RELATIONS,
   ISSUE_RECOVERY_ACTION_OUTCOMES,
   pluginOperationIssueOriginKind,
@@ -1247,6 +1248,7 @@ export type {
   IssueBlockedInboxState,
   IssueRecoveryAction,
   IssueBlockerStalledWakeContext,
+  DependencyDiagnosis,
   IssueWatchdog,
   IssueWatchdogStatus,
   IssueWatchdogSummary,
@@ -2175,6 +2177,8 @@ export {
   isValidExistingBranchName,
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
+  type DependencyInvestigationInput,
   taskRetrySchema,
   reconstructWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,
@@ -2599,6 +2603,7 @@ export {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateAgentPermissionGrantSchema,
   type UpdateAgentPermissionGrant,

@@ -8,13 +8,15 @@ import { join } from "node:path";
 import express from "express";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
+import { agents, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
+import type { CaseHandoffOfferContract } from "@groktopus/shared";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { caseRoutes } from "../routes/cases.js";
 import { caseHandoffRoutes } from "../routes/case-handoffs.js";
 import { issueRoutes } from "../routes/issues.js";
 import { setupRunnerPrpWebSocketServer, runnerPrpWebSocketInternals } from "../realtime/runner-prp-ws.js";
+import { agentService } from "../services/agents.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
 import { caseHandoffDeliveryService } from "../services/case-handoff-delivery.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -89,9 +91,12 @@ suite("case handoff through the assembled native runner", () => {
     await db.insert(companies).values({ id: companyId, name: "Native factory proof", issuePrefix: `N${companyId.slice(0, 6)}`, defaultResponsibleUserId: userId });
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, membershipRole: "operator", status: "active" });
     for (const [id, role] of [[triage, "ceo"], [engineer, "engineer"]] as const) await db.insert(agents).values({ id, companyId, name: role,
-      role, ...(id === engineer ? { reportsTo: triage } : {}), status: "idle", adapterType: "proprio_runner",
+      role, ...(id === engineer ? { reportsTo: triage } : {}), status: id === engineer ? "error" : "idle", adapterType: "proprio_runner",
       adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: workspace, lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 30,
         env: { CODEX_HOME: sourceHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" } }, runtimeConfig: { heartbeat: { enabled: false } } });
+    const { token: recipientApiKey } = await agentService(db).createApiKey(
+      engineer, "Native recipient decision fixture", { kind: "standard" }, { responsibleUserId: userId },
+    );
     const initial = await caseHandoffService(db).handoff(companyId, { type: "board", source: "local_implicit", userId }, {
       idempotencyKey: "native-factory-start", case: { create: { caseType: "work", title: "Native factory proof", fields: { specification: "persisted native specification canary" } } },
       workflow_document_text: "Workflow routing canary: triage reads the brief, implementation saves evidence, verification checks it, and finalization closes this same task.",
@@ -108,16 +113,17 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 const config=${JSON.stringify(config)};
 const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
-let turn='native-case-turn-'+randomUUID(), thread='native-case-thread-'+randomUUID(), step=0, context, prompt='', active=false, contract, returning=false, finishing=false, threadMethod;
+let turn='native-case-turn-'+randomUUID(), thread='native-case-thread-'+randomUUID(), step=0, context, prompt='', active=false, contract, returning=false, finishing=false, threadMethod, lastTool;
 process.on('uncaughtException', error=>{writeFileSync(config.errors,JSON.stringify({message:error.message}));process.exit(1);});
-const call=(tool,args)=>{step++;send({id:'call-'+step,method:'item/tool/call',params:{threadId:thread,turnId:turn,callId:'tool-'+step,tool,arguments:args}});};
+const call=(tool,args)=>{step++;lastTool=tool;send({id:'call-'+step,method:'item/tool/call',params:{threadId:thread,turnId:turn,callId:'tool-'+step,tool,arguments:args}});};
 for await (const line of createInterface({input:process.stdin})) {
   const m=JSON.parse(line), p=m.params??{};
   if (!m.method) {
     if (!String(m.id).startsWith('call-')) continue;
-    if(m.error||m.result?.success!==true) throw new Error('fixture native tool rejected');
-    const content=m.result.contentItems??m.result.content??[];
-    const value=JSON.parse(content.find(item=>typeof item.text==='string')?.text??'{}');
+    const content=m.result?.contentItems??m.result?.content??[];
+    const responseText=content.find(item=>typeof item.text==='string')?.text;
+    if(m.error||m.result?.success!==true) throw new Error('fixture '+lastTool+' rejected: '+String(m.error?.message??responseText??'no diagnostic').slice(0,600));
+    const value=JSON.parse(responseText??'{}');
     if(step===1) {
       context=value.result?.activeTask?value.result:value;
       if(context.activeTask?.id!==config.taskId) throw new Error('fixture task identity mismatch');
@@ -139,7 +145,7 @@ for await (const line of createInterface({input:process.stdin})) {
     } else if(context.actor.id===config.triage&&!returning&&step===3) {
       const document=(value.result??value).document;
       if(document?.issueId!==config.taskId||(document.body??document.latestBody)!=='Seeded native task brief canary') throw new Error('initial task brief not readable before handoff');
-      call('handoff_case',{idempotencyKey:'native-triage-handoff',case:{id:config.caseId},toAgentId:config.engineer,phase:'implementation',instructions:'Implement the persisted native specification canary',expectedHandoffVersion:1,expectedIssueStatusVersion:context.activeTask.statusVersion});
+      call('handoff_case',{idempotencyKey:'native-triage-handoff',case:{id:config.caseId},toAgentId:config.engineer,phase:'implementation',instructions:'Implement the persisted native specification canary',offer:{expectedDeliverable:'A verified implementation observation',prerequisites:['Read the saved workflow and task brief']},expectedHandoffVersion:1,expectedIssueStatusVersion:context.activeTask.statusVersion});
     } else if(context.actor.id===config.triage&&!returning) writeFileSync(config.accepted,JSON.stringify({value,pid:process.pid}));
     else if(returning&&!finishing) {}
     else if(finishing&&step===2) {
@@ -198,7 +204,9 @@ for await (const line of createInterface({input:process.stdin})) {
       const state = await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status, error: heartbeatRuns.error, result: heartbeatRuns.resultJson }).from(heartbeatRuns);
       const ledger = await db.select().from(caseHandoffs).where(eq(caseHandoffs.caseId, initial.caseId));
       const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
-      throw new Error(`${label}: runs=${JSON.stringify(state)}; handoffs=${JSON.stringify(ledger)}; wakes=${JSON.stringify(wakes)}; provider=${await readFile(config.errors, "utf8").catch(() => "no scripted-provider error")}`);
+      const diagnostics = await db.select({ payload: heartbeatRunEvents.payload }).from(heartbeatRunEvents)
+        .where(and(eq(heartbeatRunEvents.companyId, companyId), eq(heartbeatRunEvents.eventType, "harness.diagnostic"))).limit(10);
+      throw new Error(`${label}: runs=${JSON.stringify(state)}; handoffs=${JSON.stringify(ledger)}; wakes=${JSON.stringify(wakes)}; provider=${await readFile(config.errors, "utf8").catch(() => "no scripted-provider error")}; diagnostics=${JSON.stringify(diagnostics)}`);
     };
     const delivery = caseHandoffDeliveryService(db, { heartbeat });
     const seeded = await db.select({ issueId: issueDocuments.issueId, key: issueDocuments.key, body: documents.latestBody })
@@ -213,7 +221,7 @@ for await (const line of createInterface({input:process.stdin})) {
     await wait(async () => existsSync(config.accepted), "scripted provider did not receive a successful native handoff response");
     const accepted = JSON.parse(await readFile(config.accepted, "utf8"));
     const receipt = accepted.value.result?.handoffId ? accepted.value.result : accepted.value;
-    expect(receipt).toMatchObject({ taskId: initial.taskId, state: "awaiting_release", callerMustYield: true });
+    expect(receipt).toMatchObject({ taskId: initial.taskId, state: "offered", callerMustYield: true });
     expect(JSON.parse(await readFile(config.exposed, "utf8")).names).toContain("create_case");
     expect(JSON.parse(await readFile(config.exposed, "utf8")).creationSchema.required).toContain("kickoff");
     expect(await db.select().from(cases).where(eq(cases.companyId, companyId))).toHaveLength(1);
@@ -224,6 +232,62 @@ for await (const line of createInterface({input:process.stdin})) {
     expect(source).toMatchObject({ runtimeMode: "native", status: "succeeded" });
     expect(source!.resultJson).toMatchObject({ caseHandoffExecutionReleased: { issueId: initial.taskId },
       nativeResult: { reportedWorkDisposition: "yielded", continuation: { kind: "case_handoff", handoffId: receipt.handoffId } } });
+    const [offer] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId));
+    expect(offer).toMatchObject({ state: "offered", fromAgentId: triage, toAgentId: engineer, version: 2,
+      offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A verified implementation observation",
+        prerequisites: ["Read the saved workflow and task brief"],
+        requirementRevision: { id: source!.completionContractId },
+        taskBrief: { title: "Native factory proof", description: "Native factory proof" } }, recipientDecision: null });
+    expect((await db.select().from(issues).where(eq(issues.id, initial.taskId)))[0]).toMatchObject({ assigneeAgentId: triage });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, engineer))).toHaveLength(0);
+    const recipientHeaders = { authorization: `Bearer ${recipientApiKey}` };
+    const pendingResponse = await fetch(`${process.env.PROPRIO_API_URL}/api/companies/${companyId}/case-handoff-offers`, {
+      headers: recipientHeaders,
+    });
+    expect(pendingResponse.status).toBe(200);
+    const pending = await pendingResponse.json() as {
+      items: { caseId: string; handoffId: string; handoffVersion: number; createdAt: string }[];
+      nextCursor: string | null;
+    };
+    expect(pending).toEqual({ items: [{ caseId: initial.caseId, handoffId: receipt.handoffId,
+      handoffVersion: offer!.version, createdAt: expect.any(String) }], nextCursor: null });
+    const [discovered] = pending.items;
+    const historyUrl = `${process.env.PROPRIO_API_URL}/api/cases/${discovered!.caseId}/handoffs`;
+    const historyResponse = await fetch(historyUrl, { headers: recipientHeaders });
+    expect(historyResponse.status).toBe(200);
+    const history = await historyResponse.json() as { items: { id: string; version: number; offerContract: CaseHandoffOfferContract | null }[] };
+    const visibleOffer = history.items.find(item => item.id === discovered!.handoffId);
+    expect(visibleOffer).toMatchObject({
+      version: 2, state: "offered", fromAgentId: triage, toAgentId: engineer,
+      offerContract: { expectedDeliverable: "A verified implementation observation" },
+    });
+    const observedVersion = visibleOffer!.version;
+    const observedRequirementRevisionId = visibleOffer!.offerContract!.requirementRevision.id;
+    const decisionUrl = `${historyUrl}/${discovered!.handoffId}/decision`;
+    const staleDecisionResponse = await fetch(decisionUrl, {
+      method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: observedVersion, requirementRevisionId: randomUUID() }),
+    });
+    expect(staleDecisionResponse.status).toBe(409);
+    expect(await staleDecisionResponse.json()).toMatchObject({ error: expect.stringContaining("revision changed") });
+    const afterMismatch = await fetch(historyUrl, { headers: recipientHeaders });
+    expect(afterMismatch.status).toBe(200);
+    expect(await afterMismatch.json()).toMatchObject({ items: expect.arrayContaining([expect.objectContaining({
+      id: discovered!.handoffId, state: "offered", recipientDecision: null,
+    })]) });
+    const decisionResponse = await fetch(decisionUrl, {
+      method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: observedVersion,
+        requirementRevisionId: observedRequirementRevisionId }),
+    });
+    expect(decisionResponse.status).toBe(200);
+    const acceptedOffer = await decisionResponse.json();
+    expect(acceptedOffer).toMatchObject({ state: "awaiting_release", recipientDecision: {
+      outcome: "accepted", actorId: engineer, handoffVersion: observedVersion,
+      requirementRevisionId: observedRequirementRevisionId,
+    } });
+    expect(acceptedOffer).not.toHaveProperty("offerContract");
+    expect((await db.select().from(issues).where(eq(issues.id, initial.taskId)))[0]).toMatchObject({ assigneeAgentId: triage });
     const [sourceSession] = await db.select().from(agentTaskSessions).where(and(eq(agentTaskSessions.agentId, triage), eq(agentTaskSessions.taskKey, initial.taskId)));
     expect(sourceSession).toMatchObject({ lastRunId: source!.id, sessionParamsJson: {
       __proprioConfigFingerprint: expect.any(String), __proprioConfigFingerprintVersion: expect.any(Number),

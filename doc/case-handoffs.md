@@ -85,6 +85,45 @@ The case remains open during review or user waits. Stop/cancel/reassignment
 invalidate the intent. Keep terminal intents outside agent-transfer mutation
 fencing, outgoing yield detection and recipient dispatch.
 
+## Versioned handoff offers
+
+Native `handoff_case` supports an opt-in `offer` for standard-mode native runs
+with generic API tools and agent JWT signing available. The offer requires an
+authenticated source run on the same task, a completion contract, and a different
+native recipient who can read the Case and use the decision API. The recipient
+can use `search_api` and `call_api` to call
+`GET /api/companies/:companyId/case-handoff-offers`. The list contains routing
+metadata for the agent's own readable pending offers. Use the returned Case ID
+to read the requirements in Case handoff history. Follow the cursor until it is
+null, even when a page contains no readable items.
+
+The offer preserves the source assignment and records the task brief and the
+completion-contract and workflow revisions. A task brief change, Stop, or Case
+cancellation closes an unanswered offer.
+The named recipient can post a decision to `/api/cases/:caseId/handoffs/:handoffId/decision`
+using the observed handoff and completion-contract revisions. An identical reply
+returns the saved decision metadata. The Case-scoped history retains any message
+sent with a clarification or decline. Acceptance waits for the normal source
+release and recipient admission checks. The outcomes are `accepted`,
+`clarification`, and `declined`. Clarification and decline require a categorized
+`reasonCode` and a message. A reply with a mismatched handoff or requirement
+revision returns `409` and leaves a current offer open. An attempt to decide on
+an offer whose stored requirements have since been superseded returns `409`
+and closes the offer. Reread the task and handoff after either response. If
+requirements change after assignment but before admission, the handoff remains
+held for the operator. Clarification or decline closes the offer and keeps the
+source assigned. The audit event records the category and elapsed time.
+
+Stage the versioned-offer schema before admitting pilot work. If ownership
+diverges or an effect is uncertain, pause new offers, retain the handoff and
+run receipts, and reconcile active work before retrying. Verify any rollback
+or roll-forward against the retained offer states and the intended runner
+profiles before resuming. See the
+[release plan](https://github.com/groktopus/proprio/issues/222) for the candidate
+and evidence requirements.
+
+## Board and verification
+
 The board case list/detail pages are read-only. URL query parameters retain
 search/status/type/project filters through detail navigation; list paging and
 the `GET /api/companies/:companyId/cases/types` read use authorized server data.
@@ -99,7 +138,9 @@ workflow context to preserve their task-only scope. Cancelled or unapplied
 handoff intent is history, not an incoming phase instruction.
 
 Focused verification lives in the case route, handoff service, native handoff,
-durable admission, and legacy process integration tests. Run the explicit-only
+durable admission, and legacy process integration tests. Linux source
+qualification requires the assembled native handoff case to pass with the
+Rust Runner and a scripted provider. Run the explicit-only
 case-handoffs Product E2E workflow for provider/browser qualification; fixture
 and service tests do not establish that a live model followed the workflow.
 See [implementation and acceptance](plans/2026-10-19-persistent-case-handoffs.md)
