@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_SOURCE_FENCE_STATES } from "./services/case-handoff-states.js";
 import { and, eq, inArray } from "drizzle-orm";
 import { caseHandoffs, heartbeatRuns, type Db } from "@groktopus/db";
 import { forbidden } from "./errors.js";
@@ -54,7 +55,7 @@ export async function assertAgentRunWriteAllowed(tx: Db, companyId: string, acto
   }
   const [handoff] = await tx.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
     eq(caseHandoffs.companyId, companyId), eq(caseHandoffs.sourceRunId, actor.runId),
-    inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch", "delivered"]),
+    inArray(caseHandoffs.state, CASE_HANDOFF_SOURCE_FENCE_STATES),
   )).limit(1);
   if (handoff) throw forbidden("This run handed off its task. End the turn.", { code: "case_handoff_run_yielded", handoffId: handoff.id });
   return run;

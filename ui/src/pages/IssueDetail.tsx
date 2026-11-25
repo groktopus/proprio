@@ -1230,6 +1230,7 @@ type IssueDetailChatTabProps = {
   liveIssueIds: ReadonlySet<string>;
   blockerAttention: Issue["blockerAttention"] | null;
   stalledDependencies?: Issue["stalledDependencies"];
+  dependencyDiagnosisReady: boolean;
   successfulRunHandoff: Issue["successfulRunHandoff"] | null;
   scheduledRetry: Issue["scheduledRetry"] | null;
   recoveryAction: Issue["activeRecoveryAction"];
@@ -1403,6 +1404,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   liveIssueIds,
   blockerAttention,
   stalledDependencies,
+  dependencyDiagnosisReady,
   successfulRunHandoff,
   scheduledRetry,
   recoveryAction,
@@ -1504,6 +1506,17 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     : TaskChatThread;
   const designSandbox = useDesignSandbox();
   const queryClient = useQueryClient();
+  const hasExplicitBlockers = (blockedBy?.length ?? 0) > 0;
+  const dependencyDiagnosisQuery = useQuery({
+    queryKey: queryKeys.issues.dependencyInvestigation(issueId),
+    queryFn: () => issuesApi.getDependencyInvestigation(issueId),
+    enabled: dependencyDiagnosisReady && !!issueId && hasExplicitBlockers,
+    refetchOnWindowFocus: true,
+  });
+  const dependencyDiagnosis = hasExplicitBlockers ? dependencyDiagnosisQuery.data : null;
+  const dependencyDiagnosisError = hasExplicitBlockers && dependencyDiagnosisQuery.isError
+    ? describeError(dependencyDiagnosisQuery.error).body
+    : null;
   const issueQueryRef = queryIssueId ?? issueId;
   const scrollLocation = useLocation();
   const scrollNavigationType = useNavigationType();
@@ -2750,6 +2763,9 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             liveIssueIds={liveIssueIds}
             blockerAttention={blockerAttention}
             stalledDependencies={stalledDependencies}
+            dependencyDiagnosis={dependencyDiagnosis}
+            dependencyDiagnosisError={dependencyDiagnosisError}
+            onRetryDependencyDiagnosis={() => void dependencyDiagnosisQuery.refetch()}
             successfulRunHandoff={successfulRunHandoff}
             scheduledRetry={scheduledRetry}
             recoveryAction={isPreviousServerStopCause(recoveryAction?.cause) ? null : recoveryAction ?? null}
@@ -8584,6 +8600,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   liveIssueIds={liveIssueIds}
                   blockerAttention={issue.blockerAttention ?? null}
                   stalledDependencies={issue.stalledDependencies}
+                  dependencyDiagnosisReady={issueQuery.isSuccess && !isPlaceholderData}
                   successfulRunHandoff={issue.successfulRunHandoff ?? null}
                   scheduledRetry={issue.scheduledRetry ?? null}
                   recoveryAction={issue.interruption?.responsibility === "system" || isPreviousServerStopCause(issue.activeRecoveryAction?.cause) ? null : issue.activeRecoveryAction ?? null}

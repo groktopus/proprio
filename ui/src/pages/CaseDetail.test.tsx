@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CaseDetail as CaseDetailData, CaseHandoffView } from "@/api/cases";
 import { ApiError } from "@/api/client";
 import { queryKeys } from "@/lib/queryKeys";
+import { replayLeaks } from "@/lib/analytics/replay-recording.test-utils";
 import { CaseDetail } from "./CaseDetail";
 
 const cases = vi.hoisted(() => ({
@@ -50,7 +51,15 @@ function detail(): CaseDetailData {
 }
 
 function handoff(overrides: Partial<CaseHandoffView> = {}): CaseHandoffView {
-  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
+  return { id: "handoff-1", companyId: "company-1", caseId: "case-1", issueId: "task-1", version: 1, destinationKind: "agent", completedAt: null, workflowTransition: null, offerContract: null, recipientDecision: null, fromAgentId: "agent-1", toAgentId: "agent-2", phase: "verification", instructions: "Check the saved draft independently.", commentId: null, actorType: "agent", actorId: "agent-1", sourceRunId: null, responsibleUserId: null, expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-1", idempotencyKey: "handoff-key", inputFingerprint: "fingerprint", state: "awaiting_release", attemptCount: 0, nextAttemptAt: "2026-10-19T10:00:00Z", leaseExpiresAt: null, lastErrorCode: null, lastError: null, createdAt: "2026-10-19T10:00:00Z", assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: "2026-10-19T10:00:00Z", fromAgentName: "Writer", toAgentName: "Verifier", ...overrides };
+}
+
+function offerRequirements(prerequisites = ["Review the requirements", "Confirm the test fixture"]): NonNullable<CaseHandoffView["offerContract"]> {
+  return {
+    schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A tested implementation", prerequisites,
+    requirementRevision: { id: "contract-revision-7", revision: 7, canonicalSha256: "sha256:contract-hash" },
+    requirementsDigest: "sha256:requirements-digest", taskBrief: { title: "Implement the launch", description: null },
+  };
 }
 
 async function settle() {
@@ -71,8 +80,10 @@ function click(element: HTMLElement) { flushSync(() => element.dispatchEvent(new
 function expand(name: string) {
   const summary = Array.from(document.body.querySelectorAll("summary")).find(item => item.textContent?.trim() === name);
   expect(summary, `disclosure ${name}`).toBeTruthy();
+  openHistoryDetails(summary!.parentElement as HTMLDetailsElement);
+}
+function openHistoryDetails(details: HTMLDetailsElement) {
   flushSync(() => {
-    const details = summary!.parentElement as HTMLDetailsElement;
     details.open = true;
     details.dispatchEvent(new Event("toggle"));
   });
@@ -223,6 +234,123 @@ describe("read-only CaseDetail", () => {
     expect(handoffs.querySelectorAll('a[href="/issues/PAP-123"]')).toHaveLength(2);
     expect(container.textContent).toContain("Check the saved draft independently.");
     expect(cases.retryHandoff).not.toHaveBeenCalled(); expect(cases.cancelHandoff).not.toHaveBeenCalled(); expect(cases.patch).not.toHaveBeenCalled();
+  });
+
+  it("shows an unanswered versioned offer and preserves ordinary historical handoffs", async () => {
+    const offered = handoff({ id: "handoff-offered", phase: "implementation", state: "offered", version: 3,
+      offerContract: offerRequirements(),
+      recipientDecision: null });
+    const ordinary = handoff({ id: "handoff-ordinary", phase: "verification", state: "awaiting_release", offerContract: null, recipientDecision: null });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
+      id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress", statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer",
+    } });
+    cases.listHandoffs.mockResolvedValue({ items: [offered, ordinary], nextCursor: null });
+    render();
+    await waitFor(() => {
+      const section = container.querySelector('[aria-label="Case handoffs"]');
+      expect(section?.textContent).toContain("Waiting for recipient decision");
+    });
+    const history = container.querySelector('[aria-label="Case handoffs"]')!;
+    openHistoryDetails(history.querySelector("details")!);
+    expect(history.textContent).toContain("Offer requirements");
+    expect(history.textContent).toContain("Expected deliverable: A tested implementation");
+    expect(history.textContent).toContain("Review the requirements");
+    expect(history.textContent).toContain("Confirm the test fixture");
+    for (const value of ["A tested implementation", "Review the requirements", "Confirm the test fixture",
+      "contract-revision-7", "sha256:contract-hash", "sha256:requirements-digest"]) {
+      expect(replayLeaks(value, history), value).toEqual({ rendered: true, recorded: false });
+    }
+    expect(history.textContent).toContain("Recipient:");
+    expect(history.textContent).toContain("Verifier");
+    expect(history.textContent).toContain("Accountable source:");
+    expect(history.textContent).toContain("Writer");
+    expect(history.textContent).toContain("Requirement revision 7");
+    expect(history.textContent).toContain("contract-revision-7");
+    expect(history.textContent).toContain("sha256:requirements-digest");
+    expect(history.textContent).toContain("No recipient decision recorded.");
+    expect(history.textContent).toContain("Pending transfer");
+    expect(history.textContent).toContain("Check the saved draft independently.");
+    expect(cases.retryHandoff).not.toHaveBeenCalled();
+    expect(cases.cancelHandoff).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["clarification", "Clarification requested"],
+    ["declined", "Declined"],
+  ] as const)("shows the saved %s explanation and time in handoff history", async (outcome, label) => {
+    const decisionAt = "2026-10-19T10:05:00.000Z";
+    const message = "I need the signed approval before I can verify the release.";
+    const offered = handoff({ id: "handoff-decided", state: "cancelled", cancelledAt: decisionAt, offerContract: offerRequirements([]),
+      recipientDecision: { outcome, actorType: "agent", actorId: "agent-2", handoffVersion: 1,
+        requirementRevisionId: "contract-revision-7", requirementsDigest: "sha256:requirements-digest",
+        decidedAt: decisionAt, reasonCode: "missing_prerequisite", message } });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "verification", workIssue: {
+      id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress", statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer",
+    } });
+    cases.listHandoffs.mockResolvedValue({ items: [offered], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.querySelector('[aria-label="Case handoffs"] details')).not.toBeNull());
+    openHistoryDetails(container.querySelector('[aria-label="Case handoffs"] details')!);
+    await waitFor(() => expect(container.textContent).toContain(`${label} · Missing Prerequisite`));
+    expect(container.querySelector(`time[datetime="${decisionAt}"]`)).not.toBeNull();
+    expect(replayLeaks(message, container)).toEqual({ rendered: true, recorded: false });
+    expect(container.textContent).not.toContain("No recipient decision recorded.");
+    expect(cases.patch).not.toHaveBeenCalled();
+  });
+
+  it("labels the previous owner while an applied assignment is waiting for delivery", async () => {
+    const applied = handoff({ state: "pending_dispatch", assignmentAppliedAt: "2026-10-19T10:04:00Z", offerContract: offerRequirements() });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", pendingHandoff: applied,
+      workIssue: { id: "task-1", identifier: "PAP-123", title: "Verify the launch", status: "todo",
+        statusVersion: 2, assigneeAgentId: "agent-2", assigneeAgentName: "Verifier" } });
+    cases.listHandoffs.mockResolvedValue({ items: [applied], nextCursor: null });
+    render();
+    const selector = '[aria-label="Case handoffs"] details';
+    await waitFor(() => expect(container.querySelector(selector)?.textContent).toContain("Applied · waiting for delivery"));
+    openHistoryDetails(container.querySelector(selector)!);
+    expect(container.querySelector(selector)?.textContent).toContain("Previous owner:Writer");
+    expect(container.querySelector(selector)?.textContent).not.toContain("Accountable source:");
+  });
+
+  it("mounts requirements only for expanded offers across 200 loaded handoffs", async () => {
+    const pageSize = 20;
+    const pageCount = 10;
+    const prerequisites = Array.from({ length: 20 }, (_, index) => `Verification step ${index + 1}`);
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1" });
+    cases.listHandoffs.mockImplementation(async (_caseId: string, cursor: string | null) => {
+      const page = Number(cursor ?? 0);
+      return {
+        items: Array.from({ length: pageSize }, (_, index) => handoff({
+          id: `handoff-${page}-${index}`, version: page * pageSize + index + 1,
+          state: "delivered", offerContract: offerRequirements(prerequisites),
+        })),
+        nextCursor: page + 1 < pageCount ? String(page + 1) : null,
+      };
+    });
+    render();
+    const selector = '[aria-label="Case handoffs"] details';
+    for (let page = 1; page <= pageCount; page++) {
+      await waitFor(() => expect(container.querySelectorAll(selector)).toHaveLength(page * pageSize));
+      if (page < pageCount) click(button("Load older handoffs"));
+    }
+    const offerSelector = '[aria-label="Versioned handoff offer"]';
+    expect(container.querySelectorAll(offerSelector)).toHaveLength(0);
+    openHistoryDetails(container.querySelectorAll<HTMLDetailsElement>(selector)[199]!);
+    expect(container.querySelectorAll(offerSelector)).toHaveLength(1);
+    expect(container.querySelectorAll(`${offerSelector} li`)).toHaveLength(prerequisites.length);
+    expect(cases.listHandoffs).toHaveBeenCalledTimes(pageCount);
+  });
+
+  it("shows an unanswered offer as a recipient decision while the source owns the task", async () => {
+    const pending = handoff({ state: "offered" });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", phase: "implementation",
+      workIssue: { id: "task-1", identifier: "PAP-123", title: "Implement the launch", status: "in_progress",
+        statusVersion: 1, assigneeAgentId: "agent-1", assigneeAgentName: "Writer" }, pendingHandoff: pending });
+    cases.listHandoffs.mockResolvedValue({ items: [pending], nextCursor: null });
+    render();
+    await waitFor(() => expect(container.textContent).toContain("Waiting for Verifier to decide on the offer."));
+    expect(container.querySelector('[aria-label="Case work"]')?.textContent).toContain("Writer");
+    expect(container.querySelector('[aria-label="Case handoffs"]')?.textContent).toContain("Waiting for recipient decision");
   });
 
   it("shows paused delivery without implying that the recipient is working", async () => {

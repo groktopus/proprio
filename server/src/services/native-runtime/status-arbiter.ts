@@ -238,6 +238,7 @@ export function arbitrateNativeStatus(input: {
   planWaitAuthorized?: boolean;
   monitorWaitAuthorized?: boolean;
   caseHandoffAuthorized?: boolean;
+  caseHandoffAwaitingDecision?: boolean;
   /** The saved timer already admitted another run and this run no longer owns checkout. */
   monitorWaitDispatched?: boolean;
   monitorWaitPreserved?: boolean;
@@ -328,7 +329,8 @@ export function arbitrateNativeStatus(input: {
   if (input.caseHandoffAuthorized) return {
     policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
     statusAction: "preserve", toStatus: input.priorIssueStatus,
-    reasonCode: "case_handoff_waiting_for_release", unblockDescriptor: null,
+    reasonCode: input.caseHandoffAwaitingDecision ? "case_handoff_waiting_for_decision" : "case_handoff_waiting_for_release",
+    unblockDescriptor: null,
     effects: [{ kind: "release_checkout" }],
   };
   if (input.providerModelRejected && input.terminalState === "failed" &&
