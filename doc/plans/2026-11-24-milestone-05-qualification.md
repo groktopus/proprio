@@ -25,6 +25,7 @@ The export freezes the IDs and checksum of visible records in the declared captu
 - The connected MCP rollback fixture verified that an audit insert failure rolls back the invocation, approval request and rate charge before any provider send. A retry commits one rate charge and one event. The delegated test-call and legacy-plugin paths retain separate rate-accounting behavior. [Gateway rollback](https://github.com/groktopus/proprio/pull/359#issuecomment-7147343987)
 - All 16 audit route tests passed on `ebac201b` with disposable PostgreSQL and Node 24.22.1. They exercised 10,037 events, a persisted resume cursor, source epoch rotation, exact archive bytes after an older restore, and loss of visibility on a different page. The API checked all snapshot members before returning page data, count and watermark. [Restore contract](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Snapshot visibility](https://github.com/groktopus/proprio/pull/374#issuecomment-7147698734)
 - A focused export test verified that an orphaned event with a surviving private task cannot reveal its presence through a conflict response. The existing missing-binding fixture still reported incomplete delivery for an eligible event. [Private binding](https://github.com/groktopus/proprio/pull/375)
+- All 18 audit route tests passed on `49adcf9d`. A transaction committed after its first export froze. A fresh overlapping snapshot recovered its event, and stable event identity allowed deduplication across a source epoch change. Delays beyond the collector's lookback require separate reconciliation. [Overlapping export](https://github.com/groktopus/proprio/pull/376)
 - Three tests on `2b75d9b0` applied the combined migration and checked a task-bound write, a read-only call and the public export projection. The gateway persisted the provider correlation ID before dispatch, committed receipt before completion, and blocked a repeat mutation across a changed run and idempotency key. [Direct dispatch](https://github.com/groktopus/proprio/pull/366#issuecomment-7147826662)
 - Five tests and the layered server typecheck passed on `5bd23631`. The approval route and authenticated `tools/call` recorded and settled the approved action under the active claim. A same-agent direct retry with identical arguments, a replacement run, and a new key could not send again after an unresolved approved action. An expired elicitation round and a thrown transport error also preserved the unresolved intent. [Approved dispatch](https://github.com/groktopus/proprio/pull/370)
 - On `9ac8fffe`, an independent reviewer matched the exported policy decision, human approval and open dispatch intent for the interrupted action after server recreation. The `complete` field on a page signals that delivery reached the end of the frozen snapshot. The target ledger establishes the actual effect of the interrupted action. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
@@ -43,6 +44,12 @@ locked install, source and Runner builds, managed update and rollback, a fresh
 synthetic task, fresh-target PostgreSQL restore, and interruption recovery. The
 run retained its durable-work acceptance report. [Hosted qualification](https://github.com/groktopus/proprio/actions/runs/45517565083)
 
+Fifteen focused tests passed for the historical and runtime provenance stack
+at `45866c87`. The authenticated decision route returned the original policy
+revision, the admitted Codex fallback model and the pinned skill version after
+the skill was updated. The fixture also checked private task and skill visibility
+and malformed admission evidence. [Native provenance](https://github.com/groktopus/proprio/pull/358)
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
@@ -54,7 +61,12 @@ The release decision depends on the following checks.
 
 The reporting lock guard rejects the lock on `main` at `6e6ebf51`. The committed lock SHA-256 is `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`, while the report policy lists `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e` for both input and output. The intervening change pins `oxlint@1.94.0` and its platform packages. [Dependency change](https://github.com/groktopus/proprio/pull/125)
 
-The release maintainer must review the lock change and arrange the trusted reporting lock refresh. The workflow list for this repository exposed no active lock refresh workflow when checked on November 24, 2026. Then regenerate the public input pins, run the trusted SDK checks for #358 and #363, and record the results for the exact candidate. [Runner operations](https://github.com/groktopus/proprio/blob/6e6ebf51cb0cf214375523171f80f19d14da073f/tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
+The release maintainer must review the lock change and arrange the trusted
+reporting lock refresh. GitHub has no active refresh workflow at the verified
+baseline. The repository owner needs to provide the authorized workflow,
+protected environment and installed lockfile bot. Once the trusted refresh
+lands, resync public input pins and run the SDK checks for #358 and #363 on
+the exact candidate. [Runner operations](../../tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
 
 ## Hold, recovery and resume
 
