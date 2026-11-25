@@ -3,8 +3,8 @@ import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { authorizationService, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
-import { heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
+import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -39,7 +39,7 @@ async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope
 async function visibleEvents(db: DbTransaction, { companyId, actor }: ExportScope) {
   const hasIssueAccess = (issueId: typeof managedAuditEvents.taskId | typeof heartbeatRuns.issueId) =>
     exists(db.select({ id: issues.id }).from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), issuePrivacySqlCondition(actor))));
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), issueEvidenceReadSqlCondition(actor))));
   const runVisible = await heartbeatRunReadSqlCondition(db, actor, companyId, managedAuditEvents.runId);
   return and(
     eq(managedAuditEvents.companyId, companyId),
@@ -66,19 +66,9 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(
       eq(issues.companyId, scope.companyId),
       eq(issues.id, managedAuditEvents.taskId),
-      not(issuePrivacySqlCondition(scope.actor)),
+      not(issueEvidenceReadSqlCondition(scope.actor)),
     )));
-  const hiddenRunBinding = exists(tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(and(
-      eq(heartbeatRuns.companyId, scope.companyId),
-      eq(heartbeatRuns.id, managedAuditEvents.runId),
-      eq(heartbeatRuns.scopeKind, "issue"),
-      exists(tx.select({ id: issues.id }).from(issues).where(and(
-        eq(issues.companyId, scope.companyId),
-        eq(issues.id, heartbeatRuns.issueId),
-        not(issuePrivacySqlCondition(scope.actor)),
-      ))),
-    )));
+  const hiddenRunBinding = heartbeatRunIssueBindingDeniedSqlCondition(tx, scope.actor, scope.companyId, managedAuditEvents.runId);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
     .where(and(sourceWindow, or(missingRun, missingTask), not(hiddenTaskBinding), not(hiddenRunBinding))).limit(1);
   if (missing) throw conflict("Managed audit source has unavailable event bindings. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });

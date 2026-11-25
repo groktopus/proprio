@@ -18,6 +18,7 @@ import {
   createDb,
   documents,
   heartbeatRuns,
+  issueAccessGrants,
   issueComments,
   issueDocuments,
   issues,
@@ -71,6 +72,7 @@ describePostgres("agent action audit routes", () => {
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(heartbeatRuns);
+    await db.delete(issueAccessGrants);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -405,6 +407,65 @@ describePostgres("agent action audit routes", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it.each(["responsibility_dashboard", "responsibility_bar", "responsibility_status_update", "automation_conversation"])(
+    "keeps %s audit events visible only to their owner, including when a binding disappears",
+    async (originKind) => {
+      const { company, agent } = await seed();
+      const ownerId = randomUUID();
+      const auditorId = randomUUID();
+      const userIds = [ownerId, auditorId];
+      await db.insert(companyMemberships).values(userIds.map(userId => ({
+        companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+      })));
+      await db.insert(principalPermissionGrants).values(userIds.map(userId => ({
+        companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+      })));
+      const [owner, auditor] = await Promise.all(userIds.map(async userId =>
+        request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }))));
+      const [conversation] = await db.insert(issues).values({
+        companyId: company.id, originKind, originId: ownerId, title: "Personal conversation",
+        visibility: "private", responsibleUserId: ownerId,
+      }).returning();
+      await db.insert(issueAccessGrants).values({
+        issueId: conversation.id, subjectType: "user", subjectId: auditorId, source: "explicit",
+      });
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: conversation.id,
+      }).returning();
+      const event = {
+        companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+        phase: "policy_decision", decision: "allow", status: "authorized",
+      } as const;
+      const [taskEvent, runEvent] = await db.insert(managedAuditEvents).values([
+        { ...event, taskId: conversation.id, invocationId: randomUUID() },
+        { ...event, runId: run.id, invocationId: randomUUID() },
+      ]).returning();
+      const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+      try {
+        const owned = await owner.post(path).send(window).expect(201);
+        const page = await owner.get(`${path}/${owned.body.exportId}`).expect(200);
+        expect(page.body.events.map((entry: { id: string }) => entry.id).sort()).toEqual([taskEvent.id, runEvent.id].sort());
+
+        const excluded = await auditor.post(path).send(window).expect(201);
+        expect(excluded.body.eventCount).toBe(0);
+        const empty = await auditor.get(`${path}/${excluded.body.exportId}`).expect(200);
+        expect(empty.body.events).toEqual([]);
+
+        await db.update(managedAuditEvents).set({ runId: randomUUID() }).where(eq(managedAuditEvents.id, taskEvent.id));
+        await db.update(managedAuditEvents).set({ taskId: randomUUID() }).where(eq(managedAuditEvents.id, runEvent.id));
+        expect((await auditor.post(path).send(window).expect(201)).body.eventCount).toBe(0);
+        expect((await owner.post(path).send(window).expect(409)).body.details.reasonCode).toBe("snapshot_incomplete");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it("retains archive bytes and checkpoints outside an older restore and rotates the source epoch", async ({ skip }) => {
     const oldEpoch = randomUUID();
