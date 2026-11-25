@@ -974,18 +974,22 @@ or scheduled check; the manual launcher alone does not perform it.
 The trusted report job applies a reviewed `report-lock.patch` before its frozen
 install. `report-lock.json` pins the input lock, patch and resulting lock hashes.
 This updates existing patch identities and the already declared yaml dependency
-without registry resolution. The worker target and its lock artifact never
-control report dependencies. An already-reviewed output lock is used unchanged. An unknown committed lock fails before install;
-review the correction with dependency changes. The existing lockfile-refresh bot runs
-`prepare-report-lock.mjs --refresh` and includes the correction and hashes in its
-lockfile PR. The same commit resyncs `source-sdk-public-inputs.json`, whose
-`lockSha256` is copied from the committed `report-lock.json` output hash. The lockfile bot merges that PR without checks or code-owner review
-when every added package version is at least 3 days old on npm; otherwise the PR
-waits for a maintainer (see `doc/RELEASE-AUTOMATION-SETUP.md` §8.1). The bot
-merges only the commit the workflow generated. It refuses to bless an
-unrecognized committed lock. Paid authorization
-and report jobs still apply only the reviewed offline correction. The original
-failed run remains failed when retained evidence gets a new presentation.
+without registry resolution. The trusted report job controls report dependencies
+independently of the worker's target and lock artifact. An already-reviewed
+output lock is used unchanged. An unknown committed lock fails before install.
+
+The documented refresh path uses a repository-owner configured lockfile bot.
+Its workflow runs `prepare-report-lock.mjs --refresh` and includes the correction
+and hashes in a bot-generated PR. The same commit resyncs
+`source-sdk-public-inputs.json` from the committed `report-lock.json` output hash.
+The bot's automatic merge path applies to the exact generated commit when every
+added package version is at least three days old on npm. Other updates require
+maintainer review. In this checkout, the owner must provide the authorized
+refresh workflow before the trusted report job can accept a new lock.
+See the [test infrastructure guide](../../doc/test-infrastructure.md).
+
+Paid authorization and report jobs apply the reviewed offline correction. The
+original failed run remains failed when retained evidence gets a new presentation.
 
 The trusted authorization job checks this correction and validates the frozen
 lock against current dependency manifests offline before catalog/build and paid
