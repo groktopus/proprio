@@ -2789,7 +2789,7 @@ describe("ProprioControlPlanePort conformance", () => {
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Complete task", prerequisites: [],
         requirementRevision: { id: acceptedContract!.id, revision: acceptedContract!.revision, canonicalSha256: acceptedContract!.canonicalSha256 },
         requirementsDigest, taskBrief: { title: "Create the service briefing", description: objective } },
-      recipientDecision: { outcome: "accepted", actorType: "agent", actorId: sourceAgentId, handoffVersion: 1,
+      recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
         requirementRevisionId: acceptedContract!.id, requirementsDigest, decidedAt: new Date().toISOString() }, state: "delivered" });
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
     await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, caseHandoffId: handoffId,
