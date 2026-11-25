@@ -1,12 +1,16 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { conflict, forbidden, notFound } from "../errors.js";
+import { conflict, forbidden, notFound, payloadTooLarge } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
+// Every page revalidates the complete membership so counts and watermarks stay
+// truthful. Keep that repeated query and its UUID array explicitly bounded.
+// 20k preserves the existing 10,037-event qualification with room to grow.
+const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
@@ -114,7 +118,16 @@ export async function createManagedAuditExport(
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
       .where(and(visible, gte(managedAuditEvents.occurredAt, window.from), lt(managedAuditEvents.occurredAt, window.to)))
-      .orderBy(asc(managedAuditEvents.id));
+      .orderBy(asc(managedAuditEvents.id))
+      // Fetch one sentinel row so we can reject oversized snapshots without
+      // materializing an unbounded membership array in the service process.
+      .limit(MAX_SNAPSHOT_MEMBERSHIP + 1);
+    if (rows.length > MAX_SNAPSHOT_MEMBERSHIP) {
+      throw payloadTooLarge("Managed audit export exceeds the bounded snapshot membership. Narrow the export window.", {
+        reasonCode: "snapshot_membership_limit",
+        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
+      });
+    }
     const eventIds = rows.map(row => row.id);
     const watermark = createHash("sha256").update(JSON.stringify(eventIds)).digest("hex");
     const [saved] = await tx.insert(managedAuditExports).values({
@@ -180,6 +193,14 @@ export async function readManagedAuditExportPage(
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }
     assertRetainedWindow(scope, snapshot.from);
+    // Defensive fence for rows written by older code or modified outside this
+    // service. It also bounds the all-member visibility revalidation below.
+    if (snapshot.eventIds.length > MAX_SNAPSHOT_MEMBERSHIP) {
+      throw conflict("Managed audit export exceeds the supported snapshot membership. Create a narrower export.", {
+        reasonCode: "snapshot_membership_limit",
+        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
+      });
+    }
     const offset = decodeCursor(snapshot, cursor);
     const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
     const visible = await visibleEvents(tx, scope);
