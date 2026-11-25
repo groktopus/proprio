@@ -125,8 +125,8 @@ database. It writes delivered page bytes and the resume checkpoint to files
 outside both databases, resumes by that checkpoint, and verifies the archived
 ID watermark after a source row is deleted. The old checkpoint reports
 `snapshot_incomplete` when its row is missing. After restoring the older backup
-and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint reports
-`source_epoch_changed`; it is not a new complete export. A fresh API snapshot
+and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint and a
+retained expiry marker from the old epoch both report `source_epoch_changed`. A fresh API snapshot
 uses the restored data and current access. The test rejects the expired event
 window, verifies a new page omits restricted evidence, and verifies an advanced
 retention boundary invalidates its cursor. The qualification scope is an

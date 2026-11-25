@@ -944,7 +944,8 @@ describePostgres("agent action audit routes", () => {
       const shortened = await restoredBoard.get(`${path}/${fresh.body.exportId}`).query({ cursor: restoredPage.body.nextCursor });
       expect(shortened.status).toBe(409);
       expect(shortened.body).toMatchObject({ details: { reasonCode: "retention_window_expired" } });
-      expect((await restoredBoard.get(`${path}/${expired.body.exportId}`)).status).toBe(404);
+      const oldEpochMarker = await restoredBoard.get(`${path}/${expired.body.exportId}`).expect(409);
+      expect(oldEpochMarker.body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
 
       expect(await readFile(archiveFile)).toEqual(archivedBytes);
       expect(archivedIds).toContain(missingId);
