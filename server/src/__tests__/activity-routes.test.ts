@@ -32,6 +32,7 @@ const mockAgentActionAuditService = vi.hoisted(() => ({
 }));
 
 const mockCompletionHistory = vi.hoisted(() => ({ read: vi.fn() }));
+const mockFilterCasesForActor = vi.hoisted(() => vi.fn());
 
 const caseReadCondition = vi.hoisted(() => ({ policy: "authorized-cases" }));
 vi.mock("../services/case-activity-access.js", () => ({
@@ -70,6 +71,7 @@ vi.mock("../services/native-runtime/native-completion-history.js", () => ({
 
 vi.mock("../services/case-access.js", () => ({
   caseReadSqlCondition: vi.fn(async () => ({ caseReadable: true })),
+  filterCasesForActor: mockFilterCasesForActor,
 }));
 
 async function createApp(
@@ -141,6 +143,7 @@ describe("activity routes", () => {
     mockAccessService.canUser.mockReset();
     mockAgentActionAuditService.list.mockReset();
     mockCompletionHistory.read.mockReset();
+    mockFilterCasesForActor.mockReset().mockImplementation(async (_db, _actor, rows) => rows);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       action: "company_scope:read",
@@ -184,6 +187,30 @@ describe("activity routes", () => {
       companyId: "company-1", issueId: "issue-1", readableCaseHandoffIds: new Set(),
     });
     expect(res.body).toEqual([entry]);
+  });
+
+  it("only exposes handoffs from Cases that pass the canonical read check", async () => {
+    mockIssueService.getByIdentifier.mockResolvedValue({ id: "issue-1", companyId: "company-1" });
+    mockCompletionHistory.read.mockResolvedValue([]);
+    const candidates = [
+      { id: "handoff-allowed", caseId: "case-allowed" },
+      { id: "handoff-restricted", caseId: "case-restricted" },
+    ];
+    const db = { select: () => ({ from: () => ({ innerJoin: () => ({ where: async () => candidates }) }) }) };
+    mockFilterCasesForActor.mockResolvedValue([{ id: "case-allowed" }]);
+    const actor = { type: "agent", companyId: "company-1", agentId: "agent-1" };
+    const app = await createApp(actor, db);
+
+    const res = await requestApp(app, baseUrl => request(baseUrl).get("/api/issues/TEST-1/completion-history"));
+
+    expect(res.status).toBe(200);
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(mockCompletionHistory.read).toHaveBeenCalledWith(db, {
+      companyId: "company-1", issueId: "issue-1", readableCaseHandoffIds: new Set(["handoff-allowed"]),
+    });
+    expect(mockFilterCasesForActor).toHaveBeenCalledWith(db, expect.objectContaining(actor), [
+      { id: "case-allowed" }, { id: "case-restricted" },
+    ]);
   });
 
   it("does not query completion lineage when the task is unreadable", async () => {
