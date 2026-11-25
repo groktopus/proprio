@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
 import { and, eq } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, issueRelations, issues,
+import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, heartbeatRuns, issueRelations, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { afterEach, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -165,26 +165,34 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         return row ?? null;
       }, row => (row.details as Record<string, unknown>).outcome === "pending", "The controller did not persist the diagnosis claim");
 
+      const diagnosisKey = String((claim.details as Record<string, unknown>).idempotencyKey);
+      expect(diagnosisKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
+      const receiptFilter = and(eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.idempotencyKey, diagnosisKey));
+      expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(0);
+
       // Reuse the same config, PostgreSQL proxy, database and runtime control
       // file. Startup recovery must finish the committed claim with one wake.
       await writeFile(control, "");
       restarted = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
       const wake = await waitFor(async () => {
-        const rows = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
-        return rows[0] ?? null;
-      }, row => row.status !== "deferred_issue_execution", "Controller restart did not persist its diagnosis wake");
-      const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-        eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
-      expect(wakes).toHaveLength(1);
+        const [row] = await db.select().from(agentWakeupRequests).where(receiptFilter);
+        return row ?? null;
+      }, row => ["completed", "failed", "skipped", "cancelled"].includes(row.status),
+      "Controller restart did not settle its diagnosis wake");
+      expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(1);
       expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system",
-        payload: { issueId: parentId, dependencyDiagnosis: true } });
+        status: "completed", payload: { issueId: parentId } });
+      const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.wakeupRequestId, wake.id)));
+      expect(run).toMatchObject({ status: "succeeded",
+        contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
       const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string; status?: string }> }>(
         "GET", `/issues/${parentId}/diagnostics/wakes`);
-      expect(diagnostics.events).toContainEqual(expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled" }));
+      expect(diagnostics.events).toContainEqual(expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled", status: "completed" }));
     } finally {
       if (restarted) await restarted.stop().catch(() => {});
       if (controller && controller.child.exitCode === null && controller.child.signalCode === null) {
