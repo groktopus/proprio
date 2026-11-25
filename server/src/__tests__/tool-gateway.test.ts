@@ -1466,7 +1466,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
   it.each(["config", "transport", "application", "legacy_application"])("records an actionable GitHub access error from %s metadata after one approved call and keeps the connection usable", async source => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
-    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
     const denied = "failed to create repository: POST https://api.github.com/user/repos: 403 Resource not accessible by integration []";
     let fail = true;
     const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
@@ -1500,10 +1500,15 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         .rejects.toMatchObject({ reasonCode: "approval_required" });
       expect(remote.requests).toHaveLength(0);
       const [action] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
-      await db.update(issueThreadInteractions).set({ status: "accepted", resolvedAt: new Date() })
-        .where(eq(issueThreadInteractions.id, action!.interactionId!));
-      await db.update(toolActionRequests).set({ status: "approved", resolvedAt: new Date() })
-        .where(eq(toolActionRequests.id, action!.id));
+      await commitToolActionReview(db, { companyId: company.id, issueId: issue.id,
+        interactionId: action!.interactionId!, actionRequestId: action!.id,
+        decision: "approved", actor: { userId: "github-recovery-reviewer" } });
+      const [approvalEvidence] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, action!.invocationId),
+        eq(managedAuditEvents.phase, "approval_resolution"),
+      ));
+      expect(approvalEvidence).toMatchObject({ decision: "approved", status: "approved",
+        actorType: "user", actorId: "github-recovery-reviewer", requestId: action!.id });
       await expect(gateway.executeTool({ sessionToken: session.token, tool: toolName, parameters,
         approvedActionRequestId: action!.id })).rejects.toMatchObject({ reasonCode: "github_access_denied" });
       expect(remote.requests).toHaveLength(1);
@@ -5002,15 +5007,15 @@ rl.on("line", (line) => {
         actionRequestId: approvalRequest.id,
       })).rejects.toMatchObject({ status: 404, reasonCode: "action_request_not_found" });
 
-      await db
-        .update(issueThreadInteractions)
-        .set({
-          status: "accepted",
-          result: { version: 1, outcome: "accepted" },
-          resolvedByAgentId: agent.id,
-          resolvedAt: new Date(),
-        })
-        .where(eq(issueThreadInteractions.id, approvalRequest.interactionId!));
+      await commitToolActionReview(db, { companyId: company.id, issueId: issue.id,
+        interactionId: approvalRequest.interactionId!, actionRequestId: approvalRequest.id,
+        decision: "approved", actor: { userId: "shopify-approval-reviewer" } });
+      const [approvalEvidence] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, approvalRequest.invocationId),
+        eq(managedAuditEvents.phase, "approval_resolution"),
+      ));
+      expect(approvalEvidence).toMatchObject({ decision: "approved", status: "approved",
+        actorType: "user", actorId: "shopify-approval-reviewer", requestId: approvalRequest.id });
 
       pauseApprovedExecution = true;
       const approvedExecution = gateway.executeTool({
@@ -5019,7 +5024,10 @@ rl.on("line", (line) => {
         parameters: { key: "approved", value: "tampered" },
         approvedActionRequestId: approvalRequest.id,
       });
-      await approvedExecutionStarted;
+      await Promise.race([
+        approvedExecutionStarted,
+        approvedExecution.then(() => { throw new Error("The approved call finished before reaching its provider"); }),
+      ]);
       const [executingApproval] = await db
         .select()
         .from(toolActionRequests)
