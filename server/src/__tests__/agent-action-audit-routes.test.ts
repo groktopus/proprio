@@ -962,6 +962,95 @@ describePostgres("agent action audit routes", () => {
     30_000,
   );
 
+  it("keeps sibling-company work responsive while validating task and run bound snapshot members", async () => {
+    const { company, agent, issue } = await seed();
+    const { company: siblingCompany } = await seed();
+    const userId = randomUUID();
+    const siblingUserId = randomUUID();
+    const principals = [
+      { companyId: company.id, principalId: userId },
+      { companyId: siblingCompany.id, principalId: siblingUserId },
+    ];
+    await db.insert(companyMemberships).values(principals.map(principal => ({
+      ...principal, principalType: "user", membershipRole: "operator", status: "active",
+    })));
+    await db.insert(principalPermissionGrants).values(principals.map(principal => ({
+      ...principal, principalType: "user", permissionKey: "audit:view_agent_actions",
+    })));
+    const run = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: issue.id, status: "succeeded",
+    }).returning().then(rows => rows[0]!);
+    const eventRows = Array.from({ length: 64 }, () => ({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway" as const,
+      taskId: issue.id, runId: run.id,
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    }));
+    const inserted = await db.insert(managedAuditEvents).values(eventRows).returning({ id: managedAuditEvents.id });
+    const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1, dedicatedConnectionMax: 1 });
+    const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const board = request(await createApp(requestDb, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const siblingBoard = request(await createApp(requestDb, {
+      type: "board", source: "session", userId: siblingUserId, companyIds: [siblingCompany.id],
+    }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let locker: Promise<unknown> | undefined;
+    let pendingRead: Promise<request.Response> | undefined;
+    try {
+      const receipt = await board.post(path).send(window).expect(201);
+      const exportPath = `${path}/${receipt.body.exportId}`;
+      let lockerPid = 0;
+      locker = lockDb.transaction(async tx => {
+        await tx.execute(sql`lock table managed_audit_events in access exclusive mode`);
+        const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        lockerPid = backend!.pid;
+        locked.resolve();
+        await release.promise;
+      });
+      await Promise.race([locked.promise, locker]);
+      pendingRead = board.get(exportPath).then(response => response);
+      // Confirm this is the actual export validation query waiting on the
+      // fixture lock before checking ordinary-pool responsiveness.
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where datname = current_database() and query like '%managed_audit_events%'
+            and ${lockerPid} = any(pg_blocking_pids(pid))`);
+        expect(waiting).toHaveLength(1);
+      }, { timeout: 1_500, interval: 20 });
+      expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1);
+
+      await siblingBoard.get(`/api/companies/${siblingCompany.id}/activity`).timeout({ deadline: 2_000 }).expect(200);
+      expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1);
+
+      release.resolve();
+      await locker;
+      const response = await pendingRead;
+      expect(response.status, response.text).toBe(200);
+      expect(response.body).toMatchObject({
+        eventCount: inserted.length,
+        complete: true,
+        nextCursor: null,
+        events: expect.arrayContaining(inserted.map(({ id }) => expect.objectContaining({ id, taskId: issue.id, runId: run.id }))),
+      });
+      const [pageAccess] = await db.select({ companyId: managedAuditExportPageAccess.companyId,
+        userId: managedAuditExportPageAccess.userId, exportId: managedAuditExportPageAccess.exportId,
+        pageOffset: managedAuditExportPageAccess.pageOffset, itemCount: managedAuditExportPageAccess.itemCount })
+        .from(managedAuditExportPageAccess).where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId));
+      expect(pageAccess).toEqual({ companyId: company.id, userId, exportId: receipt.body.exportId, pageOffset: 0, itemCount: inserted.length });
+    } finally {
+      release.resolve();
+      await Promise.allSettled([locker, pendingRead]);
+      await Promise.all([lockDb.$client.end(), requestDb.$client.end()]);
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+
   // This race belongs with the route fixtures because it needs a held PostgreSQL
   // writer plus the suite's authenticated HTTP requests and shared snapshot setup.
   it("finds a late-committing event only through a fresh overlapping export", async () => {
