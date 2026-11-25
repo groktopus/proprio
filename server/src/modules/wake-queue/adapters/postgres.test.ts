@@ -849,7 +849,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     const otherRunId = await seedRun({ companyId, agentId: leadId, status: "succeeded", contextSnapshot: { issueId } });
     await seedIssue({
       companyId: scenario === "foreign_child" ? otherCompanyId : companyId,
-      identifier: "QA-2", parentId: scenario === "unrelated_child" ? otherIssueId : issueId,
+      identifier: "QA-2",
+      parentId: scenario === "foreign_child" ? foreignIssueId : scenario === "unrelated_child" ? otherIssueId : issueId,
       assigneeAgentId: scenario === "foreign_child" ? foreignAgentId : scenario === "other_child_assignee" ? leadId : workerId,
       status: scenario === "child_open" ? "in_progress" : scenario === "child_cancelled" ? "cancelled" : "done",
     });
