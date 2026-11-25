@@ -95,6 +95,23 @@ const support = await getEmbeddedPostgresTestSupport();
       selectedEnvironmentDriver: "sandbox" })).rejects.toMatchObject({ details: { code: "low_trust_requires_isolated_workspace" } });
   });
 
+  it("creates an agent-assigned task inside the caller transaction with one PostgreSQL connection", async () => {
+    const f = await seed();
+    const singleConnectionDb = createDb(database.connectionString, { maxConnections: 1 });
+    try {
+      const created = await singleConnectionDb.transaction((tx) => issueService(singleConnectionDb).create(
+        f.companyId,
+        { title: `Single connection task ${randomUUID()}`, status: "in_progress", assigneeAgentId: f.agent.id },
+        tx,
+      ));
+      expect(created).toMatchObject({ status: "in_progress", assigneeAgentId: f.agent.id });
+      const [persisted] = await singleConnectionDb.select().from(issues).where(eq(issues.id, created.id));
+      expect(persisted).toMatchObject({ status: "in_progress", assigneeAgentId: f.agent.id });
+    } finally {
+      await singleConnectionDb.$client.end();
+    }
+  }, 30_000);
+
   it("permits existing owner conversations without backfilling authority from historical attribution", async () => {
     const f = await seed();
     const [issue] = await db.insert(issues).values({ companyId: f.companyId, title: "Owner chat",
