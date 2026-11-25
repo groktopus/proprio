@@ -1867,7 +1867,7 @@ export async function finalizeNativeRun(input: {
           assessment: { ...assessment, hasBlockingRemainingWork: true, continuation: null } });
         proposedDecision = { ...incomplete, effects: incomplete.effects.map(effect =>
           effect.kind === "enqueue_continuation" ? { ...effect, summary: error.message }
-            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message } : effect) };
+            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message, taskRemedy: error.taskRemedy } : effect) };
       }
     }
     proposedDecision = gateDoneOnConfiguredReview(proposedDecision, reviewStage, run.agentId);

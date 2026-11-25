@@ -1,3 +1,4 @@
+import { projectTaskCompletionRecovery } from "./native-runtime/case-handoff-completion-evidence.js";
 import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { notifyIssueGraphRecovery } from "./issue-recovery-notifications.js";
 import { notifyNativeRecoveryNotices } from "./native-recovery-notice-notifications.js";
@@ -25,10 +26,6 @@ const MAX_UPSERT_RETRIES = 3;
 type IssueRecoveryActionRow = typeof issueRecoveryActions.$inferSelect;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type DbOrTransaction = Db | DbTransaction;
-
-function asDatabaseDate(value: string | Date | null) {
-  return typeof value === "string" ? new Date(value) : value;
-}
 
 function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
   const budget = evidence.recoveryBudget;
@@ -100,6 +97,7 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
 }
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
+  const recovery = projectTaskCompletionRecovery(row.evidence) ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
   return {
     id: row.id,
     companyId: row.companyId,
@@ -114,8 +112,8 @@ function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
     returnOwnerAgentId: row.returnOwnerAgentId,
     cause: row.cause,
     fingerprint: row.fingerprint,
-    evidence: row.evidence,
-    nextAction: readModelNextAction(row),
+    evidence: recovery.evidence,
+    nextAction: recovery.nextAction,
     wakePolicy: row.wakePolicy,
     monitorPolicy: row.monitorPolicy,
     attemptCount: row.attemptCount,
@@ -243,12 +241,12 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     }
   }
 
-  async function getActiveForIssue(
+  async function getActiveRow(
     companyId: string,
     sourceIssueId: string,
     dbOrTx: DbOrTransaction = db,
-  ): Promise<IssueRecoveryAction | null> {
-    const row = await dbOrTx
+  ): Promise<IssueRecoveryActionRow | null> {
+    return dbOrTx
       .select()
       .from(issueRecoveryActions)
       .where(
@@ -261,10 +259,17 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
       .orderBy(desc(issueRecoveryActions.updatedAt))
       .limit(1)
       .then((rows) => rows[0] ?? null);
-    if (!row) return null;
+  }
+
+  async function projectActiveRow(row: IssueRecoveryActionRow, dbOrTx: DbOrTransaction = db) {
     const action = toReadModel(row);
-    await projectNativeRunActivity(companyId, [action], dbOrTx);
+    await projectNativeRunActivity(row.companyId, [action], dbOrTx);
     return action;
+  }
+
+  async function getActiveForIssue(companyId: string, sourceIssueId: string, dbOrTx: DbOrTransaction = db) {
+    const row = await getActiveRow(companyId, sourceIssueId, dbOrTx);
+    return row ? projectActiveRow(row, dbOrTx) : null;
   }
 
   async function listActiveForIssues(companyId: string, sourceIssueIds: string[]) {
@@ -390,9 +395,9 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     input: UpsertIssueRecoveryActionInput,
     retryCount = 0,
   ): Promise<IssueRecoveryAction> {
-    const existing = await getActiveForIssue(input.companyId, input.sourceIssueId);
+    const existing = await getActiveRow(input.companyId, input.sourceIssueId);
     const now = new Date();
-    if (existing && input.createOnly) return existing;
+    if (existing && input.createOnly) return projectActiveRow(existing);
     if (!existing) {
       const [source] = await db.select({ status: issues.status }).from(issues)
         .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.sourceIssueId))).limit(1);
@@ -438,7 +443,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
               sql`${issueRecoveryActions.evidence}->'workspaceOwnerStop' is null`)).returning(), { companyId: input.companyId, issueId: input.sourceIssueId });
           if (updated) return toReadModel(updated);
         }
-        return existing;
+        return projectActiveRow(existing);
       }
       const nextAttemptCount =
         input.attemptCount ?? existing.attemptCount + 1;
@@ -567,10 +572,10 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
                 ? existing.maxAttempts
                 : input.maxAttempts,
             timeoutAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.timeoutAt)
+              ? existing.timeoutAt
               : input.timeoutAt ?? null,
             lastAttemptAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.lastAttemptAt)
+              ? existing.lastAttemptAt
               : input.lastAttemptAt ?? now,
             outcome: input.preserveExistingOwner ? existing.outcome : null,
             resolutionNote: input.preserveExistingOwner ? existing.resolutionNote : null,

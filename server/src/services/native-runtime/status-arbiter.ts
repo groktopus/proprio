@@ -1,3 +1,4 @@
+import type { NativeDeliverableTaskRemedy } from "./native-deliverable-feedback.js";
 import { COMPLETION_REVIEW_STAGE_REASON, COMPLETION_REVIEW_STAGE_REJECTED_REASON, type CompletionReviewStageEntry } from "../issue-execution-policy.js";
 import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
 import type { IssueUnblockDescriptor } from "@groktopus/shared";
@@ -64,6 +65,7 @@ export type NativeStatusEffect =
       kind: "record_finalization_error";
       cause: string;
       nextAction: string;
+      taskRemedy?: NativeDeliverableTaskRemedy;
       agentId: string;
     }
   | { kind: "release_run_resources" }
