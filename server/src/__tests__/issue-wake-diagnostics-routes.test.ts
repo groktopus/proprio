@@ -1,7 +1,8 @@
+import { armCrashPointForTest } from "@groktopus/shared/crash-points";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -9,10 +10,12 @@ import {
   agents,
   companies,
   createDb,
+  executionWorkspaces,
   heartbeatRuns,
   issueRelations,
   issues,
   projects,
+  workspaceOperations,
 } from "@groktopus/db";
 import { LOW_TRUST_REVIEW_PRESET } from "@groktopus/shared";
 import {
@@ -355,20 +358,103 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
     const path = `/api/issues/${parent.id}/dependency-investigation`;
 
     const operator = createApp(db, boardActor(company));
-    const visible = await request(operator).get(path).expect(200);
+    const visible = await request(operator).get(path).set("If-None-Match", "*").expect(200);
+    expect(visible.headers["cache-control"]).toBe("private, no-store");
+    expect(visible.headers.etag).toBeUndefined();
     expect(visible.body.dependencyPath.map(({ issueId }: { issueId: string }) => issueId)).toEqual([child.id, grandchild.id]);
     expect(visible.body.cause.issueId).toBe(grandchild.id);
 
     const scopedApp = createApp(db, agentActor(company, agent, run.id));
     await request(scopedApp).get(`/api/issues/${grandchild.id}`).expect(404);
     const scoped = await request(scopedApp).get(path).expect(200);
-    expect(scoped.body).toMatchObject({ cause: { kind: "restricted_dependency", issueId: null }, canInvestigate: false });
+    expect(scoped.body).toMatchObject({
+      state: "restricted", cause: { kind: "restricted_dependency", issueId: null }, nextOwner: { type: "board" }, canInvestigate: false,
+    });
+    expect(scoped.body.wake).not.toHaveProperty("idempotencyKey");
     expect(scoped.body.dependencyPath.map(({ issueId }: { issueId: string }) => issueId)).toEqual([child.id]);
     expect(JSON.stringify(scoped.body)).not.toContain(grandchild.id);
     expect(JSON.stringify(scoped.body)).not.toContain(grandchild.title);
 
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, child.id));
     expect((await request(operator).get(path).expect(200)).body).toBeNull();
+  });
+
+  it("explains a cancelled prerequisite that still blocks execution", async () => {
+    const company = await seedCompany(db);
+    const assignee = await seedAgent(db, company.id);
+    const parent = await seedIssue(db, { companyId: company.id, title: "Parent", status: "blocked", assigneeAgentId: assignee.id });
+    const child = await seedIssue(db, { companyId: company.id, title: "Cancelled prerequisite", status: "cancelled" });
+    await blockIssue(db, company.id, child.id, parent.id);
+    const app = createApp(db, boardActor(company));
+    const response = await request(app).get(`/api/issues/${parent.id}/dependency-investigation`).expect(200);
+    expect(response.body).toMatchObject({ state: "external_wait", cause: { kind: "cancelled_dependency", issueId: child.id },
+      canInvestigate: false });
+    expect(response.body.nextAction).toContain("remove or replace");
+  });
+
+  it("explains a done prerequisite until its workspace is finalized", async () => {
+    const company = await seedCompany(db);
+    const assignee = await seedAgent(db, company.id);
+    const parent = await seedIssue(db, { companyId: company.id, title: "Parent", status: "blocked", assigneeAgentId: assignee.id });
+    const child = await seedIssue(db, { companyId: company.id, title: "Done prerequisite", status: "done" });
+    const [workspace] = await db.insert(executionWorkspaces).values({ companyId: company.id, name: "Workspace",
+      mode: "shared_workspace", strategyType: "project_primary", status: "active" }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: assignee.id, issueId: child.id,
+      invocationSource: "assignment", status: "succeeded" }).returning();
+    await db.update(issues).set({ executionWorkspaceId: workspace!.id }).where(eq(issues.id, child.id));
+    await db.insert(workspaceOperations).values({ companyId: company.id, issueId: child.id, executionWorkspaceId: workspace!.id,
+      heartbeatRunId: run!.id, phase: "remote_workspace_snapshot", status: "succeeded", startedAt: new Date(Date.now() - 1_000) });
+    await blockIssue(db, company.id, child.id, parent.id);
+    const app = createApp(db, boardActor(company));
+    const path = `/api/issues/${parent.id}/dependency-investigation`;
+    expect((await request(app).get(path).expect(200)).body).toMatchObject({
+      state: "active", cause: { kind: "workspace_finalization_pending", issueId: child.id }, canInvestigate: false,
+    });
+    await db.insert(workspaceOperations).values({ companyId: company.id, issueId: child.id, executionWorkspaceId: workspace!.id,
+      heartbeatRunId: run!.id, phase: "workspace_finalize", status: "succeeded", startedAt: new Date() });
+    expect((await request(app).get(path).expect(200)).body).toBeNull();
+  });
+
+  it("restricts manual investigations of Agent Chat tasks to the conversation owner", async () => {
+    const company = await seedCompany(db);
+    const assignee = await seedAgent(db, company.id);
+    const parent = await seedIssue(db, { companyId: company.id, title: "Agent Chat", status: "todo", assigneeAgentId: assignee.id });
+    const child = await seedIssue(db, { companyId: company.id, title: "Stalled prerequisite", status: "blocked" });
+    await db.update(issues).set({ conversationAgentId: assignee.id, conversationUserId: "conversation-owner", conversationState: "active" })
+      .where(eq(issues.id, parent.id));
+    await blockIssue(db, company.id, child.id, parent.id);
+    const app = createApp(db, boardActor(company));
+    const path = `/api/issues/${parent.id}/dependency-investigation`;
+    const diagnosis = await request(app).get(path).expect(200);
+    expect(diagnosis.body.canInvestigate).toBe(false);
+    expect(diagnosis.body.wake).not.toHaveProperty("idempotencyKey");
+    await request(app).post(path).send({ idempotencyKey: "stale-key" }).expect(403);
+  });
+
+  it("acknowledges a saved request and retains the board audit actor after an interrupted response", async () => {
+    const company = await seedCompany(db);
+    const assignee = await seedAgent(db, company.id);
+    const parent = await seedIssue(db, { companyId: company.id, title: "Parent", status: "in_progress", assigneeAgentId: assignee.id });
+    const child = await seedIssue(db, { companyId: company.id, title: "Stalled prerequisite", status: "blocked" });
+    await blockIssue(db, company.id, child.id, parent.id);
+    const path = `/api/issues/${parent.id}/dependency-investigation`;
+    const operator = createApp(db, boardActor(company));
+    const initial = await request(operator).get(path).expect(200);
+    expect(initial.body).toMatchObject({ canInvestigate: true, wake: { idempotencyKey: expect.any(String) } });
+    const payload = { idempotencyKey: initial.body.wake.idempotencyKey };
+    const disarm = armCrashPointForTest("issue.dependency_diagnosis.after_claim_before_wake");
+    try {
+      await request(operator).post(path).send(payload).expect(500);
+    } finally {
+      disarm();
+    }
+    const replay = await request(operator).post(path).send(payload).expect(202);
+    expect(replay.body).toMatchObject({ accepted: true });
+    const entries = await db.select().from(activityLog).where(and(eq(activityLog.companyId, company.id),
+      eq(activityLog.action, "issue.dependency_diagnosis.requested"), eq(activityLog.entityId, parent.id)));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ actorId: "board-user", actorType: "user", entityType: "issue",
+      details: { source: "user", outcome: "pending", idempotencyKey: payload.idempotencyKey } });
   });
 
   it("omits hidden blocker state from Case-B diagnosis for boundary-scoped agents", async () => {

@@ -9892,6 +9892,10 @@ export function issueRoutes(
     const visibleMentionedProjects = mentionedProjects.filter((_, index) => mentionedProjectVisibility[index]);
     // Recovery revalidation may change the blocker; read it afterwards.
     const executionBlocker = await timing.time("execution_blocker", () => getExecutionBlocker(db, issue.companyId, issue.id));
+    const interruption = await taskInterruptionPresentation(db, issue);
+    const viewerCanRetry = interruption?.canRetry === true && req.actor.type === "board"
+      && (!issue.conversationAgentId || Boolean(req.actor.userId && req.actor.userId === issue.conversationUserId))
+      && (await decideIssueAccess(req, issue, "issue:mutate")).allowed;
     await recordAgentChildTaskRead(db, req, issue);
     res.setHeader("Server-Timing", timing.header());
     res.json({
@@ -9903,7 +9907,8 @@ export function issueRoutes(
       ...(reviewAttention ? { reviewAttention } : {}),
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       executionBlocker,
-      interruption: await taskInterruptionPresentation(db, issue),
+      interruption,
+      ...(viewerCanRetry ? { viewerCanRetry } : {}),
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       // Always present, so a cleared stall replaces the cached list.
@@ -10104,8 +10109,10 @@ export function issueRoutes(
     const { readParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");
     const diagnosis = await readParentDependencyDiagnosis(db, { companyId: issue.companyId, issueId: issue.id });
     res.setHeader("Cache-Control", "private, no-store");
+    res.type("json");
+    // Sending through Express's JSON helper can turn conditional GETs into 304s.
     if (!diagnosis) {
-      res.json(null);
+      res.end("null");
       return;
     }
     const referencedIds = diagnosis.dependencyPath.map(({ issueId }) => issueId);
@@ -10113,16 +10120,20 @@ export function issueRoutes(
     const [readable, mayInvestigate] = await Promise.all([
       readableIssueEdgeIds(req, issue.companyId, referencedIds),
       diagnosis.canInvestigate && req.actor.type === "board"
+        && (!issue.conversationAgentId || Boolean(req.actor.userId && req.actor.userId === issue.conversationUserId))
         ? decideIssueAccess(req, issue, "issue:mutate").then(({ allowed }) => allowed)
         : false,
     ]);
-    res.json(dependencyDiagnosisForViewer(diagnosis, readable, mayInvestigate));
+    res.end(JSON.stringify(dependencyDiagnosisForViewer(diagnosis, readable, mayInvestigate)));
   });
 
   router.post("/issues/:id/dependency-investigation", validate(dependencyInvestigationSchema), async (req, res) => {
     assertBoard(req);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    if (issue.conversationAgentId && (!req.actor.userId || req.actor.userId !== issue.conversationUserId)) {
+      throw forbidden("Only the conversation owner can request a chat investigation");
+    }
     const decision = await decideIssueAccess(req, issue, "issue:mutate");
     if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
     const { requestParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");

@@ -648,6 +648,8 @@ export const dependencyInvestigationSchema = z.object({
   idempotencyKey: z.string().min(1).max(200),
 }).strict();
 
+export type DependencyInvestigationInput = z.infer<typeof dependencyInvestigationSchema>;
+
 export const taskRetrySchema = z.object({
   idempotencyKey: z.string().guid(),
   observedRunId: z.string().guid().nullable(),

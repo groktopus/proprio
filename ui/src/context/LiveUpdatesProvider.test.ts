@@ -132,12 +132,14 @@ describe("LiveUpdatesProvider issue invalidation", () => {
       client.clear();
     });
   });
-  it("drops cached decision content when its access is revoked", () => {
+  it("drops permission-filtered decisions and dependency diagnoses when access is revoked", () => {
     const client = new QueryClient();
     const receiptKey = ["issues", "decision-receipts", "chat-1", "user-1"];
     const historyKey = [...queryKeys.attention("company-1"), "history"];
     const questionKey = ["issues", "pending-questions", "chat-1", "user-1"];
     const taskRecordKey = queryKeys.decisions.taskRecord("company-1", "task-1", "user-1", "decision-1");
+    const diagnosisKey = queryKeys.issues.dependencyInvestigation("parent-issue");
+    client.setQueryData(diagnosisKey, { dependencyPath: [{ title: "Private dependency" }] });
     client.setQueryData(taskRecordKey, { title: "Private decision" });
     client.setQueryData(questionKey, [{ title: "Private question" }]);
     client.setQueryData(receiptKey, { items: [{ title: "Private decision" }] });
@@ -149,8 +151,34 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(historyKey)).toBeUndefined();
     expect(client.getQueryData(questionKey)).toBeUndefined();
     expect(client.getQueryData(taskRecordKey)).toBeUndefined();
+    expect(client.getQueryData(diagnosisKey)).toBeUndefined();
     client.clear();
   });
+  it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {
+    const client = new QueryClient();
+    const parent = queryKeys.issues.dependencyInvestigation("parent");
+    const unrelated = queryKeys.issues.dependencyInvestigation("unrelated");
+    client.setQueryData(queryKeys.issues.detail("parent"), {
+      id: "parent", blockedBy: [{ id: "middle", terminalBlockers: [{ id: "leaf" }] }],
+    });
+    client.setQueryData(parent, { dependencyPath: [{ issueId: "middle" }, { issueId: "leaf" }] });
+    client.setQueryData(unrelated, { dependencyPath: [] });
+    if (type === "issue.updated") {
+      __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+        entityType: "issue", entityId: "leaf", action: type,
+      }, { userId: null, agentId: null });
+    } else {
+      __liveUpdatesTestUtils.handleLiveEvent(client, "company-1", "/", {
+        id: 1, companyId: "company-1", type, createdAt: "2020-01-01T00:00:01Z",
+        payload: { runId: "run-1", issueId: "leaf", agentId: "agent-1", status: "succeeded" },
+      }, () => null, { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set() },
+      { userId: null, agentId: null });
+    }
+    expect(client.getQueryState(parent)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
+    client.clear();
+  });
+
   it("refreshes saved project access with permission saves and live agent activity", async () => {
     const client = new QueryClient();
     const target = queryKeys.agents.projectAccess("agent-1");

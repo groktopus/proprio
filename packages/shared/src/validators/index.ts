@@ -450,6 +450,7 @@ export {
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
   dependencyInvestigationSchema,
+  type DependencyInvestigationInput,
   taskRetrySchema,
   reconstructWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,

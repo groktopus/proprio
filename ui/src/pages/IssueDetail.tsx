@@ -1505,19 +1505,15 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     : TaskChatThread;
   const designSandbox = useDesignSandbox();
   const queryClient = useQueryClient();
-  const hasUnresolvedExplicitBlockers = (blockedBy ?? []).some(blocker => blocker.status !== "done" && blocker.status !== "cancelled");
+  const hasExplicitBlockers = (blockedBy?.length ?? 0) > 0;
   const dependencyDiagnosisQuery = useQuery({
     queryKey: queryKeys.issues.dependencyInvestigation(issueId),
     queryFn: () => issuesApi.getDependencyInvestigation(issueId),
-    enabled: dependencyDiagnosisReady && !!issueId && hasUnresolvedExplicitBlockers,
+    enabled: dependencyDiagnosisReady && !!issueId && hasExplicitBlockers,
     refetchOnWindowFocus: true,
-    refetchInterval: query => {
-      const status = query.state.data?.wake.status;
-      return status === "queued" || status === "running" || status === "deferred" ? 5_000 : false;
-    },
   });
-  const dependencyDiagnosis = hasUnresolvedExplicitBlockers ? dependencyDiagnosisQuery.data : null;
-  const dependencyDiagnosisError = hasUnresolvedExplicitBlockers && dependencyDiagnosisQuery.isError
+  const dependencyDiagnosis = hasExplicitBlockers ? dependencyDiagnosisQuery.data : null;
+  const dependencyDiagnosisError = hasExplicitBlockers && dependencyDiagnosisQuery.isError
     ? describeError(dependencyDiagnosisQuery.error).body
     : null;
   const issueQueryRef = queryIssueId ?? issueId;
