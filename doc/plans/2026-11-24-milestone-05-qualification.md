@@ -54,6 +54,19 @@ After the overlapping-export review changes, all 18 audit route tests passed
 again on composition `e575e1894a9e32e32fa75747b9b946c7aa87751e` with a
 single-connection default pool. [Reviewed export fixture](https://github.com/groktopus/proprio/pull/376#issuecomment-7150562031)
 
+The owner-only conversation fix on #375 and #376 also passed all 116 tests
+in disposable composition `2660e594aafcd8b190e3c51fc47174aae16155b9` on
+Node 24.22.1 and isolated PostgreSQL. The checks covered authorization, audit
+export, reconstruction and OpenAPI. Layered server typechecking passed.
+[Owner-only visibility](https://github.com/groktopus/proprio/pull/375)
+
+The page access PR records the authorized operator, export ID and released
+page metadata without exposing counts in company activity. Its route tests
+cover replay, interrupted delivery, receipt write failure and retention across
+snapshot expiry. All 22 export route tests passed with a single database
+connection. The server and database typechecks and migration compatibility
+check passed. [Page access records](https://github.com/groktopus/proprio/pull/378)
+
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
@@ -124,7 +137,7 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
    These PRs target `main`. [#361](https://github.com/groktopus/proprio/pull/361) [#353](https://github.com/groktopus/proprio/pull/353) [#354](https://github.com/groktopus/proprio/pull/354)
 3. Review initial capture, then checkpointed export. [#359](https://github.com/groktopus/proprio/pull/359) → [#360](https://github.com/groktopus/proprio/pull/360)
 4. From checkpointed export, review the two dependent branches in their listed order.
-   - Older-restore archive, snapshot visibility, orphan privacy and overlapping collection. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376)
+   - Older-restore archive, snapshot visibility, orphan privacy, overlapping collection and page access records. [#369](https://github.com/groktopus/proprio/pull/369) → [#374](https://github.com/groktopus/proprio/pull/374) → [#375](https://github.com/groktopus/proprio/pull/375) → [#376](https://github.com/groktopus/proprio/pull/376) → [#378](https://github.com/groktopus/proprio/pull/378)
    - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363)
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
