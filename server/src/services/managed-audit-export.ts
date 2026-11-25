@@ -483,7 +483,6 @@ export async function readManagedAuditExportPage(
     return {
       ...exportReceipt(snapshot),
       events,
-      deliveredThrough,
       nextCursor: deliveredThrough < snapshot.eventCount ? encodeCursor(snapshot, deliveredThrough) : null,
       complete: deliveredThrough === snapshot.eventCount,
     };

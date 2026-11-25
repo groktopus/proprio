@@ -223,7 +223,8 @@ describePostgres("agent action audit routes", () => {
       await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
       const first = await board.get(exportPath).set("If-None-Match", 'W/"anything"');
       expect(first.status, first.text).toBe(200);
-      expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
+      expect(first.body).not.toHaveProperty("deliveredThrough");
+      expect(first.body).toMatchObject({ complete: false, nextCursor: expect.any(String) });
       expect(first.body.events[0]).not.toHaveProperty("operationFingerprint");
       expect(first.body.events[0]).not.toHaveProperty("providerRequestId");
       expect((await board.get(exportPath)).body).toEqual(first.body);
@@ -246,7 +247,8 @@ describePostgres("agent action audit routes", () => {
       }
       const expectedIds = eventRows.map(event => event.id).sort();
       expect(archived).toEqual(expectedIds);
-      expect(page).toMatchObject({ complete: true, deliveredThrough: expectedIds.length });
+      expect(page).toMatchObject({ complete: true });
+      expect(page).not.toHaveProperty("deliveredThrough");
       expect(createHash("sha256").update(JSON.stringify(archived)).digest("hex")).toBe(receipt.body.watermark);
       const allPageAccess = await pageAccess();
       expect(allPageAccess).toHaveLength(Math.ceil(expectedIds.length / 200) + 1);
@@ -1233,7 +1235,8 @@ describePostgres("agent action audit routes", () => {
       const exportPath = `${path}/${created.body.exportId}`;
       const first = await board.get(exportPath);
       expect(first.status, first.text).toBe(200);
-      expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
+      expect(first.body).not.toHaveProperty("deliveredThrough");
+      expect(first.body).toMatchObject({ complete: false, nextCursor: expect.any(String) });
       expect(first.body.events.some((event: { id: string }) => event.id === restricted.id)).toBe(false);
 
       // These files are the independently retained archive page and resume checkpoint.
@@ -1274,9 +1277,10 @@ describePostgres("agent action audit routes", () => {
       const second = await board.get(checkpointPath).query({ cursor: checkpoint.cursor });
       expect(second.status, second.text).toBe(200);
       expect(second.body).toMatchObject({
-        deliveredThrough: checkpoint.eventCount, complete: true, nextCursor: null,
+        complete: true, nextCursor: null,
         sourceEpoch: checkpoint.sourceEpoch, watermark: checkpoint.watermark,
       });
+      expect(second.body).not.toHaveProperty("deliveredThrough");
       await appendFile(archiveFile, `${second.text}\n`);
       const archivedBytes = await readFile(archiveFile);
       const archivedPages = archivedBytes.toString("utf8").trim().split("\n").map(line => JSON.parse(line));
