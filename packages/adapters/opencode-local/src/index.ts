@@ -120,6 +120,12 @@ Notes:
 - The adapter sets OPENCODE_DISABLE_PROJECT_CONFIG=true to prevent OpenCode from \
   writing an opencode.json config file into the project working directory. Model \
   selection is passed via the --model CLI flag instead.
+- When Proprio supplies an explicit skill inventory for a local run (including an \
+  empty inventory), selected Proprio skills are staged in that run's private \
+  OpenCode config. Automatic Claude compatibility skill discovery is disabled \
+  for the run; native OpenCode configured skills remain available. The discovery \
+  switch was confirmed in OpenCode v1.18.34 and v1.19.6; other OpenCode versions \
+  are not checked by the adapter.
 - When \`dangerouslySkipPermissions\` is enabled, Proprio injects a temporary \
   runtime config with \`permission=allow\` so headless runs do \
   not stall on approval prompts.
