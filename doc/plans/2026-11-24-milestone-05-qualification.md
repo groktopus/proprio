@@ -446,6 +446,10 @@ passed with the other 27 guarded transport tests at `6bc82a32`.
 On `f69b90d6044ab0a874212e0670f532dbbd036479`, the full gateway file
 passed 125 cases and failed three GitHub connection/catalog cases. The
 same three failed on exact main `166175cc093a569eed60b59f6df70f6c10c43290`.
+Core’s bundled GitHub definition exposes only `mcp-key`. The gateway rejects
+a stored `managed` GitHub connection during schema projection, before target
+execution. Signed profiles can filter methods that the app already defines.
+The release fixture uses a synthetic local MCP connector.
 The one-connection reconstruction and scoped server typecheck passed. Main
 advanced to `27339f998b4d8e7ae95bbc14395979b9d134ee88` with only a
 dependency investigation browser test change.
@@ -457,7 +461,21 @@ Hosted Linux source qualification is running for the reviewed gateway
 composition against `166175cc093a569eed60b59f6df70f6c10c43290`.
 [Reviewed gateway hosted qualification](https://github.com/groktopus/proprio/actions/runs/45579778025)
 
-The authenticated reconstruction passed on the final local source with one
+The enhanced reconstruction fixture passed on composition
+`cf9548d1faefc0ac4a916f60aef71eddf952d924` with one PostgreSQL
+connection. It verified the completed export count and watermark against the
+creation receipt and retained the observed audit phases and target ledger.
+The export contained nine events. Approved, denied, and interrupted calls
+produced four, two, and three audit phases and one, zero, and one target
+effects respectively. A separate review checked the retained result against
+the fixture and passing log. The test recreated the controller in the same
+process against the same database with a local process adapter and synthetic
+loopback MCP target. The selected release candidate still needs its own
+rehearsal and signoff.
+[Evidence fixture](https://github.com/groktopus/proprio/pull/406)
+[Exact evidence source](https://github.com/groktopus/proprio/commit/cf9548d1faefc0ac4a916f60aef71eddf952d924)
+
+The earlier authenticated reconstruction also passed with one
 database connection, Node 24.22.1, a local process adapter, and a synthetic
 loopback HTTP MCP target. The fixture used no model account. A separate company
 operator with audit access joined the evidence after recreating the controller
@@ -557,7 +575,9 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
    - Approval resolution, direct dispatch, approved dispatch and historical policy. [#362](https://github.com/groktopus/proprio/pull/362) → [#366](https://github.com/groktopus/proprio/pull/366) → [#370](https://github.com/groktopus/proprio/pull/370) → [#363](https://github.com/groktopus/proprio/pull/363). Review [#400](https://github.com/groktopus/proprio/pull/400) after #366. Review [#398](https://github.com/groktopus/proprio/pull/398) → [#399](https://github.com/groktopus/proprio/pull/399) after #370. Review [#402](https://github.com/groktopus/proprio/pull/402) and [#403](https://github.com/groktopus/proprio/pull/403) after #399. Review [#404](https://github.com/groktopus/proprio/pull/404) and [#405](https://github.com/groktopus/proprio/pull/405) after #403.
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
-   both target historical policy; independent authority targets `main`. [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
+   both target historical policy. Independent authority targets `main`. Review
+the retained evidence follow-up after the reconstruction fixture.
+[#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368) [#406](https://github.com/groktopus/proprio/pull/406)
 6. Review the one-connection task and wake changes before repeating the
    stress reconstruction on the selected source. Task creation and wake delivery
    target `main`. Deferred promotion follows wake delivery. The independent
