@@ -5146,6 +5146,64 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspaceId).toBeNull();
   });
 
+  it("creates an assigned task with a configured workspace using one database connection", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const singleConnectionDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const singleConnectionSvc = issueService(singleConnectionDb);
+
+    try {
+      await seedIssueCompany(db, companyId);
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+      await seedCodexCoder(db, companyId, assigneeAgentId);
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        name: "Configured workspace project",
+        status: "in_progress",
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "isolated_workspace",
+          allowIssueOverride: true,
+          defaultProjectWorkspaceId: projectWorkspaceId,
+        },
+      });
+      await db.insert(projectWorkspaces).values({
+        id: projectWorkspaceId,
+        companyId,
+        projectId,
+        name: "Primary workspace",
+        isPrimary: true,
+      });
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const issue = await Promise.race([
+          singleConnectionDb.transaction((tx) =>
+            singleConnectionSvc.create(companyId, {
+              projectId,
+              assigneeAgentId,
+              title: "Assigned task with configured workspace",
+              status: "in_progress",
+              priority: "medium",
+            }, tx)),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Task creation exceeded its one-connection test deadline")), 2_000);
+          }),
+        ]);
+
+        expect(issue.assigneeAgentId).toBe(assigneeAgentId);
+        expect(issue.projectWorkspaceId).toBe(projectWorkspaceId);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    } finally {
+      await singleConnectionDb.$client.end({ timeout: 0 });
+    }
+  });
+
   it("uses the target project's own workspaces for a cross-project child instead of inheriting the parent's", async () => {
     const companyId = randomUUID();
     const parentProjectId = randomUUID();
