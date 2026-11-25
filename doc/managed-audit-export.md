@@ -27,15 +27,17 @@ Keep this boundary outside the database rollback domain.
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
-3. Persist the page to separately governed storage. Deduplicate events by source
-   and stable event ID across source epochs. Event IDs can remain the same after
-   a database restore. Bind each export ID and resume checkpoint to its source
-   epoch. After epoch rotation, reconcile and create a fresh export.
-   Then record the returned `nextCursor` and send it as `cursor` on the next
-   request. A repeated page uses the same event IDs.
+3. Persist each page's event IDs under this export ID, even if all its payloads
+   were already archived. This preserves membership for the snapshot count and
+   watermark. Deduplicate archived events by `(source, event ID)`, which remains
+   stable for events carried across a restore and source-epoch rotation. Bind the export ID
+   and resume checkpoint to the source epoch. Persist the page's payloads and
+   IDs before advancing the checkpoint to the returned `nextCursor`. If a crash
+   occurs before advancing it, replay the same page idempotently. A repeated
+   page uses the same event IDs.
 4. Confirm that the final page reports `complete`. Count the distinct event IDs
-   received for this snapshot and compare the count to `eventCount`. Compare the
-   watermark to the SHA-256 of those IDs encoded as a compact JSON array in
+   recorded for this export ID and compare the count to `eventCount`. Compare
+   the watermark to the SHA-256 of those IDs encoded as a compact JSON array in
    lexicographic order.
 
 An export belongs to the creating operator and company. Company, audit and task
@@ -55,15 +57,20 @@ An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
 
 For periodic collection, re-export a bounded overlapping lookback using a new
-export ID, then deduplicate the archived events by `(source, event ID)`. Keep
-each snapshot's bounds, source epoch, count and watermark with its delivery
-checkpoint. A covered gateway transaction can commit after the snapshot was created
-while carrying an earlier `occurredAt`, and the next adjacent interval will
-exclude that event. A fresh overlapping snapshot can find it while the source
-row remains available. The watermark verifies membership and delivery for the
-frozen snapshot. Transactions that commit after the lookback has moved past
-their event time require separate reconciliation. Reconcile the affected
-interval against source or target evidence when completeness is required.
+export ID. Set `from` to the latest of the desired lookback start,
+`PROPRIO_MANAGED_AUDIT_CAPTURE_FROM`, and `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER`
+when configured. Create an export only when that `from` precedes `to`. Record any
+portion of the desired interval left outside the request for reconciliation.
+Keep the source epoch,
+export ID, bounds, count, watermark, page membership and cursor together. If a
+snapshot expires, reconcile its checkpoint before opening a fresh export.
+
+A covered gateway transaction can commit after the snapshot was created while
+carrying an earlier `occurredAt`. An adjacent interval will exclude it. A fresh
+overlapping snapshot can find it while the source row remains available. The
+watermark verifies membership and delivery for one frozen snapshot. If a
+transaction commits after its event time has passed out of the lookback,
+reconcile the affected interval against source or target evidence.
 
 ## Restore qualification and limits
 
