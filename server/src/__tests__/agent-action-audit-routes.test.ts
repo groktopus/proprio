@@ -611,6 +611,21 @@ describePostgres("agent action audit routes", () => {
       expect(replay.body).not.toHaveProperty("eventCount");
       expect(replay.body).not.toHaveProperty("watermark");
       expect(replay.body).not.toHaveProperty("events");
+
+      await db.update(issues).set({ visibility: "open", responsibleUserId: null }).where(eq(issues.id, issue.id));
+      const resumed = await board.get(exportPath).query({ cursor: first.body.nextCursor }).expect(409);
+      expect(resumed.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      expect(resumed.body).not.toHaveProperty("eventCount");
+      expect(resumed.body).not.toHaveProperty("watermark");
+      expect(resumed.body).not.toHaveProperty("events");
+      const [snapshot] = await db.select({
+        invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
+      }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
+      expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
+
+      const fresh = await board.post(path).send(window).expect(201);
+      expect(fresh.body.eventCount).toBe(201);
+      expect(fresh.body.exportId).not.toBe(created.body.exportId);
     } finally {
       vi.unstubAllEnvs();
     }

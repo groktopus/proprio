@@ -48,7 +48,9 @@ source unless the surviving binding proves the event is outside the operator's
 access. Before releasing a page, the API checks
 every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
-returning the page, count or watermark. Preserve the checkpoint and
+returning the page, count or watermark. The server persists the invalidation
+until the snapshot expires and discards its membership. Old cursors remain
+invalid after the evidence becomes visible again. Preserve the checkpoint and
 reconcile before opening a new export. The server commits an access record
 before releasing each successful page, including a replay. The record holds the
 company, operator, export ID, page offset, item count and access time. Storage
