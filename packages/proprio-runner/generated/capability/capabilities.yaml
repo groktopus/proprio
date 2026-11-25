@@ -344,15 +344,6 @@
       "expectedMockState": "operation_result"
     },
     {
-      "id": "skill:skills/proprio/SKILL.md:839",
-      "kind": "skill_heading",
-      "sourceAnchor": "skills/proprio/SKILL.md#L839:incidental-feedback",
-      "heading": "Incidental feedback",
-      "primaryDisposition": "optional_agent_tool",
-      "semanticOperation": "scoped_discovery",
-      "expectedMockState": "operation_result"
-    },
-    {
       "id": "skill:skills/proprio/references/api-reference.md:1",
       "kind": "skill_heading",
       "sourceAnchor": "skills/proprio/references/api-reference.md#L1:proprio-api-reference",
