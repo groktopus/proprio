@@ -1,3 +1,4 @@
+import { projectTaskCompletionRecovery } from "./native-runtime/case-handoff-completion-evidence.js";
 import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { notifyIssueGraphRecovery } from "./issue-recovery-notifications.js";
 import { notifyNativeRecoveryNotices } from "./native-recovery-notice-notifications.js";
@@ -26,10 +27,6 @@ type IssueRecoveryActionRow = typeof issueRecoveryActions.$inferSelect;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type DbOrTransaction = Db | DbTransaction;
 
-function asDatabaseDate(value: string | Date | null) {
-  return typeof value === "string" ? new Date(value) : value;
-}
-
 function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
   const budget = evidence.recoveryBudget;
   return Boolean(
@@ -38,38 +35,6 @@ function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
       !Array.isArray(budget) &&
       (budget as Record<string, unknown>).state === "exhausted",
   );
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-/** Case offer details have a stricter visibility boundary than the task card.
- * Keep the full receipt in durable storage, but only project generic task-local
- * gap counts into the task recovery read model. */
-function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<string, unknown>; nextAction: string } {
-  const evidence = { ...row.evidence };
-  const receipt = asRecord(evidence.caseHandoffCompletion);
-  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") {
-    return { evidence, nextAction: readModelNextAction(row) };
-  }
-  delete evidence.caseHandoffCompletion;
-  const caseHandoff = asRecord(receipt.caseHandoff);
-  const assessment = asRecord(receipt.assessment);
-  const criteria = Array.isArray(assessment.criteriaNeedingWork)
-    ? assessment.criteriaNeedingWork.map(asRecord) : [];
-  const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
-  const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
-  const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
-  const prerequisiteCount = Array.isArray(caseHandoff.prerequisites) ? caseHandoff.prerequisites.length : 0;
-  evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: prerequisiteCount > 0 ? "review_in_case" : "none",
-    unmetCriterionCount, evidenceIssueCount };
-  const guidance = [
-    prerequisiteCount > 0 ? "Review the prerequisite checklist in the authorized Case view." : null,
-    unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
-    evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
-  ].filter((item): item is string => Boolean(item));
-  return { evidence, nextAction: guidance.length ? `Review the task completion assessment. ${guidance.join(" ")}` : "Review the task completion assessment." };
 }
 
 export type UpsertIssueRecoveryActionInput = {
@@ -132,7 +97,7 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
 }
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
-  const recovery = taskRecoveryEvidence(row);
+  const recovery = projectTaskCompletionRecovery(row.evidence) ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
   return {
     id: row.id,
     companyId: row.companyId,
@@ -276,12 +241,12 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     }
   }
 
-  async function getActiveForIssue(
+  async function getActiveRow(
     companyId: string,
     sourceIssueId: string,
     dbOrTx: DbOrTransaction = db,
-  ): Promise<IssueRecoveryAction | null> {
-    const row = await dbOrTx
+  ): Promise<IssueRecoveryActionRow | null> {
+    return dbOrTx
       .select()
       .from(issueRecoveryActions)
       .where(
@@ -294,10 +259,17 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
       .orderBy(desc(issueRecoveryActions.updatedAt))
       .limit(1)
       .then((rows) => rows[0] ?? null);
-    if (!row) return null;
+  }
+
+  async function projectActiveRow(row: IssueRecoveryActionRow, dbOrTx: DbOrTransaction = db) {
     const action = toReadModel(row);
-    await projectNativeRunActivity(companyId, [action], dbOrTx);
+    await projectNativeRunActivity(row.companyId, [action], dbOrTx);
     return action;
+  }
+
+  async function getActiveForIssue(companyId: string, sourceIssueId: string, dbOrTx: DbOrTransaction = db) {
+    const row = await getActiveRow(companyId, sourceIssueId, dbOrTx);
+    return row ? projectActiveRow(row, dbOrTx) : null;
   }
 
   async function listActiveForIssues(companyId: string, sourceIssueIds: string[]) {
@@ -423,9 +395,9 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     input: UpsertIssueRecoveryActionInput,
     retryCount = 0,
   ): Promise<IssueRecoveryAction> {
-    const existing = await getActiveForIssue(input.companyId, input.sourceIssueId);
+    const existing = await getActiveRow(input.companyId, input.sourceIssueId);
     const now = new Date();
-    if (existing && input.createOnly) return existing;
+    if (existing && input.createOnly) return projectActiveRow(existing);
     if (!existing) {
       const [source] = await db.select({ status: issues.status }).from(issues)
         .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.sourceIssueId))).limit(1);
@@ -471,7 +443,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
               sql`${issueRecoveryActions.evidence}->'workspaceOwnerStop' is null`)).returning(), { companyId: input.companyId, issueId: input.sourceIssueId });
           if (updated) return toReadModel(updated);
         }
-        return existing;
+        return projectActiveRow(existing);
       }
       const nextAttemptCount =
         input.attemptCount ?? existing.attemptCount + 1;
@@ -600,10 +572,10 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
                 ? existing.maxAttempts
                 : input.maxAttempts,
             timeoutAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.timeoutAt)
+              ? existing.timeoutAt
               : input.timeoutAt ?? null,
             lastAttemptAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.lastAttemptAt)
+              ? existing.lastAttemptAt
               : input.lastAttemptAt ?? now,
             outcome: input.preserveExistingOwner ? existing.outcome : null,
             resolutionNote: input.preserveExistingOwner ? existing.resolutionNote : null,

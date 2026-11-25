@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { getRecentTasksStorageKey } from "../../../ui/src/lib/recent-tasks";
 import { collectionFixture, type CollectionFixture } from "./fixture";
 
 const RECENT_COUNT = 8;
@@ -35,26 +36,26 @@ async function ensureRecentTasks(request: APIRequestContext): Promise<RecentTask
 async function seedRecents(page: Page, request: APIRequestContext, tasks = recents) {
   const session = await (await request.get("/api/auth/get-session")).json().catch(() => null);
   const userId: string | null = session?.user?.id ?? session?.session?.userId ?? null;
-  await page.addInitScript(({ companyId, userId, recents }) => {
+  const storageKeys = [...new Set([userId, null].map(owner => getRecentTasksStorageKey(fixture.company.id, owner)))];
+  await page.addInitScript(({ companyId, storageKeys, recents }) => {
     const entries = recents.map((task, index) => ({
       id: task.id, companyId, title: task.title, identifier: task.identifier, status: "backlog", recordedAt: Date.now() - index * 1000,
     }));
-    for (const owner of new Set([userId ?? "__local_board__", "__local_board__"])) {
-      localStorage.setItem(`proprio.recentTasks.v2:${companyId}:${owner}`, JSON.stringify(entries));
-    }
-  }, { companyId: fixture.company.id, userId, recents: tasks });
+    for (const key of storageKeys) localStorage.setItem(key, JSON.stringify(entries));
+  }, { companyId: fixture.company.id, storageKeys, recents: tasks });
+  return storageKeys;
 }
 
-async function addRecent(page: Page, task: RecentTask) {
-  await page.evaluate(({ companyId, task }) => {
-    for (const key of Object.keys(localStorage).filter(key => key.startsWith(`proprio.recentTasks.v2:${companyId}:`))) {
+async function addRecent(page: Page, task: RecentTask, storageKeys: string[]) {
+  await page.evaluate(({ companyId, task, storageKeys }) => {
+    for (const key of storageKeys) {
       const oldValue = localStorage.getItem(key);
       const entries = JSON.parse(oldValue ?? "[]").filter((entry: { id: string }) => entry.id !== task.id);
       const newValue = JSON.stringify([{ ...task, companyId, status: "backlog", recordedAt: Date.now() }, ...entries]);
       localStorage.setItem(key, newValue);
       window.dispatchEvent(new StorageEvent("storage", { key, oldValue, newValue, storageArea: localStorage }));
     }
-  }, { companyId: fixture.company.id, task });
+  }, { companyId: fixture.company.id, task, storageKeys });
   await expect(page.getByRole("link", { name: task.title }).first()).toBeVisible();
 }
 
@@ -87,6 +88,22 @@ function recordRequests(page: Page) {
   return requests;
 }
 
+async function recordTaskRequestStarts(page: Page) {
+  const session = await page.context().newCDPSession(page);
+  const reads: Array<{ kind: string; startedAt: number }> = [];
+  session.on("Network.requestWillBeSent", ({ request, wallTime }) => {
+    const kind = classifyTaskRead(new URL(request.url));
+    if (kind) reads.push({ kind, startedAt: wallTime * 1000 });
+  });
+  await session.send("Network.enable");
+  return reads;
+}
+
+function firstFrameReads(reads: Array<{ kind: string; startedAt: number }>, frameAt: number) {
+  return reads.filter(({ kind, startedAt }) => startedAt <= frameAt && FIRST_FRAME_READS.has(kind))
+    .map(({ kind }) => kind);
+}
+
 async function loadIdle(page: Page) {
   await page.goto(`/${fixture.company.issuePrefix}/projects`);
   await expect(page.getByRole("link", { name: recents[0]!.title }).first()).toBeVisible();
@@ -94,7 +111,7 @@ async function loadIdle(page: Page) {
   await page.waitForTimeout(IDLE_SETTLE_MS);
 }
 
-/** Click a Recents link and return ms from the click to the latest saved comment being on screen. */
+/** Click a Recents link and measure when the latest saved comment is on screen. */
 async function openRecent(page: Page, task: RecentTask) {
   await page.evaluate((marker) => {
     const state = window as unknown as { __recentOpen?: { clickedAt?: number; shownAt?: number } };
@@ -120,7 +137,7 @@ async function openRecent(page: Page, task: RecentTask) {
   await page.waitForFunction(() => (window as unknown as { __recentOpen?: { shownAt?: number } }).__recentOpen?.shownAt !== undefined);
   return page.evaluate(() => {
     const state = (window as unknown as { __recentOpen: { clickedAt: number; shownAt: number } }).__recentOpen;
-    return state.shownAt - state.clickedAt;
+    return { elapsedMs: state.shownAt - state.clickedAt, frameAt: performance.timeOrigin + state.shownAt };
   });
 }
 
@@ -149,39 +166,58 @@ test("an idle page with Recents makes one chat-bootstrap read and no per-task re
 test("clicking a preloaded recent task shows its chat without first-frame reads", async ({ page, request }) => {
   await seedRecents(page, request);
   await loadIdle(page);
-  const requests = recordRequests(page);
-  const before = requests.length;
-  const task = recents[1]!;
-  await openRecent(page, task);
-  const reads = requests.slice(before).map(classifyTaskRead).filter((kind): kind is string => !!kind);
-  // The full detail read revalidates after the first frame; it is not a gate.
-  test.info().annotations.push({ type: "after-click task reads", description: JSON.stringify(reads) });
-  expect(reads.filter(kind => FIRST_FRAME_READS.has(kind))).toEqual([]);
+  const reads = await recordTaskRequestStarts(page);
+  const { frameAt } = await openRecent(page, recents[1]!);
+  // Polls can start after Chromium displays the chat but before Playwright finishes waiting.
+  test.info().annotations.push({
+    type: "task read start relative to first frame",
+    description: JSON.stringify(reads.map(({ kind, startedAt }) => ({ kind, offsetMs: startedAt - frameAt }))),
+  });
+  expect(firstFrameReads(reads, frameAt)).toEqual([]);
 });
 
 test("a task added after the initial Recents preload opens without first-frame reads", async ({ page, request }) => {
   const added = recents.at(-1)!;
-  await seedRecents(page, request, recents.slice(0, -1));
+  const storageKeys = await seedRecents(page, request, recents.slice(0, -1));
   await loadIdle(page);
   const requests = recordRequests(page);
-  await addRecent(page, added);
+  await addRecent(page, added, storageKeys);
   await expect.poll(() => requests.some(url => url.pathname.endsWith("/issues/chat-bootstrap")
     && url.searchParams.get("ids")?.split(",").includes(added.id))).toBe(true);
   await page.waitForLoadState("networkidle");
-  requests.length = 0;
+  const reads = await recordTaskRequestStarts(page);
   let release!: () => void;
-  const held = new Promise<void>(resolve => { release = resolve; });
-  await page.route(/\/api\/issues\//, async route => { await held; await route.continue(); });
+  let holding = true;
+  const held = new Promise<void>(resolve => {
+    release = () => {
+      holding = false;
+      resolve();
+    };
+  });
+  const pausedReads: Promise<unknown>[] = [];
+  await page.route(/\/api\/issues\//, async route => {
+    if (holding) {
+      pausedReads.push(route.request().response().then(response => response?.finished()));
+      await held;
+    }
+    await route.continue();
+  });
+  const afterPaint = () => page.evaluate(() =>
+    new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+  );
   try {
-    await openRecent(page, added);
-    expect(requests.map(classifyTaskRead).filter(kind => kind && FIRST_FRAME_READS.has(kind))).toEqual([]);
+    const { frameAt } = await openRecent(page, added);
+    expect(firstFrameReads(reads, frameAt)).toEqual([]);
     const editor = page.getByTestId("task-chat-composer-stack").locator('[contenteditable="true"]').first();
     await editor.fill("Keep this draft during background refresh");
     const savedEditor = await editor.elementHandle();
     const message = page.getByText(added.marker, { exact: true }).first();
+    await afterPaint();
     const before = await message.boundingBox();
     release();
-    await page.waitForLoadState("networkidle");
+    // The document may already have reached networkidle before these reads resumed.
+    await Promise.all(pausedReads);
+    await afterPaint();
     await expect(editor).toContainText("Keep this draft during background refresh");
     expect(await savedEditor!.evaluate(element => element.isConnected)).toBe(true);
     const after = await message.boundingBox();
@@ -211,11 +247,11 @@ for (const scenario of ["initial", "added"] as const) for (const apiDelayMs of [
           await route.fallback();
         });
       }
-      await seedRecents(page, request, scenario === "added" ? recents.slice(0, -1) : recents);
+      const storageKeys = await seedRecents(page, request, scenario === "added" ? recents.slice(0, -1) : recents);
       const requests = recordRequests(page);
       await loadIdle(page);
       if (scenario === "added") {
-        await addRecent(page, recents.at(-1)!);
+        await addRecent(page, recents.at(-1)!, storageKeys);
         await page.waitForLoadState("networkidle");
         await page.waitForTimeout(IDLE_SETTLE_MS);
       }
@@ -226,7 +262,7 @@ for (const scenario of ["initial", "added"] as const) for (const apiDelayMs of [
         await cdp.send("Profiler.enable");
         await cdp.send("Profiler.start");
       }
-      timings.push(await openRecent(page, task));
+      timings.push((await openRecent(page, task)).elapsedMs);
       if (profile) {
         const result = await cdp.send("Profiler.stop");
         const file = test.info().outputPath(`cpu-${run}.cpuprofile`);

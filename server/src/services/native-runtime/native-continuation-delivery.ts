@@ -1,14 +1,16 @@
 import { agentWakeupRequests, heartbeatRuns, statusDecisions, statusDecisionEffects, type Db } from "@groktopus/db";
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { isStrictUuid } from "../../uuid.js";
+import { record } from "./evidence-json.js";
 import { boundRunIssueIdSql } from "../run-task-binding.js";
 import { NATIVE_RUN_FAILED_RETRY_CAUSE } from "./status-arbiter.js";
 
-/** Recover conversation provenance from a committed continuation, never from
- * provider-supplied source IDs or the mere presence of a chat on the task. */
+/** Recover run provenance from a committed continuation, never from
+ * provider-supplied source IDs or the mere presence of related task data. */
 export async function readNativeContinuationSource(
   db: Pick<Db, "select">,
-  binding: { companyId: string; issueId: string; runId: string },
+  binding: { companyId: string; issueId: string; runId: string; completionRecovery?: true },
 ): Promise<string | null> {
   const source = alias(heartbeatRuns, "continuation_source");
   const dispatch = alias(agentWakeupRequests, "continuation_dispatch");
@@ -27,6 +29,7 @@ export async function readNativeContinuationSource(
     .innerJoin(dispatch, and(
       eq(dispatch.companyId, binding.companyId), eq(dispatch.agentId, heartbeatRuns.agentId),
       eq(dispatch.runId, heartbeatRuns.id), eq(dispatch.reason, "issue_status_changed"),
+      binding.completionRecovery ? eq(heartbeatRuns.wakeupRequestId, dispatch.id) : undefined,
       eq(dispatch.requestedByActorType, "system"),
       sql`${dispatch.requestedByActorId} = 'native-status-wake-dispatch:' || ${agentWakeupRequests.id}::text`,
       eq(dispatch.idempotencyKey, agentWakeupRequests.idempotencyKey),
@@ -42,7 +45,7 @@ export async function readNativeContinuationSource(
         eq(statusDecisionEffects.effectKind, "enqueue_continuation"),
         sql`${statusDecisionEffects.payload}->>'continuationKind' = 'same_agent'`,
         sql`${agentWakeupRequests.payload}->>'continuationKind' = 'same_agent'`,
-      ), and(
+      ), binding.completionRecovery ? undefined : and(
         // The one automatic retry after a failed turn answers the same chat.
         eq(statusDecisionEffects.effectKind, "schedule_retry"),
         sql`${agentWakeupRequests.payload}->>'retryCause' = ${NATIVE_RUN_FAILED_RETRY_CAUSE}`,
@@ -52,9 +55,12 @@ export async function readNativeContinuationSource(
       eq(statusDecisions.id, statusDecisionEffects.decisionId), eq(statusDecisions.companyId, binding.companyId),
       eq(statusDecisions.issueId, binding.issueId), eq(statusDecisions.applicationState, "applied"),
       or(and(
-        eq(statusDecisions.reasonCode, "live_continuation_registered"),
+        eq(statusDecisions.reasonCode, binding.completionRecovery ? "completion_evidence_incomplete" : "live_continuation_registered"),
+        binding.completionRecovery
+          ? sql`${agentWakeupRequests.payload}->>'continuationIdempotencyKey' = 'native-completion-incomplete'`
+          : undefined,
         sql`${agentWakeupRequests.idempotencyKey} = 'native-status:' || ${statusDecisions.id}::text || ':continuation'`,
-      ), and(
+      ), binding.completionRecovery ? undefined : and(
         eq(statusDecisions.reasonCode, "run_failed_partial_evidence_preserved"),
         sql`${agentWakeupRequests.idempotencyKey} = 'native-status:' || ${statusDecisions.id}::text || ':retry'`,
       )),
@@ -70,4 +76,23 @@ export async function readNativeContinuationSource(
       eq(boundRunIssueIdSql(), binding.issueId)))
     .groupBy(source.id).limit(2);
   return sources.length === 1 ? sources[0]!.runId : null;
+}
+
+/** Read the admitted handoff or its one server-issued completion correction.
+ * Other native continuation provenance is for conversation delivery. */
+export async function readCaseHandoffIdForNativeRun(
+  db: Pick<Db, "select">,
+  binding: { companyId: string; issueId: string; runId: string; contextSnapshot: unknown },
+): Promise<string | null> {
+  const context = record(binding.contextSnapshot);
+  if (isStrictUuid(context.caseHandoffId)) return context.caseHandoffId;
+  if (context.caseHandoffId != null || !isStrictUuid(context.nativeStatusWakeIntentId)) return null;
+  const sourceRunId = await readNativeContinuationSource(db, { companyId: binding.companyId, issueId: binding.issueId,
+    runId: binding.runId, completionRecovery: true });
+  if (!sourceRunId) return null;
+  const [source] = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.id, sourceRunId), eq(heartbeatRuns.companyId, binding.companyId),
+      eq(heartbeatRuns.nativeIssueId, binding.issueId))).limit(1);
+  const handoffId = record(source?.contextSnapshot).caseHandoffId;
+  return isStrictUuid(handoffId) ? handoffId : null;
 }

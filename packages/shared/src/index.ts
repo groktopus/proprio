@@ -1,5 +1,5 @@
 export type { InboxMineSnapshot, InboxSourceError } from "./types/inbox-mine.js";
-export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffOfferSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferInput, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
+export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
 export * from "./slack-app-manifest.js";
 export * from "./analytics-consent.js";
 export * from "./routine-suggestions.js";
@@ -54,6 +54,17 @@ export {
   type NativeRuntimeMode,
   type NativeRunTerminalState,
 } from "./types/native-finalization.js";
+export {
+  nativeCompletionEvidenceKindSchema,
+  nativeCompletionEvidenceOutcomeSchema,
+  nativeCompletionHistorySchema,
+  type NativeCompletionCriterionAssessment,
+  type NativeCompletionEvidenceKind,
+  type NativeCompletionEvidenceOutcome,
+  type NativeCompletionEvidenceReference,
+  type NativeCompletionHistoryEntry,
+  type NativeCompletionVerificationAssessment,
+} from "./types/native-completion-history.js";
 export {
   decisionEffectStalenessSchema,
   decisionOptionStyleSchema,
@@ -480,6 +491,7 @@ export {
   ISSUE_RECOVERY_ACTION_STATUSES,
   ISSUE_RECOVERY_ACTION_OWNER_TYPES,
   ISSUE_BLOCKER_STALLED_WAKE_REASON,
+  DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX,
   ISSUE_BLOCKER_STALL_RELATIONS,
   ISSUE_RECOVERY_ACTION_OUTCOMES,
   pluginOperationIssueOriginKind,
@@ -1237,6 +1249,7 @@ export type {
   IssueBlockedInboxState,
   IssueRecoveryAction,
   IssueBlockerStalledWakeContext,
+  DependencyDiagnosis,
   IssueWatchdog,
   IssueWatchdogStatus,
   IssueWatchdogSummary,
@@ -2165,6 +2178,8 @@ export {
   isValidExistingBranchName,
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
+  type DependencyInvestigationInput,
   taskRetrySchema,
   reconstructWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,
@@ -2589,6 +2604,7 @@ export {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateAgentPermissionGrantSchema,
   type UpdateAgentPermissionGrant,

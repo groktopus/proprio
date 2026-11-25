@@ -1,12 +1,15 @@
 import { useQueryView } from "@/components/QueryView";
-import { useContext, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/queryKeys";
 import { chatEndpointsApi } from "@/api/chatEndpoints";
 import { useChatConnectorsEnabled } from "@/hooks/useChatConnectorsEnabled";
 import { Button } from "@/components/ui/button";
 import { VoiceCallContext } from "./VoiceCallContext";
-import { NativeVoiceConversation } from "./NativeVoiceConversation";
+
+const NativeVoiceConversation = lazy(() =>
+  import("./NativeVoiceConversation").then((module) => ({ default: module.NativeVoiceConversation })),
+);
 
 export function TaskVoiceLauncher({ companyId, issueId, agentId, boundEndpointId }: { companyId: string; issueId: string; agentId?: string | null; boundEndpointId?: string }) {
   const launcher = useRef<HTMLButtonElement>(null), restoreFocus = useRef(false);
@@ -38,6 +41,10 @@ export function TaskVoiceLauncher({ companyId, issueId, agentId, boundEndpointId
     {!open ? <div className="flex flex-wrap items-center gap-3">
       {candidates.length > 1 && <label className="flex min-w-0 max-w-full flex-col gap-2 text-sm">Voice persona<select aria-label="Voice persona" className="w-full min-w-0 max-w-full rounded-md border border-input bg-background p-2 text-sm" value={endpoint.id} onChange={(event) => setSelected(event.target.value)}>{candidates.map((entry) => <option key={entry.id} value={entry.id}>{entry.botLabel ?? entry.assignedAgentName}</option>)}</select></label>}
       <Button ref={launcher} variant="outline" onClick={() => setOpen(true)}>Talk to {endpoint.assignedAgentName}</Button>
-    </div> : <NativeVoiceConversation key={`${companyId}:${issueId}:${endpoint.id}`} companyId={companyId} endpointId={endpoint.id} issueId={issueId} agentName={endpoint.assignedAgentName} />}
+    </div> : (
+      <Suspense fallback={<p role="status">Loading voice controls…</p>}>
+        <NativeVoiceConversation key={`${companyId}:${issueId}:${endpoint.id}`} companyId={companyId} endpointId={endpoint.id} issueId={issueId} agentName={endpoint.assignedAgentName} />
+      </Suspense>
+    )}
   </section>;
 }

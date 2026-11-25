@@ -17,6 +17,7 @@ import { settledResponsePublicationSql } from "../native-runtime/native-response
 import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { PROJECT_ACCESS_DENIED, ProjectAccessDeniedError } from "../project-access-denial.js";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
@@ -863,6 +864,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // configuration metadata used for this run. Persist before release,
         // which can make a same-agent successor eligible immediately.
         await persistSessionState(livenessRun);
+        await releaseIssueExecutionAndPromote(livenessRun, { suppressImmediateRecovery: true });
+        await settleAgent();
+        return;
+      }
+      if (livenessRun.runtimeMode === "native" &&
+          parseObject(livenessRun.resultJson).finalizationReasonCode === CASE_HANDOFF_SUPERSEDED_REASON) {
         await releaseIssueExecutionAndPromote(livenessRun, { suppressImmediateRecovery: true });
         await settleAgent();
         return;
