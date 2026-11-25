@@ -334,8 +334,9 @@ company-scoped parent constraint. The corrected fixture gets to the
 application query and verifies that it rejects the foreign child. The exact
 fixture head `e793dced9ab52fb7855474ec65daec5bf2cf4f6e` passed all 132 wake
 queue adapter tests and verifies that the child lookup binds the requested
-company.
+company. The hosted durable-work check passed on that exact head.
 [Wake queue test fixture](https://github.com/groktopus/proprio/pull/401)
+[Wake queue fixture CI](https://github.com/groktopus/proprio/actions/runs/45567960266)
 
 The Apps review queue checks the approval result on the standalone and
 linked-interaction paths. Both show the reconciliation message for a failed
