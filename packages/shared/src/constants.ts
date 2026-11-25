@@ -481,6 +481,7 @@ export type IssueRecoveryActionOwnerType = (typeof ISSUE_RECOVERY_ACTION_OWNER_T
  * that needs the board. Woken once per stall (one recovery action).
  */
 export const ISSUE_BLOCKER_STALLED_WAKE_REASON = "issue_blocker_stalled" as const;
+export const DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX = `${ISSUE_BLOCKER_STALLED_WAKE_REASON}:diagnosis:`;
 export const ISSUE_BLOCKER_STALL_RELATIONS = ["child", "blocker"] as const;
 export type IssueBlockerStallRelation = (typeof ISSUE_BLOCKER_STALL_RELATIONS)[number];
 

@@ -33,6 +33,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs, type Breadcrumb } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
+import { createCompanySkillsCache } from "../lib/company-skills-cache";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { useCopyAction } from "../lib/use-copy-action";
 import { EmptyState } from "../components/EmptyState";
@@ -4030,6 +4031,7 @@ export function CompanySkills() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const { selectedCompanyId } = useCompany();
+  const skillsCache = createCompanySkillsCache(queryClient, selectedCompanyId ?? "");
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToastActions();
   const adapterCaps = useAdapterCapabilities();
@@ -4376,7 +4378,7 @@ export function CompanySkills() {
   const importSkill = useMutation({
     mutationFn: (importSource: string) => companySkillsApi.importFromSource(selectedCompanyId!, importSource),
     onSuccess: async (result) => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) });
+      await skillsCache.invalidateList();
       if (result.imported[0]) navigate(routeForSkill(result.imported[0]));
       pushToast({
         tone: "success",
@@ -4406,8 +4408,8 @@ export function CompanySkills() {
     onSuccess: async (result) => {
       setScanStatusMessage("Refreshing skills list...");
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+        skillsCache.invalidateList(),
+        skillsCache.invalidateFolders(),
       ]);
       const summary = formatProjectScanSummary(result);
       setScanStatusMessage(summary);
@@ -4440,7 +4442,7 @@ export function CompanySkills() {
   const createSkill = useMutation({
     mutationFn: (payload: CompanySkillCreateRequest) => companySkillsApi.create(selectedCompanyId!, payload),
     onSuccess: async (skill) => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) });
+      await skillsCache.invalidateList();
       navigate(routeForSkill(skill));
       setCreateError(null);
       pushToast({
@@ -4465,9 +4467,7 @@ export function CompanySkills() {
     ),
     onSuccess: async (result) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, selectedSkillId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.file(selectedCompanyId!, selectedSkillId!, selectedPath) }),
+        skillsCache.invalidateList(),
       ]);
       setDraft(result.markdown ? splitFrontmatter(result.content).body : result.content);
       setEditMode(false);
@@ -4496,8 +4496,7 @@ export function CompanySkills() {
     onSuccess: async () => {
       if (!activeDetail) return;
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, activeDetail.id) }),
+        skillsCache.invalidateList(),
       ]);
     },
     onError: (error) => {
@@ -4522,8 +4521,7 @@ export function CompanySkills() {
         (current) => current?.map((entry) => entry.id === skill.id ? { ...entry, ...skill } : entry),
       );
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, skill.id) }),
+        skillsCache.invalidateList(),
       ]);
       pushToast({ tone: "success", title: "Skill settings updated", body: skillSettingsToastBody(skill) });
     },
@@ -4540,10 +4538,7 @@ export function CompanySkills() {
     mutationFn: () => companySkillsApi.installUpdate(selectedCompanyId!, selectedSkillId!),
     onSuccess: async (skill) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, selectedSkillId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.updateStatus(selectedCompanyId!, selectedSkillId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.file(selectedCompanyId!, selectedSkillId!, selectedPath) }),
+        skillsCache.invalidateList(),
       ]);
       navigate(routeForSkill(skill, selectedPath));
       pushToast({
@@ -4704,8 +4699,7 @@ export function CompanySkills() {
         }
       }
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, result.skill.id) }),
+        skillsCache.invalidateList(),
       ]);
       setInstallDialogState((current) => ({ ...current, open: false, error: null }));
       pushToast({
@@ -4746,7 +4740,7 @@ export function CompanySkills() {
       setFolderDialogOpen(false);
       setFolderDialogTarget(null);
       setFolderDialogParentId(null);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") });
+      await skillsCache.invalidateFolders();
       if (moveAfterCreateSkillIds.length > 0) {
         const ids = moveAfterCreateSkillIds;
         setMoveAfterCreateSkillIds([]);
@@ -4755,8 +4749,8 @@ export function CompanySkills() {
             foldersApi.moveItem(selectedCompanyId!, { kind: "skill", itemId, folderId: folder.id })
           ));
           await Promise.all([
-            queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-            queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+            skillsCache.invalidateList(),
+            skillsCache.invalidateFolders(),
           ]);
         } catch (moveError) {
           pushToast({
@@ -4785,7 +4779,7 @@ export function CompanySkills() {
     onSuccess: async () => {
       setFolderDialogOpen(false);
       setFolderDialogTarget(null);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") });
+      await skillsCache.invalidateFolders();
     },
     onError: (error) => {
       pushToast({
@@ -4799,7 +4793,7 @@ export function CompanySkills() {
     mutationFn: ({ folderId, parentId }: { folderId: string; parentId: string | null }) =>
       foldersApi.moveFolder(selectedCompanyId!, folderId, { parentId, position: 0 }),
     onSuccess: async (folder) => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") });
+      await skillsCache.invalidateFolders();
       setFolderSelection(folder.id);
       pushToast({
         tone: "success",
@@ -4821,8 +4815,8 @@ export function CompanySkills() {
       if (folderSelection === folderId) setFolderSelection("all");
       setDeleteFolderTarget(null);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+        skillsCache.invalidateList(),
+        skillsCache.invalidateFolders(),
       ]);
       pushToast({ tone: "success", title: "Folder deleted", body: "Skills moved to Unfiled." });
     },
@@ -4839,8 +4833,8 @@ export function CompanySkills() {
       foldersApi.moveItem(selectedCompanyId!, { kind: "skill", itemId, folderId }),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+        skillsCache.invalidateList(),
+        skillsCache.invalidateFolders(),
       ]);
     },
     onError: (error) => {
@@ -4860,8 +4854,8 @@ export function CompanySkills() {
       setSelectedSkillIds([]);
       setSelectMode(false);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
+        skillsCache.invalidateList(),
+        skillsCache.invalidateFolders(),
       ]);
       pushToast({ tone: "success", title: "Skills moved", body: `${ids.length} skill${ids.length === 1 ? "" : "s"} filed.` });
     } catch (moveError) {
@@ -4877,7 +4871,7 @@ export function CompanySkills() {
   const ensureMyFolder = useMutation({
     mutationFn: () => foldersApi.ensureMy(selectedCompanyId!),
     onSuccess: async (folder) => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") });
+      await skillsCache.invalidateFolders();
       setFolderSelection(folder.id);
     },
     onError: (error) => {
@@ -4937,7 +4931,7 @@ export function CompanySkills() {
   async function createFolderInline(parentId: string | null, name: string): Promise<string | null> {
     try {
       const folder = await foldersApi.create(selectedCompanyId!, { kind: "skill", parentId, name, color: null });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") });
+      await skillsCache.invalidateFolders();
       return folder.id;
     } catch (error) {
       pushToast({
@@ -4956,11 +4950,8 @@ export function CompanySkills() {
     try {
       await Promise.all(ids.map((itemId) => foldersApi.moveItem(selectedCompanyId!, { kind: "skill", itemId, folderId })));
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.folders.list(selectedCompanyId!, "skill") }),
-        ...ids.map((itemId) =>
-          queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, itemId) }),
-        ),
+        skillsCache.invalidateList(),
+        skillsCache.invalidateFolders(),
       ]);
       setMoveDialog(null);
       setSelectedSkillIds([]);
@@ -5008,9 +4999,7 @@ export function CompanySkills() {
     },
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, selectedSkillId ?? "") }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.versions(selectedCompanyId!, selectedSkillId ?? "") }),
+        skillsCache.invalidateList(),
       ]);
     },
   });
@@ -5077,21 +5066,8 @@ export function CompanySkills() {
       setDisplayedDetail(null);
       setDisplayedFile(null);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
-        ...(deleteTargetSkillId ? [
-          queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, deleteTargetSkillId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.updateStatus(selectedCompanyId!, deleteTargetSkillId) }),
-        ] : []),
-        ...(deleteTargetSkillId ? [
-          queryClient.invalidateQueries({
-            queryKey: queryKeys.companySkills.file(selectedCompanyId!, deleteTargetSkillId, selectedPath),
-          }),
-        ] : []),
+        skillsCache.invalidateList(),
       ]);
-      await queryClient.refetchQueries({
-        queryKey: queryKeys.companySkills.list(selectedCompanyId!),
-        type: "active",
-      });
       navigate("/skills", { replace: true });
       pushToast({
         tone: "success",

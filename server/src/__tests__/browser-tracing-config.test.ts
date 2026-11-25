@@ -6,10 +6,35 @@ const cloud = { PROPRIO_CLOUD_TENANT_SERVER_TOKEN: "tenant-token" };
 const ingestKey = "hcaik_" + "0".repeat(58);
 
 describe("resolveBrowserTracingConfig", () => {
-  it("is off for a self-hosted instance even with every variable set", () => {
+  it("is off for a self-hosted instance unless the explicit opt-in is set", () => {
     expect(resolveBrowserTracingConfig({
       PROPRIO_BROWSER_TRACES_ENDPOINT: "https://api.honeycomb.io",
       PROPRIO_BROWSER_TRACES_INGEST_KEY: ingestKey,
+    })).toBeNull();
+  });
+
+  it("supports an explicitly opted-in self-hosted collector", () => {
+    const config = resolveBrowserTracingConfig({
+      PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED: "1",
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com/otlp",
+      PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "0.25",
+      PROPRIO_BROWSER_TRACES_SERVICE_NAME: "self-hosted-board",
+      PROPRIO_BROWSER_TRACES_ENVIRONMENT: "production",
+    });
+    expect(config).toEqual({
+      tracesUrl: "https://collector.example.com/otlp/v1/traces",
+      ingestKey: null,
+      serviceName: "self-hosted-board",
+      environment: "production",
+      sampleRate: 0.25,
+    });
+    expect(authSessionSchema.shape.browserTracing.parse(config)).toEqual(config);
+  });
+
+  it("does not treat other self-hosted flag values as opt-in", () => {
+    expect(resolveBrowserTracingConfig({
+      PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED: "true",
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com/otlp",
     })).toBeNull();
   });
 
@@ -54,6 +79,7 @@ describe("resolveBrowserTracingConfig", () => {
     ["a configuration key", { PROPRIO_BROWSER_TRACES_INGEST_KEY: "51GYc2configkey00000000" }, "INGEST_KEY is not a Honeycomb ingest key"],
     ["Honeycomb with no key", { PROPRIO_BROWSER_TRACES_INGEST_KEY: undefined }, "INGEST_KEY is required"],
     ["plain http", { PROPRIO_BROWSER_TRACES_ENDPOINT: "http://api.honeycomb.io" }, "must use https"],
+    ["URL credentials", { PROPRIO_BROWSER_TRACES_ENDPOINT: "https://user:secret@collector.example.com" }, "must not contain URL credentials"],
     ["a malformed endpoint", { PROPRIO_BROWSER_TRACES_ENDPOINT: "not a url" }, "not a valid URL"],
     ["a malformed sample rate", { PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "10%" }, "SAMPLE_RATE must be a number"],
     ["an out-of-range sample rate", { PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "2" }, "SAMPLE_RATE must be a number"],
@@ -91,6 +117,16 @@ describe("resolveBrowserTracingConfig", () => {
       PROPRIO_BROWSER_TRACES_INGEST_KEY: ingestKey,
       PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "0",
     })).toBeNull();
+  });
+
+  it("fails closed for a positive sample rate too small to represent", () => {
+    const warn = vi.fn();
+    expect(resolveBrowserTracingConfig({
+      ...cloud,
+      PROPRIO_BROWSER_TRACES_ENDPOINT: "https://collector.example.com",
+      PROPRIO_BROWSER_TRACES_SAMPLE_RATE: "1e-310",
+    }, warn)).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("too small"));
   });
 });
 
