@@ -97,7 +97,7 @@ export async function readHistoryWork(ctx: ChatCatalogContext, expected: Omit<Hi
   const [task, history, comments, activity, decisions] = await Promise.all([
     ctx.input.api.get<Entity>(`/api/issues/${expected.issueId}`), ctx.input.api.get<RoutineRunSummary[]>(`/api/routines/${expected.routineId}/runs`),
     ctx.input.api.get<Entity[]>(`/api/issues/${expected.issueId}/comments?order=asc`), ctx.input.api.get<Array<Entity & { runId?: string }>>(`/api/issues/${expected.issueId}/activity`),
-    run ? ctx.input.api.get<ToolRunDecisionLookup>(`${root(ctx)}/tools/runs/${run.id}/decisions`) : Promise.resolve({ runId: "", decisions: [] }),
+    run ? ctx.input.api.get<ToolRunDecisionLookup>(`${root(ctx)}/tools/runs/${run.id}/decisions`) : Promise.resolve({ runId: "", runtimeProvenance: { source: "unknown" as const }, decisions: [] }),
   ]);
   return { run, task, invocation: history.find(row => row.id === expected.invocationId), comments, activity, decisions };
 }

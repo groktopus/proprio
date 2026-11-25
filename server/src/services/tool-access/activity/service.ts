@@ -1,12 +1,13 @@
 import { connectionManagementService } from "../../connection-management.js";
 import type { ConnectionManagementContext } from "../../connection-management.js";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, connectionTokenIssuances, authUsers, heartbeatRuns, issues, toolActionRequests, toolConnections, toolCallEvents, toolInvocations } from "@groktopus/db";
 import type { ToolConnectionActivityResponse, ToolRunDecision, ToolRunDecisionLookup } from "@groktopus/shared";
 import { notFound } from "../../../errors.js";
 import { issueReadSqlCondition, type AuthorizationActor } from "../../authorization.js";
 import { listConnectionLifecycleEvents } from "../../tool-connection-activity.js";
+import { managedAuditRuntimeProvenance } from "../../native-runtime/managed-audit-runtime-provenance.js";
 import { toToolInvocation, toToolActionRequest, toToolCallEvent, toToolPolicyRunProvenance, userFallbackName, denialReasonForDecision } from "./projection.js";
 type ConnectionLookup = (idOrUid: string, companyId?: string) => Promise<typeof toolConnections.$inferSelect>;
 
@@ -277,9 +278,15 @@ listConnectionActivity: async (
     getRunDecisionLookup: async (
       companyId: string,
       runId: string,
+      actor: AuthorizationActor = { type: "none" },
     ): Promise<ToolRunDecisionLookup> => {
       const [run] = await db
-        .select({ id: heartbeatRuns.id })
+        .select({
+          id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+          issueId: heartbeatRuns.nativeIssueId, runtimeMode: heartbeatRuns.runtimeMode,
+          driverKind: heartbeatRuns.driverKind, driverVersion: heartbeatRuns.driverVersion,
+          runnerProfileJson: heartbeatRuns.runnerProfileJson,
+        })
         .from(heartbeatRuns)
         .where(
           and(
@@ -289,6 +296,7 @@ listConnectionActivity: async (
         )
         .limit(1);
       if (!run) throw notFound("Run not found");
+      const runtimeProvenance = await managedAuditRuntimeProvenance(db, actor, run);
 
       const invocationRows = await db
         .select()
@@ -379,7 +387,7 @@ listConnectionActivity: async (
         } satisfies ToolRunDecision;
       });
 
-      return { runId, decisions };
+      return { runId, runtimeProvenance, decisions };
     }
   };
 }
