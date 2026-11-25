@@ -22,7 +22,9 @@ function HandoffActor({ id, name, fallback, agents }: {
   return id ? <AgentIdentity agent={agents?.get(id) ?? { id, name: name ?? "Agent" }} size="xs" /> : <Identity name={name ?? fallback} size="xs" />;
 }
 
-export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; task?: CaseWorkIssue | null; agents?: CaseAgentMap }) {
+type HandoffTaskIdentity = Pick<CaseWorkIssue, "id" | "identifier" | "title" | "status">;
+
+export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; task?: HandoffTaskIdentity | null; agents?: CaseAgentMap }) {
   const history = useInfiniteQuery({
     queryKey: queryKeys.cases.handoffs(caseId),
     initialPageParam: null as string | null,
@@ -31,18 +33,20 @@ export function CaseHandoffHistory({ caseId, task, agents }: { caseId: string; t
   });
   const historyView = useQueryView(history);
   const waiting = ["loading", "reconnecting"].includes(historyView.kind);
-  const handoffs = history.data?.pages.flatMap(page => page.items) ?? [];
+  const accessDenied = historyView.errorKind === "auth" || historyView.errorKind === "forbidden" ||
+    historyView.errorKind === "not_found";
+  const handoffs = accessDenied ? [] : history.data?.pages.flatMap(page => page.items) ?? [];
   return <section className="space-y-3" aria-label="Case handoffs">
     <h2 className="text-sm font-semibold">Handoffs</h2>
     {waiting ? <p className="text-sm text-muted-foreground">Loading handoffs…</p> : null}
     {(historyView.kind === "error") ? <p role="alert" className="text-sm text-destructive">Handoffs couldn’t be loaded.</p> : null}
     {!waiting && !(historyView.kind === "error") && handoffs.length === 0 ? <p className="text-sm text-muted-foreground">No handoffs yet.</p> : null}
     <ol className="divide-y divide-border">{handoffs.map(handoff => <HandoffRow key={handoff.id} handoff={handoff} task={task} agents={agents} />)}</ol>
-    {history.hasNextPage ? <Button variant="ghost" size="sm" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>Load older handoffs</Button> : null}
+    {!accessDenied && history.hasNextPage ? <Button variant="ghost" size="sm" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>Load older handoffs</Button> : null}
   </section>;
 }
 
-function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?: CaseWorkIssue | null; agents?: CaseAgentMap }) {
+function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?: HandoffTaskIdentity | null; agents?: CaseAgentMap }) {
   const [open, setOpen] = useState(false);
   const createdAt = new Date(handoff.createdAt).toISOString();
   const terminal = handoff.destinationKind === "done";

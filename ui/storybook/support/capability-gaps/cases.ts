@@ -145,7 +145,7 @@ export function installCaseFixtures(state: FixtureState = "ready", workflow?: Ca
                   id: "reverse-link-gap",
                   role: "work",
                   createdAt: caseItem.createdAt,
-                  case: caseItem,
+                  case: { ...caseItem, workIssueId: "task-gap", phase: "implementation" },
                 },
               ],
       },
