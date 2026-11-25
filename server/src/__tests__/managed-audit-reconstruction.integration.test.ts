@@ -1,17 +1,16 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { authUsers, companies, principalPermissionGrants, toolActionRequests } from "@groktopus/db";
+import { fileURLToPath } from "node:url";
+import { authAccounts, authUsers, companies, createDb, principalPermissionGrants, toolActionRequests } from "@groktopus/db";
+import { hashPassword } from "better-auth/crypto";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import type { ToolActionRequestListItem, ToolRunDecision } from "@groktopus/shared";
 import { accessService } from "../services/access.js";
-import { heartbeatService } from "../services/heartbeat.js";
-import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { recoveryPostgresSupport, startRecoveryPostgres } from "./helpers/recovery-postgres.js";
-import { startRunnerApiTestServer } from "./helpers/runner-api-server.js";
 import { createIsolatedTestHome } from "./helpers/isolated-test-home.js";
 
 const markers = ["approved", "denied", "interrupted"] as const;
@@ -42,14 +41,80 @@ console.log(JSON.stringify({ runId: process.env.PROPRIO_RUN_ID, status: call.sta
 if (call.status !== 200 && (call.status !== 409 || result.reasonCode !== "approval_required")) throw new Error("Expected a governed action");
 `;
 
-it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from an authenticated process run and an independent target", async () => {
+async function reserveLoopbackPort() {
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) =>
+    listener.once("error", reject).listen(0, "127.0.0.1", resolve));
+  const address = listener.address();
+  await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+  if (!address || typeof address === "string") throw new Error("Missing controller port");
+  return address.port;
+}
+
+async function startController(home: string, config: string, databaseUrl: string, port: number) {
+  const child = fork(fileURLToPath(new URL("./helpers/maintenance/server-child.ts", import.meta.url)), [], {
+    execArgv: ["--import", fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url))],
+    env: {
+      PATH: process.env.PATH,
+      TMPDIR: process.env.TMPDIR,
+      NODE_ENV: "test",
+      PROPRIO_HOME: home,
+      PROPRIO_CONFIG: config,
+      DATABASE_URL: databaseUrl,
+      DATABASE_POOL_MAX: process.env.DATABASE_POOL_MAX ?? "4",
+      PROPRIO_AGENT_JWT_SECRET: process.env.PROPRIO_AGENT_JWT_SECRET,
+      PROPRIO_TOOL_ACTION_SIGNING_SECRET: process.env.PROPRIO_TOOL_ACTION_SIGNING_SECRET,
+      PROPRIO_DECISION_SIGNING_SECRET: process.env.PROPRIO_DECISION_SIGNING_SECRET,
+      BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
+      PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH: process.env.PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH,
+      PROPRIO_MANAGED_AUDIT_CAPTURE_FROM: process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM,
+      PROPRIO_AUTH_RATE_LIMIT_ENABLED: "false",
+      PROPRIO_ANNOUNCEMENTS_ENABLED: "false",
+      PROPRIO_IN_WORKTREE: "false",
+      PROPRIO_UI_DEV_MIDDLEWARE: "false",
+    },
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let output = "";
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.on("data", chunk => { output = (output + chunk).slice(-8000); });
+  }
+  const exited = new Promise<number | null>(resolve => child.once("close", resolve));
+  try {
+    const readyPort = await new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Timed out starting audit controller")), 45_000);
+      child.on("message", (message: { kind?: string; port?: number; error?: string }) => {
+        if (message.kind === "ready" && message.port) { clearTimeout(timeout); resolve(message.port); }
+        else if (message.kind === "error") { clearTimeout(timeout); reject(new Error(message.error)); }
+      });
+      child.once("error", error => { clearTimeout(timeout); reject(error); });
+      void exited.then(code => { clearTimeout(timeout); reject(new Error(`Audit controller exited with code ${code}`)); });
+    });
+    expect(readyPort).toBe(port);
+  } catch (error) {
+    child.kill("SIGKILL");
+    await exited;
+    throw new Error(`Unable to start audit controller:
+${output}`, { cause: error });
+  }
+  return {
+    pid: child.pid!,
+    async close() {
+      if (child.connected) child.send({ id: 1, command: "shutdown" });
+      const timeout = setTimeout(() => child.kill("SIGKILL"), 15_000);
+      try { expect(await exited, output).toBe(0); }
+      finally { clearTimeout(timeout); }
+    },
+  };
+}
+
+it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects after an authenticated controller restart", async () => {
   const isolatedHome = createIsolatedTestHome();
   const home = isolatedHome.home;
   const ledger = join(home, "target-effects.jsonl");
-  const origin = "https://audit.fixture.invalid";
-  let server: Awaited<ReturnType<typeof startRunnerApiTestServer>> | undefined;
+  let controller: Awaited<ReturnType<typeof startController>> | undefined;
+  let db: ReturnType<typeof createDb> | undefined;
   let database: Awaited<ReturnType<typeof startRecoveryPostgres>> | undefined;
-  let lifecycle: ReturnType<typeof configureAgentLifecycle> | undefined;
   let cleanupRuns: (() => Promise<void>) | undefined;
   const target = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -106,67 +171,94 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     execFileSync("git", ["init", "-q", workspace]);
     vi.stubEnv("PROPRIO_AGENT_JWT_SECRET", randomUUID());
     vi.stubEnv("PROPRIO_TOOL_ACTION_SIGNING_SECRET", randomUUID());
+    vi.stubEnv("PROPRIO_DECISION_SIGNING_SECRET", randomUUID());
     vi.stubEnv("BETTER_AUTH_SECRET", randomUUID() + randomUUID());
     vi.stubEnv("PROPRIO_AUTH_RATE_LIMIT_ENABLED", "false");
     database = await startRecoveryPostgres("proprio-audit-reconstruction-db-");
-    server = await startRunnerApiTestServer({ humanSessions: true, authPublicBaseUrl: origin, databaseUrl: database.connectionString });
-    vi.stubEnv("PROPRIO_API_URL", server.apiUrl);
-    const f = await server.fixture({ connectionScenario: "fresh" });
-    const ownerId = f.responsibleUserId!;
-    const access = accessService(server.db);
-    await access.ensureMembership(f.companyId, "user", ownerId, "owner", "active");
-    await access.ensureRoleDefaultGrants(f.companyId, ownerId, "owner", ownerId);
-    await server.db.update(companies).set({ requireBoardApprovalForNewAgents: false }).where(eq(companies.id, f.companyId));
-    let cookie = await server.humanSession(ownerId);
+    const port = await reserveLoopbackPort();
+    const origin = `http://127.0.0.1:${port}`;
+    const config = join(home, "config.json");
+    await writeFile(config, JSON.stringify({
+      $meta: { version: 1, updatedAt: exportFrom, source: "onboard" },
+      database: { mode: "postgres", connectionString: database.connectionString, backup: { enabled: false, intervalMinutes: 60, dir: join(home, "backups") } },
+      logging: { mode: "file", logDir: join(home, "logs") },
+      server: { deploymentMode: "authenticated", exposure: "private", bind: "loopback", host: "127.0.0.1", port, serveUi: false },
+      auth: { baseUrlMode: "explicit", publicBaseUrl: origin, disableSignUp: true },
+      storage: { provider: "local_disk", localDisk: { baseDir: join(home, "storage") } },
+      secrets: { provider: "local_encrypted", strictMode: false, localEncrypted: { keyFilePath: join(home, "master.key") } },
+      telemetry: { enabled: false }, updates: { checkEnabled: false },
+    }), { mode: 0o600 });
+    db = createDb(database.connectionString);
+    const companyId = randomUUID();
+    const ownerId = randomUUID();
     const reviewerId = randomUUID();
-    await server.db.insert(authUsers).values({
-      id: reviewerId, name: "Independent audit reviewer", email: `${reviewerId}@fixture.invalid`,
-      createdAt: new Date(), updatedAt: new Date(),
+    await db.insert(companies).values({
+      id: companyId, name: "Audit reconstruction", issuePrefix: "AUD",
+      requireBoardApprovalForNewAgents: false,
     });
-    await access.ensureMembership(f.companyId, "user", reviewerId, "operator", "active");
-    await access.ensureRoleDefaultGrants(f.companyId, reviewerId, "operator", reviewerId);
-    await server.db.insert(principalPermissionGrants).values({
-      companyId: f.companyId, principalType: "user", principalId: reviewerId, permissionKey: "audit:view_agent_actions",
+    const access = accessService(db);
+    const credentials = [];
+    for (const [userId, name, role] of [[ownerId, "Fixture owner", "owner"], [reviewerId, "Independent reviewer", "operator"]] as const) {
+      const email = `${userId}@fixture.invalid`;
+      const password = `fixture-${randomUUID()}`;
+      await db.insert(authUsers).values({ id: userId, name, email, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+      await db.insert(authAccounts).values({ id: randomUUID(), issuer: "local:credential", accountId: userId,
+        providerId: "credential", userId, password: await hashPassword(password), createdAt: new Date(), updatedAt: new Date() });
+      await access.ensureMembership(companyId, "user", userId, role, "active");
+      await access.ensureRoleDefaultGrants(companyId, userId, role, ownerId);
+      credentials.push({ email, password });
+    }
+    await db.insert(principalPermissionGrants).values({
+      companyId, principalType: "user", principalId: reviewerId, permissionKey: "audit:view_agent_actions",
     }).onConflictDoNothing();
-    const reviewerCookie = await server.humanSession(reviewerId);
+    controller = await startController(home, config, database.connectionString, port);
+    const [ownerCookie, reviewerCookie] = await Promise.all(credentials.map(async credential => {
+      const response = await fetch(`${origin}/api/auth/sign-in/email`, {
+        method: "POST", headers: { "Content-Type": "application/json", origin }, body: JSON.stringify(credential),
+      });
+      expect(response.status, await response.text()).toBe(200);
+      const cookie = response.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+      expect(cookie).not.toBe("");
+      return cookie;
+    }));
+    let cookie = ownerCookie;
+    const fixtureIssueIds: string[] = [];
     const api = async (method: string, path: string, data?: unknown, session = cookie) => {
-      const url = server!.apiUrl;
-      const response = await fetch(url + "/api" + path, {
-        method, headers: { cookie: session, origin: url, "Content-Type": "application/json" },
+      const response = await fetch(origin + "/api" + path, {
+        method, headers: { cookie: session, origin, "Content-Type": "application/json" },
         ...(data === undefined ? {} : { body: JSON.stringify(data) }),
       });
       return { status: response.status, body: await response.json() };
     };
     cleanupRuns = async () => {
       for (const issueId of fixtureIssueIds) {
-        const runs = await api("GET", `/issues/${issueId}/runs`);
+        const runs = await api("GET", `/issues/${issueId}/runs`, undefined, ownerCookie);
         if (runs.status !== 200) continue;
         for (const run of runs.body as Array<{ runId: string; status: string }>) {
-          if (run.status === "queued" || run.status === "running") await api("POST", `/heartbeat-runs/${run.runId}/cancel`, {});
+          if (run.status === "queued" || run.status === "running") await api("POST", `/heartbeat-runs/${run.runId}/cancel`, {}, ownerCookie);
         }
       }
-      await heartbeatService(server!.db).drainActiveRunExecutions();
     };
-    lifecycle = configureAgentLifecycle(server.db, {
-      requiredPluginIds: async () => [], runPlugin: async () => "complete", runHost: async () => "complete",
-    });
     const agentIds: string[] = [];
     for (const marker of markers) {
-      const agent = await api("POST", `/companies/${f.companyId}/agents`, {
+      const agent = await api("POST", `/companies/${companyId}/agents`, {
         name: `Audit fixture runner ${marker}`, role: "engineer", adapterType: "process",
         adapterConfig: { command: process.execPath, args: ["-e", "process.exit(0)"], cwd: workspace },
         runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true } },
         permissions: {},
       });
       expect(agent, JSON.stringify(agent)).toMatchObject({ status: 201 });
-      await lifecycle.process(agent.body.id);
+      await vi.waitFor(async () => {
+        const state = await api("GET", `/agents/${agent.body.id}`);
+        expect(state).toMatchObject({ status: 200, body: { lifecycleState: "ready" } });
+      }, { timeout: 15_000, interval: 250 });
       agentIds.push(agent.body.id);
     }
 
     await new Promise<void>(resolve => target.listen(0, "127.0.0.1", resolve));
     const address = target.address();
     if (!address || typeof address === "string") throw new Error("Fixture listener unavailable");
-    const companyPath = `/companies/${f.companyId}`;
+    const companyPath = `/companies/${companyId}`;
     const connection = await api("POST", `${companyPath}/tools/apps/connect`, {
       name: "Independent synthetic target", link: `http://127.0.0.1:${address.port}/mcp`,
     });
@@ -187,7 +279,6 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     const policyId = createdPolicy.body.id;
 
     const cases = new Map<string, { issueId: string; runId: string; invocationId: string; requestId: string; fingerprint: string; priority: number }>();
-    const fixtureIssueIds: string[] = [];
     for (const [index, marker] of markers.entries()) {
       const agentId = agentIds[index];
       const configured = await api("PATCH", `/agents/${agentId}`, {
@@ -229,7 +320,7 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
       const beforePolicy = beforeRecord?.policyProvenance.policies.find(policy => policy.policyId === policyId);
       expect(beforePolicy).toMatchObject({ priority: index === 0 ? 1 : 2 });
       if (!beforePolicy) throw new Error("The evaluated policy snapshot was not available before decision");
-      const decision = await api("POST", `/tool-gateway/action-requests/${requestId}/${marker === "denied" ? "decline" : "approve"}`, { companyId: f.companyId });
+      const decision = await api("POST", `/tool-gateway/action-requests/${requestId}/${marker === "denied" ? "decline" : "approve"}`, { companyId: companyId });
       expect(decision, JSON.stringify(decision)).toMatchObject({ status: 200 });
       cases.set(marker, { issueId: issue.body.id, runId, invocationId, requestId, fingerprint: beforePolicy.revisionFingerprint, priority: beforePolicy.priority });
       if (marker !== "denied") await vi.waitFor(async () => expect(await effects()).toContain(marker), { timeout: 5_000 });
@@ -249,11 +340,10 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
         }
       }
     }
-    await heartbeatService(server.db).drainActiveRunExecutions();
-    await lifecycle.stop();
-    lifecycle = undefined;
-    await server.close();
-    server = await startRunnerApiTestServer({ humanSessions: true, authPublicBaseUrl: origin, databaseUrl: database.connectionString });
+    const firstControllerPid = controller.pid;
+    await controller.close();
+    controller = await startController(home, config, database.connectionString, port);
+    expect(controller.pid).not.toBe(firstControllerPid);
     cookie = reviewerCookie;
     const exportPath = `${companyPath}/audit/managed-exports`;
     const snapshot = await api("POST", exportPath, { from: exportFrom, to: new Date().toISOString() });
@@ -322,8 +412,8 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
     const pending = await api("GET", `${companyPath}/tools/action-requests?status=pending`);
     expect(pending.status).toBe(200);
     expect((pending.body.actionRequests as ToolActionRequestListItem[]).filter(item => [...cases.values()].some(ids => ids.issueId === item.request.issueId))).toHaveLength(0);
-    const durableRequests = await server.db.select({ issueId: toolActionRequests.issueId })
-      .from(toolActionRequests).where(eq(toolActionRequests.companyId, f.companyId));
+    const durableRequests = await db.select({ issueId: toolActionRequests.issueId })
+      .from(toolActionRequests).where(eq(toolActionRequests.companyId, companyId));
     for (const issueId of fixtureIssueIds) {
       expect(durableRequests.filter(request => request.issueId === issueId)).toHaveLength(1);
     }
@@ -336,9 +426,10 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
         node: process.version,
         platform: `${process.platform}/${process.arch}`,
         runnerProfile: "local process adapter; no model account",
+        controllerRestart: { beforePid: firstControllerPid, afterPid: controller.pid },
         connectorProfile: "synthetic localhost HTTP MCP target",
         reviewer: "separate company operator with default audit role grants",
-        companyId: f.companyId,
+        companyId: companyId,
         auditExport: {
           exportId: snapshot.body.exportId,
           eventCount: page.body.eventCount,
@@ -351,16 +442,19 @@ it.skipIf(!recoveryPostgresSupport.supported)("reconstructs managed effects from
           targetEffects: observedTargetEffects.filter(effect => effect === marker),
         }])),
         outcomes: { approved: "success receipt and one target effect", denied: "denied with zero target effects", interrupted: "target effect durable; response lost; no retry submitted" },
-        scope: "same-PostgreSQL test-server recreation in one Vitest process; not production index startup or independent database restore",
+        scope: "authenticated controller process restart against the same disposable PostgreSQL database",
       }, null, 2) + "\n", { mode: 0o600 });
     }
   } finally {
     try { await cleanupRuns?.(); } catch { /* Preserve the original fixture failure while attempting shutdown. */ }
-    await lifecycle?.stop();
-    await server?.close();
-    await database?.cleanup();
-    if (target.listening) await new Promise<void>(resolve => target.close(() => resolve()));
-    isolatedHome.cleanup();
-    vi.unstubAllEnvs();
+    try {
+      await controller?.close();
+    } finally {
+      await db?.$client.end();
+      await database?.cleanup();
+      if (target.listening) await new Promise<void>(resolve => target.close(() => resolve()));
+      isolatedHome.cleanup();
+      vi.unstubAllEnvs();
+    }
   }
-}, 90_000);
+}, 150_000);
