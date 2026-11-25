@@ -432,10 +432,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let remoteRuntimeRootDir: string | null = null;
     let localSkillsDir: string | null = null;
     let remoteSkillsDir: string | null = null;
-    const inPlaceSshExecution = executionTarget?.kind === "remote"
+    const needsPrivateSshSkills = executionTarget?.kind === "remote"
       && executionTarget.transport === "ssh"
-      && executionTarget.workspaceRealization?.mode === "in_place";
-    const skillsAssetKey = inPlaceSshExecution && hasExplicitRuntimeSkillInventory
+      && executionTarget.workspaceRealization?.mode === "in_place"
+      && !config.managedAiConnection
+      && hasExplicitRuntimeSkillInventory;
+    const skillsAssetKey = needsPrivateSshSkills
       ? `skills-${randomUUID()}`
       : "skills";
     let proprioBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetProprioBridge>> = null;
@@ -471,7 +473,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 key: skillsAssetKey,
                 localDir: localSkillsDir,
                 followSymlinks: true,
-                ...(inPlaceSshExecution && hasExplicitRuntimeSkillInventory
+                ...(needsPrivateSshSkills
                   ? {
                       restore: async ({ assetDir }: { assetDir: string }) => {
                         const removed = await runAdapterExecutionTargetShellCommand(
@@ -480,7 +482,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                           `rm -rf -- ${shellQuote(assetDir)}`,
                           { cwd, env: runtimeEnv, timeoutSec: 15, graceSec },
                         );
-                        if ((removed.exitCode ?? 0) !== 0 || removed.timedOut) {
+                        if (removed.exitCode !== 0 || removed.timedOut) {
                           throw new Error("Pi run skill directory cleanup failed.");
                         }
                       },
@@ -529,7 +531,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         } catch (error) {
           await Promise.allSettled([
             restoreRemoteWorkspace?.(),
-            ...(inPlaceSshExecution && hasExplicitRuntimeSkillInventory && !restoreRemoteWorkspace
+            ...(needsPrivateSshSkills && !restoreRemoteWorkspace
               ? [runAdapterExecutionTargetShellCommand(
                   runId,
                   executionTarget,
