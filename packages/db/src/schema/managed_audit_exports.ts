@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { boolean, index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
@@ -9,6 +10,7 @@ export const managedAuditExports = pgTable("managed_audit_exports", {
   from: timestamp("from_at", { withTimezone: true }).notNull(),
   to: timestamp("to_at", { withTimezone: true }).notNull(),
   eventIds: uuid("event_ids").array().notNull(),
+  membershipCleared: boolean("membership_cleared").notNull().default(false),
   invalidated: boolean("invalidated").notNull().default(false),
   watermark: text("watermark").notNull(),
   cursorSecret: uuid("cursor_secret").notNull().defaultRandom(),
@@ -16,6 +18,7 @@ export const managedAuditExports = pgTable("managed_audit_exports", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 }, table => [
   index("managed_audit_exports_company_expiry_idx").on(table.companyId, table.expiresAt),
+  index("managed_audit_exports_company_uncleared_expiry_idx").on(table.companyId, table.expiresAt, table.id).where(sql`not ${table.membershipCleared}`),
 ]);
 
 /** Access records outlive the snapshot and are excluded from company activity feeds. */

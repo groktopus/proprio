@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -370,17 +370,25 @@ describePostgres("agent action audit routes", () => {
       const afterCleanup = await board.get(exportPath).expect(409);
       expect(afterCleanup.body).toMatchObject({ details: { reasonCode: "snapshot_expired" } });
       expect(afterCleanup.body).not.toHaveProperty("eventCount");
-      const [marker] = await db.select({ expiresAt: managedAuditExports.expiresAt, eventIds: managedAuditExports.eventIds })
+      const [marker] = await db.select({ expiresAt: managedAuditExports.expiresAt, eventIds: managedAuditExports.eventIds,
+        invalidated: managedAuditExports.invalidated, membershipCleared: managedAuditExports.membershipCleared })
         .from(managedAuditExports).where(row);
-      expect(marker).toEqual({ expiresAt: expired, eventIds: [] });
+      expect(marker).toEqual({ expiresAt: expired, eventIds: [], invalidated: true, membershipCleared: true });
       expect((await otherBoard.get(exportPath).expect(404)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
 
-      await db.update(managedAuditExports).set({ expiresAt: new Date(0) }).where(row);
+      // Cleanup uses the database clock. A request replica behind the expiry
+      // clock must not retain an old marker indefinitely.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(expired.getTime() - 60_000);
+      expect((await board.get(exportPath).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      await db.update(managedAuditExports).set({ expiresAt: new Date(expired.getTime() - 25 * 60 * 60 * 1000) }).where(row);
       await board.post(path).send(window).expect(201);
       expect((await board.get(exportPath).expect(404)).body)
         .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
     } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });
@@ -604,13 +612,14 @@ describePostgres("agent action audit routes", () => {
     const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
     const oldStart = "2026-07-17T00:00:00.000Z";
     const originalExpiresAt = new Date(Date.now() + 60_000);
-    const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
+    const snapshotRows = await db.insert(managedAuditExports).values(
       Array.from({ length: 128 }, (_, index) => ({
         companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
         from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
         eventIds: [], watermark: "fixture", expiresAt: originalExpiresAt,
       })),
     ).returning({ id: managedAuditExports.id });
+    const [oldEpochRow, oldRetentionRow] = snapshotRows;
     // Make all 128 rows carry the supported maximum membership using real,
     // distinct UUID values generated in PostgreSQL. This avoids sending a
     // 40MB fixture over the test connection while preserving realistic array
@@ -623,6 +632,10 @@ describePostgres("agent action audit routes", () => {
       )
       where company_id = ${company.id}
     `);
+    // Four recent expiry markers and 124 invalidated snapshots compete for a
+    // single eight-row cleanup budget in the same create operation.
+    await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(inArray(managedAuditExports.id, snapshotRows.slice(2, 6).map(row => row.id)));
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
@@ -648,23 +661,31 @@ describePostgres("agent action audit routes", () => {
       expect(retirementReceipt).toMatchObject({
         companyId: company.id,
         actorId: userId,
-        recordCount: 128,
+        recordCount: 124,
         source: "tool_gateway",
         exportId: null,
       });
       const storage = await db.select({
+        id: managedAuditExports.id,
         invalidated: managedAuditExports.invalidated,
+        membershipCleared: managedAuditExports.membershipCleared,
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
-      expect(storage.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(8);
-      expect(storage.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(120);
+      const originalIds = new Set(snapshotRows.map(row => row.id));
+      const recentlyExpiredIds = new Set(snapshotRows.slice(2, 6).map(row => row.id));
+      expect(storage.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(8);
+      expect(storage.filter(row => recentlyExpiredIds.has(row.id) && row.membershipCleared)).toHaveLength(4);
+      expect(storage.filter(row => originalIds.has(row.id) && row.invalidated && row.membershipCleared && !recentlyExpiredIds.has(row.id))).toHaveLength(4);
+      expect(storage.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(120);
       await board.post(path).send(window).expect(201);
       const nextBatch = await db.select({
+        id: managedAuditExports.id,
         invalidated: managedAuditExports.invalidated,
+        membershipCleared: managedAuditExports.membershipCleared,
         eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
       }).from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
-      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 0)).toHaveLength(16);
-      expect(nextBatch.filter(row => row.invalidated && row.eventCount === 20_000)).toHaveLength(112);
+      expect(nextBatch.filter(row => originalIds.has(row.id) && row.membershipCleared && row.eventCount === 0)).toHaveLength(16);
+      expect(nextBatch.filter(row => row.invalidated && !row.membershipCleared && row.eventCount === 20_000)).toHaveLength(112);
       expect(await db.select().from(managedAuditTransitionReceipts)
         .where(and(eq(managedAuditTransitionReceipts.companyId, company.id),
           eq(managedAuditTransitionReceipts.transition, "company_exports_retired")))).toHaveLength(1);
@@ -1069,8 +1090,9 @@ describePostgres("agent action audit routes", () => {
       expect(resumed.body).not.toHaveProperty("events");
       const [snapshot] = await db.select({
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
+        membershipCleared: managedAuditExports.membershipCleared,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
-      expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
+      expect(snapshot).toEqual({ invalidated: true, eventIds: [], membershipCleared: true });
       expect((await db.select().from(activityLog))
         .filter(row => row.action === "audit.managed_export_invalidated")).toHaveLength(0);
       const receipts = await db.select().from(managedAuditTransitionReceipts)
@@ -1230,7 +1252,7 @@ describePostgres("agent action audit routes", () => {
         writerPid = owner!.pid;
         locked.resolve();
         await release.promise;
-        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [], membershipCleared: true })
           .where(eq(managedAuditExports.id, created.body.exportId));
       });
       await Promise.race([locked.promise, locker]);
@@ -1248,6 +1270,10 @@ describePostgres("agent action audit routes", () => {
       const response = await pendingRead;
       expect(response.status).toBe(503);
       expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      const [committedMarker] = await db.select({ invalidated: managedAuditExports.invalidated,
+        eventIds: managedAuditExports.eventIds, membershipCleared: managedAuditExports.membershipCleared })
+        .from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
+      expect(committedMarker).toEqual({ invalidated: true, eventIds: [], membershipCleared: true });
       expect(await db.select().from(managedAuditExportPageAccess)
         .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId))).toHaveLength(0);
       await board.get(exportPath).expect(409);
