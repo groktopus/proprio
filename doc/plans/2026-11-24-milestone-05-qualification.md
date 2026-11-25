@@ -190,13 +190,14 @@ Hosted stability and durable-work qualification passed for adapter head
 source revision, baseline `49611a24b54166eda41cde8a26706592cc394034`, and five
 recovery cases. [Hosted adapter qualification](https://github.com/groktopus/proprio/actions/runs/45535156471)
 
-The Pi follow-up stages explicit local inventories in a fresh directory per
-run. Node 24 fixtures cover disjoint choices, an empty inventory, configured
-skill arguments and cleanup. Review identified a remaining stale-directory
-case on in-place SSH and requested direct Pi CLI evidence. Codex reuses
-bundled discovery when the inventory is implicit. Its 14 execution tests and
-both adapter typechecks passed. A review follow-up is strengthening the
-inventory test. [Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
+The Pi follow-up stages explicit inventories in a fresh local directory or
+in a unique in-place SSH asset when the shared host supplies authentication.
+The reviewed head `f271fe60` passed 17 tests, including a credential-free Pi
+0.74.0 CLI check for ambient, selected and empty discovery. Pi extensions
+can add their own resources. Codex reuses bundled discovery when the
+inventory is implicit. The reviewed head `a59b7b0b` passed 14 execution tests.
+A representative bundled entry verified removal of a live deselected link.
+[Pi isolation](https://github.com/groktopus/proprio/pull/389) [Codex inventory](https://github.com/groktopus/proprio/pull/388)
 
 OpenCode stages explicit local inventories in the private runtime config and
 reports managed assignments as run scoped. Its compatibility flag also hides
@@ -217,10 +218,13 @@ main. The rerun used an isolated application home and temporary directory
 under a valid disposable Git root. Composition
 `abbeccfe4fec6a7de1605a70a16e9c27efed1813` added both adapter follow-ups to
 that base and passed 198 adapter, commentary and receipt recovery tests.
-Hosted Linux source qualification started against that exact composition
-and baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`. Its build,
-managed rollout and rollback, and runner recovery results are pending.
-[Hosted composition qualification](https://github.com/groktopus/proprio/actions/runs/45555172910)
+Hosted Linux source qualification on that exact composition failed while
+building the managed update. Two runner capability inventories still listed
+the removed incidental-feedback heading. The update did not reach rollback
+or later recovery steps. Head `095e8294` regenerated both inventories and
+passed their validation, four validator tests, and protocol coverage.
+[Failed composition qualification](https://github.com/groktopus/proprio/actions/runs/45555172910)
+[Manifest correction](https://github.com/groktopus/proprio/pull/352)
 
 Composition `b02e4f28eee960fbc91144bb0b45ff55c4486594` includes the
 Gemini and OpenCode updates. Node 24 and disposable PostgreSQL passed 78
@@ -230,6 +234,17 @@ repaired an interrupted audit retirement index build. They preserved the
 cleared and uncleared snapshots and recorded one migration receipt. The
 same recovery has a focused regression on the retirement PR's migration.
 [Audit retirement replay](https://github.com/groktopus/proprio/pull/392)
+
+
+Composition `df2439efa02b50ec702ffe94bf8ac6cf16a6ae71` added the reviewed
+Pi and Codex changes, the manifest correction, and the audit replay test
+using the integrated migration number. Node 24 and disposable PostgreSQL
+passed 102 focused tests across adapters, commentary, receipt recovery and
+audit migration replay, including the pinned Pi CLI check. The capability
+contract, inventory, protocol coverage, and workflow traceability checks
+also passed. The replacement hosted qualification uses the same main
+baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0` and is in progress.
+[Replacement composition qualification](https://github.com/groktopus/proprio/actions/runs/45557310471)
 
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
