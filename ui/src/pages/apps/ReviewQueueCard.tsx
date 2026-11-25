@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, ShieldQuestion, X } from "lucide-react";
 import type { ToolActionRequestListItem } from "@groktopus/shared";
@@ -38,6 +38,23 @@ export function ReviewQueueCard({
   plain?: boolean;
 }) {
   const { selectedCompanyId } = useCompany();
+  const feedbackRef = useRef<HTMLDivElement>(null);
+  const [failure, setFailure] = useState<{
+    companyId: string;
+    connectionId: string | undefined;
+    message: string;
+    moveFocus: boolean;
+  } | null>(null);
+  const visibleFailure = failure?.companyId === selectedCompanyId && failure.connectionId === connectionId
+    ? failure
+    : null;
+
+  const handledFailure = useRef<typeof failure>(null);
+  useEffect(() => {
+    if (!failure || handledFailure.current === failure) return;
+    handledFailure.current = failure;
+    if (visibleFailure?.moveFocus) feedbackRef.current?.focus();
+  }, [failure, visibleFailure]);
 
   const query = useQuery({
     queryKey: queryKeys.tools.actionRequests(selectedCompanyId ?? "__none__", "pending"),
@@ -56,30 +73,41 @@ export function ReviewQueueCard({
   if (query.isLoading || view.kind === "reconnecting") return null;
   if (view.kind === "error") return <QueryErrorState error={query.error} action="load connection reviews" onRetry={view.retry} retrying={view.isFetching} />;
 
-  if (items.length === 0) {
-    if (emptyState === "hidden") return null;
-    return (
-      <div className={plain ? "py-5 text-sm text-muted-foreground" : "rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"}>
-        Nothing is waiting for your OK right now.
-      </div>
-    );
-  }
-
   return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2">
-        <ShieldQuestion className="h-4 w-4 text-muted-foreground" />
-        <h2 className="text-sm font-bold text-foreground">{heading}</h2>
-        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
-          {items.length}
-        </span>
+    <>
+      <div ref={feedbackRef} aria-live="polite" aria-atomic="true" tabIndex={-1}
+        className={visibleFailure ? "mb-3 rounded-sm border border-destructive/60 bg-destructive/10 p-3 text-sm text-destructive" : undefined}>
+        {visibleFailure ? (
+          <>
+            <p className="font-semibold">Approved action failed</p>
+            <p>{visibleFailure.message}</p>
+          </>
+        ) : null}
       </div>
-      <div className="space-y-3">
-        {items.map((item) => (
-          <ReviewRow key={item.request.id} companyId={selectedCompanyId} item={item} plain={plain} />
-        ))}
-      </div>
-    </section>
+      {items.length === 0 ? (
+        emptyState === "reassure" ? (
+          <div className={plain ? "py-5 text-sm text-muted-foreground" : "rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"}>
+            Nothing is waiting for your OK right now.
+          </div>
+        ) : null
+      ) : (
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <ShieldQuestion className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-sm font-bold text-foreground">{heading}</h2>
+            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+              {items.length}
+            </span>
+          </div>
+          <div className="space-y-3">
+            {items.map((item) => (
+              <ReviewRow key={item.request.id} companyId={selectedCompanyId} item={item} plain={plain}
+                onFailure={(message, moveFocus) => setFailure({ companyId: selectedCompanyId, connectionId, message, moveFocus })} />
+            ))}
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
@@ -87,13 +115,16 @@ function ReviewRow({
   companyId,
   item,
   plain,
+  onFailure,
 }: {
   companyId: string;
   item: ToolActionRequestListItem;
   plain: boolean;
+  onFailure: (message: string, moveFocus: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToast();
+  const rowRef = useRef<HTMLDivElement>(null);
   const [resolving, setResolving] = useState<null | "allow" | "always" | "decline">(null);
 
   const interactionQuery = useQuery({
@@ -122,12 +153,23 @@ function ReviewRow({
     return null;
   }
 
+  function reportFailure(message: string, startedWithFocus: boolean) {
+    const activeElement = document.activeElement;
+    const moveFocus = Boolean(rowRef.current?.contains(activeElement))
+      || (startedWithFocus && activeElement === document.body);
+    onFailure(message, moveFocus);
+  }
+
   const approveAction = useMutation({
     mutationFn: approve,
-    onMutate: (rememberAction) => setResolving(rememberAction ? "always" : "allow"),
-    onSuccess: (failure, rememberAction) => {
+    onMutate: (rememberAction) => {
+      const startedWithFocus = Boolean(rowRef.current?.contains(document.activeElement));
+      setResolving(rememberAction ? "always" : "allow");
+      return startedWithFocus;
+    },
+    onSuccess: (failure, rememberAction, startedWithFocus) => {
       if (failure) {
-        pushToast({ title: "Approved action failed", body: failure, tone: "error" });
+        reportFailure(failure, startedWithFocus ?? false);
       } else if (rememberAction) {
         pushToast({
           title: "Always allowed",
@@ -160,27 +202,32 @@ function ReviewRow({
     onSettled: () => setResolving(null),
   });
 
-  if (linkedInteraction) return <IssueThreadInteractionCard
-    interaction={linkedInteraction}
-    onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
-      try {
-        const failure = await approve(rememberAction ?? false);
-        if (failure) throw new Error(`Approved action failed. ${failure}`);
-      } finally {
-        invalidate();
-      }
-    }}
-    onRejectInteraction={async (_interaction, reason) => {
-      try { await toolsApi.declineActionRequest(companyId, item.request.id, reason); }
-      finally { invalidate(); }
-    }}
-  />;
+  if (linkedInteraction) return (
+    <div ref={rowRef}>
+      <IssueThreadInteractionCard
+        interaction={linkedInteraction}
+        onAcceptInteraction={async (_interaction, _keys, _options, rememberAction) => {
+          const startedWithFocus = Boolean(rowRef.current?.contains(document.activeElement));
+          try {
+            const failure = await approve(rememberAction ?? false);
+            if (failure) reportFailure(failure, startedWithFocus);
+          } finally {
+            invalidate();
+          }
+        }}
+        onRejectInteraction={async (_interaction, reason) => {
+          try { await toolsApi.declineActionRequest(companyId, item.request.id, reason); }
+          finally { invalidate(); }
+        }}
+      />
+    </div>
+  );
 
   const busy = resolving !== null;
   const preview = item.request.previewMarkdown?.trim();
 
   return (
-    <div className={plain ? "py-3" : "rounded-xl border border-border bg-card p-4"}>
+    <div ref={rowRef} className={plain ? "py-3" : "rounded-xl border border-border bg-card p-4"}>
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
         <span className="font-bold text-foreground">{actionLabel(item)}</span>
         {item.applicationName && (

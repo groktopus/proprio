@@ -185,25 +185,27 @@ describe("ReviewQueueCard", () => {
   });
 
   it("surfaces a failed Allow once result instead of reporting success", async () => {
-    approveActionRequestMock.mockResolvedValue({
-      ...pendingRequest().request,
-      status: "failed",
-      error: "Approval could not be reconciled; refresh the review queue.",
+    approveActionRequestMock.mockImplementation(async () => {
+      listActionRequestsMock.mockResolvedValue({ actionRequests: [] });
+      return {
+        ...pendingRequest().request,
+        status: "failed",
+        error: "Approval could not be reconciled; refresh the review queue.",
+      };
     });
     await render();
+    const feedback = container.querySelector('[aria-live="polite"]')!;
+    expect(feedback.textContent).toBe("");
+    const button = buttonContaining("Allow once")!;
+    button.focus();
 
-    await act(async () => {
-      buttonContaining("Allow once")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-    });
-    await flushReact();
+    await act(async () => { button.click(); });
 
-    expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Approved action failed",
-      body: "Approval could not be reconciled; refresh the review queue.",
-      tone: "error",
-    }));
-    expect(pushToastMock).not.toHaveBeenCalledWith(expect.objectContaining({ title: "Allowed once" }));
+    await vi.waitFor(() => expect(container.textContent).toContain("Nothing is waiting for your OK right now."));
+    expect(container.querySelector('[aria-live="polite"]')).toBe(feedback);
+    expect(feedback.textContent).toContain("Approval could not be reconciled; refresh the review queue.");
+    expect(document.activeElement).toBe(feedback);
+    expect(pushToastMock).not.toHaveBeenCalled();
   });
 
   it("shows that permission can remain after an Always allow action fails", async () => {
@@ -218,11 +220,9 @@ describe("ReviewQueueCard", () => {
     await flushReact();
 
     expect(approveActionRequestMock).toHaveBeenCalledWith("company-1", "request-1", true);
-    expect(pushToastMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Approved action failed",
-      body: "The provider outcome is still being reconciled. Future calls may still be allowed.",
-      tone: "error",
-    }));
+    await vi.waitFor(() => expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The provider outcome is still being reconciled. Future calls may still be allowed."));
+    expect(pushToastMock).not.toHaveBeenCalled();
   });
 
   it("surfaces a failed approval from the linked interaction card inline", async () => {
@@ -230,10 +230,13 @@ describe("ReviewQueueCard", () => {
     const item = pendingRequest();
     listActionRequestsMock.mockResolvedValue({ actionRequests: [{ ...item, request: { ...item.request, interactionId: interaction.id } }] });
     listInteractionsMock.mockResolvedValue([interaction]);
-    approveActionRequestMock.mockResolvedValue({
-      ...item.request,
-      status: "failed",
-      error: "The provider outcome is still being reconciled.",
+    approveActionRequestMock.mockImplementation(async () => {
+      listActionRequestsMock.mockResolvedValue({ actionRequests: [] });
+      return {
+        ...item.request,
+        status: "failed",
+        error: "The provider outcome is still being reconciled.",
+      };
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);
@@ -244,6 +247,8 @@ describe("ReviewQueueCard", () => {
     await vi.waitFor(() => expect(container.querySelector("details")).not.toBeNull());
     await act(async () => { buttonContaining("Approve & run")!.click(); });
 
-    await vi.waitFor(() => expect(container.textContent).toContain("The provider outcome is still being reconciled."));
+    await vi.waitFor(() => expect(container.textContent).toContain("Nothing is waiting for your OK right now."));
+    expect(container.querySelector('[aria-live="polite"]')?.textContent)
+      .toContain("The provider outcome is still being reconciled.");
   });
 });
