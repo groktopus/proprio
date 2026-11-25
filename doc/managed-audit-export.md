@@ -85,8 +85,12 @@ persists its membership and payloads.
 A company can retain up to 128 active snapshots across all operators and API
 replicas. Creation returns `429 active_snapshot_limit` at the limit. Resume
 an existing snapshot or retry after an active snapshot expires. A new
-snapshot removes expired snapshot state in a bounded batch. Page access
-records follow their separate retention rules.
+snapshot cleans expired state in bounded batches. It discards expired
+membership and retains an owner-scoped expiry marker for 24 hours after expiry.
+During that period, a request in the same source epoch returns
+`409 snapshot_expired` even after cleanup. Later cleanup can remove the marker
+and the cursor returns `404 snapshot_missing`. Page access records follow
+their separate retention rules.
 
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire

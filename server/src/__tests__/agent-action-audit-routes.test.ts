@@ -329,6 +329,59 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
+  it("keeps a recent snapshot expiration distinguishable after cleanup", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    const otherUserId = randomUUID();
+    const users = [userId, otherUserId];
+    await db.insert(companyMemberships).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, membershipRole: "operator", status: "active",
+    })));
+    await db.insert(principalPermissionGrants).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, permissionKey: "audit:view_agent_actions",
+    })));
+    const [board, otherBoard] = await Promise.all(users.map(async principalId =>
+      request(await createApp(db, { type: "board", source: "session", userId: principalId, companyIds: [company.id] })),
+    ));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const created = await board.post(path).send(window).expect(201);
+      expect(created.body.eventCount).toBe(1);
+      const exportPath = `${path}/${created.body.exportId}`;
+      const row = eq(managedAuditExports.id, created.body.exportId);
+      const expired = new Date(Date.now() - 1_000);
+      await db.update(managedAuditExports).set({ expiresAt: expired }).where(row);
+      expect((await board.get(exportPath).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+
+      await board.post(path).send(window).expect(201);
+      const afterCleanup = await board.get(exportPath).expect(409);
+      expect(afterCleanup.body).toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+      expect(afterCleanup.body).not.toHaveProperty("eventCount");
+      const [marker] = await db.select({ expiresAt: managedAuditExports.expiresAt, eventIds: managedAuditExports.eventIds })
+        .from(managedAuditExports).where(row);
+      expect(marker).toEqual({ expiresAt: expired, eventIds: [] });
+      expect((await otherBoard.get(exportPath).expect(404)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
+
+      await db.update(managedAuditExports).set({ expiresAt: new Date(0) }).where(row);
+      await board.post(path).send(window).expect(201);
+      expect((await board.get(exportPath).expect(404)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_missing" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reserves snapshot storage per company even when another database client sees the same last slot", async () => {
     const { company } = await seed();
     const { company: otherCompany } = await seed();
