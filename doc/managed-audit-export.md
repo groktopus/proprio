@@ -64,13 +64,21 @@ Each snapshot supports up to 20,000 visible events. If creation returns
 `413 snapshot_membership_limit`, split the time window and preserve the
 collector's overlap and deduplication rules. A cursor from an oversized
 snapshot returns `409 snapshot_membership_limit`. Create a narrower snapshot
-before continuing.
+before continuing. If more than 20,000 events share the same millisecond,
+record the affected interval and source epoch as an unresolved gap. Preserve
+the checkpoint before that interval and reconcile it with an independently
+authorized source of audit evidence before marking the interval complete.
 
-An API process runs one export operation at a time on a dedicated database
-connection. Queries time out after at most five seconds. For
-`429 export_busy` or `503 export_retry_required`, retry with backoff using
-the same request or cursor. Advance the checkpoint only after the page arrives
-and its membership and payloads are saved.
+An API process runs one export operation at a time. Up to three other
+companies can queue one request each. The oldest queued company gets the next
+slot. Duplicate requests for an active or queued company, a full queue, and
+a wait beyond 25 seconds return `429 export_busy`. Export work uses the
+dedicated connection budget. PostgreSQL statements have a five-second maximum
+timeout, and the export closes a lease that exceeds seven seconds. An exhausted
+connection budget, an interrupted lease, or database contention returns
+`503 export_retry_required`. Retry with backoff using the same request or
+cursor. Advance the checkpoint only after the page arrives and the collector
+persists its membership and payloads.
 
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire

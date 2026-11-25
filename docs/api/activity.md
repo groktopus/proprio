@@ -65,4 +65,9 @@ Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
 `retention_window_expired`. If the requested interval begins before the
 configured retention cutoff, open a new snapshot with a start time at or after
-the cutoff. A cursor for an expired window cannot be resumed.
+the cutoff. A cursor for an expired window cannot be resumed. For
+`409 snapshot_membership_limit`, create a narrower snapshot. For
+`429 export_busy` or `503 export_retry_required`, retry the same request or
+cursor with backoff. For a creation request with `413 snapshot_membership_limit`,
+narrow the time window and consult the [export guide](../../doc/managed-audit-export.md)
+for intervals that cannot be split.

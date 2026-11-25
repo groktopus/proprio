@@ -2,7 +2,7 @@ import { AgentLifecycleConflict } from "../modules/agent-lifecycle/index.js";
 import type { Request, Response, NextFunction } from "express";
 import type { Db } from "@groktopus/db";
 import { ZodError } from "zod";
-import { HttpError } from "../errors.js";
+import { HttpError, ManagedAuditExportUnavailableError } from "../errors.js";
 import { trackErrorHandlerCrash } from "@groktopus/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { captureException } from "../sentry.js";
@@ -166,6 +166,11 @@ export function errorHandler(
 ) {
   const err = clientToolGatewayErrorAsHttpError(thrown);
   if (err instanceof AgentLifecycleConflict) { res.status(409).json({ error: err.message }); return; }
+  if (err instanceof ManagedAuditExportUnavailableError) {
+    res.set("Retry-After", "1").status(err.status).json({ error: err.message, details: err.details });
+    return;
+  }
+
   if (err instanceof HttpError) {
     const details =
       err.details &&

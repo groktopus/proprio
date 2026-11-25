@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
+import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { HttpError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
+import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
@@ -12,6 +12,9 @@ const PAGE_SIZE = 200;
 // truthful. Keep that repeated query and its UUID array explicitly bounded.
 const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
 const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
+const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
+const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
+const MAX_WAITING_COMPANIES = 3;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
@@ -19,36 +22,75 @@ type ExportScope = {
   sourceEpoch: string;
   actor: AuthorizationActor;
   retainAfter: Date | null;
+  signal?: AbortSignal;
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
-let exportInProgress = false;
+let activeExportCompany: string | null = null;
+const waitingExports: Array<{ companyId: string; admit: () => void }> = [];
 
-async function runExportTransaction<T>(db: Db, work: (tx: DbTransaction) => Promise<T>): Promise<T> {
-  if (exportInProgress) {
-    throw tooManyRequests("Another managed audit export operation is running. Retry this request.", {
-      reasonCode: "export_busy",
-    });
+function exportBusy() {
+  return tooManyRequests("Managed audit export capacity is busy. Retry this request.", { reasonCode: "export_busy" });
+}
+
+async function acquireExport(companyId: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  if (activeExportCompany === null) {
+    activeExportCompany = companyId;
+    return;
   }
-  exportInProgress = true;
+  if (activeExportCompany === companyId || waitingExports.length >= MAX_WAITING_COMPANIES
+    || waitingExports.some(entry => entry.companyId === companyId)) {
+    throw exportBusy();
+  }
+  await new Promise<void>((resolve, reject) => {
+    const entry = {
+      companyId,
+      admit: () => {
+        stopWaiting();
+        activeExportCompany = companyId;
+        resolve();
+      },
+    };
+    const onAbort = () => cancel(signal?.reason);
+    const timeout = setTimeout(() => cancel(exportBusy()), EXPORT_QUEUE_TIMEOUT_MS);
+    function stopWaiting() {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    }
+    function cancel(reason: unknown) {
+      stopWaiting();
+      const index = waitingExports.indexOf(entry);
+      if (index >= 0) waitingExports.splice(index, 1);
+      reject(reason);
+    }
+    waitingExports.push(entry);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function runExportTransaction<T>(db: Db, { companyId, signal }: ExportScope, work: (tx: DbTransaction) => Promise<T>): Promise<T> {
+  await acquireExport(companyId, signal);
   try {
-    // Keep the full visibility scan off the ordinary request pool. Keep the
-    // slot until PostgreSQL has released the connection, even on timeout.
+    signal?.throwIfAborted();
+    // Keep full snapshot validation off the ordinary request pool and retain
+    // admission until the dedicated connection has settled or closed.
     return await withDedicatedDbConnection(db, dedicated => dedicated.transaction(async tx => {
       await tx.execute(sql`select set_config('statement_timeout',
         least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
         true) from pg_settings where name = 'statement_timeout'`);
       return work(tx);
-    }, repeatableRead), { admitWithoutWaiting: true });
+    }, repeatableRead), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
-    if (postgresErrorCode(error) === "57014" || isTransientLockContention(error)) {
-      throw new HttpError(503, "Managed audit export could not finish in time. Retry this request.", {
-        reasonCode: "export_retry_required",
-      });
+    if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
+      || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
+      throw new ManagedAuditExportUnavailableError();
     }
     throw error;
   } finally {
-    exportInProgress = false;
+    const next = waitingExports.shift();
+    if (next) next.admit();
+    else activeExportCompany = null;
   }
 }
 
@@ -134,7 +176,7 @@ export async function createManagedAuditExport(
   window: { from: Date; to: Date },
 ) {
   const publications: ActivityPublication[] = [];
-  const snapshot = await runExportTransaction(db, async tx => {
+  const snapshot = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     assertRetainedWindow(scope, window.from);
     if (window.from < scope.captureFrom) {
@@ -155,7 +197,6 @@ export async function createManagedAuditExport(
     if (rows.length > MAX_SNAPSHOT_MEMBERSHIP) {
       throw payloadTooLarge("Managed audit export exceeds the bounded snapshot membership. Narrow the export window.", {
         reasonCode: "snapshot_membership_limit",
-        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
       });
     }
     const eventIds = rows.map(row => row.id);
@@ -209,7 +250,7 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
-  return runExportTransaction(db, async tx => {
+  return runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     const [snapshot] = await tx.select({
       ...getTableColumns(managedAuditExports),
@@ -234,7 +275,6 @@ export async function readManagedAuditExportPage(
     if (eventIds === null) {
       throw conflict("Managed audit export exceeds the supported snapshot membership. Create a narrower export.", {
         reasonCode: "snapshot_membership_limit",
-        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
       });
     }
     const boundedSnapshot = { ...snapshot, eventIds };

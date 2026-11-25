@@ -10,6 +10,8 @@ export {
   dedicatedDbConnectionStats,
   type DedicatedDbConnectionStats,
   type DedicatedDbConnectionOptions,
+  DbConnectionBudgetExhaustedError,
+  DbConnectionDeadlineExceededError,
   preparedStatementStats,
   databaseConnectionBudget,
   PRIVATE_POOL_MAX_CONNECTIONS,
