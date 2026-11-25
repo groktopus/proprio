@@ -60,9 +60,10 @@ disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
 All 112 tests passed across commentary delivery, durable receipt recovery,
 audit export, reconstruction and OpenAPI using Node 24.22.1 and isolated
 PostgreSQL. A broader native authority run identified a baseline test fixture
-that tried to insert a cross-company parent link. The fixture repair asserts the
-database rejects that link, then exercises the runner with valid records. The
-full 48-test native authority suite passed with this repair.
+that tried to insert a cross-company parent link. The fixture repair exercises
+the runner with a valid separate-company hierarchy. The existing migration
+suite covers rejection of cross-company parent links. The 48 native authority
+tests and two migration tests passed together after review.
 [Adapter cleanup](https://github.com/groktopus/proprio/pull/373)
 [Commentary opt-in](https://github.com/groktopus/proprio/pull/352)
 [Continuation fixture repair](https://github.com/groktopus/proprio/pull/377)
