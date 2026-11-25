@@ -66,6 +66,12 @@ revision, the admitted Codex fallback model and the pinned skill version after
 the skill was updated. The fixture also checked private task and skill visibility
 and malformed admission evidence. [Native provenance](https://github.com/groktopus/proprio/pull/358)
 
+Hosted Linux source qualification also passed on native provenance head
+`45866c87abda6e485053db6d4e8fa008f7367f56` against baseline `6e6ebf51`. The
+retained report records both revisions and five recovery cases. The trusted
+SDK report-lock refresh remains a separate release gate.
+[Hosted qualification](https://github.com/groktopus/proprio/actions/runs/45529687898)
+
 The release decision depends on the following checks.
 
 1. Record candidate SHA, commit range/changelog, configuration, runner, connector, evidence visibility and retention settings. Confirm historical policy attribution, authority changes/revocation, and company/private-task permissions.
