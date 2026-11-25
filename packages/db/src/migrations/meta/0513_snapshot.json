@@ -1,6 +1,6 @@
 {
-  "id": "9ed5d98d-791a-4b0c-add0-b00bdf3e13c3",
-  "prevId": "97182361-53f9-4f2a-9cca-97ba40627d34",
+  "id": "8efc0dc4-6d1f-4145-80d0-410868e801df",
+  "prevId": "a032a75e-d033-4f4c-ba7d-50fe50d6edb6",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -45762,6 +45762,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "operation_fingerprint": {
+          "name": "operation_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider_request_id": {
+          "name": "provider_request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "connection_id": {
           "name": "connection_id",
           "type": "uuid",
@@ -45859,6 +45871,28 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "managed_audit_events_pending_operation_idx": {
+          "name": "managed_audit_events_pending_operation_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "operation_fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"managed_audit_events\".\"source\" = 'tool_gateway' and \"managed_audit_events\".\"phase\" = 'dispatch_intent' and \"managed_audit_events\".\"operation_fingerprint\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -45881,6 +45915,105 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "public.managed_audit_export_page_access": {
+      "name": "managed_audit_export_page_access",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "export_id": {
+          "name": "export_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "page_offset": {
+          "name": "page_offset",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_count": {
+          "name": "item_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "managed_audit_export_page_access_company_export_idx": {
+          "name": "managed_audit_export_page_access_company_export_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "export_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "managed_audit_export_page_access_company_id_companies_id_fk": {
+          "name": "managed_audit_export_page_access_company_id_companies_id_fk",
+          "tableFrom": "managed_audit_export_page_access",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": true
     },
     "public.managed_audit_exports": {
       "name": "managed_audit_exports",
@@ -45928,6 +46061,20 @@
           "type": "uuid[]",
           "primaryKey": false,
           "notNull": true
+        },
+        "membership_cleared": {
+          "name": "membership_cleared",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "invalidated": {
+          "name": "invalidated",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "watermark": {
           "name": "watermark",
@@ -45977,6 +46124,34 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "managed_audit_exports_company_uncleared_expiry_idx": {
+          "name": "managed_audit_exports_company_uncleared_expiry_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "not \"managed_audit_exports\".\"membership_cleared\"",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -45999,6 +46174,118 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "public.managed_audit_transition_receipts": {
+      "name": "managed_audit_transition_receipts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transition": {
+          "name": "transition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "export_id": {
+          "name": "export_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "record_count": {
+          "name": "record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "managed_audit_transition_receipts_company_created_idx": {
+          "name": "managed_audit_transition_receipts_company_created_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "managed_audit_transition_receipts_company_id_companies_id_fk": {
+          "name": "managed_audit_transition_receipts_company_id_companies_id_fk",
+          "tableFrom": "managed_audit_transition_receipts",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "managed_audit_transition_receipts_transition_check": {
+          "name": "managed_audit_transition_receipts_transition_check",
+          "value": "\"managed_audit_transition_receipts\".\"transition\" in ('export_invalidated', 'company_exports_retired')"
+        },
+        "managed_audit_transition_receipts_count_check": {
+          "name": "managed_audit_transition_receipts_count_check",
+          "value": "(\"managed_audit_transition_receipts\".\"transition\" = 'export_invalidated' and \"managed_audit_transition_receipts\".\"record_count\" = 1) or (\"managed_audit_transition_receipts\".\"transition\" = 'company_exports_retired' and \"managed_audit_transition_receipts\".\"record_count\" > 0)"
+        },
+        "managed_audit_transition_receipts_export_id_check": {
+          "name": "managed_audit_transition_receipts_export_id_check",
+          "value": "(\"managed_audit_transition_receipts\".\"transition\" = 'export_invalidated' and \"managed_audit_transition_receipts\".\"export_id\" is not null) or (\"managed_audit_transition_receipts\".\"transition\" = 'company_exports_retired' and \"managed_audit_transition_receipts\".\"export_id\" is null)"
+        }
+      },
+      "isRLSEnabled": true
     },
     "public.native_harness_backups": {
       "name": "native_harness_backups",

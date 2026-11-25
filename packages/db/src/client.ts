@@ -900,6 +900,7 @@ async function recordMigrationHistoryEntry(
 // These idempotent migrations require top-level statements for batch commits
 // or concurrent index builds. History is recorded only after completion.
 const MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS = new Set([
+  "0513_large_kabuki.sql",
   "0509_friendly_shadowcat.sql",
   "0503_redundant_radioactive_man.sql",
   "0313_private_task_access.sql",
