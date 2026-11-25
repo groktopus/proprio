@@ -207,7 +207,7 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
           {showDecisions ? (
             <SidebarNavItem
               to="/decisions"
-              label="Decisions"
+              label="Needs You"
               icon={ListChecks}
               badge={attentionCount}
               badgeLabel="decisions"

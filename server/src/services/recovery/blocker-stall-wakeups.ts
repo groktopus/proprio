@@ -435,6 +435,7 @@ export async function verifyBlockerStallWake(db: Db, input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   requestedByActorType: string | null | undefined;
   runId?: string | null;
+  wakeupRequestId?: string | null;
 }): Promise<boolean> {
   const context = input.contextSnapshot;
   // Parent diagnosis wakes have no child recovery action to reference. Their

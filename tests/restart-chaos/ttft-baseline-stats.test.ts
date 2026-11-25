@@ -3,6 +3,7 @@ import {
   baselineRows, daytonaBaselineHolders, daytonaRetainsSandboxes, distribution, parseBaselineEnvironment, parseBaselinePhases, openShellExecutions, percentile, rankPreTurnSteps, recoverySamples, runMetrics, runWarmth,
   type BaselineEvent, type BaselineRun,
 } from "./ttft-baseline-stats.js";
+import { createNativeRunTrace } from "../../server/src/services/native-runtime/native-run-trace.js";
 
 const at = (ms: number) => new Date(1_800_000_000_000 + ms).toISOString();
 const span = (name: string, startOffsetMs: number, durationMs: number, extra: Record<string, unknown> = {}): BaselineEvent => ({
@@ -28,6 +29,48 @@ const coldRun = (id: string, scale = 1) => run(id, "cold", [
 ]);
 
 describe("ttft baseline statistics", () => {
+  it("measures a credential-free process-adapter accepted-input fixture from native trace events", async () => {
+    const emitted: BaselineEvent[] = [];
+    const trace = createNativeRunTrace({
+      runId: "fixture-process-adapter-run",
+      startedAtMs: 1_800_000_000_000,
+      onEvent: async (event) => {
+        emitted.push({
+          eventType: event.eventType,
+          createdAt: new Date().toISOString(),
+          payload: (event.payload ?? null) as Record<string, unknown> | null,
+        });
+      },
+    });
+
+    // This is a deterministic process-adapter fixture: it exercises the same
+    // native trace writer as a real run, but intentionally makes no provider
+    // request. The accepted-input and visible-activity boundaries are the
+    // evidence under test; its durations are not provider-latency evidence.
+    await trace.record({ name: "comment.to_run_created", startedAtMs: 1_800_000_000_000, endedAtMs: 1_800_000_002_000 });
+    await trace.record({ name: "heartbeat.queue", startedAtMs: 1_800_000_002_000, endedAtMs: 1_800_000_003_000 });
+    await trace.record({ name: "runner.turn.submit", startedAtMs: 1_800_000_003_000, endedAtMs: 1_800_000_004_000 });
+    await trace.record({ name: "task.time_to_first_agent_activity", startedAtMs: 1_800_000_000_000, endedAtMs: 1_800_000_009_000, attributes: { anchor: "comment" } });
+    await trace.record({ name: "task.time_to_first_token", startedAtMs: 1_800_000_000_000, endedAtMs: 1_800_000_012_000, attributes: { anchor: "comment" } });
+    await trace.finish("ok");
+
+    const run: BaselineRun = {
+      runId: "fixture-process-adapter-run",
+      adapter: "process-fixture",
+      environment: "local-fixture",
+      phase: "warm",
+      events: emitted,
+    };
+    expect(emitted.some((event) => event.payload?.span === "comment.to_run_created")).toBe(true);
+    expect(emitted.some((event) => event.payload?.span === "task.time_to_first_agent_activity")).toBe(true);
+    expect(runMetrics(run)).toMatchObject({
+      inputWaitMs: 2_000,
+      submitToFirstActivityMs: 9_000,
+      submitToFirstTextMs: 12_000,
+      firstActivityAfterRunCreatedMs: 7_000,
+    });
+  });
+
   it("uses nearest-rank percentiles and ignores non-finite values", () => {
     expect(percentile([5, 1, 3, 2, 4], 50)).toBe(3);
     expect(percentile([5, 1, 3, 2, 4], 95)).toBe(5);
@@ -132,9 +175,24 @@ describe("ttft baseline statistics", () => {
       span("task.time_to_first_token", 0, 48_000, { anchor: "comment" }),
     ], "claude");
     expect(runMetrics(toolFirst)).toMatchObject({ inputWaitMs: 30_000, firstActivityAfterRunCreatedMs: 5_000,
-      ttftAfterRunCreatedMs: 18_000 });
+      ttftAfterRunCreatedMs: 18_000, submitToFirstActivityMs: 35_000, submitToFirstTextMs: 48_000 });
     expect(baselineRows([toolFirst])[0]).toMatchObject({ firstActivityAfterRunCreated: { p50: 5_000 },
-      ttftAfterRunCreated: { p50: 18_000 } });
+      ttftAfterRunCreated: { p50: 18_000 }, submitToFirstActivity: { p50: 35_000 }, submitToFirstText: { p50: 48_000 } });
+  });
+
+  it("keeps full submit-to-visible latency separate from the run-created budget", () => {
+    const measured = runMetrics(run("submit", "cold", [
+      span("comment.to_run_created", 0, 4_000),
+      span("heartbeat.queue", 4_000, 100),
+      span("task.time_to_first_agent_activity", 0, 18_000, { anchor: "comment" }),
+      span("task.time_to_first_token", 0, 35_000, { anchor: "comment" }),
+    ]));
+    expect(measured).toMatchObject({
+      inputWaitMs: 4_000,
+      firstActivityAfterRunCreatedMs: 14_000,
+      submitToFirstActivityMs: 18_000,
+      submitToFirstTextMs: 35_000,
+    });
   });
 
   it("measures first activity from run creation even when it is anchored at an earlier wake request", () => {

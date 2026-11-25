@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import {
   activityLog,
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
   approvals,
@@ -9,65 +10,66 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueRecoveryActions,
+  issueRecoveryDeferrals,
   issueRelations,
   issueThreadInteractions,
   issues,
   type Db,
 } from "@groktopus/db";
-import { getAgentWorkEligibility, ISSUE_BLOCKER_STALLED_WAKE_REASON } from "@groktopus/shared";
+import { DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX, getAgentWorkEligibility, ISSUE_BLOCKER_STALLED_WAKE_REASON, type DependencyDiagnosis } from "@groktopus/shared";
 import { crashPoint } from "@groktopus/shared/crash-points";
 import { logActivity, publishActivity, type ActivityPublication } from "../activity-log.js";
+import { CHAT_CONTROL_RECOVERY_STOP_CODE, CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-stop.js";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
+import type { WakeupOptions } from "../heartbeat/run-preparation.js";
+import { activeIssueInteractionCondition } from "../issue-question-context.js";
+import { listPendingFinalizeBlockerIssueIds } from "../issues.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { automaticRunCreationHeldUntil } from "./automatic-run-brake.js";
+import { stableJson } from "./stable-json.js";
+import { pendingWakeSql, queuedRunStalledSql } from "./stalled-queued-run-sql.js";
 
 const MAX_DEPENDENCY_DEPTH = 12;
 const MAX_DEPENDENCY_NODES = 200;
+const MAX_DEPENDENCY_EDGES = 400;
 const MAX_DEPENDENCY_PATHS = 64;
 const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
-const PENDING_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"];
 const OPEN_RECOVERY_STATUSES = ["active", "escalated"];
 const TERMINAL_STATUSES = ["done", "cancelled"];
 
-export type ParentDependencyWakeStatus = "not_requested" | "queued" | "running" | "deferred" | "refused" | "exhausted" | "completed";
-export type ParentDependencyDiagnosis = {
-  state: "no_execution_path" | "active" | "external_wait";
-  dependencyPath: Array<{ issueId: string; identifier: string | null; title: string; status: string }>;
-  cause: { kind: string; issueId: string | null; recoveryActionId?: string };
-  nextOwner: { type: "agent" | "user" | "board"; id?: string; name?: string };
-  nextAction: string;
-  wake: { idempotencyKey: string; status: ParentDependencyWakeStatus; wakeupRequestId?: string };
-  canInvestigate: boolean;
+type ParentDependencyWakeStatus = DependencyDiagnosis["wake"]["status"];
+export type ParentDependencyDiagnosis = Omit<DependencyDiagnosis, "state" | "cause" | "nextOwner" | "wake"> & {
+  state: Exclude<DependencyDiagnosis["state"], "restricted">;
+  cause: DependencyDiagnosis["cause"] & { recoveryActionId?: string };
+  nextOwner: DependencyDiagnosis["nextOwner"] & { id?: string };
+  wake: DependencyDiagnosis["wake"] & { idempotencyKey: string; wakeupRequestId?: string };
 };
 
-type EnqueueWakeup = (agentId: string, opts: {
-  source: "automation" | "on_demand";
-  triggerDetail: "system" | "manual";
-  reason: string;
-  payload: Record<string, unknown>;
-  idempotencyKey: string;
-  requestedByActorType: "user" | "system";
-  requestedByActorId: string | null;
-  contextSnapshot: Record<string, unknown>;
-  issueStateGuard: { statuses: string[]; assigneeAgentId: string };
-  allowRunCoalescing: false;
-}) => Promise<unknown | null>;
+type EnqueueWakeup = (agentId: string, opts: WakeupOptions) => Promise<unknown | null>;
 
 export type ParentDependencyDiagnosisAuditEvent = {
   action: "issue.dependency_diagnosis.requested";
   details: {
     idempotencyKey: string;
     outcome: "pending" | "queued" | "refused" | "deferred" | "exhausted";
-    dependencyPathDigest: string;
     assigneeAgentId: string;
     source: "automatic" | "user";
     attempt: number;
   };
 };
 
-type IssueRow = Pick<typeof issues.$inferSelect, "id" | "companyId" | "identifier" | "title" | "status" | "updatedAt"
-  | "statusVersion" | "assigneeAgentId" | "assigneeUserId" | "hiddenAt" | "unblockDescriptor" | "monitorNextCheckAt"
-  | "executionState" | "executionPolicy" | "blockedTransitionAt" | "parentId">;
+type IssueRow = Pick<typeof issues.$inferSelect, "id" | "companyId" | "identifier" | "title" | "status"
+  | "statusVersion" | "assigneeAgentId" | "assigneeUserId" | "hiddenAt" | "unblockDescriptor" | "monitorNextCheckAt">;
 
+const issueColumns = {
+  id: issues.id, companyId: issues.companyId, identifier: issues.identifier, title: issues.title,
+  status: issues.status, statusVersion: issues.statusVersion, assigneeAgentId: issues.assigneeAgentId,
+  assigneeUserId: issues.assigneeUserId, hiddenAt: issues.hiddenAt, unblockDescriptor: issues.unblockDescriptor,
+  monitorNextCheckAt: issues.monitorNextCheckAt,
+};
+
+type DiagnosisAdmission = { runId?: string | null; wakeupRequestId?: string | null };
+type DiagnosisInput = { companyId: string; issueId: string; now?: Date };
 type GraphEdge = { parent: string; blocker: string };
 type PathFacts = {
   active: Set<string>;
@@ -77,14 +79,6 @@ type PathFacts = {
   revisions: Map<string, string>;
 };
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) =>
-      `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 function keyFor(input: { parent: IssueRow; path: IssueRow[]; edges: GraphEdge[]; state: ParentDependencyDiagnosis["state"];
   pathRevisions: Map<string, string>;
@@ -102,10 +96,10 @@ function keyFor(input: { parent: IssueRow; path: IssueRow[]; edges: GraphEdge[];
     cause: input.cause,
   })).digest("hex");
   // The key is opaque: descendant issue ids never appear in the durable key.
-  return `${ISSUE_BLOCKER_STALLED_WAKE_REASON}:diagnosis:${digest}`;
+  return `${DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX}${digest}`;
 }
 
-function mapWakeStatus(row: { id: string; status: string; runStatus: string | null; error?: string | null } | undefined): ParentDependencyWakeStatus {
+function mapWakeStatus(row: { id: string; status: string; runStatus: string | null } | undefined): ParentDependencyWakeStatus {
   if (!row) return "not_requested";
   if (row.status === "queued" || row.status === "coalesced") return "queued";
   if (row.status === "deferred_issue_execution") return "deferred";
@@ -120,33 +114,75 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 async function readDiagnosisClaim(db: Db, companyId: string, issueId: string, idempotencyKey: string) {
-  const [row] = await db.select({ id: activityLog.id, details: activityLog.details }).from(activityLog)
+  const [row] = await db.select({ id: activityLog.id, actorId: activityLog.actorId, details: activityLog.details }).from(activityLog)
     .where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId),
       eq(activityLog.action, "issue.dependency_diagnosis.requested"),
       sql`${activityLog.details}->>'idempotencyKey' = ${idempotencyKey}`))
     .orderBy(desc(activityLog.createdAt)).limit(1);
-  return row ? { id: row.id, details: object(row.details) } : undefined;
+  return row ? { ...row, details: object(row.details) } : undefined;
 }
 
-async function updateDiagnosisClaim(db: Db, companyId: string, issueId: string, idempotencyKey: string,
-  update: Record<string, unknown>) {
-  const claim = await readDiagnosisClaim(db, companyId, issueId, idempotencyKey);
-  if (!claim) return;
-  await db.update(activityLog).set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(update)}::jsonb` })
-    .where(eq(activityLog.id, claim.id));
+const DIAGNOSIS_MAX_ATTEMPTS = 3;
+const DIAGNOSIS_QUEUE = DELIVERY_QUEUES.assignedWorkInvariant;
+
+function attemptDeadline(details: Record<string, unknown>): Date | null {
+  const time = typeof details.nextAttemptAt === "string" ? Date.parse(details.nextAttemptAt) : NaN;
+  return Number.isFinite(time) ? new Date(time) : null;
+}
+
+async function persistDiagnosisDeadline(db: Db, input: DiagnosisInput, dueAt: Date | null, previousDueAt: Date | null) {
+  const scope = and(eq(issueRecoveryDeferrals.queue, DIAGNOSIS_QUEUE),
+    eq(issueRecoveryDeferrals.companyId, input.companyId), eq(issueRecoveryDeferrals.issueId, input.issueId));
+  if (!dueAt) {
+    if (previousDueAt) await db.delete(issueRecoveryDeferrals).where(and(scope, eq(issueRecoveryDeferrals.dueAt, previousDueAt)));
+    return;
+  }
+  await notifyDeliveryWork(db, DIAGNOSIS_QUEUE, JSON.stringify({ companyId: input.companyId, issueId: input.issueId }));
+  await db.insert(issueRecoveryDeferrals).values({ queue: DIAGNOSIS_QUEUE, issueId: input.issueId, companyId: input.companyId, dueAt })
+    .onConflictDoUpdate({
+      target: [issueRecoveryDeferrals.queue, issueRecoveryDeferrals.issueId],
+      set: { dueAt: previousDueAt
+        ? sql`case when ${issueRecoveryDeferrals.dueAt} = ${previousDueAt.toISOString()}::timestamptz then excluded.due_at
+          else least(${issueRecoveryDeferrals.dueAt}, excluded.due_at) end`
+        : sql`least(${issueRecoveryDeferrals.dueAt}, excluded.due_at)` },
+      setWhere: eq(issueRecoveryDeferrals.companyId, input.companyId),
+    });
+}
+
+async function settleDiagnosisClaim(db: Db, input: DiagnosisInput & { idempotencyKey: string; attempt: number },
+  outcome: "queued" | "deferred" | "refused") {
+  const now = input.now ?? new Date();
+  const terminal = outcome !== "queued" && input.attempt >= DIAGNOSIS_MAX_ATTEMPTS;
+  const retryAt = outcome === "queued" || terminal ? null
+    : new Date(now.getTime() + (outcome === "deferred" ? 60_000 : 10 * 60_000));
+  const message = terminal ? "Diagnosis wake admission did not succeed after three attempts."
+    : outcome === "deferred" ? "Wake admission did not settle; it will be retried."
+      : outcome === "refused" ? "The current execution gates refused the wake." : null;
+  const update = { outcome: terminal ? "exhausted" : outcome, nextAttemptAt: retryAt?.toISOString() ?? null, message };
+  const settled = await db.transaction(async tx => {
+    const database = tx as unknown as Db;
+    const current = await readDiagnosisClaim(database, input.companyId, input.issueId, input.idempotencyKey);
+    if (!current) return false;
+    const [settled] = await tx.update(activityLog)
+      .set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(update)}::jsonb` })
+      .where(and(eq(activityLog.id, current.id), sql`${activityLog.details}->>'outcome' = 'pending'`,
+        sql`${activityLog.details}->>'attempt' = ${String(input.attempt)}`)).returning({ id: activityLog.id });
+    if (settled) await persistDiagnosisDeadline(database, input, retryAt, attemptDeadline(current.details));
+    return Boolean(settled);
+  });
+  if (settled) publishActivity({
+    companyId: input.companyId,
+    payload: { issueId: input.issueId, entityType: "issue", entityId: input.issueId,
+      action: "issue.dependency_diagnosis.settled", actorType: "system", actorId: "parent_dependency_diagnosis" },
+    pluginEvent: null,
+  });
+  return retryAt;
 }
 
 async function readIssue(db: Db, companyId: string, issueId: string) {
-  const [row] = await db.select({
-    id: issues.id, companyId: issues.companyId, identifier: issues.identifier, title: issues.title,
-    status: issues.status, updatedAt: issues.updatedAt, statusVersion: issues.statusVersion,
-    assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId,
-    hiddenAt: issues.hiddenAt, unblockDescriptor: issues.unblockDescriptor,
-    monitorNextCheckAt: issues.monitorNextCheckAt, executionState: issues.executionState,
-    executionPolicy: issues.executionPolicy, blockedTransitionAt: issues.blockedTransitionAt,
-    parentId: issues.parentId,
-  }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
-  return row as IssueRow | undefined;
+  const [row] = await db.select(issueColumns).from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
+  return row;
 }
 
 async function readGraph(db: Db, companyId: string, parentId: string) {
@@ -157,29 +193,32 @@ async function readGraph(db: Db, companyId: string, parentId: string) {
   let frontier = [parent.id];
   let truncated = false;
   for (let depth = 0; depth < MAX_DEPENDENCY_DEPTH && frontier.length && nodes.size < MAX_DEPENDENCY_NODES; depth += 1) {
-    const rows = await db.select({ parent: issueRelations.relatedIssueId, blocker: issues.id,
-      id: issues.id, companyId: issues.companyId, identifier: issues.identifier, title: issues.title,
-      status: issues.status, updatedAt: issues.updatedAt, statusVersion: issues.statusVersion,
-      assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId,
-      hiddenAt: issues.hiddenAt, unblockDescriptor: issues.unblockDescriptor,
-      monitorNextCheckAt: issues.monitorNextCheckAt, executionState: issues.executionState,
-      executionPolicy: issues.executionPolicy, blockedTransitionAt: issues.blockedTransitionAt,
-      parentId: issues.parentId,
-    }).from(issueRelations).innerJoin(issues, and(eq(issues.companyId, issueRelations.companyId), eq(issues.id, issueRelations.issueId)))
+    const remaining = MAX_DEPENDENCY_EDGES - edges.length;
+    const rows = await db.select({ ...issueColumns, parent: issueRelations.relatedIssueId, executionWorkspaceId: issues.executionWorkspaceId })
+      .from(issueRelations).innerJoin(issues, and(eq(issues.companyId, issueRelations.companyId), eq(issues.id, issueRelations.issueId)))
       .where(and(eq(issueRelations.companyId, companyId), eq(issueRelations.type, "blocks"),
-        inArray(issueRelations.relatedIssueId, frontier), notInArray(issues.status, TERMINAL_STATUSES), isNull(issues.hiddenAt)))
-      .orderBy(issues.id);
+        inArray(issueRelations.relatedIssueId, frontier), or(ne(issues.status, "done"), isNotNull(issues.executionWorkspaceId))))
+      .orderBy(issueRelations.relatedIssueId, issueRelations.issueId).limit(remaining + 1);
+    if (rows.length > remaining) truncated = true;
+    const candidates = rows.slice(0, remaining);
+    const pendingFinalize = await listPendingFinalizeBlockerIssueIds(db, companyId, candidates.flatMap(row =>
+      row.status === "done" && row.executionWorkspaceId ? [{ blockerIssueId: row.id, executionWorkspaceId: row.executionWorkspaceId }] : []));
     const next: string[] = [];
-    for (const row of rows) {
-      edges.push({ parent: row.parent, blocker: row.blocker });
+    for (const row of candidates) {
+      if (row.status === "done" && !pendingFinalize.has(row.id)) continue;
       if (!nodes.has(row.id)) {
         if (nodes.size < MAX_DEPENDENCY_NODES) {
-          nodes.set(row.id, row as IssueRow);
-          next.push(row.id);
-        } else truncated = true;
+          nodes.set(row.id, row);
+          if (!TERMINAL_STATUSES.includes(row.status)) next.push(row.id);
+        } else {
+          truncated = true;
+          continue;
+        }
       }
+      edges.push({ parent: row.parent, blocker: row.id });
     }
     frontier = next;
+    if (truncated) break;
   }
   if (frontier.length) truncated = true;
   return { parent, nodes, edges, truncated };
@@ -207,18 +246,21 @@ function dependencyPaths(parentId: string, nodes: Map<string, IssueRow>, edges: 
     }
   };
   visit(parentId, []);
-  return { paths, truncated };
+  return { paths, truncated, blockersByIssue };
 }
 
-async function readPathFacts(db: Db, companyId: string, issueIds: string[]): Promise<PathFacts> {
+async function readPathFacts(db: Db, companyId: string, issueIds: string[], now: Date, admission?: DiagnosisAdmission): Promise<PathFacts> {
   if (!issueIds.length) return { active: new Set<string>(), waits: new Map(), agentNames: new Map(), agents: [], revisions: new Map() };
   const [runs, wakes, actions, interactions, approvalRows, agentsRows] = await Promise.all([
     db.select({ issueId: sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, id: heartbeatRuns.id, status: heartbeatRuns.status })
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ACTIVE_RUN_STATUSES),
-        inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, issueIds))),
+        sql`not ${queuedRunStalledSql(heartbeatRuns, now)}`,
+        inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, issueIds),
+        admission?.runId ? ne(heartbeatRuns.id, admission.runId) : undefined)),
     db.select({ issueId: sql<string>`${agentWakeupRequests.payload}->>'issueId'`, id: agentWakeupRequests.id, status: agentWakeupRequests.status })
-      .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), inArray(agentWakeupRequests.status, PENDING_WAKE_STATUSES),
-        inArray(sql<string>`${agentWakeupRequests.payload}->>'issueId'`, issueIds))),
+      .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), pendingWakeSql(agentWakeupRequests, now),
+        inArray(sql<string>`${agentWakeupRequests.payload}->>'issueId'`, issueIds),
+        admission?.wakeupRequestId ? ne(agentWakeupRequests.id, admission.wakeupRequestId) : undefined)),
     db.select({ issueId: issueRecoveryActions.sourceIssueId, id: issueRecoveryActions.id, kind: issueRecoveryActions.kind,
       cause: issueRecoveryActions.cause, ownerType: issueRecoveryActions.ownerType, ownerAgentId: issueRecoveryActions.ownerAgentId,
       ownerUserId: issueRecoveryActions.ownerUserId, nextAction: issueRecoveryActions.nextAction, status: issueRecoveryActions.status,
@@ -229,7 +271,7 @@ async function readPathFacts(db: Db, companyId: string, issueIds: string[]): Pro
       .orderBy(desc(issueRecoveryActions.updatedAt)),
     db.select({ issueId: issueThreadInteractions.issueId, id: issueThreadInteractions.id })
       .from(issueThreadInteractions).where(and(eq(issueThreadInteractions.companyId, companyId), inArray(issueThreadInteractions.issueId, issueIds),
-        eq(issueThreadInteractions.status, "pending"))),
+        eq(issueThreadInteractions.status, "pending"), activeIssueInteractionCondition())),
     db.select({ issueId: issueApprovals.issueId, id: issueApprovals.approvalId })
       .from(issueApprovals).innerJoin(approvals, and(eq(approvals.companyId, issueApprovals.companyId), eq(approvals.id, issueApprovals.approvalId)))
       .where(and(eq(issueApprovals.companyId, companyId), inArray(issueApprovals.issueId, issueIds), eq(approvals.status, "pending"))),
@@ -267,6 +309,12 @@ function classifyPath(path: IssueRow[], facts: Awaited<ReturnType<typeof readPat
   if (!path.length) return null;
   for (let index = 0; index < path.length; index += 1) {
     const node = path[index]!;
+    if (node.status === "cancelled") return { state: "external_wait", path: path.slice(0, index + 1),
+      cause: { kind: "cancelled_dependency", issueId: node.id }, nextOwner: { type: "board" },
+      nextAction: "Ask the board to remove or replace the cancelled required dependency." };
+    if (node.status === "done") return { state: "active", path: path.slice(0, index + 1),
+      cause: { kind: "workspace_finalization_pending", issueId: node.id }, nextOwner: { type: "board" },
+      nextAction: "Wait for the required dependency’s workspace finalization to finish." };
     if (facts.active.has(node.id)) return { state: "active" as const, path: path.slice(0, index + 1),
       cause: { kind: "execution_active", issueId: node.id }, nextOwner: { type: "agent" as const,
         ...(node.assigneeAgentId ? { id: node.assigneeAgentId, name: facts.agentNames.get(node.assigneeAgentId) } : {}) },
@@ -311,8 +359,13 @@ function classifyPath(path: IssueRow[], facts: Awaited<ReturnType<typeof readPat
   return null;
 }
 
-async function parentGate(db: Db, companyId: string, parent: IssueRow, facts: PathFacts, now: Date): Promise<
-  { owner: ParentDependencyDiagnosis["nextOwner"]; action: string } | null> {
+export function isOperatorStoppedRun(run: Pick<typeof heartbeatRuns.$inferSelect, "status" | "errorCode" | "resultJson">): boolean {
+  return [CHAT_CONTROL_RECOVERY_STOP_CODE, CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE, "operator_interrupted"].includes(run.errorCode ?? "")
+    || (run.status === "cancelled" && ["user", "board"].includes(String(object(run.resultJson).cancelledByActorType)));
+}
+
+async function parentGate(db: Db, companyId: string, parent: IssueRow, facts: PathFacts, now: Date, admission?: DiagnosisAdmission): Promise<
+  { owner: ParentDependencyDiagnosis["nextOwner"]; action: string; retryAt?: Date } | null> {
   if (!parent.assigneeAgentId || parent.assigneeUserId || parent.hiddenAt || !["todo", "in_progress", "blocked"].includes(parent.status)) {
     return { owner: { type: "board" }, action: "Assign the parent task to an active agent before requesting an investigation." };
   }
@@ -338,44 +391,58 @@ async function parentGate(db: Db, companyId: string, parent: IssueRow, facts: Pa
   if ((await issueTreeControlService(db).listActivePauseHeldIssueIds(companyId, [parent.id])).has(parent.id)) {
     return { owner: { type: "board" }, action: "Release the task pause before requesting an investigation." };
   }
-  const [latestRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${parent.id}`))
-    .orderBy(desc(heartbeatRuns.createdAt)).limit(1);
+  const [[latestRun], [pausedGoal]] = await Promise.all([
+    db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status,
+      errorCode: heartbeatRuns.errorCode,
+      resultJson: sql<typeof heartbeatRuns.$inferSelect.resultJson>`jsonb_build_object('cancelledByActorType', ${heartbeatRuns.resultJson}->'cancelledByActorType')` }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${parent.id}`,
+        admission?.runId ? ne(heartbeatRuns.id, admission.runId) : undefined))
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1),
+    db.select({ id: agentTaskSessions.id }).from(agentTaskSessions)
+      .innerJoin(agents, and(eq(agents.companyId, agentTaskSessions.companyId), eq(agents.id, agentTaskSessions.agentId),
+        eq(agents.adapterType, agentTaskSessions.adapterType)))
+      .where(and(eq(agentTaskSessions.companyId, companyId), eq(agentTaskSessions.taskKey, parent.id),
+        eq(agentTaskSessions.agentId, assignee.id), ne(agentTaskSessions.goalStatus, "complete"),
+        sql`(${agentTaskSessions.goalStatus} <> 'active' or ${agentTaskSessions.goalDesiredState} is distinct from 'active')`)).limit(1),
+  ]);
+  if (pausedGoal || (latestRun?.agentId === assignee.id && isOperatorStoppedRun(latestRun))) {
+    return { owner: { type: "board" }, action: "Resume the stopped parent work before requesting an investigation." };
+  }
   const heldUntil = await automaticRunCreationHeldUntil(db, companyId, { issueId: parent.id, sourceRunId: latestRun?.id ?? null });
-  if (heldUntil) return { owner: { type: "board" }, action: `Automatic work is held until ${heldUntil.toISOString()}.` };
+  if (heldUntil && heldUntil > now) return { owner: { type: "board" }, action: `Automatic work is held until ${heldUntil.toISOString()}.`, retryAt: heldUntil };
   return null;
 }
 
-async function readWakeReceipt(db: Db, companyId: string, idempotencyKey: string) {
+async function readWakeReceipt(db: Db, input: DiagnosisInput & { idempotencyKey: string; assigneeAgentId: string | null }) {
+  if (!input.assigneeAgentId) return undefined;
   const [row] = await db.select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status, runId: agentWakeupRequests.runId,
-    runStatus: heartbeatRuns.status, error: agentWakeupRequests.error }).from(agentWakeupRequests)
+    runStatus: heartbeatRuns.status }).from(agentWakeupRequests)
     .leftJoin(heartbeatRuns, and(eq(heartbeatRuns.companyId, agentWakeupRequests.companyId), eq(heartbeatRuns.id, agentWakeupRequests.runId)))
-    .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, idempotencyKey)))
+    .where(and(eq(agentWakeupRequests.companyId, input.companyId), eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
+      eq(agentWakeupRequests.agentId, input.assigneeAgentId), eq(agentWakeupRequests.reason, ISSUE_BLOCKER_STALLED_WAKE_REASON),
+      inArray(agentWakeupRequests.requestedByActorType, ["system", "user"]),
+      sql`${agentWakeupRequests.payload}->>'issueId' = ${input.issueId}`,
+      or(inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "claimed", "coalesced", "completed"]),
+        sql`${agentWakeupRequests.runId} is not null`)))
     .orderBy(desc(agentWakeupRequests.createdAt)).limit(1);
-  return row ? { id: row.id, status: row.status, runStatus: row.runStatus, error: row.error } : undefined;
+  return row ? { id: row.id, status: row.status, runStatus: row.runStatus } : undefined;
 }
 
-export async function readParentDependencyDiagnosis(db: Db, input: { companyId: string; issueId: string; now?: Date }): Promise<ParentDependencyDiagnosis | null> {
+async function readDiagnosisState(db: Db, input: DiagnosisInput, admission?: DiagnosisAdmission) {
   const graph = await readGraph(db, input.companyId, input.issueId);
   if (!graph) return null;
-  const { paths, truncated: pathLimitReached } = dependencyPaths(graph.parent.id, graph.nodes, graph.edges);
-  if (!paths.length) return null;
+  const { paths, truncated: pathLimitReached, blockersByIssue } = dependencyPaths(graph.parent.id, graph.nodes, graph.edges);
+  if (!paths.length && !graph.truncated) return null;
   const ids = [...new Set(paths.flat().map(row => row.id))];
-  const facts = await readPathFacts(db, input.companyId, [...ids, graph.parent.id]);
   const now = input.now ?? new Date();
+  const facts = await readPathFacts(db, input.companyId, [...ids, graph.parent.id], now, admission);
   // A fully active required path does not create a diagnosis. Prefer the first
   // stalled path; if every unresolved path already has an owner, report the
   // first named external wait instead.
-  const blockersByIssue = new Map<string, string[]>();
-  for (const edge of graph.edges) {
-    const list = blockersByIssue.get(edge.parent) ?? [];
-    list.push(edge.blocker);
-    blockersByIssue.set(edge.parent, list);
-  }
   const classified = paths.map(path => classifyPath(path, facts, graph.parent, now, blockersByIssue)).filter(Boolean) as NonNullable<ReturnType<typeof classifyPath>>[];
   const truncated = graph.truncated || pathLimitReached;
   const result = truncated
-    ? { state: "external_wait" as const, path: paths[0]!, cause: { kind: "dependency_graph_bound", issueId: null },
+    ? { state: "external_wait" as const, path: paths[0] ?? [], cause: { kind: "dependency_graph_bound", issueId: null },
       nextOwner: { type: "board" as const }, nextAction: "The required dependency graph exceeds the automatic diagnosis bound. Review the dependency chain and choose the next action." }
     : classified.find(row => row.state === "no_execution_path")
       ?? classified.find(row => row.state === "external_wait")
@@ -384,7 +451,7 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
   const key = keyFor({ parent: graph.parent, path: result.path, edges: graph.edges, state: result.state,
     cause: result.cause, pathRevisions: facts.revisions });
   const [wake, claim] = await Promise.all([
-    readWakeReceipt(db, input.companyId, key), readDiagnosisClaim(db, input.companyId, graph.parent.id, key),
+    readWakeReceipt(db, { ...input, idempotencyKey: key, assigneeAgentId: graph.parent.assigneeAgentId }), readDiagnosisClaim(db, input.companyId, graph.parent.id, key),
   ]);
   const wakeStatus = wake ? mapWakeStatus(wake) : claim
     ? claim.details.outcome === "refused" ? "refused"
@@ -393,12 +460,11 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
           : claim.details.outcome === "queued" ? "queued"
             : claim.details.outcome === "pending" ? "deferred" : "queued"
     : "not_requested";
-  const gate = result.state === "no_execution_path" ? await parentGate(db, input.companyId, graph.parent, facts, now) : null;
+  const gate = result.state === "no_execution_path" ? await parentGate(db, input.companyId, graph.parent, facts, now, admission) : null;
   const wakeGateAction = wakeStatus === "refused" || wakeStatus === "exhausted"
-    ? wake?.error ? `The diagnostic continuation was refused: ${wake.error}`
-      : claim?.details.message ? String(claim.details.message) : "The diagnostic continuation was refused by execution admission. Review the current parent gates before retrying."
+    ? "The diagnostic continuation could not start. Review the parent task’s execution status for the current next step."
     : null;
-  return {
+  const diagnosis: ParentDependencyDiagnosis = {
     state: result.state,
     dependencyPath: result.path.map(row => ({ issueId: row.id, identifier: row.identifier, title: row.title, status: row.status })),
     cause: result.cause,
@@ -407,50 +473,98 @@ export async function readParentDependencyDiagnosis(db: Db, input: { companyId: 
     wake: { idempotencyKey: key, status: wakeStatus, ...(wake ? { wakeupRequestId: wake.id } : {}) },
     canInvestigate: result.state === "no_execution_path" && !gate && wakeStatus === "not_requested",
   };
+  return { diagnosis, gate, wake, claim, parent: graph.parent };
 }
 
-async function claimDiagnosis(db: Db, input: { companyId: string; issueId: string; diagnosis: ParentDependencyDiagnosis;
+export async function readParentDependencyDiagnosis(db: Db, input: DiagnosisInput): Promise<ParentDependencyDiagnosis | null> {
+  return (await readDiagnosisState(db, input))?.diagnosis ?? null;
+}
+
+async function claimDiagnosis(db: Db, input: DiagnosisInput & { idempotencyKey: string;
   assigneeAgentId: string; source: "automatic" | "user"; actorId: string | null }) {
   const publications: ActivityPublication[] = [];
-  const details: ParentDependencyDiagnosisAuditEvent["details"] = {
-    idempotencyKey: input.diagnosis.wake.idempotencyKey,
-    outcome: "pending",
-    dependencyPathDigest: input.diagnosis.wake.idempotencyKey,
-    assigneeAgentId: input.assigneeAgentId,
-    source: input.source,
-    attempt: 1,
-  };
-  const claimed = await db.transaction(async tx => {
-    const [parent] = await tx.select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status,
-      statusVersion: issues.statusVersion, assigneeUserId: issues.assigneeUserId, hiddenAt: issues.hiddenAt })
-      .from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId))).for("update");
-    if (!parent || parent.assigneeAgentId !== input.assigneeAgentId || parent.assigneeUserId || parent.hiddenAt
-      || TERMINAL_STATUSES.includes(parent.status)) return false;
-    const current = await readParentDependencyDiagnosis(tx as unknown as Db, { companyId: input.companyId, issueId: input.issueId });
-    if (!current || current.state !== "no_execution_path" || current.wake.idempotencyKey !== input.diagnosis.wake.idempotencyKey) return false;
-    const existing = await readDiagnosisClaim(tx as unknown as Db, input.companyId, input.issueId, input.diagnosis.wake.idempotencyKey);
-    if (existing) {
-      const attempt = Number(existing.details.attempt ?? 1);
-      const outcome = existing.details.outcome;
-      if (outcome === "queued" || outcome === "completed" || outcome === "exhausted") return false;
-      if ((outcome === "refused" || outcome === "deferred") && Date.parse(String(existing.details.nextAttemptAt ?? "")) > Date.now()) return false;
-      if ((outcome === "refused" || outcome === "deferred") && attempt >= 3) {
-        await tx.update(activityLog).set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify({ outcome: "exhausted", message: "Automatic diagnosis wake admission was refused three times." })}::jsonb` })
-          .where(eq(activityLog.id, existing.id));
-        return false;
-      }
-      await tx.update(activityLog).set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify({ outcome: "pending", attempt: attempt + 1, nextAttemptAt: null })}::jsonb` })
+  const now = input.now ?? new Date();
+  const result = await db.transaction(async tx => {
+    const database = tx as unknown as Db;
+    const [parent] = await tx.select({ assigneeAgentId: issues.assigneeAgentId }).from(issues)
+      .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId))).for("update");
+    if (parent?.assigneeAgentId !== input.assigneeAgentId) return null;
+    const current = await readDiagnosisState(database, input);
+    if (!current || current.gate || current.wake || current.diagnosis.state !== "no_execution_path"
+      || current.diagnosis.wake.idempotencyKey !== input.idempotencyKey) return null;
+    const existing = current.claim;
+    const previousDueAt = existing ? attemptDeadline(existing.details) : null;
+    if (existing && (previousDueAt && previousDueAt > now
+      || !["pending", "refused", "deferred"].includes(String(existing.details.outcome)))) return null;
+    const previousAttempt = Number(existing?.details.attempt ?? 0);
+    const replay = existing?.details.outcome === "pending";
+    if (existing && !replay && previousAttempt >= DIAGNOSIS_MAX_ATTEMPTS) {
+      const exhausted = { outcome: "exhausted", nextAttemptAt: null,
+        message: "Diagnosis wake admission did not succeed after three attempts." };
+      await tx.update(activityLog)
+        .set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(exhausted)}::jsonb` })
         .where(eq(activityLog.id, existing.id));
-      return true;
+      await persistDiagnosisDeadline(database, input, null, previousDueAt);
+      return null;
     }
-    await logActivity(tx as unknown as Db, { companyId: input.companyId, actorType: input.source === "user" ? "user" : "system",
-      actorId: input.actorId ?? "parent_dependency_diagnosis", agentId: input.assigneeAgentId, runId: null,
-      action: "issue.dependency_diagnosis.requested", entityType: "issue", entityId: input.issueId,
-      details }, publications);
-    return true;
+    // Replaying an interrupted admission keeps the same attempt and wake key.
+    const attempt = replay ? previousAttempt : previousAttempt + 1;
+    const details: ParentDependencyDiagnosisAuditEvent["details"] = {
+      idempotencyKey: input.idempotencyKey, outcome: "pending", assigneeAgentId: input.assigneeAgentId,
+      source: existing?.details.source === "user" ? "user" : input.source, attempt,
+    };
+    const pendingDetails = { ...details, nextAttemptAt: now.toISOString() };
+    if (existing) {
+      await tx.update(activityLog)
+        .set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(pendingDetails)}::jsonb` })
+        .where(eq(activityLog.id, existing.id));
+    } else {
+      await logActivity(database, { companyId: input.companyId, actorType: input.source === "user" ? "user" : "system",
+        actorId: input.actorId ?? "parent_dependency_diagnosis", agentId: input.assigneeAgentId, runId: null,
+        action: "issue.dependency_diagnosis.requested", entityType: "issue", entityId: input.issueId,
+        details: pendingDetails }, publications);
+    }
+    // A restart after the claim commits can find this exact issue even with
+    // a recent assigned-work full pass and otherwise unchanged issue rows.
+    await persistDiagnosisDeadline(database, input, now, previousDueAt);
+    return { action: "issue.dependency_diagnosis.requested" as const, details };
   });
   for (const publication of publications) publishActivity(publication);
-  return { claimed, event: { action: "issue.dependency_diagnosis.requested" as const, details } };
+  return result;
+}
+
+async function deliverDiagnosis(db: Db, input: DiagnosisInput & { idempotencyKey: string; assigneeAgentId: string;
+  source: "automatic" | "user"; actorId: string | null; enqueueWakeup: EnqueueWakeup }, attempt: number) {
+  const persisted = await readWakeReceipt(db, input);
+  if (persisted) {
+    await settleDiagnosisClaim(db, { ...input, attempt }, "queued");
+    return { accepted: true, retryAt: null };
+  }
+  crashPoint("issue.dependency_diagnosis.after_claim_before_wake");
+  let outcome: "queued" | "deferred" | "refused";
+  try {
+    const wake = await input.enqueueWakeup(input.assigneeAgentId, {
+      source: input.source === "user" ? "on_demand" : "automation",
+      triggerDetail: input.source === "user" ? "manual" : "system",
+      reason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
+      payload: { issueId: input.issueId },
+      idempotencyKey: input.idempotencyKey,
+      requestedByActorType: input.source === "user" ? "user" : "system",
+      requestedByActorId: input.actorId,
+      contextSnapshot: {
+        issueId: input.issueId, taskId: input.issueId, wakeReason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
+        dependencyDiagnosis: true, dependencyDiagnosisKey: input.idempotencyKey,
+        livenessContinuationInstruction: "A required dependency has no active execution or named recovery path. Inspect the authorized dependency context, continue independent work, or propose a replacement. Leave unresolved dependencies intact until the board approves a change.",
+      },
+      issueStateGuard: { statuses: ["todo", "in_progress", "blocked"], assigneeAgentId: input.assigneeAgentId },
+      allowRunCoalescing: false,
+    });
+    outcome = wake || await readWakeReceipt(db, input) ? "queued" : "refused";
+  } catch {
+    outcome = "deferred";
+  }
+  const retryAt = await settleDiagnosisClaim(db, { ...input, attempt }, outcome);
+  return { accepted: outcome === "queued", retryAt };
 }
 
 export async function requestParentDependencyDiagnosis(db: Db, input: {
@@ -460,112 +574,52 @@ export async function requestParentDependencyDiagnosis(db: Db, input: {
   actorId: string;
   enqueueWakeup: EnqueueWakeup;
 }): Promise<{ accepted: boolean; message: string; auditEvent?: ParentDependencyDiagnosisAuditEvent }> {
-  const diagnosis = await readParentDependencyDiagnosis(db, input);
-  if (!diagnosis || diagnosis.state !== "no_execution_path" || diagnosis.wake.idempotencyKey !== input.idempotencyKey) {
+  const current = await readDiagnosisState(db, input);
+  if (!current || current.diagnosis.state !== "no_execution_path" || current.diagnosis.wake.idempotencyKey !== input.idempotencyKey) {
     return { accepted: false, message: "The dependency state changed. Refresh the task and review its current next action." };
   }
-  const existingWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (existingWake) return { accepted: !["refused", "exhausted"].includes(mapWakeStatus(existingWake)),
+  if (current.wake) return { accepted: !["refused", "exhausted"].includes(mapWakeStatus(current.wake)),
     message: "The diagnostic continuation is already recorded." };
-  if (!diagnosis.canInvestigate) return { accepted: false, message: diagnosis.nextAction };
-  const [parent] = await db.select({ assigneeAgentId: issues.assigneeAgentId, status: issues.status }).from(issues)
-    .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)));
-  if (!parent?.assigneeAgentId) return { accepted: false, message: "The task no longer has an agent assignee." };
-  const claim = await claimDiagnosis(db, { companyId: input.companyId, issueId: input.issueId, diagnosis,
-    assigneeAgentId: parent.assigneeAgentId, source: "user", actorId: input.actorId });
-  if (!claim.claimed) return { accepted: false, message: "The task assignment changed. Refresh the task before requesting an investigation." };
-  const existingWakeAfterClaim = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (existingWakeAfterClaim) return { accepted: !["refused", "exhausted"].includes(mapWakeStatus(existingWakeAfterClaim)),
-    message: "The diagnostic continuation is already recorded.", auditEvent: claim.event };
-  crashPoint("issue.dependency_diagnosis.after_claim_before_wake");
-  let wake: unknown | null;
-  try { wake = await input.enqueueWakeup(parent.assigneeAgentId, {
-    source: "on_demand", triggerDetail: "manual", reason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
-    payload: { issueId: input.issueId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosis.wake.idempotencyKey,
-      livenessContinuationInstruction: "A required dependency has no active execution or named recovery path. Inspect the authorized dependency context, continue independent work, or propose a replacement. Leave unresolved dependencies intact until the board approves a change." },
-    idempotencyKey: diagnosis.wake.idempotencyKey,
-    requestedByActorType: "user", requestedByActorId: input.actorId,
-    contextSnapshot: { issueId: input.issueId, taskId: input.issueId, wakeReason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
-      dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosis.wake.idempotencyKey,
-      livenessContinuationInstruction: "A required dependency has no active execution or named recovery path. Inspect the authorized dependency context, continue independent work, or propose a replacement. Leave unresolved dependencies intact until the board approves a change." },
-    issueStateGuard: { statuses: ["todo", "in_progress", "blocked", "in_review"], assigneeAgentId: parent.assigneeAgentId },
-    allowRunCoalescing: false,
-  }); } catch {
-    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey,
-      { outcome: "deferred", nextAttemptAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake admission did not settle; it will be retried." });
-    return { accepted: false, message: "Wake admission did not settle. The request will be retried.", auditEvent: claim.event };
+  if (current.claim && ["pending", "deferred", "refused", "queued"].includes(String(current.claim.details.outcome))) {
+    return { accepted: true, message: "The diagnostic investigation request is already recorded." };
   }
-  if (!wake) {
-    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey,
-      { outcome: "refused", nextAttemptAt: new Date(Date.now() + 10 * 60_000).toISOString(), message: "The current execution gates refused the wake." });
-    return { accepted: false, message: "The diagnostic continuation was refused by the current execution gates.", auditEvent: claim.event };
-  }
-  const persistedWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (persistedWake) {
-    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
-    return { accepted: !["refused", "exhausted"].includes(mapWakeStatus(persistedWake)),
-      message: "The diagnostic continuation is already recorded.", auditEvent: claim.event };
-  }
-  await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
-  return { accepted: true, message: "The assignee was asked to investigate the dependency.", auditEvent: claim.event };
+  const assigneeAgentId = current.parent.assigneeAgentId;
+  if (!assigneeAgentId || !current.diagnosis.canInvestigate) return { accepted: false, message: current.diagnosis.nextAction };
+  const delivery = { ...input, assigneeAgentId, source: "user" as const };
+  const auditEvent = await claimDiagnosis(db, delivery);
+  if (!auditEvent) return { accepted: false, message: "The task state changed. Refresh the task before requesting an investigation." };
+  const result = await deliverDiagnosis(db, delivery, auditEvent.details.attempt);
+  return { accepted: result.accepted, auditEvent,
+    message: result.accepted ? "The assignee was asked to investigate the dependency."
+      : result.retryAt ? "The wake could not be admitted. The request will be retried."
+        : "The diagnostic continuation could not be admitted." };
 }
 
-export async function reconcileParentDependencyDiagnosis(db: Db, input: {
-  companyId: string; issueId: string; enqueueWakeup: EnqueueWakeup; now?: Date;
-}): Promise<{ accepted: boolean; message: string; diagnosis: ParentDependencyDiagnosis | null; retryAt: Date | null }> {
-  const diagnosis = await readParentDependencyDiagnosis(db, input);
-  const pendingClaim = diagnosis?.state === "no_execution_path"
-    ? await readDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey) : null;
-  const pendingDue = pendingClaim?.details.outcome === "pending"
-    && (!pendingClaim.details.nextAttemptAt || Date.parse(String(pendingClaim.details.nextAttemptAt)) <= (input.now ?? new Date()).getTime());
-  if (!diagnosis || diagnosis.state !== "no_execution_path" || (!diagnosis.canInvestigate && !pendingDue)) {
-    return { accepted: false, message: "No automatic dependency diagnosis is due.", diagnosis, retryAt: null };
+export async function reconcileParentDependencyDiagnosis(db: Db, input: DiagnosisInput & { enqueueWakeup: EnqueueWakeup }) {
+  const current = await readDiagnosisState(db, input);
+  if (!current || current.diagnosis.state !== "no_execution_path" || !current.parent.assigneeAgentId || current.wake) {
+    return { accepted: false, retryAt: null };
   }
-  const parent = await readIssue(db, input.companyId, input.issueId);
-  if (!parent?.assigneeAgentId) return { accepted: false, message: "The parent assignee is unavailable.", diagnosis, retryAt: null };
-  const [latestRun] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.companyId, input.companyId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${input.issueId}`))
-    .orderBy(desc(heartbeatRuns.createdAt)).limit(1);
-  const heldUntil = await automaticRunCreationHeldUntil(db, input.companyId, { issueId: input.issueId, sourceRunId: latestRun?.id ?? null });
-  if (heldUntil && heldUntil.getTime() > (input.now ?? new Date()).getTime()) return { accepted: false, message: "Parent execution is held.", diagnosis, retryAt: heldUntil };
-  const treeControl = issueTreeControlService(db);
-  if ((await treeControl.listActivePauseHeldIssueIds(input.companyId, [input.issueId])).has(input.issueId)) return { accepted: false, message: "Parent execution is paused.", diagnosis, retryAt: null };
-  const claim = await claimDiagnosis(db, { companyId: input.companyId, issueId: input.issueId, diagnosis,
-    assigneeAgentId: parent.assigneeAgentId, source: "automatic", actorId: null });
-  if (!claim.claimed) return { accepted: false, message: "The parent assignment changed.", diagnosis, retryAt: null };
-  const existingWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (existingWake) return { accepted: true, message: "Diagnostic wake already recorded.", diagnosis, retryAt: null };
-  crashPoint("issue.dependency_diagnosis.after_claim_before_wake");
-  let wake: unknown | null;
-  try { wake = await input.enqueueWakeup(parent.assigneeAgentId, {
-    source: "automation", triggerDetail: "system", reason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
-    payload: { issueId: input.issueId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosis.wake.idempotencyKey,
-      livenessContinuationInstruction: "A required dependency has no active execution or named recovery path. Inspect the authorized dependency context, continue independent work, or propose a replacement. Leave unresolved dependencies intact until the board approves a change." },
-    idempotencyKey: diagnosis.wake.idempotencyKey, requestedByActorType: "system", requestedByActorId: null,
-    contextSnapshot: { issueId: input.issueId, taskId: input.issueId, wakeReason: ISSUE_BLOCKER_STALLED_WAKE_REASON,
-      dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosis.wake.idempotencyKey,
-      livenessContinuationInstruction: "A required dependency has no active execution or named recovery path. Inspect the authorized dependency context, continue independent work, or propose a replacement. Leave unresolved dependencies intact until the board approves a change." },
-    issueStateGuard: { statuses: ["todo", "in_progress", "blocked", "in_review"], assigneeAgentId: parent.assigneeAgentId },
-    allowRunCoalescing: false,
-  }); } catch {
-    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey,
-      { outcome: "deferred", nextAttemptAt: new Date(Date.now() + 60_000).toISOString(), message: "Wake admission did not settle; it will be retried." });
-    return { accepted: false, message: "Wake admission did not settle. The request will be retried.", diagnosis, retryAt: new Date(Date.now() + 60_000) };
+  if (current.gate) return { accepted: false, retryAt: current.gate.retryAt ?? null };
+  if (current.claim) {
+    if (!["pending", "deferred", "refused"].includes(String(current.claim.details.outcome))) {
+      return { accepted: false, retryAt: null };
+    }
+    const dueAt = attemptDeadline(current.claim.details);
+    if (dueAt && dueAt > (input.now ?? new Date())) return { accepted: false, retryAt: dueAt };
   }
-  const persistedWake = await readWakeReceipt(db, input.companyId, diagnosis.wake.idempotencyKey);
-  if (persistedWake) {
-    await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, { outcome: "queued" });
-    return { accepted: true, message: "Diagnostic wake already recorded.", diagnosis, retryAt: null };
-  }
-  await updateDiagnosisClaim(db, input.companyId, input.issueId, diagnosis.wake.idempotencyKey, wake ? { outcome: "queued" }
-    : { outcome: "refused", nextAttemptAt: new Date(Date.now() + 10 * 60_000).toISOString(), message: "The current execution gates refused the wake." });
-  return { accepted: Boolean(wake), message: wake ? "Diagnostic wake queued." : "Diagnostic wake was refused by execution admission.", diagnosis,
-    retryAt: wake ? null : new Date(Date.now() + 10 * 60_000) };
+  const manualClaim = current.claim?.details.source === "user" ? current.claim : null;
+  const delivery = { ...input, idempotencyKey: current.diagnosis.wake.idempotencyKey,
+    assigneeAgentId: current.parent.assigneeAgentId, source: manualClaim ? "user" as const : "automatic" as const,
+    actorId: manualClaim?.actorId ?? null };
+  const claim = await claimDiagnosis(db, delivery);
+  return claim ? deliverDiagnosis(db, delivery, claim.details.attempt) : { accepted: false, retryAt: null };
 }
 
 export async function verifyParentDependencyDiagnosisWake(db: Db, input: {
   companyId: string; issueId: string; contextSnapshot: Record<string, unknown> | null | undefined;
   runId?: string | null;
+  wakeupRequestId?: string | null;
 }): Promise<boolean> {
   const context = input.contextSnapshot;
   if (context?.dependencyDiagnosis !== true || typeof context.dependencyDiagnosisKey !== "string") return false;
@@ -581,7 +635,8 @@ export async function verifyParentDependencyDiagnosisWake(db: Db, input: {
     if (retry?.retryOfRunId !== retryOfRunId || retryContext.dependencyDiagnosisKey !== context.dependencyDiagnosisKey
       || sourceContext.dependencyDiagnosis !== true || sourceContext.dependencyDiagnosisKey !== context.dependencyDiagnosisKey) return false;
   }
-  const current = await readParentDependencyDiagnosis(db, input);
-  return current?.state === "no_execution_path" && current.wake.idempotencyKey === context.dependencyDiagnosisKey
-    && current.dependencyPath.length > 0;
+  const current = await readDiagnosisState(db, input, input);
+  return current?.diagnosis.state === "no_execution_path" && current.diagnosis.wake.idempotencyKey === context.dependencyDiagnosisKey
+    && current.diagnosis.dependencyPath.length > 0 && !current.gate
+    && current.claim?.details.assigneeAgentId === current.parent.assigneeAgentId;
 }

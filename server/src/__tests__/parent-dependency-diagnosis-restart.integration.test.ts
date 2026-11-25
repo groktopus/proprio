@@ -6,7 +6,7 @@ import path from "node:path";
 import express from "express";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, approvals, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, issueApprovals, issueDocuments,
+import { activityLog, agentWakeupRequests, agents, approvals, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, heartbeatRuns, issueApprovals, issueDocuments,
   issueRelations, issueTreeHolds, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { describe, expect, it } from "vitest";
@@ -128,9 +128,10 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       expect(committedClaim).toHaveLength(1);
       const details = committedClaim[0]!.details as Record<string, unknown>;
       expect(details).toMatchObject({ outcome: "pending", source: "automatic", assigneeAgentId: agent!.id });
-      expect(String(details.dependencyPathDigest)).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
-      expect(String(details.idempotencyKey)).not.toContain(childId);
-      expect(String(details.idempotencyKey)).not.toContain(grandchildId);
+      const diagnosisKey = String(details.idempotencyKey);
+      expect(diagnosisKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
+      expect(diagnosisKey).not.toContain(childId);
+      expect(diagnosisKey).not.toContain(grandchildId);
       const artifactAfterCrash = await db.select({ body: documents.latestBody }).from(issueDocuments)
         .innerJoin(documents, eq(documents.id, issueDocuments.documentId)).where(and(eq(issueDocuments.issueId, siblingId),
           eq(issueDocuments.key, "result")));
@@ -150,11 +151,14 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
       expect(effectsAfterRestart.map(effect => effect.label).sort()).toEqual(["diagnosis", "unrelated"]);
       expect(new Set(effectsAfterRestart.map(effect => effect.runId)).size).toBe(2);
       const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-        eq(agentWakeupRequests.idempotencyKey, String(details.idempotencyKey))));
+        eq(agentWakeupRequests.idempotencyKey, diagnosisKey)));
       expect(wakes, JSON.stringify(restarted)).toHaveLength(1);
       expect(wakes[0]).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system" });
-      expect(wakes[0]!.payload).toMatchObject({ issueId: parentId, dependencyDiagnosis: true,
-        dependencyDiagnosisKey: details.idempotencyKey });
+      expect(wakes[0]!.payload).toMatchObject({ issueId: parentId });
+      const [diagnosisRun] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id)));
+      expect(diagnosisRun).toMatchObject({ id: effectsAfterRestart.find(effect => effect.label === "diagnosis")!.runId,
+        status: "succeeded", contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
 
       const claimsAfterRestart = await db.select().from(activityLog).where(and(eq(activityLog.entityId, parentId),
         eq(activityLog.action, "issue.dependency_diagnosis.requested")));
@@ -188,7 +192,7 @@ describe.skipIf(!support.supported)("parent dependency diagnosis survives a cont
         JSON.parse(await readFile(`${effectLedger}.${label}`, "utf8")) as { label: string; runId: string }));
       expect(effectsAfterReplay).toEqual(effectsAfterRestart);
       const wakesAfterReplay = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-        eq(agentWakeupRequests.idempotencyKey, String(details.idempotencyKey))));
+        eq(agentWakeupRequests.idempotencyKey, diagnosisKey)));
       expect(wakesAfterReplay).toHaveLength(1);
 
       // A fresh route app and DB client model the board reload after the worker
