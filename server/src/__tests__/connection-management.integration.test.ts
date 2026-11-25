@@ -23,6 +23,7 @@ import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 import { agentService } from "../services/agents.js";
 import { accessService } from "../services/access.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
+import { resolveProprioRunnerNativeProviderInput } from "../services/native-runtime/provider-profile.js";
 import { secretService } from "../services/secrets.js";
 import { localEncryptedProvider } from "../secrets/local-encrypted-provider.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -1467,6 +1468,7 @@ describe("connection management with production default agents", () => {
       { companyId: f.companyId, companySkillId: visibleSkill.id, revisionNumber: 1 },
       { companyId: f.companyId, companySkillId: hiddenSkill.id, revisionNumber: 1 },
     ]).returning();
+    await server.db.update(companySkills).set({ currentVersionId: visibleVersion.id }).where(eq(companySkills.id, visibleSkill.id));
     const skillBundle = { schema: NATIVE_RUNTIME_ASSET_SCHEMA, digest: "b".repeat(64), manifestDigest: "c".repeat(64),
       rootPath: "/must-not-leak", fileCount: 1, totalBytes: 1 };
     context.skills = [
@@ -1474,11 +1476,16 @@ describe("connection management with production default agents", () => {
       { key: hiddenSkill.key, runtimeName: hiddenSkill.key, versionId: hiddenVersion.id, bundle: { ...skillBundle, digest: "d".repeat(64) } },
     ];
     context.aggregateDigest = canonicalNativeRuntimeContextDigest(context);
+    const effectiveProvider = resolveProprioRunnerNativeProviderInput({
+      companyId: f.companyId, backend: "codex_app_server", codexCliVersion: "0.160.0",
+      adapterConfig: { provider: "codex", model: "gpt-6.2-sol" },
+    });
+    expect(effectiveProvider.model).toBe("gpt-6.1-sol");
     await server.db.update(heartbeatRuns).set({ runnerProfileJson: { nativeExecutionInput: buildNativeExecutionInput({
       companyId: f.companyId, agentId: f.agentId, runId: companyRun.id,
       issue: { id: companyIssue.id, identifier: companyIssue.identifier, title: companyIssue.title,
         description: companyIssue.description, workMode: companyIssue.workMode },
-      taskPrompt: "Fixture task prompt that must not be returned", provider: "codex", runtimeContext: context,
+      taskPrompt: "Fixture task prompt that must not be returned", ...effectiveProvider, runtimeContext: context,
       workspace: { id: companyRun.id, cwd: "/fixture/private", repoUrl: null, repoRef: null, branchName: null }, normalizedSessionId: null,
       completionContract: { id: "contract", sha256: "saved", schemaVersion: "proprio.completion-contract.v1",
         contract: { revision: "1", objective: "fixture", criteria: [{ id: "objective", requirement: "fixture" }] } },
@@ -1498,6 +1505,10 @@ describe("connection management with production default agents", () => {
     expect(blocked).toMatchObject({ decision: "deny", matchedPolicyIds: [policy.id] });
     const { invocation: companyCall } = await policyService.recordInvocation(invocationInput, blocked);
     await server.db.update(toolPolicies).set({ priority: 20 }).where(eq(toolPolicies.id, policy.id));
+    const [nextSkillVersion] = await server.db.insert(companySkillVersions).values({
+      companyId: f.companyId, companySkillId: visibleSkill.id, revisionNumber: 2,
+    }).returning();
+    await server.db.update(companySkills).set({ currentVersionId: nextSkillVersion.id }).where(eq(companySkills.id, visibleSkill.id));
     const [privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
       .values([privateIssue.id, null].map(issueId => ({
         companyId: f.companyId, runId: companyRun.id, issueId, toolName: "fixture_read",
@@ -1514,7 +1525,7 @@ describe("connection management with production default agents", () => {
           policyId: policy.id, priority: 10, revisionFingerprint: expect.any(String),
         })] },
       })],
-      runtimeProvenance: { source: "native_admission", provider: "codex", model: null,
+      runtimeProvenance: { source: "native_admission", provider: "codex", model: "gpt-6.1-sol",
         driverKind: "codex_app_server", driverVersion: "fixture-driver", runtimeContextDigest: context.aggregateDigest,
         skills: [{ key: visibleSkill.key, versionId: visibleVersion.id, bundleDigest: skillBundle.digest }] },
     } });
