@@ -25,18 +25,29 @@ The export freezes the IDs and checksum of visible records in the declared captu
 - The connected MCP rollback fixture verified that an audit insert failure rolls back the invocation, approval request and rate charge before any provider send. A retry commits one rate charge and one event. The delegated test-call and legacy-plugin paths retain separate rate-accounting behavior. [Gateway rollback](https://github.com/groktopus/proprio/pull/359#issuecomment-7147343987)
 - All 16 audit route tests passed on `ebac201b` with disposable PostgreSQL and Node 24.22.1. They exercised 10,037 events, a persisted resume cursor, source epoch rotation, exact archive bytes after an older restore, and loss of visibility on a different page. The API checked all snapshot members before returning page data, count and watermark. [Restore contract](https://github.com/groktopus/proprio/pull/369#issuecomment-7147751483) [Snapshot visibility](https://github.com/groktopus/proprio/pull/374#issuecomment-7147698734)
 - A focused export test verified that an orphaned event with a surviving private task cannot reveal its presence through a conflict response. The existing missing-binding fixture still reported incomplete delivery for an eligible event. [Private binding](https://github.com/groktopus/proprio/pull/375)
-- All 18 audit route tests passed on `49adcf9d`. A transaction committed after its first export froze. A fresh overlapping snapshot recovered its event, and stable event identity allowed deduplication across a source epoch change. Delays beyond the collector's lookback require separate reconciliation. [Overlapping export](https://github.com/groktopus/proprio/pull/376)
+- All 18 audit route tests passed on `6e15a034` with `DATABASE_POOL_MAX=1`. A transaction committed after its first export froze. A fresh overlapping snapshot recovered its event, and stable event identity allowed deduplication across a source epoch change. The procedure saves membership before advancing its cursor and records any interval clipped by capture or retention. Delays beyond the lookback require separate reconciliation. [Overlapping export](https://github.com/groktopus/proprio/pull/376)
 - Three tests on `2b75d9b0` applied the combined migration and checked a task-bound write, a read-only call and the public export projection. The gateway persisted the provider correlation ID before dispatch, committed receipt before completion, and blocked a repeat mutation across a changed run and idempotency key. [Direct dispatch](https://github.com/groktopus/proprio/pull/366#issuecomment-7147826662)
 - Five tests and the layered server typecheck passed on `5bd23631`. The approval route and authenticated `tools/call` recorded and settled the approved action under the active claim. A same-agent direct retry with identical arguments, a replacement run, and a new key could not send again after an unresolved approved action. An expired elicitation round and a thrown transport error also preserved the unresolved intent. [Approved dispatch](https://github.com/groktopus/proprio/pull/370)
 - On `9ac8fffe`, an independent reviewer matched the exported policy decision, human approval and open dispatch intent for the interrupted action after server recreation. The `complete` field on a page signals that delivery reached the end of the frozen snapshot. The target ledger establishes the actual effect of the interrupted action. [Reconstruction](https://github.com/groktopus/proprio/pull/368)
 
-The latest local composition `b8be6b6f3cb1e1151651abef0f882448a7ec2546` passed
+The audit stack composition `b8be6b6f3cb1e1151651abef0f882448a7ec2546` passed
 14 focused tests on Linux with Node 24.22.1. It combined the reviewed
 reconstruction, independent authority, historical policy, direct and approved
 calls, retention and export privacy branches. The fixture used isolated
 PostgreSQL and a process adapter against a local synthetic MCP target. It
 captured historical policy in the transaction that writes the rate charge and
 managed admission record.
+
+The disposable composition `7198e55415fe96baf5bea8ea543013153cc57df2`
+included all 20 published PR heads at the time of verification. It passed 70
+server and recovery checks, seven adapter checks and 12 transcript checks. The
+server typecheck and OpenAPI consistency check also passed. The server tests
+used Node 24.22.1, isolated PostgreSQL and a loopback MinIO store to verify
+commentary, managed audit, independent authority, reconstruction and
+older-backup deletion together.
+After the overlapping-export review changes, all 18 audit route tests passed
+again on composition `e575e1894a9e32e32fa75747b9b946c7aa87751e` with a
+single-connection default pool. [Reviewed export fixture](https://github.com/groktopus/proprio/pull/376#issuecomment-7150562031)
 
 GitHub's Linux source qualification passed for reconstruction PR head
 `9ac8fffe7fed9114b04ded567802a6381790b0f8` with baseline `6e6ebf51`. It covered
