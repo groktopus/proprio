@@ -214,14 +214,28 @@ The release decision depends on the following checks.
 
 ## Lock and provenance hold
 
-The reporting lock guard rejects the lock on `main` at `6e6ebf51`. The committed lock SHA-256 is `535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`, while the report policy lists `f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e` for both input and output. The intervening change pins `oxlint@1.94.0` and its platform packages. [Dependency change](https://github.com/groktopus/proprio/pull/125)
+The reporting lock and SDK public-input checks reject `main` at
+`19b4a032258db9395b6c6cacc183d913d69ba40e`. The committed lock SHA-256 is
+`535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337`. The
+report policy lists
+`f54797a4c415df7a40ec6550479a903cb33ba4225921eefcbe7e7d5fb7e7dc8e`
+for both input and output. The last root lock change is the app lint dependency
+update at `7d7c3621`, which pins `oxlint@1.94.0` and its platform packages.
+[Dependency change](https://github.com/groktopus/proprio/pull/125)
 
-The release maintainer must review the lock change and arrange the trusted
-reporting lock refresh. GitHub has no active refresh workflow at the verified
-baseline. The repository owner needs to provide the authorized workflow,
-protected environment and installed lockfile bot. Once the trusted refresh
-lands, resync public input pins and run the SDK checks for #358 and #363 on
-the exact candidate. [Runner operations](../../tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
+The repository's trusted writer check ran against that exact main revision.
+It found no merged Dependabot PR for the root lock bytes. The regular refresh
+requires a reviewed base or a verified Dependabot lock. A workflow
+registration by itself leaves the current lock unrecognized. GitHub also
+showed no active refresh workflow, protected refresh environment or refresh
+branch at this revision.
+
+The release maintainer must arrange an approved trusted lock recovery with the
+repository owner. Provide the authorized workflow, protected environment and
+installed lockfile bot. Record the reviewed base or verified writer and rerun
+the frozen reporting check. After that refresh lands, resync public input pins
+and run the SDK checks for #358 and #363 on the exact candidate.
+[Runner operations](../../tests/runner-e2e/OPERATIONS.md#hosted-report-dependencies)
 
 ## Hold, recovery and resume
 
