@@ -28,8 +28,12 @@ Keep this boundary outside the database rollback domain.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
 3. Persist the page to separately governed storage. Deduplicate events by source
-   and ID. Then record the returned `nextCursor` and send it as `cursor` on the
-   next request. A repeated page uses the same event IDs.
+   and stable event ID. Event IDs can remain the same after a database restore,
+   so do not include the source epoch in the archive's event deduplication key.
+   Bind each export ID and resume checkpoint to its source epoch; after epoch
+   rotation, reconcile and create a fresh export instead of resuming the old one.
+   Then record the returned `nextCursor` and send it as `cursor` on the next
+   request. A repeated page uses the same event IDs.
 4. Confirm that the final page reports `complete`, the archived count equals
    `eventCount`, and the watermark equals the SHA-256 of the compact JSON
    array of archived event IDs in lexicographic order.
@@ -49,6 +53,20 @@ Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
 An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
+
+For periodic collection, re-export a bounded overlapping lookback using a new
+export ID, then deduplicate the archived events by `(source, event ID)`. Keep
+each snapshot's bounds, source epoch, count and watermark with its delivery
+checkpoint. Do not treat a completed snapshot as proof that its time interval is
+final: a covered gateway transaction can commit after the snapshot was created
+while carrying an earlier `occurredAt`, and the next adjacent interval will
+exclude that event. A fresh overlapping snapshot can find it while the source
+row remains available. The current watermark proves membership and delivery of
+one frozen snapshot only; it is not a commit-ordered high-water mark and gives
+no upper bound on late commits. This overlap procedure reduces the exposure but
+does not guarantee completeness for arbitrarily delayed transactions. Reconcile
+the affected interval against source or target evidence when completeness is
+required.
 
 ## Restore qualification and limits
 
