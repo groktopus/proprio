@@ -96,7 +96,8 @@ describePostgres("case handoff migration upgrades", () => {
     const { sql, connectionString } = await database();
     await sql`DROP TABLE case_handoffs, case_access_sources`;
     await sql`ALTER TABLE cases DROP COLUMN work_issue_id, DROP COLUMN phase, DROP COLUMN handoff_version`;
-    await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash IN ${sql([...migrations.map(row => row.hash), offerMigrationHash])}`;
+    await sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE hash IN ${sql(migrations.map(row => row.hash))} OR hash = ${offerMigrationHash}`;
     const row = await seed(sql);
     const before = await contentsWithoutRouting(sql);
     await applyPendingMigrations(connectionString);
