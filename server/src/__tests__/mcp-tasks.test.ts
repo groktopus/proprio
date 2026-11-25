@@ -135,6 +135,7 @@ function taskServer() {
   const requests: Recorded[] = [];
   const tasks = new Map<string, FakeTask>();
   let forgetAll = false;
+  let onLegacyRejection: ((request: Recorded) => Promise<void>) | undefined;
   /** The next N task polls fail as if the app were briefly unreachable. */
   let failingGets = 0;
   const tool = (name: string) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } });
@@ -151,7 +152,10 @@ function taskServer() {
     const headers = new Headers(init.headers);
     requests.push({ method: body.method, headers, body });
     const meta = body.params?._meta ?? {};
-    if (meta[META_VERSION] !== MCP_MODERN_PROTOCOL_VERSION || headers.get("mcp-protocol-version") !== MCP_MODERN_PROTOCOL_VERSION) return fail(400, body.id, -32020, "Header mismatch");
+    if (meta[META_VERSION] !== MCP_MODERN_PROTOCOL_VERSION || headers.get("mcp-protocol-version") !== MCP_MODERN_PROTOCOL_VERSION) {
+      await onLegacyRejection?.(requests.at(-1)!);
+      return fail(400, body.id, -32020, "Header mismatch");
+    }
     const declared = Boolean(meta[META_CAPABILITIES]?.extensions?.[MCP_TASKS_EXTENSION_ID]);
     switch (body.method) {
       case "server/discover":
@@ -208,6 +212,7 @@ function taskServer() {
   };
   return {
     requests, tasks, handle, only,
+    observeLegacyRejection: (callback: (request: Recorded) => Promise<void>) => { onLegacyRejection = callback; },
     count: (method: string) => requests.filter((request) => request.method === method).length,
     finish: () => { only().task.status = "completed"; },
     /** The running task now needs a person's answer. */
@@ -721,9 +726,20 @@ const support = await getEmbeddedPostgresTestSupport();
     const tool = (await fresh.listToolsForSession(ctx.session.token)).find((candidate) => candidate.name.endsWith(":build"))!;
     const key = "legacy-stateless-task-retry";
     const requestOffset = server.requests.length;
+    let intentSeenAtLegacySend = false;
+    server.observeLegacyRejection(async (request) => {
+      expect(request.method).toBe("tools/call");
+      const intents = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ));
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({ providerRequestId: String(request.body.id) });
+      intentSeenAtLegacySend = true;
+    });
     await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" },
       idempotencyKey: key, timeoutMs: 1_500 }))
       .rejects.toMatchObject({ reasonCode: "provider_task_pending" });
+    expect(intentSeenAtLegacySend).toBe(true);
     expect((await ctx.rows())[0]).toMatchObject({ protocolVersion: MCP_MODERN_PROTOCOL_VERSION, status: "working" });
     expect(server.tasks.size).toBe(1);
 
@@ -736,15 +752,17 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(firstAttempt[1]!.body.params._meta[META_VERSION]).toBe(MCP_MODERN_PROTOCOL_VERSION);
     expect(firstAttempt[1]!.body.params._meta[META_CAPABILITIES].extensions[MCP_TASKS_EXTENSION_ID]).toEqual({});
 
-    const [intent] = await db.select().from(managedAuditEvents).where(and(
+    const companyReceipts = await db.select().from(managedAuditEvents).where(and(
       eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "dispatch_intent"),
     ));
-    expect(intent).toMatchObject({ providerRequestId: String(firstAttempt[1]!.body.id) });
+    const [intent] = companyReceipts;
+    expect(intent).toMatchObject({ providerRequestId: String(firstAttempt[0]!.body.id) });
     const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
     expect(invocation).toMatchObject({ status: "timed_out", errorCode: "provider_task_pending" });
-    expect(await db.select().from(managedAuditEvents).where(and(
-      eq(managedAuditEvents.invocationId, intent!.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
-    ))).toHaveLength(0);
+    const companyOutcomesBeforeCollection = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+    ));
+    expect(companyOutcomesBeforeCollection).toHaveLength(0);
 
     server.finish();
     const collectionOffset = server.requests.length;
@@ -759,9 +777,9 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(collectedTask).toMatchObject({ status: "completed", deliveredAt: expect.any(Date) });
     const [settledInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
     expect(settledInvocation).toMatchObject({ status: "succeeded", errorCode: null });
-    const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, intent!.invocationId));
-    expect(events.filter((event) => event.phase === "dispatch_intent")).toHaveLength(1);
-    expect(events.filter((event) => event.phase === "terminal_outcome")).toEqual([
+    const allCompanyReceipts = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, ctx.org.id));
+    expect(allCompanyReceipts.filter((event) => event.phase === "dispatch_intent")).toEqual([intent]);
+    expect(allCompanyReceipts.filter((event) => event.phase === "terminal_outcome")).toEqual([
       expect.objectContaining({ status: "succeeded", requestId: intent!.requestId }),
     ]);
   });
