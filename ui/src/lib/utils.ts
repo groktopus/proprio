@@ -7,6 +7,10 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function formatCodeLabel(value: string): string {
+  return value.replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
+}
+
 export function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
