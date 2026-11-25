@@ -9,6 +9,7 @@ import {
   createDb,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
   projects,
   toolAccessAuditEvents,
@@ -226,6 +227,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(managedAuditEvents);
     await db.delete(toolRateLimitCounters);
     await db.delete(toolActionRequests);
     await db.delete(toolInvocations);
@@ -813,6 +815,8 @@ describeEmbeddedPostgres("tool access policy service", () => {
   it("records approval-required invocations and action requests with matched policy IDs", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
+    const issue = await createIssue(db, company.id);
+    const run = await createRun(db, company.id, agent.id, { issueId: issue.id });
     const { connection } = await createTool(db, company.id);
     const policy = await db.insert(toolPolicies).values({
       companyId: company.id,
@@ -824,6 +828,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const input = {
       companyId: company.id,
       actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id, issueId: issue.id },
       request: {
         connectionId: connection.id,
         toolName: "send_email",
@@ -836,6 +841,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const recorded = await toolAccessPolicyService(db).recordInvocation(input, decision);
     await toolAccessPolicyService(db).writeAudit(input, decision);
     const [callEvent] = await db.select().from(toolCallEvents);
+    const [managedEvent] = await db.select().from(managedAuditEvents);
 
     expect(decision).toMatchObject({
       allowed: false,
@@ -863,6 +869,26 @@ describeEmbeddedPostgres("tool access policy service", () => {
       matchedPolicyIds: [policy.id],
       requestSummary: expect.objectContaining({ summary: expect.any(String) }),
     });
+    expect(managedEvent).toMatchObject({
+      companyId: company.id,
+      source: "tool_gateway",
+      schemaVersion: 1,
+      eventType: "invocation_decision_recorded",
+      phase: "policy_decision",
+      occurredAt: recorded.invocation.createdAt,
+      runId: run.id,
+      taskId: issue.id,
+      invocationId: recorded.invocation.id,
+      requestId: recorded.actionRequest!.id,
+      connectionId: connection.id,
+      actorType: "agent",
+      actorId: agent.id,
+      decision: "require_approval",
+      status: "awaiting_approval",
+      reasonCode: "requires_approval_policy",
+    });
+    expect(JSON.stringify(managedEvent)).not.toContain("ship it");
+    expect(managedEvent).not.toHaveProperty("argumentsSummary");
     expect(callEvent?.metadata).not.toHaveProperty("policyExplanation.explicitMatchedPolicies");
     expect(JSON.stringify(callEvent.metadata)).not.toContain("explicitMatchedPolicies");
     expect(JSON.stringify(callEvent.metadata)).not.toContain("revisionFingerprint");
@@ -963,6 +989,41 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(first.replayed).toBe(false);
     expect(replay.replayed).toBe(true);
     expect(replay.invocation.id).toBe(first.invocation.id);
+    expect(await db.select().from(managedAuditEvents)).toHaveLength(1);
+  });
+
+  it("rolls back invocation and approval request if minimized capture fails", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { connection } = await createTool(db, company.id);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review writes",
+      policyType: "require_approval",
+      selectors: { toolName: "send_email" },
+    });
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      request: { connectionId: connection.id, toolName: "send_email", arguments: { body: "private payload" } },
+    };
+    const decision = await toolAccessPolicyService(db).decide(input);
+    const suffix = randomUUID().replaceAll("-", "");
+    const functionName = `managed_audit_capture_failure_${suffix}`;
+    const triggerName = `managed_audit_capture_failure_${suffix}`;
+    await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'managed audit capture fault'; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`));
+    try {
+      await expect(toolAccessPolicyService(db).recordInvocation(input, decision)).rejects.toThrow(/managed_audit_events/);
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(0);
+      expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+      await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+    }
   });
 
   it("derives a canonical idempotency key for side-effecting calls without caller-supplied keys", async () => {
