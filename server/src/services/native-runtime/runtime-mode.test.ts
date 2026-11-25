@@ -20,11 +20,15 @@ const eligible = {
 } as const;
 
 describe("nativeRuntimeSupportsCaseOfferDecision", () => {
-  it("admits an idle native recipient while keeping paused recipients ineligible", () => {
+  it("admits invokable native recipients while keeping paused recipients ineligible", () => {
     const agent = { ...eligible.agent, adapterConfig: eligible.adapterConfig, runtimeConfig: eligible.runtimeConfig };
     const settings = { enableNativeRunner: true, enableMuse: false, enableOpenAiDot: false, enableGrokBot: false };
-    expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status: "idle" }, eligible.issue.id, settings)).toBe(true);
-    expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status: "paused" }, eligible.issue.id, settings)).toBe(false);
+    for (const status of ["active", "idle", "running", "error"]) {
+      expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status }, eligible.issue.id, settings), status).toBe(true);
+    }
+    for (const status of ["paused", "terminated", "pending_approval"]) {
+      expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status }, eligible.issue.id, settings), status).toBe(false);
+    }
   });
 });
 

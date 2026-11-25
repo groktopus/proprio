@@ -1,3 +1,4 @@
+import { isAgentStatusInvokable } from "@groktopus/shared";
 import {
   NATIVE_STATUS_ARBITER_POLICY_VERSION,
   type NativeAuthoritativeIssueStatus,
@@ -92,8 +93,8 @@ export function nativeRuntimeSupportsCaseOfferDecision(
   settings: { enableNativeRunner: boolean; enableMuse: boolean; enableOpenAiDot: boolean; enableGrokBot: boolean },
 ): boolean {
   try {
-    // Heartbeat starts idle agents by moving them to running before resolving the runtime.
-    const recipient = agent.status === "idle" ? { ...agent, status: "running" } : agent;
+    // Heartbeat moves an invokable agent to running before resolving the runtime.
+    const recipient = isAgentStatusInvokable(agent.status) ? { ...agent, status: "running" } : agent;
     const runtime = resolveNativeRuntimeMode({
       enabled: settings.enableNativeRunner, museEnabled: settings.enableMuse, dotEnabled: settings.enableOpenAiDot,
       grokEnabled: settings.enableGrokBot, agent: recipient, adapterConfig: agent.adapterConfig, runtimeConfig: agent.runtimeConfig,

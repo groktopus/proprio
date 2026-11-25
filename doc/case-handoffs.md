@@ -106,11 +106,13 @@ returns the saved decision metadata. The Case-scoped history retains any message
 sent with a clarification or decline. Acceptance waits for the normal source
 release and recipient admission checks. The outcomes are `accepted`,
 `clarification`, and `declined`. Clarification and decline require a categorized
-`reasonCode` and a message. A stale offer closes when the recipient attempts a
-decision. On a `409`, reread the task and handoff before deciding again. If requirements change after assignment but before admission, the
-handoff remains held for the operator. Clarification or decline closes the offer
-and keeps the source assigned. The audit event records the category and elapsed
-time.
+`reasonCode` and a message. A reply with a mismatched handoff or requirement
+revision returns `409` and leaves a current offer open. An attempt to decide on
+an offer whose stored requirements have since been superseded returns `409`
+and closes the offer. Reread the task and handoff after either response. If
+requirements change after assignment but before admission, the handoff remains
+held for the operator. Clarification or decline closes the offer and keeps the
+source assigned. The audit event records the category and elapsed time.
 
 Stage the versioned-offer schema before admitting pilot work. If ownership
 diverges or an effect is uncertain, pause new offers, retain the handoff and
@@ -136,7 +138,9 @@ workflow context to preserve their task-only scope. Cancelled or unapplied
 handoff intent is history, not an incoming phase instruction.
 
 Focused verification lives in the case route, handoff service, native handoff,
-durable admission, and legacy process integration tests. Run the explicit-only
+durable admission, and legacy process integration tests. Linux source
+qualification requires the assembled native handoff case to pass with the
+Rust Runner and a scripted provider. Run the explicit-only
 case-handoffs Product E2E workflow for provider/browser qualification; fixture
 and service tests do not establish that a live model followed the workflow.
 See [implementation and acceptance](plans/2026-10-19-persistent-case-handoffs.md)

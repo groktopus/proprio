@@ -9,6 +9,7 @@ import express from "express";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, agentApiKeys, agentTaskSessions, agentWakeupRequests, authUsers, caseDocuments, caseEvents, caseHandoffs, cases, companies, companyMemberships, createDb, documents, heartbeatRunEvents, heartbeatRuns, issueDocuments, issues } from "@groktopus/db";
+import type { CaseHandoffOfferContract } from "@groktopus/shared";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { caseRoutes } from "../routes/cases.js";
@@ -89,7 +90,7 @@ suite("case handoff through the assembled native runner", () => {
     await db.insert(companies).values({ id: companyId, name: "Native factory proof", issuePrefix: `N${companyId.slice(0, 6)}`, defaultResponsibleUserId: userId });
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, membershipRole: "operator", status: "active" });
     for (const [id, role] of [[triage, "ceo"], [engineer, "engineer"]] as const) await db.insert(agents).values({ id, companyId, name: role,
-      role, ...(id === engineer ? { reportsTo: triage } : {}), status: "idle", adapterType: "proprio_runner",
+      role, ...(id === engineer ? { reportsTo: triage } : {}), status: id === engineer ? "error" : "idle", adapterType: "proprio_runner",
       adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: workspace, lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 30,
         env: { CODEX_HOME: sourceHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" } }, runtimeConfig: { heartbeat: { enabled: false } } });
     const recipientApiKey = `native-case-recipient-${randomUUID()}`;
@@ -253,28 +254,36 @@ for await (const line of createInterface({input:process.stdin})) {
     const historyUrl = `${process.env.PROPRIO_API_URL}/api/cases/${discovered!.caseId}/handoffs`;
     const historyResponse = await fetch(historyUrl, { headers: recipientHeaders });
     expect(historyResponse.status).toBe(200);
-    const history = await historyResponse.json() as { items: { id: string }[] };
-    expect(history.items.find(item => item.id === discovered!.handoffId)).toMatchObject({
+    const history = await historyResponse.json() as { items: { id: string; version: number; offerContract: CaseHandoffOfferContract | null }[] };
+    const visibleOffer = history.items.find(item => item.id === discovered!.handoffId);
+    expect(visibleOffer).toMatchObject({
       version: 2, state: "offered", fromAgentId: triage, toAgentId: engineer,
       offerContract: { expectedDeliverable: "A verified implementation observation" },
     });
+    const observedVersion = visibleOffer!.version;
+    const observedRequirementRevisionId = visibleOffer!.offerContract!.requirementRevision.id;
     const decisionUrl = `${historyUrl}/${discovered!.handoffId}/decision`;
     const staleDecisionResponse = await fetch(decisionUrl, {
       method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: offer!.version, requirementRevisionId: randomUUID() }),
+      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: observedVersion, requirementRevisionId: randomUUID() }),
     });
     expect(staleDecisionResponse.status).toBe(409);
     expect(await staleDecisionResponse.json()).toMatchObject({ error: expect.stringContaining("revision changed") });
+    const afterMismatch = await fetch(historyUrl, { headers: recipientHeaders });
+    expect(afterMismatch.status).toBe(200);
+    expect(await afterMismatch.json()).toMatchObject({ items: expect.arrayContaining([expect.objectContaining({
+      id: discovered!.handoffId, state: "offered", recipientDecision: null,
+    })]) });
     const decisionResponse = await fetch(decisionUrl, {
       method: "POST", headers: { ...recipientHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: offer!.version,
-        requirementRevisionId: offer!.offerContract!.requirementRevision.id }),
+      body: JSON.stringify({ outcome: "accepted", expectedHandoffVersion: observedVersion,
+        requirementRevisionId: observedRequirementRevisionId }),
     });
     expect(decisionResponse.status).toBe(200);
     const acceptedOffer = await decisionResponse.json();
     expect(acceptedOffer).toMatchObject({ state: "awaiting_release", recipientDecision: {
-      outcome: "accepted", actorId: engineer, handoffVersion: offer!.version,
-      requirementRevisionId: offer!.offerContract!.requirementRevision.id,
+      outcome: "accepted", actorId: engineer, handoffVersion: observedVersion,
+      requirementRevisionId: observedRequirementRevisionId,
     } });
     expect(acceptedOffer).not.toHaveProperty("offerContract");
     expect((await db.select().from(issues).where(eq(issues.id, initial.taskId)))[0]).toMatchObject({ assigneeAgentId: triage });
