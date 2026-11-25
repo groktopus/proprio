@@ -90,7 +90,16 @@ native handoff calls cannot create them while that flow is disabled. An offer
 requires an authenticated native source run on the same task, a completion
 contract, and a native recipient who can already read the case. It preserves the
 source assignment and records the task brief and the completion-contract and
-workflow revisions. A task brief change or Stop cancels an unanswered offer.
+workflow revisions. A task brief change, Stop, or Case cancellation closes an
+unanswered offer.
+The named recipient can post a decision to `/api/cases/:caseId/handoffs/:handoffId/decision`
+using the observed handoff and completion-contract revisions. An identical reply
+returns the saved receipt. Acceptance waits for the normal source release and
+recipient admission checks. A stale offer closes when the recipient attempts a
+decision. If requirements change after assignment but before admission, the
+handoff remains held for the operator. Clarification or decline closes the offer
+and keeps the source assigned. The audit event records the category and elapsed
+time.
 
 The board case list/detail pages are read-only. URL query parameters retain
 search/status/type/project filters through detail navigation; list paging and

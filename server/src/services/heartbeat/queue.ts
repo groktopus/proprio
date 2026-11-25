@@ -1,4 +1,5 @@
 import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
+import { assertAcceptedOfferIsCurrent } from "../case-handoff-offer-authority.js";
 import { canAdmitSessionGoalRecovery } from "./session-goal-recovery.js";
 import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
 import { QUEUED_MESSAGES_DELIVERED_REASON } from "../../modules/wake-queue/index.js";
@@ -1098,13 +1099,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       eq(caseHandoffs.wakeupRequestId, run.wakeupRequestId), eq(caseHandoffs.companyId, run.companyId),
     )).limit(1) : [];
     if (caseHandoffReceipt) {
-      const [current] = await db.select({ version: cases.handoffVersion, issueId: cases.workIssueId,
+      const [current] = await db.select({ version: cases.handoffVersion, issueId: cases.workIssueId, caseStatus: cases.status,
         agentId: issues.assigneeAgentId, statusVersion: issues.statusVersion }).from(cases)
         .innerJoin(issues, eq(issues.id, cases.workIssueId)).where(and(eq(cases.id, caseHandoffReceipt.caseId),
           eq(cases.companyId, run.companyId), eq(issues.companyId, run.companyId))).limit(1);
       if (!["pending_dispatch", "delivered"].includes(caseHandoffReceipt.state) || caseHandoffReceipt.toAgentId !== run.agentId ||
           !current || current.version !== caseHandoffReceipt.version || current.issueId !== caseHandoffReceipt.issueId ||
-          current.agentId !== run.agentId || (!run.startedAt && current.statusVersion !== caseHandoffReceipt.appliedIssueStatusVersion)) {
+          current.agentId !== run.agentId || (caseHandoffReceipt.offerContract && current.caseStatus === "cancelled") ||
+          (!run.startedAt && current.statusVersion !== caseHandoffReceipt.appliedIssueStatusVersion)) {
         const cancelled = await db.transaction(async tx => {
           const [currentRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
             .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "queued")))
@@ -1440,14 +1442,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         return declined("case_handoff_pending");
       if (caseHandoffReceipt) {
         const [current] = await tx.select({ state: caseHandoffs.state, version: caseHandoffs.version,
-          currentVersion: cases.handoffVersion, workIssueId: cases.workIssueId,
+          currentVersion: cases.handoffVersion, workIssueId: cases.workIssueId, caseStatus: cases.status,
           appliedIssueStatusVersion: caseHandoffs.appliedIssueStatusVersion,
           toAgentId: caseHandoffs.toAgentId, wakeupRequestId: caseHandoffs.wakeupRequestId }).from(caseHandoffs)
           .innerJoin(cases, eq(cases.id, caseHandoffs.caseId)).where(and(eq(caseHandoffs.id, caseHandoffReceipt.id),
             eq(caseHandoffs.companyId, run.companyId))).limit(1);
         if (!current || !["pending_dispatch", "delivered"].includes(current.state) || current.version !== current.currentVersion ||
             current.workIssueId !== issueId || current.toAgentId !== run.agentId || current.wakeupRequestId !== run.wakeupRequestId ||
-            !ownsIssue || (!run.startedAt && current.appliedIssueStatusVersion !== owner?.statusVersion))
+            (caseHandoffReceipt.offerContract && current.caseStatus === "cancelled") || !ownsIssue || (!run.startedAt && current.appliedIssueStatusVersion !== owner?.statusVersion))
           return declined("case_handoff_superseded");
       }
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
@@ -3704,14 +3706,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           );
           if (durableReceipt)
             return { kind: "durable" as const, receipt: durableReceipt };
-          if (caseRequest) {
-            const [handoff] = await tx.select().from(caseHandoffs).where(and(eq(caseHandoffs.id, caseRequest.handoffId),
-              eq(caseHandoffs.companyId, agent.companyId),
-              eq(caseHandoffs.issueId, caseRequest.issueId), eq(caseHandoffs.state, "pending_dispatch"),
-              eq(caseHandoffs.toAgentId, agentId), eq(caseHandoffs.wakeupRequestId, caseRequest.wakeupRequestId))).for("update");
-            if (!handoff || handoff.appliedIssueStatusVersion !== caseRequest.expectedIssueStatusVersion)
-              throw conflict("Case handoff delivery was superseded");
-          }
           const failedChatRetry = await authorizeFailedChatRunRetryWake(
             db,
             tx as unknown as Db,
@@ -3798,6 +3792,30 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // Durable chat authorization can write through this transaction. A missing
           // row has no lock, so the later read can also see a newly inserted issue.
           const issue = durableRequest || !lockedIssue ? await lockIssue() : lockedIssue;
+
+          if (caseRequest && issue) {
+            const handoffScope = and(eq(caseHandoffs.id, caseRequest.handoffId), eq(caseHandoffs.companyId, agent.companyId),
+              eq(caseHandoffs.issueId, issue.id), eq(caseHandoffs.state, "pending_dispatch"),
+              eq(caseHandoffs.toAgentId, agentId), eq(caseHandoffs.wakeupRequestId, caseRequest.wakeupRequestId));
+            const [snapshot] = await tx.select({ caseId: caseHandoffs.caseId }).from(caseHandoffs).where(handoffScope);
+            if (!snapshot) throw conflict("Case handoff delivery was superseded");
+            // Serialize against task changes and Case cancellation in issue → Case → handoff order.
+            const [caseRow] = await tx.select({ status: cases.status, version: cases.handoffVersion, workIssueId: cases.workIssueId })
+              .from(cases).where(and(eq(cases.id, snapshot.caseId), eq(cases.companyId, agent.companyId))).for("update");
+            const [handoff] = await tx.select().from(caseHandoffs).where(handoffScope).for("update");
+            if (!handoff || !caseRow || caseRow.version !== handoff.version || caseRow.workIssueId !== issue.id
+                || handoff.appliedIssueStatusVersion !== caseRequest.expectedIssueStatusVersion
+                || (handoff.offerContract && caseRow.status === "cancelled")) {
+              throw conflict("Case handoff delivery was superseded");
+            }
+            if (handoff.offerContract) {
+              const [brief] = await tx.select({ title: issues.title, description: issues.description }).from(issues).where(and(
+                eq(issues.id, issue.id), eq(issues.companyId, agent.companyId),
+              ));
+              if (!brief) throw conflict("Case handoff task no longer exists");
+              await assertAcceptedOfferIsCurrent(tx as unknown as Db, handoff, brief);
+            }
+          }
 
           if (!issue) {
             if (caseRequest) throw conflict("Case handoff task no longer exists");

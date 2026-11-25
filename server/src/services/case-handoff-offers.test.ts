@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeCaseHandoffRequirementsDigest } from "./case-handoffs.js";
+import { computeCaseHandoffRequirementsDigest } from "./case-handoff-offer-authority.js";
 
 describe("case handoff requirement snapshots", () => {
   it("hashes equivalent snapshots consistently and detects requirement changes", () => {
