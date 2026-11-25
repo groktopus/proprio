@@ -351,9 +351,10 @@ reconciliation reason across the remote deadline and omits the internal
 classification from the caller response. The regression holds the real
 fingerprint lock past the deadline, checks the failed replacement in
 PostgreSQL and verifies that the original unresolved intent stays open.
-Six focused gateway tests passed on composed source
-`d87f64c97347ffa7db3dd8b744e62c63720b8f00`. Hosted Linux qualification
-for this revision is in progress.
+Six focused gateway tests and all 77 audit route and MCP Tasks tests
+passed on composed source `d87f64c97347ffa7db3dd8b744e62c63720b8f00`.
+The scoped server typecheck and generated OpenAPI check passed. Hosted
+Linux qualification for this revision is in progress.
 [Approved caller](https://github.com/groktopus/proprio/pull/403)
 [Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45569138741)
 
