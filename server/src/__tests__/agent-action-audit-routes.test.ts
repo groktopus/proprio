@@ -384,6 +384,86 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("allows another auditor to collect when one owner reaches the principal snapshot limit", async () => {
+    const { company } = await seed();
+    const users = [randomUUID(), randomUUID()];
+    await db.insert(companyMemberships).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, membershipRole: "operator", status: "active",
+    })));
+    await db.insert(principalPermissionGrants).values(users.map(principalId => ({
+      companyId: company.id, principalType: "user", principalId, permissionKey: "audit:view_agent_actions",
+    })));
+    const [first, second] = await Promise.all(users.map(async userId =>
+      request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] })),
+    ));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    await db.insert(managedAuditExports).values(Array.from({ length: 32 }, () => ({
+      companyId: company.id, userId: users[0], sourceEpoch: epoch,
+      from: new Date(window.from), to: new Date(window.to), eventIds: [], watermark: "fixture",
+      expiresAt: new Date(Date.now() + 60_000),
+    })));
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      expect((await first.post(path).send(window).expect(429)).body)
+        .toMatchObject({ details: { reasonCode: "principal_snapshot_limit" } });
+      await second.post(path).send(window).expect(201);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reclaims quota after an epoch or retention change while keeping old checkpoints fenced", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, {
+      type: "board", source: "session", userId, companyIds: [company.id],
+    }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const oldEpoch = randomUUID();
+    const currentEpoch = randomUUID();
+    const window = { from: "2026-07-17T00:00:01.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const oldStart = "2026-07-17T00:00:00.000Z";
+    const [oldEpochRow, oldRetentionRow] = await db.insert(managedAuditExports).values(
+      Array.from({ length: 128 }, (_, index) => ({
+        companyId: company.id, userId, sourceEpoch: index % 2 ? currentEpoch : oldEpoch,
+        from: new Date(index % 2 ? oldStart : window.from), to: new Date(window.to),
+        eventIds: [randomUUID()], watermark: "fixture", expiresAt: new Date(Date.now() + 60_000),
+      })),
+    ).returning({ id: managedAuditExports.id });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", currentEpoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", oldStart);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
+    try {
+      await board.post(path).send(window).expect(201);
+      for (const [row, reasonCode] of [[oldEpochRow, "source_epoch_changed"], [oldRetentionRow, "retention_window_expired"]] as const) {
+        const stale = await board.get(`${path}/${row.id}`).expect(409);
+        expect(stale.body).toMatchObject({ details: { reasonCode } });
+        expect(stale.body).not.toHaveProperty("eventCount");
+        const [marker] = await db.select({ eventIds: managedAuditExports.eventIds }).from(managedAuditExports)
+          .where(eq(managedAuditExports.id, row.id));
+        expect(marker.eventIds).toEqual([]);
+      }
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+      expect((await board.get(`${path}/${oldRetentionRow.id}`).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
+      expect((await board.get(`${path}/${oldEpochRow.id}`).expect(409)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reserves snapshot storage per company even when another database client sees the same last slot", async () => {
     const { company } = await seed();
     const { company: otherCompany } = await seed();
@@ -407,7 +487,8 @@ describePostgres("agent action audit routes", () => {
       expiresAt: new Date(Date.now() + 60_000),
     };
     const saved = await db.insert(managedAuditExports)
-      .values(Array.from({ length: 127 }, () => fields)).returning({ id: managedAuditExports.id });
+      .values(Array.from({ length: 127 }, () => ({ ...fields, userId: randomUUID() })))
+      .returning({ id: managedAuditExports.id });
     const [expired] = await db.insert(managedAuditExports).values({
       ...fields, expiresAt: new Date(0),
     }).returning({ id: managedAuditExports.id });
@@ -451,6 +532,77 @@ describePostgres("agent action audit routes", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it("returns a retryable failure when its serializable snapshot quota loses a writer race", async () => {
+    const { company } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    const retainAfter = "2026-07-01T00:00:00.000Z";
+    const triggerKey = 380_380;
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", retainAfter);
+    const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const writerDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    let held = false;
+    let losingRequest: Promise<{ status: number; body: Record<string, unknown>; text: string }> | undefined;
+    try {
+      await db.insert(managedAuditExports).values(Array.from({ length: 31 }, () => ({
+        companyId: company.id, userId, sourceEpoch: epoch,
+        from: new Date(window.from), to: new Date(window.to), eventIds: [],
+        watermark: "quota-race-fixture", expiresAt: new Date(Date.now() + 60_000),
+      })));
+      await db.execute(sql`create function public.proprio_test_block_managed_export_insert() returns trigger language plpgsql as $$ begin if new.watermark not in ('quota-race-fixture', 'winning-concurrent-quota-writer') then perform pg_advisory_xact_lock(380380::bigint); end if; return new; end $$`);
+      await db.execute(sql`create trigger proprio_test_block_managed_export_insert before insert on managed_audit_exports for each row execute function public.proprio_test_block_managed_export_insert()`);
+      await lockDb.execute(sql`select pg_advisory_lock(${triggerKey}::bigint)`);
+      held = true;
+
+      losingRequest = board.post(path).send(window).then(response => response);
+      await vi.waitFor(async () => {
+        const [waiting] = await db.execute<{ count: number }>(sql`
+          select count(*)::int as count from pg_locks
+          where locktype = 'advisory' and not granted and classid = 0 and objid = ${triggerKey}::oid
+        `);
+        expect(waiting.count).toBeGreaterThan(0);
+      });
+      await writerDb.transaction(async tx => {
+        await tx.execute(sql`select count(*) from managed_audit_exports where company_id = ${company.id} and user_id = ${userId} and source_epoch = ${epoch} and expires_at > now() and from_at >= ${retainAfter}::timestamptz`);
+        await tx.insert(managedAuditExports).values({
+          companyId: company.id, userId, sourceEpoch: epoch,
+          from: new Date(window.from), to: new Date(window.to), eventIds: [],
+          watermark: "winning-concurrent-quota-writer", expiresAt: new Date(Date.now() + 60_000),
+        });
+      }, { isolationLevel: "serializable" });
+      await lockDb.execute(sql`select pg_advisory_unlock(${triggerKey}::bigint)`);
+      held = false;
+
+      const response = await losingRequest;
+      expect(response.status, response.text).toBe(503);
+      expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      const snapshots = await db.select().from(managedAuditExports).where(eq(managedAuditExports.companyId, company.id));
+      expect(snapshots).toHaveLength(32);
+      expect(snapshots.filter(snapshot => snapshot.watermark === "winning-concurrent-quota-writer")).toHaveLength(1);
+      expect(snapshots.filter(snapshot => snapshot.watermark === "quota-race-fixture")).toHaveLength(31);
+      expect((await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created")).toHaveLength(0);
+    } finally {
+      if (held) await lockDb.execute(sql`select pg_advisory_unlock(${triggerKey}::bigint)`).catch(() => undefined);
+      await Promise.allSettled([losingRequest]);
+      await db.execute(sql`drop trigger if exists proprio_test_block_managed_export_insert on managed_audit_exports`);
+      await db.execute(sql`drop function if exists public.proprio_test_block_managed_export_insert()`);
+      await writerDb.$client.end();
+      await lockDb.$client.end();
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
 
   it.each(["managed_audit_exports", "managed_audit_export_page_access"])(
     "keeps the ordinary pool available while an audit page waits for %s",

@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, not, or, sql, type SQL } from "drizzle-orm";
 import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -12,6 +12,7 @@ const PAGE_SIZE = 200;
 // truthful. Keep that repeated query and its UUID array explicitly bounded.
 const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
 const MAX_ACTIVE_COMPANY_SNAPSHOTS = 128;
+const MAX_ACTIVE_PRINCIPAL_SNAPSHOTS = 32;
 const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
 const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
 const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
@@ -214,6 +215,27 @@ async function cleanExpiredSnapshots(tx: DbTransaction, companyId: string, now: 
     .where(inArray(managedAuditExports.id, recentExpirations));
 }
 
+async function snapshotLimitReached(tx: DbTransaction, condition: SQL | undefined, limit: number) {
+  const [boundary] = await tx.select({ present: sql<number>`1` }).from(managedAuditExports)
+    .where(condition).offset(limit - 1).limit(1);
+  return Boolean(boundary);
+}
+
+async function retireSupersededSnapshots(tx: DbTransaction, scope: ExportScope, now: Date) {
+  const superseded = tx.select({ id: managedAuditExports.id }).from(managedAuditExports).where(and(
+    eq(managedAuditExports.companyId, scope.companyId),
+    gt(managedAuditExports.expiresAt, now),
+    or(
+      ne(managedAuditExports.sourceEpoch, scope.sourceEpoch),
+      scope.retainAfter ? lt(managedAuditExports.from, scope.retainAfter) : undefined,
+    ),
+  )).orderBy(asc(managedAuditExports.expiresAt), asc(managedAuditExports.id)).limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+  // Retire superseded memberships even if the cutoff or epoch later rolls
+  // back. The retained row still explains the current epoch or cutoff conflict.
+  await tx.update(managedAuditExports).set({ expiresAt: now, eventIds: [] })
+    .where(inArray(managedAuditExports.id, superseded));
+}
+
 export async function createManagedAuditExport(
   db: Db,
   scope: ExportScope & { captureFrom: Date },
@@ -229,15 +251,24 @@ export async function createManagedAuditExport(
     const now = new Date();
     // Serializable isolation makes this quota check and the insert one
     // ordered operation even when separate API replicas create snapshots.
-    const active = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
-      .where(and(eq(managedAuditExports.companyId, scope.companyId), gt(managedAuditExports.expiresAt, now)))
-      .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
-    if (active.length === MAX_ACTIVE_COMPANY_SNAPSHOTS) {
+    const active = and(
+      eq(managedAuditExports.companyId, scope.companyId),
+      eq(managedAuditExports.sourceEpoch, scope.sourceEpoch),
+      gt(managedAuditExports.expiresAt, now),
+      scope.retainAfter ? gte(managedAuditExports.from, scope.retainAfter) : undefined,
+    );
+    if (await snapshotLimitReached(tx, and(active, eq(managedAuditExports.userId, userId)), MAX_ACTIVE_PRINCIPAL_SNAPSHOTS)) {
+      throw tooManyRequests("You already have the maximum number of active audit snapshots. Resume an existing snapshot or retry after one expires.", {
+        reasonCode: "principal_snapshot_limit",
+      });
+    }
+    if (await snapshotLimitReached(tx, active, MAX_ACTIVE_COMPANY_SNAPSHOTS)) {
       throw tooManyRequests("The company already has the maximum number of active audit snapshots. Retry after a snapshot expires.", {
         reasonCode: "active_snapshot_limit",
       });
     }
     await cleanExpiredSnapshots(tx, scope.companyId, now);
+    await retireSupersededSnapshots(tx, scope, now);
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
@@ -314,10 +345,10 @@ export async function readManagedAuditExportPage(
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {
       throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
     }
+    assertRetainedWindow(scope, snapshot.from);
     if (snapshot.expiresAt <= new Date()) {
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }
-    assertRetainedWindow(scope, snapshot.from);
     if (snapshot.invalidated) return null;
     // Defensive fence for rows written by older code or modified outside this
     // service. It also bounds the all-member visibility revalidation below.
