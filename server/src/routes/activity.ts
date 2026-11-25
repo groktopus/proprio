@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { Db } from "@groktopus/db";
 import { normalizeIssueIdentifier } from "@groktopus/shared";
@@ -319,14 +319,27 @@ export function activityRoutes(db: Db) {
     res.status(201).json(await createManagedAuditExport(db, scope, { from, to }));
   });
 
-  router.get("/companies/:companyId/audit/managed-exports/:exportId", async (req, res) => {
+  const readManagedExportPage = async (req: Request, res: Response, recordAccess: boolean) => {
     const params = managedAuditExportParamsSchema.safeParse(req.params);
     if (!params.success) throw badRequest("Company and export IDs must be UUIDs");
     const scope = await managedAuditScope(req, params.data.companyId);
     const query = managedAuditExportPageQuerySchema.safeParse(req.query);
     if (!query.success) throw badRequest("Invalid managed audit export cursor");
     res.set("Cache-Control", "no-store");
-    res.json(await readManagedAuditExportPage(db, scope, params.data.exportId, query.data.cursor));
+    const page = await readManagedAuditExportPage(db, scope, params.data.exportId, query.data.cursor, recordAccess);
+    if (!recordAccess) {
+      res.status(200).end();
+      return;
+    }
+    // Bypass Express freshness handling: an authenticated GET must return the
+    // body whose successful release is represented by the access receipt.
+    res.type("application/json").status(200).end(JSON.stringify(page));
+  };
+  router.head("/companies/:companyId/audit/managed-exports/:exportId", async (req, res) => {
+    await readManagedExportPage(req, res, false);
+  });
+  router.get("/companies/:companyId/audit/managed-exports/:exportId", async (req, res) => {
+    await readManagedExportPage(req, res, true);
   });
 
   router.get("/companies/:companyId/audit/agent-actions.csv", async (req, res) => {
