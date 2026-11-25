@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import request from "supertest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -328,6 +328,74 @@ describePostgres("agent action audit routes", () => {
       vi.unstubAllEnvs();
     }
   }, 45_000);
+
+  it("reserves snapshot storage per company even when another database client sees the same last slot", async () => {
+    const { company } = await seed();
+    const { company: otherCompany } = await seed();
+    const userId = randomUUID();
+    const principals = [company.id, otherCompany.id].map(companyId => ({ companyId, principalId: userId }));
+    await db.insert(companyMemberships).values(principals.map(principal => ({
+      ...principal, principalType: "user", membershipRole: "operator", status: "active",
+    })));
+    await db.insert(principalPermissionGrants).values(principals.map(principal => ({
+      ...principal, principalType: "user", permissionKey: "audit:view_agent_actions",
+    })));
+    const board = request(await createApp(db, {
+      type: "board", source: "session", userId, companyIds: [company.id, otherCompany.id],
+    }));
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    const fields = {
+      companyId: company.id, userId, sourceEpoch: epoch, from: new Date(window.from), to: new Date(window.to),
+      eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"),
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const saved = await db.insert(managedAuditExports)
+      .values(Array.from({ length: 127 }, () => fields)).returning({ id: managedAuditExports.id });
+    const [expired] = await db.insert(managedAuditExports).values({
+      ...fields, expiresAt: new Date(0),
+    }).returning({ id: managedAuditExports.id });
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+
+    const otherWriter = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const ready = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const replica = otherWriter.transaction(async tx => {
+      const active = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports).where(and(
+        eq(managedAuditExports.companyId, company.id), gt(managedAuditExports.expiresAt, new Date()),
+      )).limit(128);
+      expect(active).toHaveLength(127);
+      ready.resolve();
+      await release.promise;
+      await tx.insert(managedAuditExports).values(fields);
+    }, { isolationLevel: "serializable" });
+    try {
+      await Promise.race([ready.promise, replica]);
+      await board.post(path).send(window).expect(201);
+      const rejectedReplica = expect(replica).rejects.toMatchObject({ cause: { code: "40001" } });
+      release.resolve();
+      await rejectedReplica;
+
+      const limited = await board.post(path).send(window).expect(429);
+      expect(limited.body).toMatchObject({ details: { reasonCode: "active_snapshot_limit" } });
+      const retained = await db.select({ id: managedAuditExports.id }).from(managedAuditExports)
+        .where(eq(managedAuditExports.companyId, company.id));
+      expect(retained).toHaveLength(128);
+      expect(retained.map(entry => entry.id)).not.toContain(expired.id);
+      await board.post(`/api/companies/${otherCompany.id}/audit/managed-exports`).send(window).expect(201);
+
+      await db.update(managedAuditExports).set({ expiresAt: new Date(0) }).where(eq(managedAuditExports.id, saved[0].id));
+      await board.post(path).send(window).expect(201);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([replica]);
+      await otherWriter.$client.end();
+      vi.unstubAllEnvs();
+    }
+  });
 
   it.each(["managed_audit_exports", "managed_audit_export_page_access"])(
     "keeps the ordinary pool available while an audit page waits for %s",

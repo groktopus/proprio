@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, count, eq, exists, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -11,6 +11,7 @@ const PAGE_SIZE = 200;
 // Every page revalidates the complete membership so counts and watermarks stay
 // truthful. Keep that repeated query and its UUID array explicitly bounded.
 const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
+const MAX_ACTIVE_COMPANY_SNAPSHOTS = 128;
 const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
 const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
 const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
@@ -26,6 +27,17 @@ type ExportScope = {
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
+const serializable = { isolationLevel: "serializable" } as const;
+const snapshotColumns = {
+  id: managedAuditExports.id,
+  sourceEpoch: managedAuditExports.sourceEpoch,
+  from: managedAuditExports.from,
+  to: managedAuditExports.to,
+  watermark: managedAuditExports.watermark,
+  expiresAt: managedAuditExports.expiresAt,
+  cursorSecret: managedAuditExports.cursorSecret,
+  eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
+};
 let activeExportCompany: string | null = null;
 const waitingExports: Array<{ companyId: string; admit: () => void }> = [];
 
@@ -69,7 +81,12 @@ async function acquireExport(companyId: string, signal?: AbortSignal) {
   });
 }
 
-async function runExportTransaction<T>(db: Db, { companyId, signal }: ExportScope, work: (tx: DbTransaction) => Promise<T>): Promise<T> {
+async function runExportTransaction<T>(
+  db: Db,
+  { companyId, signal }: ExportScope,
+  work: (tx: DbTransaction) => Promise<T>,
+  transactionOptions: typeof repeatableRead | typeof serializable = repeatableRead,
+): Promise<T> {
   await acquireExport(companyId, signal);
   try {
     signal?.throwIfAborted();
@@ -80,7 +97,7 @@ async function runExportTransaction<T>(db: Db, { companyId, signal }: ExportScop
         least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
         true) from pg_settings where name = 'statement_timeout'`);
       return work(tx);
-    }, repeatableRead), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
+    }, transactionOptions), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
     if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
       || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
@@ -150,7 +167,9 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
   if (missing) throw conflict("Managed audit source has unavailable event bindings. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
 }
 
-function exportReceipt(snapshot: typeof managedAuditExports.$inferSelect) {
+type SnapshotReceipt = Pick<typeof managedAuditExports.$inferSelect, "id" | "sourceEpoch" | "from" | "to" | "watermark" | "expiresAt"> & { eventCount: number };
+
+function exportReceipt(snapshot: SnapshotReceipt) {
   return {
     exportId: snapshot.id,
     source: "tool_gateway" as const,
@@ -159,7 +178,7 @@ function exportReceipt(snapshot: typeof managedAuditExports.$inferSelect) {
     from: snapshot.from.toISOString(),
     to: snapshot.to.toISOString(),
     watermark: snapshot.watermark,
-    eventCount: snapshot.eventIds.length,
+    eventCount: snapshot.eventCount,
     expiresAt: snapshot.expiresAt.toISOString(),
   };
 }
@@ -183,9 +202,21 @@ export async function createManagedAuditExport(
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
     const now = new Date();
-    await tx.delete(managedAuditExports).where(and(
-      eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
-    ));
+    // Serializable isolation makes this quota check and the insert one
+    // ordered operation even when separate API replicas create snapshots.
+    const active = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+      .where(and(eq(managedAuditExports.companyId, scope.companyId), gt(managedAuditExports.expiresAt, now)))
+      .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+    if (active.length === MAX_ACTIVE_COMPANY_SNAPSHOTS) {
+      throw tooManyRequests("The company already has the maximum number of active audit snapshots. Retry after a snapshot expires.", {
+        reasonCode: "active_snapshot_limit",
+      });
+    }
+    const expired = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+      .where(and(eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now)))
+      .orderBy(asc(managedAuditExports.expiresAt))
+      .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+    await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, expired));
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
@@ -209,7 +240,7 @@ export async function createManagedAuditExport(
       eventIds,
       watermark,
       expiresAt: new Date(now.getTime() + SNAPSHOT_TTL_MS),
-    }).returning();
+    }).returning(snapshotColumns);
     await logActivity(tx as unknown as Db, {
       companyId: scope.companyId,
       actorType: "user",
@@ -220,23 +251,23 @@ export async function createManagedAuditExport(
       details: { exportId: saved.id, source: "tool_gateway" },
     }, publications);
     return saved;
-  });
+  }, serializable);
   for (const publication of publications) publishActivity(publication);
   return exportReceipt(snapshot);
 }
 
-function encodeCursor(snapshot: typeof managedAuditExports.$inferSelect, offset: number) {
+function encodeCursor(snapshot: { cursorSecret: string }, offset: number) {
   const signature = createHmac("sha256", snapshot.cursorSecret).update(String(offset)).digest("hex");
   return `${offset}.${signature}`;
 }
 
-function decodeCursor(snapshot: typeof managedAuditExports.$inferSelect, cursor?: string) {
+function decodeCursor(snapshot: { cursorSecret: string; eventCount: number }, cursor?: string) {
   if (cursor === undefined) return 0;
   const value = /^([1-9][0-9]{0,9})\.([a-f0-9]{64})$/.exec(cursor);
   if (value) {
     const offset = Number(value[1]);
     const expected = encodeCursor(snapshot, offset);
-    if (offset < snapshot.eventIds.length && timingSafeEqual(Buffer.from(cursor), Buffer.from(expected))) {
+    if (offset < snapshot.eventCount && timingSafeEqual(Buffer.from(cursor), Buffer.from(expected))) {
       return offset;
     }
   }
@@ -252,15 +283,12 @@ export async function readManagedAuditExportPage(
 ) {
   return runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
-    const [snapshot] = await tx.select({
-      ...getTableColumns(managedAuditExports),
-      eventIds: sql<string[] | null>`case when cardinality(${managedAuditExports.eventIds}) <= ${MAX_SNAPSHOT_MEMBERSHIP}
-        then ${managedAuditExports.eventIds} end`.mapWith(managedAuditExports.eventIds),
-    }).from(managedAuditExports).where(and(
+    const ownedSnapshot = and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),
       eq(managedAuditExports.userId, userId),
-    ));
+    );
+    const [snapshot] = await tx.select(snapshotColumns).from(managedAuditExports).where(ownedSnapshot);
     if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {
       throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
@@ -271,27 +299,28 @@ export async function readManagedAuditExportPage(
     assertRetainedWindow(scope, snapshot.from);
     // Defensive fence for rows written by older code or modified outside this
     // service. It also bounds the all-member visibility revalidation below.
-    const eventIds = snapshot.eventIds;
-    if (eventIds === null) {
+    if (snapshot.eventCount > MAX_SNAPSHOT_MEMBERSHIP) {
       throw conflict("Managed audit export exceeds the supported snapshot membership. Create a narrower export.", {
         reasonCode: "snapshot_membership_limit",
       });
     }
-    const boundedSnapshot = { ...snapshot, eventIds };
-    const offset = decodeCursor(boundedSnapshot, cursor);
-    const ids = eventIds.slice(offset, offset + PAGE_SIZE);
+    const offset = decodeCursor(snapshot, cursor);
     const visible = await visibleEvents(tx, scope);
-    if (eventIds.length > 0) {
-      // Counts and watermarks also describe rows on other pages. Check all
-      // snapshot members in the same transaction before returning either.
+    if (snapshot.eventCount > 0) {
+      // Keep the full membership in PostgreSQL. Counts and watermarks
+      // describe other pages, so validate all members in this transaction.
+      const membership = tx.select({ ids: managedAuditExports.eventIds }).from(managedAuditExports).where(ownedSnapshot);
       const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
-        .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(eventIds, managedAuditExports.eventIds)})`));
-      if (available.eventCount !== eventIds.length) {
+        .where(and(visible, sql`${managedAuditEvents.id} = any((${membership})::uuid[])`));
+      if (available.eventCount !== snapshot.eventCount) {
         throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
       }
     }
-    const events = ids.length
-      ? await tx.select().from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
+    const pageIds = tx.select({
+      ids: sql`${managedAuditExports.eventIds}[${offset + 1}:${offset + PAGE_SIZE}]`,
+    }).from(managedAuditExports).where(ownedSnapshot);
+    const events = snapshot.eventCount
+      ? await tx.select().from(managedAuditEvents).where(and(visible, sql`${managedAuditEvents.id} = any((${pageIds})::uuid[])`))
         .orderBy(asc(managedAuditEvents.id))
       : [];
     const deliveredThrough = offset + events.length;
@@ -315,11 +344,11 @@ export async function readManagedAuditExportPage(
       }
     }
     return {
-      ...exportReceipt(boundedSnapshot),
+      ...exportReceipt(snapshot),
       events,
       deliveredThrough,
-      nextCursor: deliveredThrough < eventIds.length ? encodeCursor(boundedSnapshot, deliveredThrough) : null,
-      complete: deliveredThrough === eventIds.length,
+      nextCursor: deliveredThrough < snapshot.eventCount ? encodeCursor(snapshot, deliveredThrough) : null,
+      complete: deliveredThrough === snapshot.eventCount,
     };
   });
 }

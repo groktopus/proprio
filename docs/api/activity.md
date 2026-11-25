@@ -70,4 +70,6 @@ the cutoff. A cursor for an expired window cannot be resumed. For
 `429 export_busy` or `503 export_retry_required`, retry the same request or
 cursor with backoff. For a creation request with `413 snapshot_membership_limit`,
 narrow the time window and consult the [export guide](../../doc/managed-audit-export.md)
-for intervals that cannot be split.
+for intervals that cannot be split. A create request at the company snapshot
+limit returns `429 active_snapshot_limit`. Resume a retained snapshot or
+retry after one expires.
