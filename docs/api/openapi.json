@@ -63069,10 +63069,6 @@
                         ]
                       }
                     },
-                    "deliveredThrough": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
                     "nextCursor": {
                       "type": "string",
                       "nullable": true
@@ -63092,7 +63088,6 @@
                     "eventCount",
                     "expiresAt",
                     "events",
-                    "deliveredThrough",
                     "nextCursor",
                     "complete"
                   ]
