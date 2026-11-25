@@ -254,6 +254,7 @@ export async function createManagedAuditExport(
     const active = and(
       eq(managedAuditExports.companyId, scope.companyId),
       eq(managedAuditExports.sourceEpoch, scope.sourceEpoch),
+      eq(managedAuditExports.invalidated, false),
       gt(managedAuditExports.expiresAt, now),
       scope.retainAfter ? gte(managedAuditExports.from, scope.retainAfter) : undefined,
     );
