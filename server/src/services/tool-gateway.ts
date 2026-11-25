@@ -8629,6 +8629,7 @@ export function createToolGatewayService(
         };
         try {
           if (options.remoteHttpRequest) {
+            init.signal?.throwIfAborted();
             onRequestStart();
             return await options.remoteHttpRequest(target, init);
           }
