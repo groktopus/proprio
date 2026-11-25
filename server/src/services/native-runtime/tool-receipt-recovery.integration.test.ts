@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { activityLog, agentCommentary, agents, companies, createDb, heartbeatRuns, issueComments, issues } from "@groktopus/db";
 import { startRecoveryPostgres } from "../../__tests__/helpers/recovery-postgres.js";
 import { ProprioRunnerToolAuthority } from "./proprio-runner-tool-authority.js";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 
 describe("tool receipt recovery through the mutation owner", () => {
   let temporary: Awaited<ReturnType<typeof startRecoveryPostgres>>;
@@ -18,16 +19,20 @@ describe("tool receipt recovery through the mutation owner", () => {
     const companyId = randomUUID(), agentId = randomUUID(), nextId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Receipt recovery", issuePrefix: `R${companyId.slice(0, 6)}` });
     await db.insert(agents).values([
-      { id: agentId, companyId, name: "Manager", role: "ceo", status: "active", adapterType: "proprio_runner" },
+      { id: agentId, companyId, name: "Manager", role: "ceo", status: "active", adapterType: "proprio_runner", adapterConfig: { proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } } },
       { id: nextId, companyId, name: "Engineer", role: "engineer", status: "active", adapterType: "proprio_runner" },
     ]);
     await db.insert(issues).values({ id: issueId, companyId, title: "Coordinate", status: "in_progress", assigneeAgentId: agentId });
-    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: issueId, contextSnapshot: { issueId } });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: issueId,
+      contextSnapshot: { issueId, agentProactiveCommentarySkillKeys: [...PROPRIO_FEEDBACK_SKILL_KEYS] } });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
     const enqueueWakeup = vi.fn().mockResolvedValue(null);
     const stopTaskForReassignment = vi.fn().mockResolvedValue(undefined);
-    const binding = { companyId, agentId, issueId, runId, enqueueWakeup, stopTaskForReassignment, syncIssueExternalObjects: vi.fn().mockResolvedValue(undefined) };
-    const replacement = () => new ProprioRunnerToolAuthority(db, binding);
+    const binding = { companyId, agentId, issueId, runId, proactiveCommentarySkillKeys: [...PROPRIO_FEEDBACK_SKILL_KEYS],
+      runtimeContext: { skills: PROPRIO_FEEDBACK_SKILL_KEYS.map(key => ({ key })) } as never,
+      enqueueWakeup, stopTaskForReassignment, syncIssueExternalObjects: vi.fn().mockResolvedValue(undefined) };
+    const replacement = (deliverCommentary = true) => new ProprioRunnerToolAuthority(db,
+      deliverCommentary ? binding : { ...binding, runtimeContext: { skills: [] } as never });
     const effects = async () => ({
       activity: await db.select().from(activityLog).where(eq(activityLog.companyId, companyId)),
       comments: await db.select().from(issueComments).where(eq(issueComments.companyId, companyId)),
@@ -49,7 +54,7 @@ describe("tool receipt recovery through the mutation owner", () => {
       await db.update(issues).set({ title: "Later human title" }).where(eq(issues.id, f.issueId));
     }
     const before = await f.effects();
-    expect(await f.replacement().recover(call)).toEqual({ result: tool === "set_task_title" ? result : { ...result as object, replayed: true } });
+    expect(await f.replacement(tool === "set_task_title").recover(call)).toEqual({ result: tool === "set_task_title" ? result : { ...result as object, replayed: true } });
     expect(await f.effects()).toEqual(before);
     expect(await f.replacement().recover({ ...call, arguments: { ...args, ...(tool === "set_task_title" ? { title: "Different intent" } : { body: "Different intent" }) } })).toBeNull();
     expect(await f.replacement().recover({ ...call, arguments: { ...args, idempotencyKey: "missing" } })).toBeNull();

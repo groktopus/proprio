@@ -22,6 +22,7 @@ import {
   isProprioExternalChatQuestionResponseTurn,
   isProprioExternalChatTurn,
   materializeProprioSkillCopy,
+  removeUnselectedProprioSkillSymlinks,
   normalizeProprioRunnerAdapterConfig,
   PROPRIO_OPERATIONAL_SKILL_KEY,
   PROPRIO_FEEDBACK_SKILL_KEYS,
@@ -47,6 +48,53 @@ import {
 } from "./server-utils.js";
 
 const execFile = promisify(execFileCallback);
+
+describe("removeUnselectedProprioSkillSymlinks", () => {
+  it("reconciles competing cleanup and matches every known source for a runtime name", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-skill-reconcile-"));
+    try {
+      const skillsHome = path.join(root, "home");
+      const firstSource = path.join(root, "first", "skill");
+      const secondSource = path.join(root, "second", "skill");
+      await fs.mkdir(skillsHome, { recursive: true });
+      await fs.mkdir(firstSource, { recursive: true });
+      await fs.mkdir(secondSource, { recursive: true });
+      await fs.symlink(secondSource, path.join(skillsHome, "shared-name"));
+
+      const available = [
+        { runtimeName: "shared-name", source: firstSource },
+        { runtimeName: "shared-name", source: secondSource },
+      ];
+      const competing = await Promise.all([
+        removeUnselectedProprioSkillSymlinks(skillsHome, available, []),
+        removeUnselectedProprioSkillSymlinks(skillsHome, available, []),
+      ]);
+
+      expect(competing.flat()).toEqual(["shared-name"]);
+      await expect(fs.lstat(path.join(skillsHome, "shared-name"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a live source alone when another source with the same name is known", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-skill-reconcile-"));
+    try {
+      const skillsHome = path.join(root, "home");
+      const source = path.join(root, "second", "skill");
+      await fs.mkdir(skillsHome, { recursive: true });
+      await fs.mkdir(source, { recursive: true });
+      await fs.symlink(source, path.join(skillsHome, "shared-name"));
+
+      await expect(removeUnselectedProprioSkillSymlinks(skillsHome, [
+        { runtimeName: "shared-name", source: path.join(root, "first", "skill") },
+        { runtimeName: "shared-name", source },
+      ], [])).resolves.toEqual(["shared-name"]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 it("keeps Pi draft models empty and preserves saved native Pi settings", () => {
   expect(normalizeProprioRunnerAdapterConfig("proprio_runner", { provider: "acpx", acpxAgent: "pi", model: "" })).toMatchObject({ provider: "acpx", acpxAgent: "pi", model: "" });
@@ -191,14 +239,21 @@ describe("legacy adapter skill selection", () => {
     );
   });
 
-  it("makes feedback available to existing legacy agents without opting native agents into API skills", () => {
+  it("keeps proactive commentary opt-in for legacy and native agents", () => {
     const inventory = [operationalEntry, ...PROPRIO_FEEDBACK_SKILL_KEYS.map((key) => ({ key }))];
     for (const config of [{}, { proprioSkillSync: { desiredSkills: [] } }]) {
       expect(resolveLegacyProprioDesiredSkillNames(config, inventory)).toEqual([
-        PROPRIO_OPERATIONAL_SKILL_KEY, ...PROPRIO_FEEDBACK_SKILL_KEYS,
+        PROPRIO_OPERATIONAL_SKILL_KEY,
       ]);
       expect(resolveProprioDesiredSkillNames(config, inventory)).toEqual([]);
     }
+    const optedIn = { proprioSkillSync: { desiredSkills: PROPRIO_FEEDBACK_SKILL_KEYS } };
+    expect(resolveLegacyProprioDesiredSkillNames(optedIn, inventory)).toEqual([
+      PROPRIO_OPERATIONAL_SKILL_KEY, ...PROPRIO_FEEDBACK_SKILL_KEYS,
+    ]);
+    expect(resolveLegacyProprioDesiredSkillNames(
+      { proprioSkillSync: { desiredSkills: [PROPRIO_FEEDBACK_SKILL_KEYS[0]] } }, inventory,
+    )).toEqual([PROPRIO_OPERATIONAL_SKILL_KEY, PROPRIO_FEEDBACK_SKILL_KEYS[0]]);
     expect(resolveLegacyProprioDesiredSkillNames({}, inventory.slice(1))).toEqual([]);
   });
 });

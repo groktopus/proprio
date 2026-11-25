@@ -1814,7 +1814,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(String(meta[0]?.prompt ?? "")).toContain(`Skill root: ${skillsHome}`);
   });
 
-  it.skipIf(process.platform === "win32")("revokes removed ACPX Codex skills and skips symlinked descendants", async () => {
+  it.skipIf(process.platform === "win32")("revokes ordinary removed ACPX Codex skills but retains shared commentary", async () => {
     const root = await makeTempRoot();
     const skillRoot = path.join(root, "skills");
     const outsideRoot = path.join(root, "outside");
@@ -1823,6 +1823,7 @@ describe("shared ACPX engine runtime behavior", () => {
     await fs.writeFile(path.join(outsideRoot, "secret.txt"), "do not expose", "utf8");
     const keep = await createSkill(skillRoot, "keep");
     const remove = await createSkill(skillRoot, "remove");
+    const feedback = { ...await createSkill(skillRoot, "complain"), key: "groktopus/proprio/complain" };
     await fs.symlink(path.join(outsideRoot, "secret.txt"), path.join(keep.source, "leak.txt"));
     await fs.symlink(outsideRoot, path.join(keep.source, "leak-dir"));
 
@@ -1830,12 +1831,12 @@ describe("shared ACPX engine runtime behavior", () => {
       agent: "codex",
       stateDir: path.join(root, "state"),
       env: { CODEX_HOME: codexHome },
-      proprioRuntimeSkills: [keep, remove],
+      proprioRuntimeSkills: [keep, remove, feedback],
     };
 
     await runExecutor({
       ...baseConfig,
-      proprioSkillSync: { desiredSkills: [keep.key, remove.key] },
+      proprioSkillSync: { desiredSkills: [keep.key, remove.key, feedback.key] },
     });
     expect(await pathExists(path.join(codexHome, "skills", remove.runtimeName, "SKILL.md"))).toBe(true);
 
@@ -1848,6 +1849,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(await pathExists(path.join(codexHome, "skills", keep.runtimeName, "leak.txt"))).toBe(false);
     expect(await pathExists(path.join(codexHome, "skills", keep.runtimeName, "leak-dir"))).toBe(false);
     expect(await pathExists(path.join(codexHome, "skills", remove.runtimeName))).toBe(false);
+    expect(await pathExists(path.join(codexHome, "skills", feedback.runtimeName, "SKILL.md"))).toBe(true);
   });
 
   it.skipIf(process.platform === "win32")("keeps the operational skill in an ACPX Codex home after an empty replacement", async () => {
@@ -5269,6 +5271,39 @@ describe("ACPX engine Claude skill bundle staging (remote ACP lane)", () => {
     const hostSkillsHome = path.join(hostBundleDir, ".claude", "skills");
     await expect(pathExists(path.join(hostSkillsHome, "symlinked-skill-md"))).resolves.toBe(false);
     await expect(pathExists(path.join(hostSkillsHome, "no-skill-md"))).resolves.toBe(false);
+  });
+
+  it("stages only this Gemini run's authorized skills, leaving old and operator links out", async () => {
+    const { root, stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const home = path.join(root, "gemini-home");
+    const selected = await createSkill(path.join(root, "sources"), "selected-gemini", "# SELECTED_GEMINI\n");
+    const revoked = await createSkill(path.join(root, "sources"), "revoked-gemini", "# REVOKED_GEMINI\n");
+    const skillsHome = path.join(home, ".gemini", "skills");
+    await fs.mkdir(skillsHome, { recursive: true });
+    await fs.symlink(revoked.source, path.join(skillsHome, revoked.runtimeName));
+    const operator = path.join(root, "operator", "skills", "operator-skill");
+    await fs.mkdir(operator, { recursive: true });
+    await fs.writeFile(path.join(operator, "SKILL.md"), "# OPERATOR_SKILL\n");
+    await fs.symlink(operator, path.join(skillsHome, "operator-skill"));
+
+    const runId = "gemini-selected-run";
+    const { meta, result } = await runExecutor({
+      agent: "gemini", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd,
+      env: { HOME: home }, proprioRuntimeSkills: [selected],
+      proprioSkillSync: { desiredSkills: [selected.key] },
+    }, {
+      runId, authToken: "real-run-jwt", executionTarget,
+      prepareRemoteManagedHome: stagingClaudeSeam(),
+    });
+
+    const bundle = path.join(stateDir, "runtime-skills", "gemini", runId, "skills");
+    expect(await fs.readdir(bundle)).toEqual([selected.runtimeName]);
+    await expect(fs.readFile(path.join(bundle, selected.runtimeName, "SKILL.md"), "utf8")).resolves.toContain("SELECTED_GEMINI");
+    await expect(fs.readFile(path.join(bundle, revoked.runtimeName, "SKILL.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(path.join(bundle, "operator-skill", "SKILL.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(String(meta[0]?.prompt ?? "")).toContain("Skill root for this run:");
+    expect(String(meta[0]?.prompt ?? "")).not.toContain(home);
+    expect(result.sessionParams?.skills).toMatchObject({ selectedSkills: [selected.runtimeName] });
   });
 });
 

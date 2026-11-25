@@ -20,6 +20,7 @@ import { buildNativeRuntimeContext } from "../src/services/native-runtime/runtim
 import { ensureNativeCompletionContract } from "../src/services/native-runtime/completion-contracts.js";
 import { acquireCommentaryDaytonaTarget } from "./agent-commentary-daytona.js";
 import { redactSensitiveText } from "../src/redaction.js";
+import { PROPRIO_FEEDBACK_SKILL_KEYS, readProprioRuntimeSkillEntries } from "@groktopus/adapter-utils/server-utils";
 
 const root = await mkdtemp(join(tmpdir(), "proprio-commentary-live-"));
 let server: Awaited<ReturnType<typeof startRunnerApiTestServer>> | undefined;
@@ -57,19 +58,20 @@ try {
     const f: Awaited<ReturnType<typeof server.fixture>> = await server.fixture({ disableWakeOnDemand: true });
     const remote: Awaited<ReturnType<typeof acquireCommentaryDaytonaTarget>> | null = process.env.PROPRIO_LIVE_ENVIRONMENT === "daytona" ? await acquireCommentaryDaytonaTarget(server.db, f, mode) : null;
     try {
-      const prompt = `This is a bounded integration test in a disposable Proprio instance. Use the available feedback interface to submit exactly one complaint (body: "Live ${mode} complaint: the fixture made me repeat the same setup. UGH.", key: "live-complaint") and one suggestion (body: "Live ${mode} suggestion: repeated setup wastes time; cache the fixture after initialization.", key: "live-suggestion"). ${mode === "legacy" ? "Read the automatically installed complain and suggestion-box skills and use their operational-skill stdin helper, passing each key as its second argument." : "Use the submit_complaint and submit_suggestion native tools with body and idempotencyKey."} Then continue the primary task by writing continued.txt in the working directory containing exactly continued-after-feedback. End with a brief final response. Do not create task comments or modify task status; the test harness owns disposition. Do not retry submissions. Do not access other workspaces or any external messaging tools.`;
+      const prompt = `This is a bounded integration test in a disposable Proprio instance. Use the available feedback interface to submit exactly one complaint (body: "Live ${mode} complaint: the fixture made me repeat the same setup. UGH.", key: "live-complaint") and one suggestion (body: "Live ${mode} suggestion: repeated setup wastes time; cache the fixture after initialization.", key: "live-suggestion"). ${mode === "legacy" ? "Read the operator-selected complain and suggestion-box skills and use their operational-skill stdin helper, passing each key as its second argument." : "Use the enabled submit_complaint and submit_suggestion native tools with body and idempotencyKey."} Then continue the primary task by writing continued.txt in the working directory containing exactly continued-after-feedback. End with a brief final response. Do not create task comments or modify task status; the test harness owns disposition. Do not retry submissions. Do not access other workspaces or any external messaging tools.`;
       let log = "";
       const onLog = async (_stream: "stdout" | "stderr", chunk: string) => { log += chunk; };
       console.error(`Starting real ${mode} Codex feedback smoke.`);
       let result;
       if (mode === "legacy") {
         await server.db.update(heartbeatRuns).set({ runtimeMode: "legacy", nativeIssueId: null }).where(eq(heartbeatRuns.id, f.runId));
-        await createAgentLifecycle(server.db).updateConfiguration(f.agentId, { adapterType: "codex_local" });
+        const adapterConfig = { proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } };
+        await createAgentLifecycle(server.db).updateConfiguration(f.agentId, { adapterType: "codex_local", adapterConfig });
         result = await executeLegacy({
           runId: f.runId,
-          agent: { id: f.agentId, companyId: f.companyId, name: "Feedback smoke", adapterType: "codex_local", adapterConfig: {} },
+          agent: { id: f.agentId, companyId: f.companyId, name: "Feedback smoke", adapterType: "codex_local", adapterConfig },
           runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: f.issueId },
-          config: { engine: "cli", cwd: f.workspace, timeoutSec: 180, promptTemplate: prompt, extraArgs: ["--skip-git-repo-check"], env: { CODEX_HOME: codexHome } },
+          config: { engine: "cli", cwd: f.workspace, timeoutSec: 180, promptTemplate: prompt, extraArgs: ["--skip-git-repo-check"], env: { CODEX_HOME: codexHome }, ...adapterConfig },
           context: { issueId: f.issueId },
           executionTarget: remote?.target,
           authToken: createLocalAgentJwt(f.agentId, f.companyId, "codex_local", f.runId)!, onLog,
@@ -88,7 +90,8 @@ try {
           taskPrompt: prompt, workspace: { id: f.runId, cwd: f.workspace, repoUrl: null, repoRef: null, branchName: null },
           normalizedSessionId: native.normalizedSessionId, provider: "codex", codexApprovalPolicy: "never", codexReasoningEffort: "low",
           completionContract: { id: completion.row.id, sha256: completion.row.canonicalSha256, schemaVersion: completion.row.schemaVersion, contract: completion.contract },
-          runtimeContext: await buildNativeRuntimeContext({ db: server.db, agent, runId: f.runId, runtimeConfig: {}, runtimeSkillEntries: [] }),
+          runtimeContext: await buildNativeRuntimeContext({ db: server.db, agent, runId: f.runId, runtimeConfig: { proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } },
+            runtimeSkillEntries: await readProprioRuntimeSkillEntries({ proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } }, import.meta.dirname) }),
         });
         await server.db.update(heartbeatRuns).set({ runnerProfileJson: { nativeExecutionInput: execution } }).where(eq(heartbeatRuns.id, f.runId));
         await server.db.insert(nativeRunFinalizations).values({ companyId: f.companyId, issueId: f.issueId, runId: f.runId, phase: "observed" });

@@ -155,6 +155,7 @@ import {
   EXECUTION_CONTROL_DEADLINE_MS,
 } from "../execution-control-deadline.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY, PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 import { execFile } from "node:child_process";
 import {
   chmodSync,
@@ -16689,6 +16690,11 @@ async function createRunnerdBackendWithinSessionClaim(
       eq(heartbeatRuns.companyId, input.execution.binding.companyId),
     )).limit(1).then((rows) => rows[0]);
   const nativeReview = readNativeReviewAssignmentContext(reviewRun?.contextSnapshot);
+  const feedbackSkillKeySet = new Set<string>(PROPRIO_FEEDBACK_SKILL_KEYS);
+  const pinnedCommentaryOptIns = Array.isArray(reviewRun?.contextSnapshot?.[PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY])
+    ? (reviewRun.contextSnapshot[PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY] as unknown[])
+      .filter((key): key is string => typeof key === "string" && feedbackSkillKeySet.has(key))
+    : [];
   if (nativeReview && !await getNativeReviewAssignment(input.db, {
     ...input.execution.binding, contextSnapshot: nativeReview,
   })) throw new Error("native_review_assignment_no_longer_available");
@@ -16758,6 +16764,7 @@ async function createRunnerdBackendWithinSessionClaim(
         : undefined,
     workMode: input.execution.task.workMode,
     runtimeContext: "runtimeContext" in input.execution ? input.execution.runtimeContext : undefined,
+    proactiveCommentarySkillKeys: pinnedCommentaryOptIns,
     workspaceBridge: input.execution.schema === "proprio.native-execution-input.v6" && !!input.dotWorkspaceRoot,
     taskAttachmentRead: dotAttachmentActor?.config.dotAttachmentAccess === true,
     dotRuntime: input.execution.schema === "proprio.native-execution-input.v6",

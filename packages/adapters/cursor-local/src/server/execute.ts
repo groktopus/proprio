@@ -132,6 +132,7 @@ async function buildCursorSkillsDir(config: Record<string, unknown>): Promise<st
 type EnsureCursorSkillsInjectedOptions = {
   skillsDir?: string | null;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
+  desiredSkillNames?: Iterable<string>;
   skillsHome?: string;
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
@@ -150,7 +151,8 @@ export async function ensureCursorSkillsInjected(
             source: path.join(options.skillsDir!, entry.name),
           }))
       : await readProprioRuntimeSkillEntries({}, __moduleDir));
-  if (skillsEntries.length === 0) return;
+  const selectedNames = new Set(options.desiredSkillNames ?? skillsEntries.map(entry => entry.key));
+  const selectedEntries = skillsEntries.filter(entry => selectedNames.has(entry.key));
 
   const skillsHome = options.skillsHome ?? resolveCursorSkillsHome({});
   try {
@@ -164,7 +166,7 @@ export async function ensureCursorSkillsInjected(
   }
   const removedSkills = await removeMaintainerOnlySkillSymlinks(
     skillsHome,
-    skillsEntries.map((entry) => entry.runtimeName),
+    selectedEntries.map((entry) => entry.runtimeName),
   );
   for (const skillName of removedSkills) {
     await onLog(
@@ -173,7 +175,8 @@ export async function ensureCursorSkillsInjected(
     );
   }
   const linkSkill = options.linkSkill ?? ((source: string, target: string) => fs.symlink(source, target));
-  for (const entry of skillsEntries) {
+  for (const entry of selectedEntries) {
+    if (isProprioSkillSourceMissing(entry)) continue;
     const target = path.join(skillsHome, entry.runtimeName);
     try {
       const result = await ensureProprioSkillSymlink(entry.source, target, linkSkill);
@@ -233,9 +236,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const desiredCursorSkillNames = resolveLegacyProprioDesiredSkillNames(config, cursorSkillEntries);
   if (!executionTargetIsRemote) {
     await ensureCursorSkillsInjected(onLog, {
-      skillsEntries: cursorSkillEntries.filter(
-        (entry) => desiredCursorSkillNames.includes(entry.key) && !isProprioSkillSourceMissing(entry),
-      ),
+      skillsEntries: cursorSkillEntries,
+      desiredSkillNames: desiredCursorSkillNames,
       skillsHome: resolveCursorSkillsHome(config),
     });
   }

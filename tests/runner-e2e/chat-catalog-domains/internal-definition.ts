@@ -2,6 +2,7 @@ import { chatCatalogOriginalPhaseDeadline, type ChatCatalogCase, type ChatCatalo
 import { observeInternal, verifyInternalResult, type Entity, type InternalObservation } from "./internal-support.js";
 import { codexSubscriptionAgentConfig } from "../codex-subscription-fixture.js";
 import { pollUntil } from "../api.js";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "../../../packages/adapter-utils/src/server-utils.js";
 export function makeDefinition(scenarioId: string, setup: ChatCatalogCase["setup"], grade: ChatCatalogCase["grade"]): ChatCatalogCase {
   const coverageGaps = scenarioId === "goals.align-existing-work" ? ["cross-company-goal-rejection"]
     : scenarioId === "goals.explain-purpose" ? ["missing-association", "inaccessible-goal-nondisclosure"]
@@ -11,12 +12,14 @@ export function makeDefinition(scenarioId: string, setup: ChatCatalogCase["setup
     oracleVersion: "proprio.chat-catalog.internal.v1", expectedRunCount: 1, verifyResult: verifyInternalResult, turnTimeoutMs: 120_000, attemptTimeoutMs: 300_000, observe: observeInternal, grade };
 }
 
-export async function fixtureWorker(ctx: ChatCatalogContext) {
+export async function fixtureWorker(ctx: ChatCatalogContext, options: { proactiveCommentary?: boolean } = {}) {
   const originalDeadline = chatCatalogOriginalPhaseDeadline(ctx);
   const { execution, fixtures, workspacePath, nonce, api } = ctx.input;
   const base = execution.profile.buildAgent({ environmentId: fixtures.environment.id, environmentFixtureId: execution.environment.id,
     workspacePath, secretRefs: fixtures.secretRefs, executionId: nonce });
-  const payload = { ...base, name: "Morgan", role: "engineer", title: "Frontend engineer", reportsTo: fixtures.agent.id,
+  const adapterConfig = options.proactiveCommentary ? { ...(base.adapterConfig as Record<string, unknown> ?? {}),
+    proprioSkillSync: { desiredSkills: [...PROPRIO_FEEDBACK_SKILL_KEYS] } } : base.adapterConfig;
+  const payload = { ...base, ...(adapterConfig ? { adapterConfig } : {}), name: "Morgan", role: "engineer", title: "Frontend engineer", reportsTo: fixtures.agent.id,
     capabilities: "Builds accessible websites.", runtimeConfig: { ...(base.runtimeConfig as Record<string, unknown>), heartbeat: { enabled: false, maxConcurrentRuns: 1 } } };
   const worker = await api.post<Entity>(`/api/companies/${fixtures.company.id}/agents`, execution.profile.credential === "CODEX_AUTH_JSON"
     ? codexSubscriptionAgentConfig(payload, process.env, fixtures.company.id) : payload);

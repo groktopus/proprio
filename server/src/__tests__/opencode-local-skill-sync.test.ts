@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 import {
   listOpenCodeSkills,
   syncOpenCodeSkills,
@@ -39,6 +40,7 @@ describe("opencode local skill sync", () => {
     expect(before.mode).toBe("persistent");
     expect(before.warnings).toContain("OpenCode currently uses the shared Claude skills home (~/.claude/skills).");
     expect(before.desiredSkills).toContain(proprioKey);
+    for (const feedbackKey of PROPRIO_FEEDBACK_SKILL_KEYS) expect(before.desiredSkills).not.toContain(feedbackKey);
     expect(before.entries.find((entry) => entry.key === proprioKey)?.state).toBe("missing");
 
     const after = await syncOpenCodeSkills(ctx, [proprioKey]);
