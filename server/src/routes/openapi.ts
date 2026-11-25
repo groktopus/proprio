@@ -1763,6 +1763,7 @@ function resolveOperationAuthLevel(
   if (path === "/api/companies/{companyId}/grok-invitations"
       || /^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/grok-binding(?:\/(?:routine|verify|retry|stop|recover))?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/withdraw") return "board";
   if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision"
     || key === "GET /api/companies/{companyId}/case-handoff-offers") return "agent";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
