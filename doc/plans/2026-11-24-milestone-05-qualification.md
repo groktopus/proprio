@@ -285,10 +285,22 @@ wake promotion for session and attribution reads. On
 passed with one ordinary connection. It reconstructed the approved, denied,
 and interrupted actions through the synthetic target after controller restart.
 The same source passed 111 standard-pool tests, the OpenAPI generation check,
-and the runner capability checks. Hosted qualification for this exact source
-is running against baseline `2363fe6f`.
-[Deferred wake promotion](https://github.com/groktopus/proprio/pull/395)
+and the runner capability checks. Hosted Linux qualification succeeded for
+this exact source against baseline `2363fe6fb68ece06e6dc4207e93be8b9c7646cc0`.
+The retained report records five passed cases, including managed update and
+rollback, fresh-target restore, active-run migration recovery, interruption
+diagnostics and browser task readback. The active-run migration case recorded
+zero observed data loss.
 [Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45563068633)
+[Retained qualification report](https://github.com/groktopus/proprio/actions/runs/45563068633/artifacts/14999529201)
+
+The bounded routine promotion regression uses real heartbeat completion on
+one database connection. It verifies that a previously deferred wake links
+to a successor with the owner recorded on the original routine run. The
+regression stalled when transaction-reader forwarding was removed, then
+passed with the fix. All 54 heartbeat liveness tests and the scoped server
+typecheck passed on `8779c411fd36969906ff930296479229dc5996c3`.
+[Deferred wake promotion](https://github.com/groktopus/proprio/pull/395)
 
 Composition `82d25021500a2e4e65a3b2079d958a082ea22ab2` includes the
 review changes for audit marker retention, export pool isolation and the
@@ -310,6 +322,13 @@ collection under one intent and one terminal receipt.
 [Interruption fence](https://github.com/groktopus/proprio/pull/398)
 [Approval outcome](https://github.com/groktopus/proprio/pull/399)
 [MCP protocol recovery](https://github.com/groktopus/proprio/pull/400)
+
+The combined MCP Tasks and wake queue adapter suites passed all 174 tests
+on composition `1b9c872f2de5055184ca6152be9d78580d2049f2`. This includes the
+foreign-company fixture fix. On the baseline, its test setup failed at the
+company-scoped parent constraint. The corrected fixture gets to the
+application query and verifies that it rejects the foreign child.
+[Wake queue test fixture](https://github.com/groktopus/proprio/pull/401)
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
@@ -401,7 +420,8 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
    both target historical policy; independent authority targets `main`. [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
 6. Review the one-connection task and wake changes before repeating the
    stress reconstruction on the selected source. Task creation and wake delivery
-   target `main`. Deferred promotion follows wake delivery.
+   target `main`. Deferred promotion follows wake delivery. The independent
+   [#401](https://github.com/groktopus/proprio/pull/401) fixture correction also targets `main`.
    [#393](https://github.com/groktopus/proprio/pull/393) [#394](https://github.com/groktopus/proprio/pull/394) [#395](https://github.com/groktopus/proprio/pull/395)
 
 After a base PR lands, check the next PR's comparison and verify its current
