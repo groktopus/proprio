@@ -829,11 +829,90 @@ describePostgres("agent action audit routes", () => {
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
       expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
+      const invalidationAudits = (await db.select().from(activityLog))
+        .filter(row => row.action === "audit.managed_export_invalidated");
+      expect(invalidationAudits).toHaveLength(1);
+      expect(invalidationAudits[0]).toMatchObject({
+        companyId: company.id,
+        actorType: "user",
+        actorId: userId,
+        entityId: company.id,
+        details: { exportId: created.body.exportId, source: "tool_gateway" },
+      });
+      expect(invalidationAudits[0]?.details).not.toHaveProperty("eventIds");
+      expect(invalidationAudits[0]?.details).not.toHaveProperty("eventCount");
 
       const fresh = await board.post(path).send(window).expect(201);
       expect(fresh.body.eventCount).toBe(201);
       expect(fresh.body.exportId).not.toBe(created.body.exportId);
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not release a page from a repeatable-read snapshot after concurrent invalidation wins", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const from = "2026-07-17T00:00:00.000Z";
+    const to = "2026-07-17T00:00:02.000Z";
+    await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    });
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    const writer = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let locker: Promise<unknown> | undefined;
+    let pendingRead: Promise<request.Response> | undefined;
+    try {
+      const created = await board.post(path).send({ from, to }).expect(201);
+      const exportPath = `${path}/${created.body.exportId}`;
+      let writerPid = 0;
+      locker = writer.transaction(async tx => {
+        await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+          .where(eq(managedAuditExports.id, created.body.exportId)).for("no key update");
+        const [owner] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        writerPid = owner!.pid;
+        locked.resolve();
+        await release.promise;
+        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+          .where(eq(managedAuditExports.id, created.body.exportId));
+      });
+      await locked.promise;
+      pendingRead = board.get(exportPath).then(response => response);
+      // Prove the HTTP transaction is blocked by this writer, rather than
+      // relying on a timing delay before committing the competing update.
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where datname = current_database() and query like '%managed_audit_exports%'
+            and ${writerPid} = any(pg_blocking_pids(pid))`);
+        expect(waiting).toHaveLength(1);
+      }, { timeout: 1_500, interval: 20 });
+      release.resolve();
+      await locker;
+      const response = await pendingRead;
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      expect(await db.select().from(managedAuditExportPageAccess)
+        .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId))).toHaveLength(0);
+      await board.get(exportPath).expect(409);
+    } finally {
+      release.resolve();
+      if (locker) await Promise.allSettled([locker]);
+      if (pendingRead) await Promise.allSettled([pendingRead]);
+      await writer.$client.end();
       vi.unstubAllEnvs();
     }
   });

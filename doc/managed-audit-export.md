@@ -50,8 +50,11 @@ every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. The server persists the invalidation
 until the snapshot expires and discards its membership. Old cursors remain
-invalid after the evidence becomes visible again. Preserve the checkpoint and
-reconcile before opening a new export. The server commits an access record
+invalid after the evidence becomes visible again. The server serializes page
+validation and invalidation for each snapshot. It records the company, operator
+and export ID once in `audit.managed_export_invalidated`, without event IDs or
+counts. Preserve the checkpoint and reconcile before opening a new export. The
+server commits an access record
 before releasing each successful page, including a replay. The record holds the
 company, operator, export ID, page offset, item count and access time. Storage
 operators can review it by company and export ID in
