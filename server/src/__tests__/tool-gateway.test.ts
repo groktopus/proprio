@@ -981,17 +981,54 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
           .send({ companyId: company.id }).expect(200);
         expect(repeatedApproval.body).toMatchObject({ id: ambiguousRequest.id, status: "executing" });
         expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+
+        const sweep = await gateway.settleInterruptedActionReviews(new Date(Date.now() + 11 * 60_000));
+        expect(sweep.scanned).toBeGreaterThanOrEqual(1);
+        expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, ambiguousRequest.id)))
+          .toEqual([expect.objectContaining({ status: "failed" })]);
+        expect(await db.select().from(toolInvocations).where(eq(toolInvocations.id, ambiguousRequest.invocationId)))
+          .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_execution_outcome_unknown" })]);
+        expect(await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+        ))).toHaveLength(1);
+        expect(await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+        ))).toHaveLength(0);
       } finally {
         await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
         await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
       }
-      await db.delete(toolPolicies).where(and(
-        eq(toolPolicies.companyId, company.id), eq(toolPolicies.id, approvalPolicy.id),
-      ));
+
       const replacement = await createIssueAndRun(db, company.id, agent.id);
       const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
         runId: replacement.run.id, issueId: replacement.issue.id });
       await expect(gateway.executeTool({ sessionToken: replacementSession.token, tool,
+        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" } }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [replacementRequest] = await db.select().from(toolActionRequests).where(and(
+        eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.status, "pending"),
+      ));
+      expect(replacementRequest).toBeDefined();
+      const replacementApproval = await request(app).post(`/api/tool-gateway/action-requests/${replacementRequest!.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(replacementApproval.body).toMatchObject({ id: replacementRequest!.id });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, replacementRequest!.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(0);
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+      await db.delete(toolPolicies).where(and(
+        eq(toolPolicies.companyId, company.id), eq(toolPolicies.id, approvalPolicy.id),
+      ));
+      const direct = await createIssueAndRun(db, company.id, agent.id);
+      const directSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: direct.run.id, issueId: direct.issue.id });
+      await expect(gateway.executeTool({ sessionToken: directSession.token, tool,
         parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
         idempotencyKey: "approved-ambiguous-direct-retry" })).rejects.toMatchObject({
         status: 409, reasonCode: "managed_dispatch_outcome_unknown",
