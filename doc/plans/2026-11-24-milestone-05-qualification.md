@@ -357,6 +357,18 @@ for this revision is in progress.
 [Approved caller](https://github.com/groktopus/proprio/pull/403)
 [Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45569138741)
 
+The authenticated reconstruction passed on that revision with one database
+connection, Node 24.22.1, a local process adapter, and a synthetic loopback
+HTTP MCP target. The fixture used no model account. A separate company
+operator with audit access joined the evidence after recreating the controller
+against the same PostgreSQL database. These IDs refer to disposable data.
+
+| Case | Task | Run | Invocation | Action request | Observed outcome |
+| --- | --- | --- | --- | --- | --- |
+| Approved | `3ffed563-b44a-4ef7-9c15-5c6b52842b52` | `12f0526c-ac6b-4ebd-b062-69e3c585565b` | `40d6491f-bf45-4d9b-8c2c-2bfe598c81dd` | `d6a89dd0-b184-486c-964a-45c9a2fede68` | Success receipt and one target effect |
+| Denied | `f8f42113-8adf-479c-8854-374f1227e05c` | `3a91a4ae-2fab-4b47-993a-817b5c4d8ea4` | `0caea314-d1de-4375-ac8c-d25d3acf667a` | `a8fe4f10-8a17-42da-b515-08a80835e53d` | Denied with zero target effects |
+| Interrupted | `3d251cf3-6393-480b-a4bb-041e3deee5de` | `ae393db4-980c-471d-af5b-71547a312e10` | `e25f8731-5729-44ce-9d94-ceffcdcd7677` | `43d69fc6-2be9-40d8-9b95-ea0ee56eedbe` | Open intent and one durable target effect after the lost response |
+
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
 disposable composition `c20523ab28c40b3ea8777e9abac9ea04a7f76708`.
 All 112 tests passed across commentary delivery, durable receipt recovery,
