@@ -279,6 +279,18 @@ The suite includes commentary, the pinned Pi and OpenCode probes, migration
 replay, synthetic audit reconstruction and native receipt recovery. This
 revision includes the reviewed adapter changes and both new pool fixes.
 
+The final pool follow-up passes the transaction reader through deferred
+wake promotion for session and attribution reads. On
+`248ba8107848dade87914f97fed328518af1e328`, the authenticated reconstruction
+passed with one ordinary connection. It reconstructed the approved, denied,
+and interrupted actions through the synthetic target after controller restart.
+The same source passed 111 standard-pool tests, the OpenAPI generation check,
+and the runner capability checks. Hosted qualification for this exact source
+is running against baseline `2363fe6f`.
+[Deferred wake promotion](https://github.com/groktopus/proprio/pull/395)
+[Exact composition qualification](https://github.com/groktopus/proprio/actions/runs/45563068633)
+
+
 
 
 The updated commentary heads, `40aa561e` and `58c3bce3`, were included in
@@ -369,6 +381,10 @@ The recovery and audit work is tracked in [#150 restore reconciliation](https://
 5. Review runtime provenance and independent authority before qualifying
    end-to-end reconstruction. Runtime provenance and the reconstruction fixture
    both target historical policy; independent authority targets `main`. [#358](https://github.com/groktopus/proprio/pull/358) [#357](https://github.com/groktopus/proprio/pull/357) [#368](https://github.com/groktopus/proprio/pull/368)
+6. Review the one-connection task and wake changes before repeating the
+   stress reconstruction on the selected source. Task creation and wake delivery
+   target `main`. Deferred promotion follows wake delivery.
+   [#393](https://github.com/groktopus/proprio/pull/393) [#394](https://github.com/groktopus/proprio/pull/394) [#395](https://github.com/groktopus/proprio/pull/395)
 
 After a base PR lands, check the next PR's comparison and verify its current
 head against `main` when retargeting it. Rebase stacked branches as needed to
