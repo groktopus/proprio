@@ -16,6 +16,7 @@ import {
   heartbeatRuns,
   issues,
   issueThreadInteractions,
+  managedAuditEvents,
   projects,
   toolInvocations,
   toolMcpTasks,
@@ -718,10 +719,51 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.update(toolConnections).set({ config: { ...connection!.config, mcpProtocolVersion: "2025-11-25" } }).where(eq(toolConnections.id, connection!.id));
     const fresh = ctx.restart();
     const tool = (await fresh.listToolsForSession(ctx.session.token)).find((candidate) => candidate.name.endsWith(":build"))!;
-    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" }, timeoutMs: 1_500 }))
+    const key = "legacy-stateless-task-retry";
+    const requestOffset = server.requests.length;
+    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" },
+      idempotencyKey: key, timeoutMs: 1_500 }))
       .rejects.toMatchObject({ reasonCode: "provider_task_pending" });
     expect((await ctx.rows())[0]).toMatchObject({ protocolVersion: MCP_MODERN_PROTOCOL_VERSION, status: "working" });
     expect(server.tasks.size).toBe(1);
+
+    const firstAttempt = server.requests.slice(requestOffset).filter((request) => request.method === "tools/call");
+    expect(firstAttempt).toHaveLength(2);
+    expect(firstAttempt[0]!.headers.get("mcp-protocol-version")).not.toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[0]!.body.params._meta?.[META_CAPABILITIES]?.extensions?.[MCP_TASKS_EXTENSION_ID]).toBeUndefined();
+    expect(firstAttempt[1]!.headers.get("mcp-protocol-version")).toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[0]!.body.id).toBe(firstAttempt[1]!.body.id);
+    expect(firstAttempt[1]!.body.params._meta[META_VERSION]).toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[1]!.body.params._meta[META_CAPABILITIES].extensions[MCP_TASKS_EXTENSION_ID]).toEqual({});
+
+    const [intent] = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+    ));
+    expect(intent).toMatchObject({ providerRequestId: String(firstAttempt[1]!.body.id) });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
+    expect(invocation).toMatchObject({ status: "timed_out", errorCode: "provider_task_pending" });
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.invocationId, intent!.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+    ))).toHaveLength(0);
+
+    server.finish();
+    const collectionOffset = server.requests.length;
+    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" },
+      idempotencyKey: key, timeoutMs: 2_000 })).resolves.toMatchObject({ status: "completed", result: { content: "build finished" } });
+    const collectionRequests = server.requests.slice(collectionOffset);
+    expect(collectionRequests.filter((request) => request.method === "tools/call")).toHaveLength(0);
+    expect(collectionRequests.filter((request) => request.method === "tasks/get").length).toBeGreaterThan(0);
+    expect(server.tasks.size).toBe(1);
+
+    const [collectedTask] = await ctx.rows();
+    expect(collectedTask).toMatchObject({ status: "completed", deliveredAt: expect.any(Date) });
+    const [settledInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
+    expect(settledInvocation).toMatchObject({ status: "succeeded", errorCode: null });
+    const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, intent!.invocationId));
+    expect(events.filter((event) => event.phase === "dispatch_intent")).toHaveLength(1);
+    expect(events.filter((event) => event.phase === "terminal_outcome")).toEqual([
+      expect.objectContaining({ status: "succeeded", requestId: intent!.requestId }),
+    ]);
   });
 
   it("never wakes twice when a wake was already requested before a crash", async () => {
