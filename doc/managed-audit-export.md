@@ -58,6 +58,18 @@ offsets and counts can disclose private evidence. The record survives snapshot
 expiry. The storage owner applies the deployment's audit retention policy to
 these records and any database backups that contain them.
 
+Each snapshot supports up to 20,000 visible events. If creation returns
+`413 snapshot_membership_limit`, split the time window and preserve the
+collector's overlap and deduplication rules. A cursor from an oversized
+snapshot returns `409 snapshot_membership_limit`. Create a narrower snapshot
+before continuing.
+
+An API process runs one export operation at a time on a dedicated database
+connection. Queries time out after at most five seconds. For
+`429 export_busy` or `503 export_retry_required`, retry with backoff using
+the same request or cursor. Advance the checkpoint only after the page arrives
+and its membership and payloads are saved.
+
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.

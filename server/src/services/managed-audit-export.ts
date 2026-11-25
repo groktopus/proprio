@@ -1,12 +1,17 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { conflict, forbidden, notFound } from "../errors.js";
+import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
+import { and, asc, count, eq, exists, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
+import { HttpError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
+import { isTransientLockContention, postgresErrorCode } from "./transient-lock-contention.js";
 
 const PAGE_SIZE = 200;
+// Every page revalidates the complete membership so counts and watermarks stay
+// truthful. Keep that repeated query and its UUID array explicitly bounded.
+const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
+const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
@@ -17,6 +22,35 @@ type ExportScope = {
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
+let exportInProgress = false;
+
+async function runExportTransaction<T>(db: Db, work: (tx: DbTransaction) => Promise<T>): Promise<T> {
+  if (exportInProgress) {
+    throw tooManyRequests("Another managed audit export operation is running. Retry this request.", {
+      reasonCode: "export_busy",
+    });
+  }
+  exportInProgress = true;
+  try {
+    // Keep the full visibility scan off the ordinary request pool. Keep the
+    // slot until PostgreSQL has released the connection, even on timeout.
+    return await withDedicatedDbConnection(db, dedicated => dedicated.transaction(async tx => {
+      await tx.execute(sql`select set_config('statement_timeout',
+        least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
+        true) from pg_settings where name = 'statement_timeout'`);
+      return work(tx);
+    }, repeatableRead), { admitWithoutWaiting: true });
+  } catch (error) {
+    if (postgresErrorCode(error) === "57014" || isTransientLockContention(error)) {
+      throw new HttpError(503, "Managed audit export could not finish in time. Retry this request.", {
+        reasonCode: "export_retry_required",
+      });
+    }
+    throw error;
+  } finally {
+    exportInProgress = false;
+  }
+}
 
 function actorUserId(scope: ExportScope) {
   if (scope.actor.type !== "board" || !scope.actor.userId) {
@@ -100,7 +134,7 @@ export async function createManagedAuditExport(
   window: { from: Date; to: Date },
 ) {
   const publications: ActivityPublication[] = [];
-  const snapshot = await db.transaction(async tx => {
+  const snapshot = await runExportTransaction(db, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     assertRetainedWindow(scope, window.from);
     if (window.from < scope.captureFrom) {
@@ -114,7 +148,16 @@ export async function createManagedAuditExport(
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
       .where(and(visible, gte(managedAuditEvents.occurredAt, window.from), lt(managedAuditEvents.occurredAt, window.to)))
-      .orderBy(asc(managedAuditEvents.id));
+      .orderBy(asc(managedAuditEvents.id))
+      // Fetch one sentinel row so we can reject oversized snapshots without
+      // materializing an unbounded membership array in the service process.
+      .limit(MAX_SNAPSHOT_MEMBERSHIP + 1);
+    if (rows.length > MAX_SNAPSHOT_MEMBERSHIP) {
+      throw payloadTooLarge("Managed audit export exceeds the bounded snapshot membership. Narrow the export window.", {
+        reasonCode: "snapshot_membership_limit",
+        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
+      });
+    }
     const eventIds = rows.map(row => row.id);
     const watermark = createHash("sha256").update(JSON.stringify(eventIds)).digest("hex");
     const [saved] = await tx.insert(managedAuditExports).values({
@@ -136,7 +179,7 @@ export async function createManagedAuditExport(
       details: { exportId: saved.id, source: "tool_gateway" },
     }, publications);
     return saved;
-  }, repeatableRead);
+  });
   for (const publication of publications) publishActivity(publication);
   return exportReceipt(snapshot);
 }
@@ -165,9 +208,13 @@ export async function readManagedAuditExportPage(
   exportId: string,
   cursor?: string,
 ) {
-  return db.transaction(async tx => {
+  return runExportTransaction(db, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
-    const [snapshot] = await tx.select().from(managedAuditExports).where(and(
+    const [snapshot] = await tx.select({
+      ...getTableColumns(managedAuditExports),
+      eventIds: sql<string[] | null>`case when cardinality(${managedAuditExports.eventIds}) <= ${MAX_SNAPSHOT_MEMBERSHIP}
+        then ${managedAuditExports.eventIds} end`.mapWith(managedAuditExports.eventIds),
+    }).from(managedAuditExports).where(and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),
       eq(managedAuditExports.userId, userId),
@@ -180,15 +227,25 @@ export async function readManagedAuditExportPage(
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }
     assertRetainedWindow(scope, snapshot.from);
-    const offset = decodeCursor(snapshot, cursor);
-    const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
+    // Defensive fence for rows written by older code or modified outside this
+    // service. It also bounds the all-member visibility revalidation below.
+    const eventIds = snapshot.eventIds;
+    if (eventIds === null) {
+      throw conflict("Managed audit export exceeds the supported snapshot membership. Create a narrower export.", {
+        reasonCode: "snapshot_membership_limit",
+        maxEvents: MAX_SNAPSHOT_MEMBERSHIP,
+      });
+    }
+    const boundedSnapshot = { ...snapshot, eventIds };
+    const offset = decodeCursor(boundedSnapshot, cursor);
+    const ids = eventIds.slice(offset, offset + PAGE_SIZE);
     const visible = await visibleEvents(tx, scope);
-    if (snapshot.eventIds.length > 0) {
+    if (eventIds.length > 0) {
       // Counts and watermarks also describe rows on other pages. Check all
       // snapshot members in the same transaction before returning either.
       const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
-        .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(snapshot.eventIds, managedAuditExports.eventIds)})`));
-      if (available.eventCount !== snapshot.eventIds.length) {
+        .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(eventIds, managedAuditExports.eventIds)})`));
+      if (available.eventCount !== eventIds.length) {
         throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
       }
     }
@@ -223,11 +280,11 @@ export async function readManagedAuditExportPage(
       itemCount: events.length,
     });
     return {
-      ...exportReceipt(snapshot),
+      ...exportReceipt(boundedSnapshot),
       events,
       deliveredThrough,
-      nextCursor: deliveredThrough < snapshot.eventIds.length ? encodeCursor(snapshot, deliveredThrough) : null,
-      complete: deliveredThrough === snapshot.eventIds.length,
+      nextCursor: deliveredThrough < eventIds.length ? encodeCursor(boundedSnapshot, deliveredThrough) : null,
+      complete: deliveredThrough === eventIds.length,
     };
-  }, repeatableRead);
+  });
 }
