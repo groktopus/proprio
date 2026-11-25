@@ -780,7 +780,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const allCompanyReceipts = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, ctx.org.id));
     expect(allCompanyReceipts.filter((event) => event.phase === "dispatch_intent")).toEqual([intent]);
     expect(allCompanyReceipts.filter((event) => event.phase === "terminal_outcome")).toEqual([
-      expect.objectContaining({ status: "succeeded", requestId: intent!.requestId }),
+      expect.objectContaining({ status: "succeeded", invocationId: intent!.invocationId, requestId: intent!.requestId }),
     ]);
   });
 
