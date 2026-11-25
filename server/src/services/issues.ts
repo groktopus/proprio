@@ -2653,7 +2653,7 @@ function pendingFinalizeBlockerCondition(companyId: string, issueId: SQL, worksp
   )`;
 }
 
-async function listPendingFinalizeBlockerIssueIds(
+export async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
   blockerWorkspacePairs: Array<{ blockerIssueId: string; executionWorkspaceId: string }>,
