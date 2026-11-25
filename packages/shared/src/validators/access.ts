@@ -132,6 +132,11 @@ export const updateCompanyMemberWithPermissionsSchema = z.object({
 
 export type UpdateCompanyMemberWithPermissions = z.infer<typeof updateCompanyMemberWithPermissionsSchema>;
 
+export const archiveCompanyMemberPreviewParamsSchema = z.object({
+  companyId: z.string().guid(),
+  memberId: z.string().guid(),
+});
+
 export const archiveCompanyMemberSchema = z.object({
   reassignment: z
     .object({
