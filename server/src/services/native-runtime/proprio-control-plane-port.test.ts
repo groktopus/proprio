@@ -3,7 +3,7 @@ import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external
 import { plugins } from "@groktopus/db";
 import { readTaskPanelActivations } from "../plugin-task-panels.js";
 import { startServerMetrics, stopServerMetrics } from "../server-metrics.js";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -69,6 +69,7 @@ import { NativeRunCoordinatorStore } from "./native-run-coordinator-store.js";
 import { finalizeNativeRun, repairCommittedNativeChatResponse } from "./native-run-finalizer.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
+import { instanceSettingsService } from "../instance-settings.js";
 import { documentService } from "../documents.js";
 import { claimNativeReviewExecutionLock, getNativeReviewAssignment } from "./native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-review-dispatch.js";
@@ -3005,7 +3006,7 @@ describe("ProprioControlPlanePort conformance", () => {
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });
   });
 
-  it.each(["same-recipient newer handoff", "withdrawal", "Case cancellation"] as const)("preserves a late accepted result after %s", async authorityChange => {
+  it.each(["same-recipient newer handoff", "accepted scope correction through Case service", "withdrawal", "Case cancellation"] as const)("preserves a late accepted result after %s", async authorityChange => {
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     const { caseId, handoffId, acceptedContract, offerContract, sourceAgentId, requirements } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
     const initialIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
@@ -3016,13 +3017,62 @@ describe("ProprioControlPlanePort conformance", () => {
       normalizedSessionId: run!.nativeSessionId!, turnId, eventType: "item.completed", schemaVersion: 1,
       priority: 0, emittedAt: new Date().toISOString(),
       payload: { kind: "agentMessage", channel: "final", text: "The previous handoff requirements are complete." } });
-    await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
+    const usesCaseService = authorityChange === "accepted scope correction through Case service";
+    if (!usesCaseService) await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
 
     const correctedDeliverable = "Corrected scope with verified publication";
     const correctedInstructions = "Publish the corrected deliverable and include verified evidence.";
-    const successorId = authorityChange === "same-recipient newer handoff" ? randomUUID() : null;
+    let successorId: string | undefined;
+    let issueBeforeFinalization = initialIssue;
     let correctedDigest: string | undefined;
-    if (successorId) {
+    if (usesCaseService) {
+      await db.update(agents).set({ adapterType: "proprio_runner" }).where(eq(agents.id, agentId));
+      const [correctionSource] = await db.insert(heartbeatRuns).values({
+        companyId, agentId: sourceAgentId, issueId, nativeIssueId: issueId, runtimeMode: "native", status: "running",
+        responsibleUserId: initialIssue.responsibleUserId, completionContractId: acceptedContract.id,
+        completionContractSha256: acceptedContract.canonicalSha256, contextSnapshot: { issueId },
+      }).returning();
+      const correctionRunId = correctionSource!.id;
+      const [taskAtCorrection] = await db.update(issues).set({ assigneeAgentId: sourceAgentId, executionRunId: correctionRunId })
+        .where(eq(issues.id, issueId)).returning();
+      const service = caseHandoffService(db);
+      const prerequisites = ["Verify the publication receipt"];
+      const settings = instanceSettingsService(db);
+      const { enableCases } = await settings.getExperimental();
+      if (!enableCases) {
+        onTestFinished(async () => { await settings.updateExperimental({ enableCases }); });
+        await settings.updateExperimental({ enableCases: true });
+      }
+      const correction = await service.handoff(companyId, {
+        type: "agent", source: "agent_jwt", companyId, agentId: sourceAgentId, runId: correctionRunId,
+      }, {
+        case: { id: caseId }, idempotencyKey: `scope-correction-${caseId}`, expectedHandoffVersion: 1,
+        expectedIssueStatusVersion: taskAtCorrection!.statusVersion, toAgentId: agentId, phase: requirements.phase,
+        instructions: correctedInstructions, offer: { expectedDeliverable: correctedDeliverable, prerequisites },
+      }, { enableVersionedOffers: true });
+      successorId = correction.handoffId;
+      recoveryEvidenceSuccessorHandoffId = successorId;
+      expect(correction).toMatchObject({ handoffVersion: 2, state: "offered" });
+      correctedDigest = computeCaseHandoffRequirementsDigest({
+        ...requirements, instructions: correctedInstructions, expectedDeliverable: correctedDeliverable, prerequisites,
+      });
+      expect(correctedDigest).not.toBe(offerContract.requirementsDigest);
+      await expect(service.recordRecipientDecision({
+        type: "agent", source: "agent_key", companyId, agentId,
+      }, caseId, successorId, {
+        outcome: "accepted", expectedHandoffVersion: correction.handoffVersion, requirementRevisionId: acceptedContract.id,
+      })).resolves.toMatchObject({
+        state: "awaiting_release", recipientDecision: { outcome: "accepted", actorId: agentId,
+          handoffVersion: 2, requirementRevisionId: acceptedContract.id, requirementsDigest: correctedDigest },
+      });
+      // The correcting sender still owns the task until its run releases it.
+      const [currentIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      issueBeforeFinalization = currentIssue!;
+      expect(issueBeforeFinalization).toMatchObject({ status: initialIssue.status, statusVersion: taskAtCorrection!.statusVersion,
+        assigneeAgentId: sourceAgentId, executionRunId: correctionRunId });
+      await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
+    } else if (authorityChange === "same-recipient newer handoff") {
+      successorId = randomUUID();
       recoveryEvidenceSuccessorHandoffId = successorId;
       const [currentCase] = await db.select().from(cases).where(eq(cases.id, caseId));
       const workflow = await captureCaseWorkflow(db, companyId, currentCase!, issueId, requirements.phase);
@@ -3055,20 +3105,29 @@ describe("ProprioControlPlanePort conformance", () => {
 
     await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
     const currentIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
-    expect(currentIssue).toMatchObject({ status: initialIssue.status, statusVersion: initialIssue.statusVersion,
-      assigneeAgentId: initialIssue.assigneeAgentId });
+    expect(currentIssue).toMatchObject({ status: issueBeforeFinalization.status, statusVersion: issueBeforeFinalization.statusVersion,
+      assigneeAgentId: issueBeforeFinalization.assigneeAgentId, executionRunId: issueBeforeFinalization.executionRunId });
     const [decision] = await db.select().from(statusDecisions).where(and(eq(statusDecisions.companyId, companyId),
       eq(statusDecisions.issueId, issueId), eq(statusDecisions.runId, runId)));
     expect(decision).toMatchObject({ reasonCode: "case_handoff_superseded", applicationState: "applied",
-      decisionJson: { statusAction: "preserve", toStatus: initialIssue.status, effects: [] } });
+      decisionJson: { statusAction: "preserve", toStatus: issueBeforeFinalization.status, effects: [] } });
     if (successorId) {
       const [successor] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, successorId));
       const [currentCase] = await db.select({ handoffVersion: cases.handoffVersion }).from(cases).where(eq(cases.id, caseId));
       expect(currentCase?.handoffVersion).toBe(2);
-      expect(successor).toMatchObject({ state: "delivered", version: 2, instructions: correctedInstructions });
+      expect(successor).toMatchObject({ state: usesCaseService ? "awaiting_release" : "delivered",
+        version: 2, instructions: correctedInstructions, toAgentId: agentId });
       expect(readAcceptedCaseHandoffOffer(successor!)).toMatchObject({
         expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest,
       });
+      if (usesCaseService) {
+        const [original] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, handoffId));
+        expect(original).toMatchObject({ state: "delivered", version: 1, offerContract,
+          recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
+            requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest } });
+        expect(successor).toMatchObject({ sourceRunId: issueBeforeFinalization.executionRunId, assignmentAppliedAt: null });
+        expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, successor!.wakeupRequestId))).toEqual([]);
+      }
     }
     expect(await db.select().from(nativeRunResults).where(and(eq(nativeRunResults.companyId, companyId),
       eq(nativeRunResults.issueId, issueId), eq(nativeRunResults.runId, runId)))).toHaveLength(1);
