@@ -61,6 +61,7 @@ import { deferredWakeJoinsFirstTurn, firstTurnTakesAllQueuedComments, runAccepts
 import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
+import { captureRequiredQualityReviewDecisionBinding, recordExecutionStageDecision } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
 import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
@@ -97,7 +98,6 @@ import {
   issueAccessGrants,
   issueComments,
   issueDocuments,
-  issueExecutionDecisions,
   issueRelations,
   issueRecoveryActions,
   issueThreadInteractions,
@@ -381,6 +381,7 @@ import {
 import {
   applyIssueExecutionPolicyTransition,
   normalizeIssueExecutionPolicy,
+  isExecutionStageParticipant,
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
@@ -2095,20 +2096,6 @@ function executionPrincipalsEqual(
   return left.type === "agent"
     ? left.agentId === right.agentId
     : left.userId === right.userId;
-}
-
-function actorMatchesExecutionParticipant(
-  actor: { actorType: "user" | "agent"; actorId: string },
-  participant: ParsedExecutionState["currentParticipant"] | null,
-) {
-  if (!participant) return false;
-  // Require the actor kind to match the participant kind before comparing ids. Without this
-  // an agent and a user that happen to share an id value would falsely satisfy participant
-  // gating on the auto-approval path.
-  if (participant.type !== actor.actorType) return false;
-  return participant.type === "agent"
-    ? participant.agentId === actor.actorId
-    : participant.userId === actor.actorId;
 }
 
 // Negation/rejection markers that invalidate an otherwise approval-looking heading.
@@ -10875,17 +10862,11 @@ export function issueRoutes(
                 ...nextExecutionState,
                 lastDecisionId: decisionId,
               };
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: lockedIssue.companyId,
-                issueId: lockedIssue.id,
-                stageId: transition.decision.stageId,
-                stageType: transition.decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: transition.decision.outcome,
-                body: transition.decision.body,
-                createdByRunId: actor.runId ?? null,
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: lockedIssue, previousPolicy: lockedIssue.executionPolicy, nextPolicy: lockedIssue.executionPolicy,
+                previousExecutionState: lockedIssue.executionState, decision: transition.decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
           }
@@ -15532,6 +15513,22 @@ export function issueRoutes(
         }
       }
 
+      if (transition.decision?.outcome === "approved" && existing.assigneeAgentId &&
+          (assigneeWillChange || updateFields.status === "done") &&
+          parseObject(existing.executionPolicy?.reviewTargetBinding).source === "required_quality_review") {
+        const decision = transition.decision;
+        await db.transaction(async (tx) => {
+          const locked = await svc.getByIdForUpdate(id, tx);
+          if (!locked || locked.companyId !== existing.companyId) throw notFound("Issue not found");
+          await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+            issue: locked, previousPolicy: locked.executionPolicy, nextPolicy: nextExecutionPolicy,
+            expectedPolicy: existing.executionPolicy, previousExecutionState: locked.executionState,
+            expectedExecutionState: existing.executionState, stage: decision, actorAgentId: actor.agentId,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          });
+        });
+      }
+
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
@@ -15920,17 +15917,16 @@ export function issueRoutes(
             }
 
             if (decision && decisionId) {
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: updated.companyId,
-                issueId: updated.id,
-                stageId: decision.stageId,
-                stageType: decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: decision.outcome,
-                body: decision.body,
-                createdByRunId: actor.runId ?? null,
+              // updateIssue holds the task lock through decision insertion.
+              const policyChange = updated.changes?.executionPolicy;
+              const stateChange = updated.changes?.executionState;
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: updated, previousPolicy: policyChange ? policyChange.from : updated.executionPolicy,
+                expectedPolicy: existing.executionPolicy, nextPolicy: nextExecutionPolicy,
+                previousExecutionState: stateChange ? stateChange.from : existing.executionState,
+                expectedExecutionState: existing.executionState, decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
 
@@ -19823,10 +19819,10 @@ export function issueRoutes(
       const shouldAutoApproveReviewComment =
         currentIssue.status === "in_review" &&
         currentExecutionState?.status === "pending" &&
-        actorMatchesExecutionParticipant(
-          actor,
-          currentExecutionState.currentParticipant ?? null,
-        ) &&
+        isExecutionStageParticipant(currentExecutionState.currentParticipant ?? null, {
+          agentId: actor.actorType === "agent" ? actor.actorId : null,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        }) &&
         isApprovalReviewComment(req.body.body);
 
       // Persist the comment and the auto-approval state transition atomically when both apply.
@@ -19927,17 +19923,13 @@ export function issueRoutes(
             if (!updated) throw new AutoApprovalIssueMissingError();
 
             if (transition.decision && decisionId) {
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: updated.companyId,
-                issueId: updated.id,
-                stageId: transition.decision.stageId,
-                stageType: transition.decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: transition.decision.outcome,
-                body: transition.decision.body,
-                createdByRunId: actor.runId ?? null,
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: updated, previousPolicy: updated.executionPolicy, expectedPolicy: currentIssue.executionPolicy,
+                nextPolicy: currentExecutionPolicy, previousExecutionState: updated.changes?.executionState
+                  ? updated.changes.executionState.from : currentIssue.executionState,
+                expectedExecutionState: currentIssue.executionState, decision: transition.decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
 

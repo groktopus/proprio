@@ -219,7 +219,7 @@ import {
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
 } from "./issue-execution-policy.js";
-import { assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, requiredQualityReview } from "./required-quality-review.js";
+import { assertDeferredSignoffTargetCurrent, assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, bindPendingExecutionReviewTargets, requiredQualityReview } from "./required-quality-review.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -12125,10 +12125,18 @@ export function issueService(db: Db) {
             code: "issue_execution_lock_changed",
           });
         }
-        if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
+        const nextReviewPolicy = issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy;
+        if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: nextReviewPolicy, actorAgentId, actorUserId });
+        if (patch.executionState && typeof patch.executionState === "object") {
+          patch.executionState = await bindPendingExecutionReviewTargets(tx as Db, {
+            issue: receiptExisting, nextPolicy: nextReviewPolicy, nextState: patch.executionState,
+          });
+        }
         if ((patch.status ?? receiptExisting.status) === "done" &&
             (receiptExisting.status !== "done" || issueData.executionPolicy !== undefined)) {
-          await assertRequiredQualityReviewComplete(tx as Db, { ...receiptExisting, executionPolicy: issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy }, true);
+          const issueForReview = { ...receiptExisting, executionPolicy: nextReviewPolicy };
+          await assertDeferredSignoffTargetCurrent(tx as Db, issueForReview);
+          await assertRequiredQualityReviewComplete(tx as Db, issueForReview, true);
         }
         if (actorRunId) await assertNoCaseHandoffMutation(tx, actorRunId, id);
         if (expectedStatusVersion !== undefined && (

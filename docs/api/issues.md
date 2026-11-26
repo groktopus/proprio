@@ -126,6 +126,27 @@ Headers: X-Proprio-Run-Id: {runId}
 
 The optional `comment` field adds a comment in the same call. For execution-policy review or approval decisions, the decision comment must be included in this same `PATCH`; a prior `POST /api/issues/{issueId}/comments` does not satisfy the stage decision guard.
 
+Set `executionPolicy.reviewTargetBinding` to `{"source":"required_quality_review"}`
+with `requiredQualityReview` to require immutable signoff. Submitting a stage
+records the requirements digest and the exact output document revisions or
+attachment byte hashes in `executionState.reviewTargetBinding`. Approval checks
+that the submitted values still match the current human-approved outputs. An
+approved decision retains its submitted binding.
+
+A `422` with code `required_quality_review_incomplete` identifies an outstanding
+human quality review. A `422` with code `required_quality_review_stale` means the
+reviewer needs a fresh submission. Request changes and submit the current
+outputs to start a new review.
+
+These errors also apply when `POST /api/issues/{issueId}/comments` auto-approves
+a stage or `POST /api/issues/{issueId}/recovery-actions/resolve` approves one.
+An auto-approval comment records its own decision. An ordinary earlier comment
+cannot satisfy the decision comment guard on a later PATCH.
+
+For `POST /api/issues/{id}/stalled-review-decision`, an approval that would bypass
+immutable signoff returns `required_quality_review_stale`. Request changes and
+resubmit the current outputs to an available reviewer.
+
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
 
 When changing `projectId` and `goalId` together, the supplied goal is validated

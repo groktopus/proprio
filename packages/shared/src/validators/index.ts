@@ -442,6 +442,7 @@ export {
   stalledReviewDecisionSchema,
   issueExecutionPolicySchema,
   requiredQualityReviewSchema,
+  issueExecutionReviewTargetBindingSchema,
   issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,
