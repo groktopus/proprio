@@ -73,6 +73,25 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     await expect(reserveRunBudget(db, f.companyId, unrelatedRun.id, null)).resolves.toMatchObject({ reused: false });
   });
 
+  it("enforces overlapping tree budgets and charges one hold to both scopes", async () => {
+    const f = await fixture();
+    const agent = await f.makeAgent("Worker");
+    const outer = await f.makeIssue("Outer root");
+    const inner = await f.makeIssue("Nested root", outer.id);
+    const task = await f.makeIssue("Nested work", inner.id);
+    const sibling = await f.makeIssue("Sibling work", outer.id);
+    const outerPolicy = await f.makePolicy(outer.id, { amount: 100, reservationCents: "60" });
+    const innerPolicy = await f.makePolicy(inner.id, { amount: 80, reservationCents: "70" });
+    const first = await f.makeRun(agent.id, task.id);
+    const second = await f.makeRun(agent.id, sibling.id);
+
+    await expect(reserveRunBudget(db, f.companyId, first.id, null)).resolves.toMatchObject({ amountCents: "70.0000000" });
+    await expect(computeObservedSpend(db, outerPolicy)).resolves.toMatchObject({ effectiveHeldCents: "70.0000000" });
+    await expect(computeObservedSpend(db, innerPolicy)).resolves.toMatchObject({ effectiveHeldCents: "70.0000000" });
+    await expect(reserveRunBudget(db, f.companyId, second.id, null)).rejects.toMatchObject({ status: 409 });
+    expect(await db.select().from(budgetReservations).where(eq(budgetReservations.companyId, f.companyId))).toHaveLength(1);
+  });
+
   it("attributes settled spend to the captured tree after the task is reparented", async () => {
     const f = await fixture();
     const agent = await f.makeAgent("Worker");
@@ -97,7 +116,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const nextRun = await f.makeRun(agent.id, task.id);
     await reserveRunBudget(db, f.companyId, nextRun.id, null);
     const [next] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRun.id));
-    expect(next!.taskLineageJson).toEqual({ version: 1, issueId: task.id, pathIssueIds: [task.id, newRoot.id] });
+    expect(next!.taskLineageJson).toEqual({ version: 1, pathIssueIds: [task.id, newRoot.id] });
   });
 
   it("reevaluates the matching historical tree after queued cost changes", async () => {

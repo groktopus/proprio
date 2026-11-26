@@ -130,11 +130,11 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
       amountLimit: 1, amountObserved: 1, createdAt: new Date(Date.now() - 60_000) }).returning();
     const [inside, outside] = await db.insert(heartbeatRuns).values([
       { companyId: company.id, agentId: agent.id, issueId: child.id, status: "cancelled", runtimeMode: "legacy",
-        taskLineageJson: { version: 1, issueId: child.id, pathIssueIds: [child.id, root.id] },
+        taskLineageJson: { version: 1, pathIssueIds: [child.id, root.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
       { companyId: company.id, agentId: agent.id, issueId: unrelated.id, status: "cancelled", runtimeMode: "legacy",
-        taskLineageJson: { version: 1, issueId: unrelated.id, pathIssueIds: [unrelated.id] },
+        taskLineageJson: { version: 1, pathIssueIds: [unrelated.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
     ]).returning();

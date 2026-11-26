@@ -377,3 +377,71 @@ test("issue-detail baseline", async ({ request, baseURL }) => {
   await fs.writeFile(path.join(OUTPUT_DIR, "baseline.md"), report);
   console.log(`\n${report}\n`);
 });
+
+test("cold board and direct task mobile loads", async ({ request, baseURL }) => {
+  const target = baseURL!;
+  const fixture = await seed(request);
+  const profile = PROFILES.find((item) => item.name === "fast-4g-4x-cpu")!;
+  const results = [];
+  const browser = await chromium.launch();
+  try {
+    for (let run = 1; run <= RUNS; run += 1) {
+      for (const route of ["board", "task"] as const) {
+        const context = await browser.newContext({
+          baseURL: target,
+          viewport: { width: 390, height: 844 },
+          isMobile: true,
+          hasTouch: true,
+          serviceWorkers: "block",
+        });
+        try {
+          const page = await context.newPage();
+          await installVitalObserver(page, true, false);
+          const session = await configureProfile(context, page, profile);
+          await session.send("Network.setCacheDisabled", { cacheDisabled: true });
+          const network = await startNetworkCapture(session);
+          const url = `/${fixture.prefix}/issues${route === "task" ? `/${fixture.identifier}` : ""}`;
+          await page.goto(url, { waitUntil: "domcontentloaded" });
+          if (route === "board") {
+            await expect(page.locator("[data-inbox-issue-link]", { hasText: fixture.title }).first())
+              .toBeVisible({ timeout: PAGE_READY_TIMEOUT_MS });
+          } else {
+            await expect(page.getByText("Seeded performance comment 12:", { exact: false }).first())
+              .toBeVisible({ timeout: PAGE_READY_TIMEOUT_MS });
+            await expect(page.getByTestId("task-chat-composer-stack").locator('[contenteditable="true"]').first())
+              .toBeVisible({ timeout: PAGE_READY_TIMEOUT_MS });
+          }
+          const timings = await page.evaluate(async () => {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+            return {
+              readyMs: performance.now(),
+              timeOrigin: performance.timeOrigin,
+              firstContentfulPaintMs: performance.getEntriesByName("first-contentful-paint")[0]?.startTime ?? null,
+              largestContentfulPaintMs: (window as Window & { __issuePerfLcp?: number }).__issuePerfLcp ?? null,
+            };
+          });
+          const { timeOrigin, ...paint } = timings;
+          const work = summarizeNetwork(network, fixture, timeOrigin + paint.readyMs);
+          expect(work.jsBytesBeforeContentPaint).toBeGreaterThan(0);
+          expect(paint.firstContentfulPaintMs).not.toBeNull();
+          results.push({
+            run,
+            route,
+            ...paint,
+            transferredBytes: work.bytesBeforeContentPaint,
+            transferredJsBytes: work.jsBytesBeforeContentPaint,
+          });
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  await fs.mkdir(OUTPUT_DIR, { recursive: true });
+  await fs.writeFile(
+    path.join(OUTPUT_DIR, "cold-mobile.json"),
+    JSON.stringify({ profile, viewport: { width: 390, height: 844 }, results }, null, 2),
+  );
+});

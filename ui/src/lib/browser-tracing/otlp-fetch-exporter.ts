@@ -88,6 +88,7 @@ export class OtlpFetchExporter implements SpanExporter {
       body: body as BodyInit,
       keepalive,
       credentials: "omit",
+      referrerPolicy: "no-referrer",
     })
       .then((response) => response.ok)
       .catch(() => false)

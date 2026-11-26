@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { environmentLeases, heartbeatRunEvents, heartbeatRuns, type Db } from "@groktopus/db";
+import { environmentLeases, heartbeatRunEvents, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
 import { parseObject } from "../adapters/utils.js";
 import { resolveProviderApiPlacement } from "./native-runtime/provider-api-placement.js";
 import { hasNativeLocalProcessStop } from "./native-local-process-stop.js";
@@ -7,6 +7,9 @@ import { hasRecoveredCleanupStopReceipt, hasRemoteTerminationReceipt } from "./r
 import { validatePrpEvent } from "../vendor/proprio-runner/index.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
 import { isConfirmedCursorCloudTerminalObservation } from "./native-runtime/cursor-cloud-runtime.js";
+import { OPERATOR_RUN_STOP_REASON, readRunCancellation } from "./run-cancellation.js";
+import { hasPendingRunCleanup } from "./execution-blocker.js";
+import { nativeRetryCancellationEligible } from "./native-runtime/native-cancellation-request.js";
 import { isAgentLifecycleStopRecord } from "./governance-pause-stop.js";
 
 export function hasAcknowledgedNativeRunStopRequest(run: {
@@ -66,6 +69,33 @@ export function isAcknowledgedNativeReassignmentStop(run: Parameters<typeof hasA
 
 export function isAcknowledgedNativeStop(run: Parameters<typeof hasAcknowledgedNativeStopIntent>[0]): boolean {
   return run.status === "cancelled" && hasAcknowledgedNativeStopIntent(run);
+}
+
+/** Verify the named operator Stop and its terminal execution evidence. */
+export async function isAcknowledgedOperatorRunStop(db: Db, run: Pick<typeof heartbeatRuns.$inferSelect,
+  "id" | "companyId" | "agentId" | "nativeIssueId" | "status" | "finishedAt" | "resultJson" | "processPid" |
+  "processGroupId" | "runtimeMode" | "driverKind" | "runnerProfileJson" | "nativeSessionId" | "runnerInstanceId">
+): Promise<boolean> {
+  if (run.status !== "cancelled" || !run.finishedAt || run.resultJson?.cancelledByActorType !== "user") return false;
+  const cancellation = readRunCancellation(run.resultJson);
+  if (cancellation?.source !== "operator" || !cancellation.expected || cancellation.initiator.type !== "user" ||
+      (run.resultJson.operatorRunStop !== true && cancellation.reason !== OPERATOR_RUN_STOP_REASON)) return false;
+  const execution = parseObject(run.resultJson.executionCancellation);
+  if (execution.state === "acknowledged" && typeof execution.acknowledgedAt === "string" &&
+      Number.isFinite(Date.parse(execution.acknowledgedAt))) return true;
+  if (run.runtimeMode !== "native" || !run.nativeIssueId || !hasAcknowledgedNativeRunStopRequest(run)) return false;
+
+  if (parseObject(run.resultJson.nativeCancellation).dispatched === false) {
+    if (run.processPid !== null || run.processGroupId !== null) return false;
+    const [coordinator] = await db.select({ phase: nativeRunFinalizations.phase, failureCode: nativeRunFinalizations.failureCode })
+      .from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.companyId, run.companyId),
+        eq(nativeRunFinalizations.issueId, run.nativeIssueId), eq(nativeRunFinalizations.runId, run.id))).limit(1);
+    return coordinator?.phase === "terminal_failure" && coordinator.failureCode === "native_retry_cancelled" &&
+      nativeRetryCancellationEligible({ runId: run.id, companyId: run.companyId, issueId: run.nativeIssueId,
+        resultJson: run.resultJson }, coordinator) && !await hasPendingRunCleanup(db, run.companyId, run.id);
+  }
+  if (execution.state === "requested") return false;
+  return await acknowledgedNativeApiStopExecutionHasStopped(db, run) || await acknowledgedNativeStopExecutionHasStopped(db, run);
 }
 
 /** API-owned execution has no Computer lease. Its provider terminal and retired

@@ -1,4 +1,4 @@
-import type { CaseHandoff, DocumentRevision, HandoffCaseInput, HandoffCaseResult, IssueBlockerAttention, IssueDocument, IssueLabel } from "@groktopus/shared";
+import type { CaseHandoff, CaseHandoffRecoveryHistory, DocumentRevision, HandoffCaseInput, HandoffCaseResult, IssueBlockerAttention, IssueDocument, IssueLabel } from "@groktopus/shared";
 import { api } from "./client";
 
 // -----------------------------------------------------------------------------
@@ -354,6 +354,8 @@ export const casesApi = {
     api.post<HandoffCaseResult>(`/companies/${companyId}/case-handoffs`, input),
   listHandoffs: (caseId: string, cursor?: string | null) =>
     api.get<CaseHandoffPage>(`/cases/${caseId}/handoffs?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getHandoffRecoveryHistory: (caseId: string, handoffId: string, signal?: AbortSignal) =>
+    api.get<CaseHandoffRecoveryHistory>(`/cases/${caseId}/handoffs/${handoffId}/recovery-history`, { signal, cache: "no-store" }),
   retryHandoff: (caseId: string, handoffId: string) =>
     api.post(`/cases/${caseId}/handoffs/${handoffId}/retry`, {}),
   cancelHandoff: (caseId: string, handoffId: string) =>

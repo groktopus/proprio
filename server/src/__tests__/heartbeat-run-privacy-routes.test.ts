@@ -522,6 +522,35 @@ describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, 
       .toMatchObject({ status: "failed", resultJson: null });
   });
 
+  it("keeps the admitted private ancestry out of detail, list, and cancellation responses for a child-only reader", async () => {
+    const f = await seedFixture();
+    const [ancestor] = await db.insert(issues).values({
+      companyId: f.companyId, title: "Private former parent", visibility: "private", responsibleUserId: f.ownerUserId,
+    }).returning({ id: issues.id });
+    await db.insert(issueAccessGrants).values({
+      issueId: f.issueId, subjectType: "user", subjectId: f.otherUserId, source: "explicit",
+    });
+    const taskLineageJson = { version: 1 as const, pathIssueIds: [f.issueId, ancestor!.id] };
+    await db.update(heartbeatRuns).set({
+      status: "queued", startedAt: null, finishedAt: null, nextEventSeq: 100, taskLineageJson,
+    }).where(eq(heartbeatRuns.id, f.privateRunId));
+
+    const app = createBoardApp(f.companyId, f.otherUserId);
+    const detail = await request(app).get(`/api/heartbeat-runs/${f.privateRunId}`).expect(200);
+    const list = await request(app).get(`/api/companies/${f.companyId}/heartbeat-runs`).expect(200);
+    const stopped = await request(app).post(`/api/heartbeat-runs/${f.privateRunId}/cancel`).send({}).expect(200);
+    expect(detail.body.id).toBe(f.privateRunId);
+    expect(list.body).toEqual(expect.arrayContaining([expect.objectContaining({ id: f.privateRunId })]));
+    expect(stopped.body).toMatchObject({ id: f.privateRunId, status: "cancelled" });
+    for (const response of [detail, list, stopped]) {
+      expect(response.text).not.toContain("taskLineageJson");
+      expect(response.text).not.toContain(ancestor!.id);
+    }
+    const [saved] = await db.select({ taskLineageJson: heartbeatRuns.taskLineageJson }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, f.privateRunId));
+    expect(saved?.taskLineageJson).toEqual(taskLineageJson);
+  });
+
   it("Stop on a task waiting in line cancels its run and wake, frees the task, and logs both changes", async () => {
     const fixture = await seedFixture();
     await db.update(heartbeatRuns).set({ status: "queued", startedAt: null, finishedAt: null, resultJson: null,

@@ -7,7 +7,7 @@ import { getSecretProvider } from "../secrets/provider-registry.js";
 import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
-import { redactActivityDetails } from "../services/activity-log.js";
+import { logActivity, redactActivityDetails } from "../services/activity-log.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -18,7 +18,7 @@ import { WebSocket } from "ws";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentApiKeys, agents, authSessions, authUsers, companies, companyMemberships, createDb,
-  heartbeatRuns, issueAccessGrants, issueComments, issues, type Db,
+  heartbeatRuns, issueAccessGrants, issueComments, issues, projectAccessMembers, projects, type Db,
 } from "@groktopus/db";
 import * as schema from "@groktopus/db/schema/index";
 import { setupLiveEventsWebSocketServer } from "../realtime/live-events-ws.js";
@@ -111,6 +111,83 @@ describe("live-event run read boundaries", () => {
       socket.terminate();
       wss.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reauthorizes a removed private-project viewer without sending the project identity", async () => {
+    const companyId = randomUUID(), userId = randomUUID(), unrelatedUserId = randomUUID();
+    const now = new Date();
+    await db.insert(companies).values({ id: companyId, name: "Audience fixture", issuePrefix: "AUDIENCE" });
+    await db.insert(authUsers).values([userId, unrelatedUserId].map(id => ({
+      id, email: `${id}@example.test`, name: "Audience fixture", createdAt: now, updatedAt: now,
+    })));
+    await db.insert(companyMemberships).values([userId, unrelatedUserId].map(principalId => ({
+      companyId, principalType: "user" as const, principalId, membershipRole: "operator", status: "active",
+    })));
+    const [project] = await db.insert(projects).values({ companyId, name: "Private audience project", visibility: "private" }).returning();
+    const [member] = await db.insert(projectAccessMembers).values({ companyId, projectId: project!.id, subjectType: "user", subjectId: userId }).returning();
+    const sessionIds = new Map<string, string>([userId, unrelatedUserId].map(id => [id, randomUUID()]));
+    await db.insert(authSessions).values([...sessionIds].map(([id, sessionId]) => ({
+      id: sessionId, token: randomUUID(), userId: id, createdAt: now, updatedAt: now, expiresAt: new Date(now.getTime() + 60_000),
+    })));
+    const server = createServer();
+    const wss = setupLiveEventsWebSocketServer(server, db, {
+      deploymentMode: "authenticated",
+      resolveSessionFromHeaders: async headers => {
+        const id = headers.get("x-fixture-user");
+        const sessionId = id && sessionIds.get(id);
+        return id && sessionId ? { user: { id }, session: { id: sessionId, userId: id } } : null;
+      },
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const host = `127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const sockets = [userId, unrelatedUserId].map(id => new WebSocket(`ws://${host}/api/companies/${companyId}/events/ws`, {
+      origin: `http://${host}`, headers: { "x-fixture-user": id },
+    }));
+    const received: string[][] = [[], []];
+    sockets.forEach((socket, index) => socket.on("message", data => received[index]!.push(data.toString())));
+    try {
+      await Promise.all(sockets.map(socket => once(socket, "open")));
+      await db.delete(projectAccessMembers).where(eq(projectAccessMembers.id, member!.id));
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "project.access_member_removed",
+        entityType: "project", entityId: project!.id, details: { subjectType: "user", subjectId: userId },
+      });
+      publishLiveEvent({ companyId, type: "agent.status", payload: { agentId: randomUUID(), status: "idle" } });
+      await expect.poll(() => received.every(events => events.some(event => JSON.parse(event).type === "agent.status"))).toBe(true);
+      const activity = (index: number) => received[index]!.map(event => JSON.parse(event)).filter(event => event.type === "activity.logged");
+      expect(activity(0).map(event => event.payload)).toEqual([{ action: "resource_membership.changed" }]);
+      expect(activity(1)).toEqual([]);
+      expect(received.flat().join("")).not.toContain(project!.id);
+      expect(received.flat().join("")).not.toContain(userId);
+
+      const [task] = await db.insert(issues).values({
+        companyId, title: "Hidden after placement change", status: "todo", visibility: "private",
+        createdByUserId: unrelatedUserId,
+      }).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "issue.updated",
+        entityType: "issue", entityId: task!.id, issueId: task!.id,
+        details: { changes: { visibility: { from: "open", to: "private" } } },
+      });
+      await expect.poll(() => activity(0).length).toBe(2);
+      expect(activity(0)[1]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(task!.id);
+
+      const [membership] = await db.update(companyMemberships).set({ status: "archived" })
+        .where(eq(companyMemberships.principalId, userId)).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
+        entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
+      });
+      await expect.poll(() => activity(0).length).toBe(3);
+      expect(activity(0)[2]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(membership!.id);
+    } finally {
+      sockets.forEach(socket => socket.terminate());
+      wss.close();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 

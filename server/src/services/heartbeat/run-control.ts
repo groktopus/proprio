@@ -318,7 +318,7 @@ export type CancelRunOptions = {
 function runCancellationFenceSql(input: {
   cancellation: ReturnType<typeof requestedRunCancellation>;
   errorCode: string;
-  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId">;
+  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId"> & { operatorRunStop?: true };
   reassignmentStopRequested?: boolean;
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
@@ -1201,15 +1201,21 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         tx,
       );
     } else {
+      const payload = agentWakeupRequests.payload;
+      const wakeTask = sql`lower(btrim(coalesce(
+        ${payload}->>'issueId', ${payload}->>'taskId', ${payload}->>'taskKey',
+        ${payload}->'_proprioWakeContext'->>'issueId', ${payload}->'_proprioWakeContext'->>'taskId',
+        ${payload}->'_proprioWakeContext'->>'taskKey'
+      )))`;
       wakeupIds = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
         eq(agentWakeupRequests.companyId, scope.companyId),
         inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
-        sql`${agentWakeupRequests.runId} is null`,
-        sql`${agentWakeupRequests.payload}->>'issueId' in (with recursive task_tree(id) as (
-          select id from ${issues} where id = ${scope.scopeId}::uuid and company_id = ${scope.companyId}::uuid
-          union all select child.id from ${issues} child join task_tree parent on child.parent_id = parent.id
+        isNull(agentWakeupRequests.runId),
+        sql`${wakeTask} in (with recursive task_tree(id, identifier) as (
+          select id, identifier from ${issues} where id = ${scope.scopeId}::uuid and company_id = ${scope.companyId}::uuid
+          union select child.id, child.identifier from ${issues} child join task_tree parent on child.parent_id = parent.id
             where child.company_id = ${scope.companyId}::uuid)
-          select id::text from task_tree)`,
+          select id::text from task_tree union all select lower(identifier) from task_tree where identifier is not null)`,
       )).then(rows => rows.map(row => row.id));
     }
 
@@ -1333,6 +1339,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const attribution = {
       cancelledByActorType: options.resultJson?.cancelledByActorType,
       cancelledByUserId: options.resultJson?.cancelledByUserId,
+      ...(options.resultJson?.operatorRunStop === true ? { operatorRunStop: true as const } : {}),
     };
     const handoffIssueId = run.nativeIssueId ?? run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
     const supersedesCaseHandoff = options.resultJson?.cancelledByActorType === "user" || options.errorCode === "issue_reassigned";
@@ -1914,7 +1921,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       scope.scopeType === "agent" ? eq(browserUseSessions.agentId, scope.scopeId) : undefined,
       scope.scopeType === "project" ? sql`${project} = ${scope.scopeId}` : undefined,
       scope.scopeType === "task_tree" ? sql`exists (select 1 from ${browserUseRuns} br
-        join ${heartbeatRuns} parent_run on parent_run.id = br.heartbeat_run_id
+        join ${heartbeatRuns} parent_run on parent_run.id = br.heartbeat_run_id and parent_run.company_id = br.company_id
         where br.company_id = ${scope.companyId} and br.session_id = ${browserUseSessions.id}
           and parent_run.task_lineage_json->'pathIssueIds' @> ${JSON.stringify([scope.scopeId])}::jsonb)` : undefined,
       scope.createdBefore ? lt(browserUseSessions.createdAt, scope.createdBefore) : undefined,

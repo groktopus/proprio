@@ -47,6 +47,8 @@ type IssueRunLedgerProps = {
   childIssues: Issue[];
   agentMap: ReadonlyMap<string, Agent>;
   hasLiveRuns: boolean;
+  /** Shared execution-history read owned by the task-detail activity slice. */
+  runs?: RunForIssue[];
   activityEvents?: ActivityEvent[];
   renderActivityEvent?: (event: ActivityEvent) => ReactNode;
   resolveUserLabel?: (userId: string) => string | null | undefined;
@@ -446,6 +448,7 @@ export function IssueRunLedger({
   childIssues,
   agentMap,
   hasLiveRuns,
+  runs: runsProp,
   activityEvents,
   renderActivityEvent,
   resolveUserLabel,
@@ -459,13 +462,15 @@ export function IssueRunLedger({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: () => accessApi.getCurrentBoardAccess(),
   });
-  const { data: runs } = useQuery({
+  const { data: queriedRuns } = useQuery({
     queryKey: queryKeys.issues.runs(issueId),
     queryFn: () => activityApi.runsForIssue(issueId),
+    enabled: runsProp === undefined,
     refetchInterval:
       hasLiveRuns || issueStatus === "in_progress" ? 5000 : false,
     placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueId),
   });
+  const runs = runsProp ?? queriedRuns;
   const { data: liveRuns } = useQuery({
     queryKey: queryKeys.issues.liveRuns(issueId),
     queryFn: () => readFromIssueChatBootstrap(queryClient, queryKeys.issues.liveRuns(issueId), issueId, (item) => item.liveRuns, () => heartbeatsApi.liveRunsForIssue(issueId)),
