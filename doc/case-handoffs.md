@@ -132,6 +132,11 @@ the checklist and keeps the Case receipt in durable storage. When the recovery
 budget runs out, the task guidance states how many attempts were used and asks
 the board to review the assessment before assigning further work. The same
 guidance appears on a waiting task when its stalled dependency is readable.
+Completion recovery tracks attempts for each accepted handoff revision.
+Finalizer replay and reassessment of the same saved run preserve the attempt
+count. Task recovery can look up an action by an earlier recorded source run.
+When a later accepted revision requires recovery, it starts a new action and
+retains the previous receipt.
 
 Status commitment rechecks the accepted handoff for the receiving run and
 its completion corrective wake. If the Case is cancelled, the handoff is

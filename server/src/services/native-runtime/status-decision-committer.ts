@@ -965,38 +965,33 @@ async function materializeDecisionEffect(input: {
         decisionId: input.decisionId,
       })
       : null;
-    const recovery = await issueRecoveryActionService(
-      input.tx,
-    ).upsertSourceScoped({
+    const acceptedHandoff = handoffCompletionEvidence?.caseHandoff;
+    const fingerprint = acceptedHandoff
+      ? nativeSha256({ cause: effect.cause, handoffId: acceptedHandoff.id, version: acceptedHandoff.version,
+        requirementsDigest: acceptedHandoff.requirementsDigest })
+      : nativeSha256({ runId: input.runId, decisionId: input.decisionId, cause: effect.cause });
+    const recovery = await issueRecoveryActionService(input.tx).upsertSourceScoped({
       companyId: input.companyId,
       sourceIssueId: input.issue.id,
       kind: "active_run_watchdog",
       ownerType: "agent",
       ownerAgentId: effect.agentId,
       cause: effect.cause,
-      fingerprint: nativeSha256({
-        runId: input.runId,
-        decisionId: input.decisionId,
-        cause: effect.cause,
-      }),
-      evidence: {
-        runId: input.runId,
-        decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? {
-          caseHandoffCompletion: { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
-        } : {}),
-      },
+      fingerprint,
+      evidence: { runId: input.runId, decisionId: input.decisionId },
+      ...(effect.cause === "completion_evidence_incomplete" ? {
+        caseCompletionAttempt: {
+          runId: input.runId,
+          decisionId: input.decisionId,
+          receipt: handoffCompletionEvidence && { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        },
+      } : {}),
       nextAction: effect.nextAction,
-      supersedeOnIdentityChange: Boolean(handoffCompletionEvidence),
       wakePolicy: null,
       maxAttempts: 3,
     });
-    return {
-      effectKind: effect.kind,
-      targetType: "issue_recovery_action",
-      targetId: recovery.id,
-      payload: { cause: effect.cause, nextAction: effect.nextAction },
-    };
+    return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: recovery.id,
+      payload: { cause: effect.cause, nextAction: effect.nextAction } };
   }
   if (effect.kind === "release_run_resources") {
     failAt("recovery_materialization", input.failpoint);

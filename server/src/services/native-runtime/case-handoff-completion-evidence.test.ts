@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, caseHandoffs, cases, completionContracts, companies, createDb, heartbeatRuns,
-  issues, nativeRunResults, statusDecisions, workAssessments } from "@groktopus/db";
+  issues, issueRecoveryActions, nativeRunResults, statusDecisions, workAssessments } from "@groktopus/db";
 import { startRecoveryPostgres } from "../../__tests__/helpers/recovery-postgres.js";
+import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
 
 describe("accepted case-handoff completion recovery evidence", () => {
@@ -103,6 +104,79 @@ describe("accepted case-handoff completion recovery evidence", () => {
     await db.update(cases).set({ status: "draft" }).where(eq(cases.workIssueId, f.issueId));
     await db.update(caseHandoffs).set({ state: "cancelled" }).where(eq(caseHandoffs.id, f.handoffId));
     await expect(readAcceptedCaseHandoffCompletionEvidence({ db, ...f })).resolves.toBeNull();
+  });
+
+  it("preserves accepted recovery across unbound failures and reassesses one saved run without charging twice", async () => {
+    const f = await fixture();
+    const receipt = (await readAcceptedCaseHandoffCompletionEvidence({ db, ...f }))!;
+    const recovery = issueRecoveryActionService(db);
+    const input = {
+      companyId: f.companyId, sourceIssueId: f.issueId, kind: "active_run_watchdog" as const,
+      cause: "completion_evidence_incomplete", fingerprint: "accepted-handoff-fingerprint",
+      ownerType: "agent" as const, ownerAgentId: f.agentId, maxAttempts: 3, nextAction: "Review the assessment.",
+    };
+    const first = await recovery.upsertSourceScoped({ ...input,
+      caseCompletionAttempt: { runId: f.runId, decisionId: f.decisionId, receipt },
+    });
+    const unbound = await recovery.upsertSourceScoped({ ...input, fingerprint: "unbound-follow-up",
+      caseCompletionAttempt: { runId: randomUUID(), decisionId: randomUUID(), receipt: null },
+    });
+    expect(unbound).toEqual(first);
+    const [decision] = await db.select().from(statusDecisions).where(eq(statusDecisions.id, f.decisionId));
+    const [assessment] = await db.select().from(workAssessments).where(eq(workAssessments.id, decision!.assessmentId));
+    const reassessmentId = randomUUID();
+    await db.insert(workAssessments).values({ ...assessment!, id: reassessmentId,
+      inputDigest: `new-prior-state-${reassessmentId}`, supersedesAssessmentId: assessment!.id });
+    const decisionId = randomUUID();
+    await db.insert(statusDecisions).values({ ...decision!, id: decisionId, assessmentId: reassessmentId,
+      decisionVersion: decision!.decisionVersion + 1, decisionDigest: `reconsidered-${decisionId}`, supersedesDecisionId: decision!.id });
+    const reconsidered = (await readAcceptedCaseHandoffCompletionEvidence({ db, ...f, decisionId }))!;
+    const updated = await recovery.upsertSourceScoped({ ...input,
+      caseCompletionAttempt: { runId: f.runId, decisionId, receipt: reconsidered },
+    });
+    expect(updated).toMatchObject({ id: first.id, attemptCount: 1 });
+    const [stored] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, first.id));
+    expect(stored?.evidence).toMatchObject({ decisionId, caseHandoffCompletion: { attempts: [{
+      runId: f.runId, decisionId, resultId: receipt.assessment.resultId, assessmentId: reassessmentId,
+    }] } });
+    expect((await db.select().from(statusDecisions).where(eq(statusDecisions.runId, f.runId))).map(row => row.id))
+      .toEqual(expect.arrayContaining([f.decisionId, decisionId]));
+    expect(updated.evidence).not.toHaveProperty("caseHandoffCompletion");
+  });
+
+  it("recomputes Case attempt lineage if another writer wins the recovery row", async () => {
+    const f = await fixture();
+    const receipt = (await readAcceptedCaseHandoffCompletionEvidence({ db, ...f }))!;
+    const recovery = issueRecoveryActionService(db);
+    const earlier = { runId: randomUUID(), decisionId: randomUUID() };
+    const competing = { runId: randomUUID(), decisionId: randomUUID() };
+    const input = {
+      companyId: f.companyId, sourceIssueId: f.issueId, kind: "active_run_watchdog" as const,
+      cause: "completion_evidence_incomplete", fingerprint: "accepted-handoff-fingerprint",
+      ownerType: "agent" as const, ownerAgentId: f.agentId, maxAttempts: 3, nextAction: "Review the assessment.",
+    };
+    const first = await recovery.upsertSourceScoped({ ...input, evidence: {
+      ...earlier, caseHandoffCompletion: { ...receipt, attempts: [earlier] },
+    } });
+    const transaction = db.transaction.bind(db);
+    const injectCompetingWrite = vi.spyOn(db, "transaction").mockImplementationOnce(async (write, options) => {
+      await db.update(issueRecoveryActions).set({ attemptCount: 2, evidence: {
+        ...competing, caseHandoffCompletion: { ...receipt, attempts: [earlier, competing] },
+      } }).where(eq(issueRecoveryActions.id, first.id));
+      return transaction(write, options);
+    });
+    try {
+      const updated = await recovery.upsertSourceScoped({ ...input,
+        caseCompletionAttempt: { runId: f.runId, decisionId: f.decisionId, receipt },
+      });
+      expect(updated).toMatchObject({ id: first.id, attemptCount: 3, status: "escalated", ownerType: "board" });
+    } finally {
+      injectCompetingWrite.mockRestore();
+    }
+    const [saved] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, first.id));
+    expect(saved?.evidence).toMatchObject({ caseHandoffCompletion: { attempts: [
+      earlier, competing, { runId: f.runId, decisionId: f.decisionId },
+    ] } });
   });
 
   it("requires a nonempty bound digest for the accepted offer and decision", async () => {
