@@ -10085,12 +10085,15 @@ export function issueRoutes(
       const selected = z.object({ inspectSourceRunId: z.string().uuid(), inspectSourceActionId: z.string().uuid().optional() })
         .safeParse(req.query);
       if (!selected.success) throw badRequest("A valid source run and optional recovery action are required.");
-      const { inspectSourceRunId: runId, inspectSourceActionId: actionId } = selected.data;
+      const runId = selected.data.inspectSourceRunId.toLowerCase();
+      const actionId = selected.data.inspectSourceActionId;
       const rows = await db.select().from(issueRecoveryActions).where(and(
         eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
         or(sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
-          sql`${issueRecoveryActions.evidence}#>'{caseHandoffCompletion,attempts}'
-            @> jsonb_build_array(jsonb_build_object('runId', ${runId}::text))`),
+          and(eq(issueRecoveryActions.cause, "completion_evidence_incomplete"),
+            sql`${issueRecoveryActions.evidence}#>>'{caseHandoffCompletion,schema}' = 'proprio.case-handoff-completion-recovery.v1'`,
+            sql`${issueRecoveryActions.evidence}#>'{caseHandoffCompletion,attempts}'
+              @> jsonb_build_array(jsonb_build_object('runId', ${runId}::text))`)),
         actionId ? eq(issueRecoveryActions.id, actionId) : undefined,
       )).orderBy(desc(issueRecoveryActions.createdAt)).limit(actionId ? 1 : 20);
       if (actionId && !rows[0]) throw notFound("Recovery source not found.");

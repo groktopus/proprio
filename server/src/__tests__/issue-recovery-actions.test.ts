@@ -2112,7 +2112,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
     const app = createApp();
     const url = `/api/issues/${sourceIssueId}/recovery-actions`;
-    for (const runId of [earlierRunId, latestRunId]) {
+    for (const runId of [earlierRunId.toUpperCase(), latestRunId]) {
       const inspected = await request(app).get(url).query({ inspectSourceRunId: runId, inspectSourceActionId: action.id }).expect(200);
       expect(inspected.body.active).toMatchObject({ id: action.id, evidence: { runId: latestRunId } });
       expect(inspected.text).not.toContain(hiddenHandoffId);
