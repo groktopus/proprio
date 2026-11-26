@@ -9,7 +9,7 @@ import type { Duplex } from "node:stream";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agentApiKeys, authSessions, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@groktopus/db";
-import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@groktopus/shared";
+import { isUuidLike, issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@groktopus/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { createActivityToastIdentity } from "./activity-toast-identity.js";
@@ -337,10 +337,16 @@ export function setupLiveEventsWebSocketServer(
       const audienceChanged = () => ({ ...event, payload: { action: "resource_membership.changed" } });
       // An access update can make the target ineligible for ordinary delivery.
       // An already authenticated socket gets only a reset, without role or identity details.
-      if (boardActivity && payload.entityType === "company_membership" &&
-          (payload.action === "company_member.updated" || payload.action === "company_member.access_updated" || payload.action === "company_member.archived") &&
-          details.principalType !== "agent" && details.principalId === context!.actorId) {
-        return { ...event, payload: { action: "company_membership.changed" } };
+      const memberId = typeof payload.entityId === "string" && isUuidLike(payload.entityId) ? payload.entityId : null;
+      if (boardActivity && memberId && payload.entityType === "company_membership" && typeof payload.action === "string"
+        && payload.action.startsWith("company_member.")) {
+        const member = await sharedDeliveryRead(reads, `membership-change:${memberId}`, async () => {
+          const [row] = await db.select({ userId: companyMemberships.principalId }).from(companyMemberships)
+            .where(and(eq(companyMemberships.companyId, event.companyId), eq(companyMemberships.id, memberId),
+              eq(companyMemberships.principalType, "user"))).limit(1);
+          return row;
+        });
+        if (member?.userId === context!.actorId) return { ...event, payload: { action: "company_membership.changed" } };
       }
 
       const principalActive = await sharedDeliveryRead(reads, "principal", async () => {

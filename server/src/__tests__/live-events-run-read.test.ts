@@ -195,14 +195,28 @@ describe("live-event run read boundaries", () => {
       await expect.poll(() => activity(0).length).toBe(4);
       expect(activity(0)[3]!.payload).toEqual({ action: "company_membership.changed" });
 
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.permissions_updated",
+        entityType: "company_membership", entityId: membership!.id, details: { grantCount: 1 },
+      });
+      await expect.poll(() => activity(0).length).toBe(5);
+      expect(activity(0)[4]!.payload).toEqual({ action: "company_membership.changed" });
+
       await db.update(companyMemberships).set({ status: "suspended" }).where(eq(companyMemberships.id, membership!.id));
       await logActivity(db, {
         companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.access_updated",
         entityType: "company_membership", entityId: membership!.id,
         details: { principalId: userId, principalType: "user", status: "suspended" },
       });
-      await expect.poll(() => activity(0).length).toBe(5);
-      expect(activity(0)[4]!.payload).toEqual({ action: "company_membership.changed" });
+      await expect.poll(() => activity(0).length).toBe(6);
+      expect(activity(0)[5]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await logActivity(db, {
+        companyId, actorType: "plugin", actorId: "membership-fixture-plugin", action: "company_member.updated_by_plugin",
+        entityType: "company_membership", entityId: membership!.id, details: { patch: { status: "suspended" } },
+      });
+      await expect.poll(() => activity(0).length).toBe(7);
+      expect(activity(0)[6]!.payload).toEqual({ action: "company_membership.changed" });
 
       await db.update(companyMemberships).set({ status: "archived" })
         .where(eq(companyMemberships.id, membership!.id));
@@ -210,8 +224,8 @@ describe("live-event run read boundaries", () => {
         companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
         entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
       });
-      await expect.poll(() => activity(0).length).toBe(6);
-      expect(activity(0)[5]!.payload).toEqual({ action: "company_membership.changed" });
+      await expect.poll(() => activity(0).length).toBe(8);
+      expect(activity(0)[7]!.payload).toEqual({ action: "company_membership.changed" });
       expect(received[0]!.join("")).not.toContain(membership!.id);
     } finally {
       sockets.forEach(socket => socket.terminate());
