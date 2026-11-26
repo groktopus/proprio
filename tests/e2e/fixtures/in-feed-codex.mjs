@@ -156,6 +156,15 @@ async function execute() {
       send({ method: 'thread/status/changed', params: { threadId: 'unrelated-fixture-thread', status: { type: 'idle' } } });
       if (text.includes('RECOVERY-INJECT-UNKNOWN-WRITE')) {
         send({ method: 'item/started', params: { threadId, turnId, item: { id: 'uncertain-email-write', type: 'mcpToolCall', tool: 'send_fixture_email', readOnlyHint: false, status: 'inProgress' } } });
+        // Model a provider-owned write that reaches its receiver, then lose the
+        // terminal tool receipt when the provider turn fails below.
+        const endpoint = new URL(process.env.RECOVERY_FIXTURE_EFFECT_URL ?? '');
+        if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || !endpoint.port
+          || endpoint.pathname !== '/effects' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+          throw new Error('The recovery fixture only accepts its local effect receiver');
+        }
+        const effect = await fetch(endpoint, { method: 'POST', redirect: 'error' });
+        if (effect.status !== 204) throw new Error(`Unexpected fixture effect response ${effect.status}`);
       }
       send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { code: 'fixture_checkpoint_unusable', message: 'Deterministic failed provider session after Gmail access' } } } });
       return;

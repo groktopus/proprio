@@ -61,17 +61,17 @@ for (const journey of [
         res.end(JSON.stringify({ effects: externalEffects }));
         return;
       }
+      if (journey === "uncertain" && req.method === "POST" && req.url === "/effects") {
+        externalEffects.push({ operation: "send_fixture_email", sequence: externalEffects.length + 1 });
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       const chunks: Buffer[] = [];
       for await (const part of req) chunks.push(Buffer.from(part));
       const message = JSON.parse(Buffer.concat(chunks).toString() || "{}");
       const gmail = req.url === "/gmail";
       calls.push(`${gmail ? "gmail" : "notion"}:${message.method}`);
-      if (journey === "uncertain" && gmail && message.method === "tools/call") {
-        // The failed provider turn reports that this external send may have
-        // happened. Track its effect in the remote fixture independently of
-        // the API's run/retry records.
-        externalEffects.push({ operation: "send_fixture_email", sequence: externalEffects.length + 1 });
-      }
       if (message.id === undefined) {
         res.writeHead(202);
         res.end();
@@ -194,19 +194,18 @@ for (const journey of [
           adapterType: row.adapterType,
           lifecycleHolds: row.lifecycleHolds,
         })),
-        tasks: (await api(`/companies/${company.id}/issues`)).map(
-          (task: Record<string, unknown>) => ({
-            id: task.id,
-            status: task.status,
-            assigneeAgentId: task.assigneeAgentId,
-          }),
-        ),
+        tasks: await Promise.all((await api(`/companies/${company.id}/issues`)).map(async (task: { id: string }) => {
+          const detail = await api(`/issues/${task.id}`);
+          return { id: detail.id, status: detail.status, assigneeAgentId: detail.assigneeAgentId,
+            recoveryCause: detail.activeRecoveryAction?.cause, recoveryEvidence: detail.activeRecoveryAction?.evidence };
+        })),
         runs: await Promise.all((await api(`/companies/${company.id}/heartbeat-runs`)).map(async (run: Record<string, unknown>) => {
           const detail = await api(`/heartbeat-runs/${run.id}`);
           return {
             id: run.id,
             status: run.status,
-            runtimeMode: run.runtimeMode,
+            runtimeMode: detail.runtimeMode,
+            scheduledRetryReason: detail.scheduledRetryReason,
             error: run.error ?? detail.error,
             errorCode: run.errorCode ?? detail.errorCode,
             stderrExcerpt: detail.stderrExcerpt,
@@ -310,7 +309,11 @@ for (const journey of [
             lifecycleMode: "per_turn",
             codexPermissionMode: "never",
             timeoutSec: 50,
-            env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "not-a-real-model-key" },
+            env: {
+              CODEX_HOME: codexHome,
+              OPENAI_API_KEY: "not-a-real-model-key",
+              ...(journey === "uncertain" ? { RECOVERY_FIXTURE_EFFECT_URL: `http://127.0.0.1:${port}/effects` } : {}),
+            },
           },
         });
       }
