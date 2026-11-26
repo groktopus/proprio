@@ -8,6 +8,8 @@ import {
 import { budgetService } from "./budgets.js";
 import { heartbeatService } from "./heartbeat.js";
 import { heldTaskRetryRefusals } from "./task-retry-eligibility.js";
+import { readFreshWorkspaceReadiness } from "./fresh-workspace-continuation.js";
+import { taskInterruptionPresentation } from "./task-interruption-presentation.js";
 import { HttpError } from "../errors.js";
 import {
   deliverBudgetResumeContinuations, hasDeliverableBudgetResume, hasPendingBudgetResume, markBudgetCancelledWorkForResume,
@@ -125,7 +127,7 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
       { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null, assigneeAgentId: agent.id },
       { companyId: company.id, title: "Unrelated" },
       { companyId: company.id, title: "Stopped by company" },
-      { companyId: company.id, title: "Legacy child", identifier: `${company.issuePrefix}-64`, assigneeAgentId: agent.id },
+      { companyId: company.id, title: "Legacy child", identifier: `${company.issuePrefix}-64`, assigneeAgentId: agent.id, status: "in_progress" },
     ]).returning();
     const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
       scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true }).returning();
@@ -150,7 +152,7 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
           startupCancellation: { requestedAt: new Date().toISOString() },
         } },
       { companyId: company.id, agentId: agent.id, status: "cancelled", runtimeMode: "legacy",
-        contextSnapshot: { taskKey: legacyTask.identifier },
+        contextSnapshot: { issueId: legacyTask.identifier, taskKey: legacyTask.identifier },
         taskLineageJson: { version: 1, pathIssueIds: [legacyTask.id, root.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
@@ -188,6 +190,20 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
       (mode === "private descendant" ? [legacyTask.id] : [child.id, legacyTask.id]).sort());
     expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered", requestId: expect.any(String) });
     expect(await claimOf(inside.id)).toMatchObject({ state: mode === "private descendant" ? "abandoned" : "delivered" });
+    if (mode === "direct raise") {
+      const wake = wakes.find(candidate => candidate.payload?.issueId === legacyTask.id)!;
+      await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, issueId: legacyTask.id,
+        status: "succeeded", createdAt: new Date(Date.now() - 86_400_000) });
+      expect(await taskInterruptionPresentation(db, legacyTask)).toMatchObject({ observedRunId: legacy.id });
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, agent.id));
+      await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, status: "running" });
+      await heartbeatService(db).resumeTaskRetry(company.id, wake.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(stored?.runId).toEqual(expect.any(String));
+      const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, stored!.runId!));
+      expect(successor).toMatchObject({ status: "queued", issueId: legacyTask.id, contextSnapshot: { previousRunId: legacy.id } });
+      expect(await readFreshWorkspaceReadiness(db, successor!)).toMatchObject({ mode: "fresh_isolated_workspace", sourceRunId: legacy.id });
+    }
     if (mode === "access revoked before dispatch") {
       const wake = wakes.find(candidate => candidate.payload?.issueId === legacyTask.id)!;
       await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, legacyTask.id));
@@ -217,6 +233,39 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     await deliverBudgetResumeContinuations(db);
     expect(await continuations(scope.company.id)).toEqual([expect.objectContaining({
       payload: expect.objectContaining({ issueId: task.issue.id }) })]);
+  });
+
+  it("rechecks current Cloud owner elevation for a private task in deferred budget recovery", async () => {
+    const scope = await seedScope("cloud owner");
+    const task = await seedTask(scope);
+    const cloudUserId = randomUUID();
+    await db.insert(companyMemberships).values({ companyId: scope.company.id, principalType: "user",
+      principalId: cloudUserId, status: "active", membershipRole: "owner" });
+    await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, task.issue.id));
+    vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "fixture-cloud-authority");
+    vi.stubEnv("PROPRIO_CLOUD_API_ORIGIN", "https://cloud.example.test");
+    vi.stubEnv("PROPRIO_CLOUD_STACK_ID", "fixture-stack-id");
+    vi.stubEnv("PROPRIO_STACK_SLUG", "budget-retry");
+    vi.stubEnv("PROPRIO_MANAGED_CONFIG", JSON.stringify({ v: 1, mode: "cloud", catalogVersion: "test",
+      features: { enableOwnerInstanceAdmin: true }, plugins: { autoInstall: [] } }));
+    const portfolio = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({ stacks: [{ stackSlug: "budget-retry", role: "owner", isCurrent: true }] }),
+    ).mockResolvedValueOnce(Response.json({ stacks: [{ stackSlug: "budget-retry", role: "member", isCurrent: true }] }));
+    try {
+      await budgetService(db).resolveIncident(scope.company.id, scope.incident.id,
+        { action: "raise_budget_and_resume", amount: 500 }, cloudUserId, "cloud_tenant");
+      await deliverBudgetResumeContinuations(db);
+      const [wake] = await continuations(scope.company.id);
+      expect(wake?.requestedByActorId).toBe(cloudUserId);
+      await heartbeatService(db).resumeTaskRetry(scope.company.id, wake!.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
+      expect(stored).toMatchObject({ runId: null, payload: { executionWait: { reason: "retry_authority_denied" } } });
+      expect(portfolio).toHaveBeenCalledTimes(2);
+      expect(portfolio.mock.calls[0]?.[1]?.headers).toMatchObject({ "x-proprio-cloud-user-id": cloudUserId });
+    } finally {
+      portfolio.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("dispatches the continuation through the real Retry path into a queued run", async () => {

@@ -641,6 +641,11 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     expect(fresh.status).toBe(200);
     expect(fresh.headers["x-proprio-request-cache"]).toBe("miss");
     expect(computations).toBe(3);
+    const unusedKey = `${path}&offset=10`;
+    expect((await request(app).get(unusedKey).set("Cache-Control", "no-store")).status).toBe(200);
+    const ordinary = await request(app).get(unusedKey);
+    expect(ordinary.headers["x-proprio-request-cache"]).toBe("miss");
+    expect(computations).toBe(5);
   });
 
   it("keeps compact issue-list cache keys separated by board user identity", async () => {

@@ -1,5 +1,7 @@
 const executionReviewEvidenceFamily = ["issues", "execution-review-evidence"] as const;
 
+const issueSearchPrefix = (companyId: string) => ["issues", companyId, "search"] as const;
+
 export const queryKeys = {
   linkPreview: (companyId: string, userId: string | null, url: string) =>
     ["link-preview", companyId, userId, url] as const,
@@ -337,7 +339,7 @@ export const queryKeys = {
       ["issues", companyId, "star-prompt-done"] as const,
     mentionPool: (companyId: string) =>
       ["issues", companyId, "mention-pool"] as const,
-    searches: (companyId: string) => ["issues", companyId, "search"] as const,
+    searches: issueSearchPrefix,
     search: (
       companyId: string,
       q: string,
@@ -345,9 +347,7 @@ export const queryKeys = {
       limit?: number,
     ) =>
       [
-        "issues",
-        companyId,
-        "search",
+        ...issueSearchPrefix(companyId),
         q,
         projectId ?? "__all-projects__",
         limit ?? "__no-limit__",

@@ -9,7 +9,7 @@ import { readWorkspaceRecovery } from "./workspace-recovery-receipt.js";
 import { randomUUID } from "node:crypto";
 import { taskRetryRunAncestry } from "./recovery-run-ancestry.js";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, heartbeatRuns, issues, issueComments, runIdentityContexts, issueRecoveryActions, type Db } from "@groktopus/db";
+import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, companyMemberships, heartbeatRuns, issues, issueComments, runIdentityContexts, issueRecoveryActions, type Db } from "@groktopus/db";
 import { conflict, forbidden, notFound, HttpError } from "../errors.js";
 import { persistActivity } from "./activity-log.js";
 import { createSystemRecovery, readSystemRecovery, savedFilesUnrecoverable } from "./system-recovery-state.js";
@@ -25,6 +25,7 @@ import { notifyDeferredExecutionWork } from "./deferred-execution-notifications.
 import { hasPendingRunCleanup } from "./execution-blocker.js";
 import { liveExecutionOwnerCondition, taskAttemptCondition, taskRetryRunIssueCondition } from "./task-retry-eligibility.js";
 import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
+import { isCurrentCloudOwnerInstanceAdmin, loadCurrentCloudOwnerAuthority, type CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { undeliveredContinuation } from "./fresh-continuation-retry-fold.js";
 import { PersistedExecutionWaitRefusal } from "./deferred-execution-wait.js";
 import { rearmExhaustedNativeFinalization } from "./native-runtime/exhausted-finalization-retry.js";
@@ -34,12 +35,23 @@ import { selectTaskRetryInput } from "./chat-channels/task-retry-input.js";
 
 export async function taskRetryMutationAllowed(db: Db, input: {
   companyId: string; issueId: string; actorId: string; actorSource: TaskRetryIntent["actorSource"];
+  cloudAuthority?: CurrentCloudOwnerAuthority | null;
 }) {
   const [issue] = await db.select({ status: issues.status, projectId: issues.projectId, parentIssueId: issues.parentId, assigneeAgentId: issues.assigneeAgentId,
     assigneeUserId: issues.assigneeUserId }).from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)));
   if (!issue) return false;
   const access = authorizationService(db);
-  const actor = { type: "board" as const, userId: input.actorId, source: input.actorSource };
+  let isInstanceAdmin = false;
+  if (input.actorSource === "cloud_tenant") {
+    const [membership] = await db.select({ role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
+      eq(companyMemberships.companyId, input.companyId), eq(companyMemberships.principalType, "user"),
+      eq(companyMemberships.principalId, input.actorId), eq(companyMemberships.status, "active"),
+    )).for("share");
+    if (!membership || membership.role === "viewer" || input.cloudAuthority?.role === "viewer") return false;
+    isInstanceAdmin = await isCurrentCloudOwnerInstanceAdmin(db, input.actorId, input.cloudAuthority);
+  }
+  const actor = { type: "board" as const, userId: input.actorId, source: input.actorSource,
+    ...(isInstanceAdmin ? { isInstanceAdmin } : {}) };
   const resource = { type: "issue" as const, companyId: input.companyId, issueId: input.issueId, ...issue };
   return (await access.decide({ actor, resource, action: "issue:read" })).allowed
     && (await access.decide({ actor, resource, action: "issue:mutate" })).allowed;
@@ -277,7 +289,9 @@ function isTaskRetryContention(error: unknown) {
 export async function requestTaskRetry(input: TaskRetryRequest) {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await admitTaskRetry(input);
+      const cloudAuthority = input.reauthorize && input.actorSource === "cloud_tenant"
+        ? await loadCurrentCloudOwnerAuthority(input.actorId) : null;
+      return await admitTaskRetry(input, cloudAuthority);
     } catch (error) {
       if (!isTaskRetryContention(error)) throw error;
       // Chat authorization for the same principal is briefly locked. The whole
@@ -290,7 +304,7 @@ export async function requestTaskRetry(input: TaskRetryRequest) {
   }
 }
 
-function admitTaskRetry(input: TaskRetryRequest) {
+function admitTaskRetry(input: TaskRetryRequest, cloudAuthority: CurrentCloudOwnerAuthority | null) {
   return writeExecutionControl(input.db, DELIVERY_QUEUES.workspaceRecovery, async tx => {
     const db = tx as unknown as Db;
     if (input.reauthorize) await lockIssuePrivacyTree(tx, input.companyId, "shared");
@@ -298,7 +312,7 @@ function admitTaskRetry(input: TaskRetryRequest) {
       eq(issues.id, input.issueId))).for("update");
     if (!issue) throw notFound("Task not found");
     if (input.reauthorize && !await taskRetryMutationAllowed(db, { companyId: input.companyId, issueId: issue.id,
-      actorId: input.actorId, actorSource: taskRetryIntentSchema.shape.actorSource.parse(input.actorSource) })) {
+      actorId: input.actorId, actorSource: taskRetryIntentSchema.shape.actorSource.parse(input.actorSource), cloudAuthority })) {
       throw forbidden("Current task read and write access are required to retry");
     }
     assertTaskRetryConversationAllowed(issue, input.actorId);

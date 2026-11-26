@@ -40,6 +40,7 @@ import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { ensureProjectAccessMember } from "../services/projects.js";
+import { lockIssuePrivacyTree } from "../services/issue-hierarchy.js";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,
@@ -654,7 +655,15 @@ export function projectRoutes(db: Db) {
       res.status(422).json({ error: "The project privacy owner cannot be removed" });
       return;
     }
-    await db.delete(projectAccessMembers).where(eq(projectAccessMembers.id, member.id));
+    const [removed] = await db.transaction(async tx => {
+      await lockIssuePrivacyTree(tx, project.companyId);
+      return tx.delete(projectAccessMembers).where(and(eq(projectAccessMembers.id, member.id),
+        eq(projectAccessMembers.companyId, project.companyId), eq(projectAccessMembers.projectId, project.id))).returning();
+    });
+    if (!removed) {
+      res.status(404).json({ error: "Project access member not found" });
+      return;
+    }
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: project.companyId,

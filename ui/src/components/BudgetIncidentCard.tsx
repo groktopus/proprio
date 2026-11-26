@@ -46,10 +46,12 @@ export function BudgetIncidentCard({
   const amountErrorId = useId();
   const isWarning = incident.thresholdType === "soft";
   const isTaskTree = incident.scopeType === "task_tree";
-  const [draftAmount, setDraftAmount] = useState(
-    centsInputValue(isWarning
+  const atMaximum = isTaskTree && Math.max(incident.amountLimit, incident.amountObserved) >= BUDGET_AMOUNT_MAX_CENTS;
+  const suggestedAmount = isWarning
       ? Math.max(incident.amountObserved, incident.amountLimit) + 1000
-      : Math.max(incident.amountObserved + 1000, incident.amountLimit)),
+      : Math.max(incident.amountObserved + 1000, incident.amountLimit);
+  const [draftAmount, setDraftAmount] = useState(
+    centsInputValue(isTaskTree ? Math.min(suggestedAmount, BUDGET_AMOUNT_MAX_CENTS) : suggestedAmount),
   );
   const parsed = isTaskTree ? parseBudgetDollarAmount(draftAmount) : parseDollarInput(draftAmount);
   const amountError = isTaskTree && draftAmount.trim() && parsed === null
@@ -120,17 +122,17 @@ export function BudgetIncidentCard({
           <div className="mt-2 flex flex-col gap-3 sm:flex-row">
             <Input
               id={amountId}
-              disabled={!canResolve || isMutating}
+              disabled={!canResolve || isMutating || atMaximum}
               value={draftAmount}
               onChange={(event) => setDraftAmount(event.target.value)}
               inputMode="decimal"
               placeholder="0.00"
               aria-invalid={Boolean(amountError)}
-              aria-describedby={amountError ? amountErrorId : undefined}
+              aria-describedby={amountError || atMaximum ? amountErrorId : undefined}
             />
             <Button
               className="gap-2"
-              disabled={!canResolve || isMutating || parsed === null || parsed <= incident.amountObserved}
+              disabled={!canResolve || isMutating || atMaximum || parsed === null || parsed <= incident.amountObserved}
               onClick={() => {
                 if (typeof parsed === "number") onRaiseAndResume(parsed);
               }}
@@ -139,7 +141,9 @@ export function BudgetIncidentCard({
               {isMutating ? "Applying..." : isWarning ? "Raise budget" : "Raise budget & resume"}
             </Button>
           </div>
-          {amountError ? (
+          {atMaximum ? (
+            <p id={amountErrorId} className="mt-2 text-xs text-muted-foreground">This task budget has reached the maximum supported limit.</p>
+          ) : amountError ? (
             <p id={amountErrorId} className="mt-2 text-xs text-destructive">{amountError}</p>
           ) : null}
         </div>

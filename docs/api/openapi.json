@@ -41738,6 +41738,37 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Too many concurrent task-list reads.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "retryAfterSeconds": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "retryAfterSeconds"
+                  ]
+                }
+              }
+            }
           }
         },
         "parameters": [

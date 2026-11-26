@@ -26,10 +26,16 @@ export function refreshBoardAccessAfterMembershipChange(client: QueryClient) {
   const sessionKey = queryKeys.auth.session;
   const sessionQuery = client.getQueryCache().find({ queryKey: sessionKey, exact: true });
   const session = client.getQueryData<BoardBootstrapSession>(sessionKey);
-  if (sessionQuery && session?.boardBootstrap) {
+  if (sessionQuery) {
+    const wasFetching = sessionQuery.state.fetchStatus === "fetching";
     void client.cancelQueries({ queryKey: sessionKey, exact: true }, { revert: false, silent: true });
-    sessionQuery.setState({ data: { ...session, boardBootstrap: undefined }, fetchStatus: "idle" });
+    sessionQuery.setState({
+      data: session?.boardBootstrap ? { ...session, boardBootstrap: undefined } : session,
+      fetchStatus: "idle",
+    });
+    if (wasFetching) void client.refetchQueries({ queryKey: sessionKey, exact: true, type: "active" });
   }
 
   void client.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
+  void client.resetQueries({ queryKey: queryKeys.companies.list(session?.user.id ?? null), exact: true });
 }

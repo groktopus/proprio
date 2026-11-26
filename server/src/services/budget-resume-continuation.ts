@@ -6,7 +6,7 @@ import { logActivity, publishActivity, type ActivityPublication } from "./activi
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { budgetCancellationScopePredicate } from "./heartbeat/budget-cancellation.js";
 import { AGENT_LIFECYCLE_STOP_REASON } from "./governance-pause-stop.js";
-import { persistedTaskLineageIssueId } from "./task-retry-eligibility.js";
+import { retryRunTaskIssueId } from "./task-retry-eligibility.js";
 
 /**
  * Resuming after a budget hard stop continues the work that the stop
@@ -56,8 +56,7 @@ export type BudgetResumeDelivery = {
   requestRetry?: typeof import("./task-retry.js").requestTaskRetry;
 };
 
-const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.nativeIssueId}::text,
-  ${heartbeatRuns.contextSnapshot}->>'issueId', ${persistedTaskLineageIssueId})`;
+const runIssueId = retryRunTaskIssueId();
 
 /**
  * Stamp every task run this scope's budget stop cancelled since the incident

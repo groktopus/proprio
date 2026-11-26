@@ -7,8 +7,8 @@ import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
 import { notifyExternalObjectRefresh } from "./external-object-refresh-notifications.js";
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
-import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, gt, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
+import { addCents, BUDGET_POLICY_EXISTS_ERROR_CODE, compareCents, normalizeCents } from "@groktopus/shared";
+import { and, asc, desc, eq, gt, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import type { AuthorizationActor } from "./authorization.js";
 import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
@@ -655,27 +655,28 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       companyId: incident.companyId, scopeType: incident.scopeType as BudgetScopeType, scopeId: incident.scopeId,
       incidentId: incident.id, incidentOpenedAt: incident.createdAt, actorUserId, actorSource,
     });
-    if (claimedRunIds.length > 0) await recordActivity({
+    if (incident.scopeType === "task_tree" || claimedRunIds.length > 0) await recordActivity({
       companyId: incident.companyId,
       actorType: "user",
       actorId: actorUserId,
       action: "budget.cancelled_work_resume_requested",
       entityType: "budget_incident",
       entityId: incident.id,
-      details: { scopeType: incident.scopeType, scopeId: incident.scopeId, runCount: claimedRunIds.length,
-        ...(incident.scopeType === "task_tree" ? {} : { sampleRunIds: claimedRunIds.slice(0, 20) }) },
+      details: { scopeType: incident.scopeType, scopeId: incident.scopeId,
+        ...(incident.scopeType === "task_tree" ? {} : { runCount: claimedRunIds.length, sampleRunIds: claimedRunIds.slice(0, 20) }) },
     });
   }
 
   async function claimDismissedTaskTreeStops(policyId: string, companyId: string, actorUserId: string, actorSource?: string | null) {
     // Keep paused dismisses the notification. Work stopped in the current
-    // window can still continue when an operator later lifts the block.
-    const incidents = await db.select().from(budgetIncidents).where(and(
+    // window can still continue when an operator later lifts the block. One
+    // scope scan starting at the earliest dismissal covers all of those runs.
+    const [incident] = await db.select().from(budgetIncidents).where(and(
       eq(budgetIncidents.policyId, policyId), eq(budgetIncidents.companyId, companyId),
       eq(budgetIncidents.scopeType, "task_tree"), eq(budgetIncidents.thresholdType, "hard"),
       eq(budgetIncidents.status, "dismissed"), gt(budgetIncidents.windowEnd, now),
-    )).orderBy(desc(budgetIncidents.createdAt));
-    for (const incident of incidents) await claimCancelledWork(incident, actorUserId, actorSource);
+    )).orderBy(asc(budgetIncidents.createdAt)).limit(1);
+    if (incident) await claimCancelledWork(incident, actorUserId, actorSource);
   }
 
   async function resolveOpenIncidentsForPolicy(
@@ -684,7 +685,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     approvalStatus: "approved" | "rejected" | null,
     decidedByUserId: string | null,
     thresholdType?: BudgetThresholdType,
-    policyEditor?: { userId: string; source?: string | null },
+    recovery?: { actorSource?: string | null; includeDismissed: boolean },
   ) {
     await notifyAttentionRetentionWork(db, { companyId, sourceKind: "budget_alert" });
     const condition = and(eq(budgetIncidents.policyId, policyId), eq(budgetIncidents.companyId, companyId),
@@ -694,13 +695,15 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       .from(budgetIncidents)
       .where(condition);
 
-    if (policyEditor) {
+    if (recovery && decidedByUserId) {
       for (const incident of openRows) {
         if (incident.scopeType === "task_tree" && incident.thresholdType === "hard") {
-          await claimCancelledWork(incident, policyEditor.userId, policyEditor.source);
+          await claimCancelledWork(incident, decidedByUserId, recovery.actorSource);
         }
       }
-      await claimDismissedTaskTreeStops(policyId, companyId, policyEditor.userId, policyEditor.source);
+      if (recovery.includeDismissed) {
+        await claimDismissedTaskTreeStops(policyId, companyId, decidedByUserId, recovery.actorSource);
+      }
     }
 
     await db
@@ -1004,7 +1007,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         )
         .then((rows) => rows[0] ?? null);
 
-      const alreadyExists = () => conflict("A budget policy already exists for this scope and window", { code: "budget_policy_exists" });
+      const alreadyExists = () => conflict("A budget policy already exists for this scope and window", { code: BUDGET_POLICY_EXISTS_ERROR_CODE });
       if (existing && input.createOnly) throw alreadyExists();
       if (!existing && input.amount === undefined) throw unprocessable("Amount is required for a new budget policy");
       const amount = Math.max(0, Math.floor(input.amount ?? existing!.amount));
@@ -1084,12 +1087,19 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           .where(eq(agents.id, input.scopeId));
       }
 
-      const policyEditor = actorUserId && input.scopeType === "task_tree" ? { userId: actorUserId, source: actorSource } : undefined;
+      const recovery = actorUserId && input.scopeType === "task_tree" ? {
+        actorSource,
+        includeDismissed: Boolean(existing && (
+          row.amount > existing.amount || (!row.isActive && existing.isActive)
+          || (!row.hardStopEnabled && existing.hardStopEnabled)
+          || (row.unpricedUsagePolicy === "allow" && existing.unpricedUsagePolicy !== "allow")
+        )),
+      } : undefined;
       if (row.isActive && amount > 0) {
         const observed = await computeObservedSpend(db, row);
         if (!hardStopReached(row, observed)) {
           await resumeScopeFromBudget(row);
-          await resolveOpenIncidentsForPolicy(row.id, row.companyId, "approved", actorUserId ?? "budget_service", "hard", policyEditor);
+          await resolveOpenIncidentsForPolicy(row.id, row.companyId, "approved", actorUserId ?? "budget_service", "hard", recovery);
           if (row.notifyEnabled && compareCents(observed.totalExact, Math.ceil(row.amount * row.warnPercent / 100)) >= 0) {
             await createIncidentIfNeeded(row, "soft", observed);
           } else {
@@ -1108,7 +1118,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         }
       } else {
         await resumeScopeFromBudget(row);
-        await resolveOpenIncidentsForPolicy(row.id, row.companyId, "approved", actorUserId ?? "budget_service", undefined, policyEditor);
+        await resolveOpenIncidentsForPolicy(row.id, row.companyId, "approved", actorUserId ?? "budget_service", undefined, recovery);
       }
 
       await recordActivity({

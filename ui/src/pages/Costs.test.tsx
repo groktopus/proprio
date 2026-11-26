@@ -68,6 +68,7 @@ vi.mock("../api/budgets", () => ({
 }));
 vi.mock("../api/issues", () => ({ issuesApi: {
   list: (...args: unknown[]) => issueListMock(...args),
+  listCompact: (...args: unknown[]) => issueListMock(...args),
   summaries: (...args: unknown[]) => issueSummariesMock(...args),
 } }));
 vi.mock("../api/access", () => ({ accessApi: { getCurrentBoardAccess: (...args: unknown[]) => boardAccessMock(...args) } }));
@@ -138,11 +139,19 @@ describe("Shared Costs surfaces", () => {
     queryClient.clear();
     await act(async () => root.unmount());
 
-    boardAccessMock.mockResolvedValue({ userId: "viewer", companyIds: ["company-1"], memberships: [{ companyId: "company-1", status: "active", membershipRole: "viewer" }], source: "session", isInstanceAdmin: false });
+    boardAccessMock.mockResolvedValue({ userId: "viewer", companyIds: ["company-1", "company-2"],
+      memberships: [{ companyId: "company-1", status: "active", membershipRole: "viewer" },
+        { companyId: "company-2", status: "active", membershipRole: "owner" }], source: "cloud_tenant", isInstanceAdmin: true });
+    const boardReadsBeforeViewer = boardAccessMock.mock.calls.length;
     const viewerClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);
     await act(async () => root.render(<QueryClientProvider client={viewerClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
-    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
+    await act(async () => { await vi.waitFor(() => {
+      expect(container.textContent).toContain("Open root task: Root task");
+      expect(boardAccessMock).toHaveBeenCalledTimes(boardReadsBeforeViewer + 1);
+    }); });
+    expect(budgetInput(container, "Root task").disabled).toBe(true);
+    expect(budgetInput(container, "Lifetime limit (USD)").disabled).toBe(true);
     expect(container.textContent).toContain("shared by the root task and its descendants");
     expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent?.trim() === "Update budget")).toBe(false);
     expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent?.trim() === "Set task budget")?.disabled).toBe(true);
@@ -252,7 +261,7 @@ describe("Shared Costs surfaces", () => {
       utilizationPercent: 0, unpricedEventCount: 0, pendingRunCount: 0, status: "ok", paused: false,
     }));
     const existing = { policies, activeIncidents: [], pendingApprovalCount: 0, pausedAgentCount: 0, pausedProjectCount: 0 };
-    issueListMock.mockImplementation((_companyId, filters) => Promise.resolve(filters.offset === 0 ? firstPage : [rootTask]));
+    issueListMock.mockImplementation((_companyId, filters) => Promise.resolve(filters.offset === 0 ? [...firstPage, rootTask] : [rootTask]));
     issueSummariesMock.mockResolvedValue([rootTask]);
     budgetOverviewMock.mockResolvedValue(existing);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -264,6 +273,7 @@ describe("Shared Costs surfaces", () => {
     await typeRootSearch(search, "Release");
     expect(issueListMock).toHaveBeenCalledTimes(1);
     expect(issueListMock.mock.calls[0]?.[1]).toMatchObject({ q: "Release", offset: 0 });
+    expect(issueListMock.mock.calls[0]?.[1]).toMatchObject({ projection: "index", limit: 21 });
     const more = () => [...container.querySelectorAll("button")].find(button => button.textContent === "More task results");
     await act(async () => { await vi.waitFor(() => expect(more()).toBeTruthy()); });
     await act(async () => more()!.click());
@@ -337,6 +347,31 @@ describe("Shared Costs surfaces", () => {
     queryClient.clear();
   });
 
+  it("restores a task budget draft after reauthorization unmounts the board", async () => {
+    const task = { id: "root-id", identifier: "PRO-10", title: "Prepare release" };
+    issueListMock.mockResolvedValue([task]);
+    issueSummariesMock.mockResolvedValue([task]);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const mount = async () => {
+      root = createRoot(container);
+      await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    };
+    await mount();
+    await act(async () => { await vi.waitFor(() => expect(budgetInput(container, "Root task").disabled).toBe(false)); });
+    await typeRootSearch(budgetInput(container, "Root task"), "Prepare");
+    const result = () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("Prepare release"));
+    await act(async () => { await vi.waitFor(() => expect(result()).toBeTruthy()); });
+    await act(async () => result()!.click());
+    await act(async () => typeAmount(budgetInput(container, "Lifetime limit (USD)"), "25.50"));
+    await act(async () => root.unmount());
+    await queryClient.resetQueries({ queryKey: queryKeys.issues.list("company-1") });
+    await queryClient.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
+    await mount();
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Change root task")); });
+    expect(budgetInput(container, "Lifetime limit (USD)").value).toBe("25.50");
+    queryClient.clear();
+  });
+
   it("keeps the task budget grid bounded and preserves a pending save across pagination", async () => {
     const policies = Array.from({ length: 96 }, (_, index) => ({
       policyId: `policy-${index}`, companyId: "company-1", scopeType: "task_tree",
@@ -380,6 +415,19 @@ describe("Shared Costs surfaces", () => {
     await act(async () => rejectSave(new Error("Save failed")));
     await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Could not update the budget policy.")); });
     expect(amount.value).toBe("25");
+
+    const edited = policies[24]!;
+    budgetOverviewMock.mockResolvedValue({
+      policies: [{ ...edited, amount: 1500 }, ...policies.filter(policy => policy.policyId !== edited.policyId)],
+      activeIncidents: [], pendingApprovalCount: 0, pausedAgentCount: 0, pausedProjectCount: 0,
+    });
+    upsertPolicyMock.mockResolvedValueOnce({});
+    await act(async () => typeAmount(budgetInput(container, "Budget (USD)"), "15"));
+    await act(async () => button("Update budget").click());
+    await act(async () => { await vi.waitFor(() => {
+      expect(taskLinks()[0]?.textContent).toContain("Release root 24");
+      expect(container.textContent).toContain("Page 1 of 8");
+    }); });
     queryClient.clear();
   });
 

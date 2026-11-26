@@ -357,6 +357,7 @@ import {
 } from "../services/issues.js";
 import {
   loadParentChainWith,
+  lockIssuePrivacyTree,
   placeTaskParent,
   planParentChange,
   type IssueParentDepthPolicy,
@@ -14382,15 +14383,14 @@ export function issueRoutes(
       if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
       const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
       if (!managedIssue) return;
-      const [grant] = await db
-        .update(issueAccessGrants)
-        .set({ revokedAt: new Date() })
-        .where(and(
+      const [grant] = await db.transaction(async tx => {
+        await lockIssuePrivacyTree(tx, issue.companyId);
+        return tx.update(issueAccessGrants).set({ revokedAt: new Date() }).where(and(
           eq(issueAccessGrants.id, req.params.grantId as string),
           eq(issueAccessGrants.issueId, managedIssue.id),
           isNull(issueAccessGrants.revokedAt),
-        ))
-        .returning();
+        )).returning();
+      });
       if (!grant) {
         res.status(404).json({ error: "Issue access grant not found" });
         return;

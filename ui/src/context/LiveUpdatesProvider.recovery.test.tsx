@@ -153,6 +153,19 @@ describe("LiveUpdatesProvider connection recovery", () => {
     expect(client.getQueryData(unrelated)).toEqual(["another company"]);
   });
 
+  it("cancels a permission-filtered read that started before the first subscription", async () => {
+    vi.stubGlobal("WebSocket", Socket);
+    const key = queryKeys.budgets.overview("company-1");
+    let release!: (value: unknown) => void;
+    const pending = client.fetchQuery({ queryKey: key, queryFn: () => new Promise(resolve => { release = resolve; }) })
+      .catch(() => null);
+    await renderPolling();
+    await act(async () => Socket.instances[0]!.onopen?.());
+    release(["old private policy"]);
+    await pending;
+    expect(client.getQueryData(key)).toBeUndefined();
+  });
+
   it.each(["unmount", "disconnect", "company", "session", "hidden"])("discards a queued resync-ack refresh after %s", async change => {
     vi.stubGlobal("WebSocket", Socket);
     await renderPolling();

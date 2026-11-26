@@ -2,7 +2,7 @@
 import { act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
-import type { BudgetIncident } from "@groktopus/shared";
+import { BUDGET_AMOUNT_MAX_CENTS, type BudgetIncident } from "@groktopus/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BudgetIncidentCard } from "./BudgetIncidentCard";
 import { MemoryRouter } from "react-router-dom";
@@ -108,6 +108,21 @@ describe("BudgetIncidentCard", () => {
     await act(async () => dismiss.click());
     expect(onKeepPaused).toHaveBeenCalledTimes(1);
     await cleanup();
+  });
+
+  it("keeps a near-maximum task budget suggestion within range and explains the maximum", async () => {
+    const maximum = BUDGET_AMOUNT_MAX_CENTS;
+    const base = { scopeType: "task_tree", thresholdType: "soft", amountObserved: maximum - 1000 } as const;
+    const near = await renderCard(incident({ ...base, amountLimit: maximum - 100 }));
+    expect(near.div.querySelector("input")?.value).toBe((maximum / 100).toFixed(2));
+    expect(near.div.querySelector("button")?.disabled).toBe(false);
+    await near.cleanup();
+    const full = await renderCard(incident({ ...base, amountLimit: maximum }));
+    const input = full.div.querySelector("input")!;
+    expect(full.div.querySelector("button")?.disabled).toBe(true);
+    expect(full.div.querySelector("[id='" + input.getAttribute("aria-describedby") + "']")?.textContent)
+      .toContain("maximum supported limit");
+    await full.cleanup();
   });
 
   it("describes a paused project for a project hard stop", async () => {

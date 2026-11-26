@@ -53,6 +53,25 @@ describe("account-scoped board bootstrap", () => {
     client.clear();
   });
 
+  it("discards an older pending session read and clears the affected account's organizations", async () => {
+    const client = new QueryClient();
+    const sessionKey = queryKeys.auth.session;
+    const restored = { user: { id: "one" } };
+    client.setQueryData(sessionKey, restored);
+    client.setQueryData(queryKeys.companies.list("one"), { companies: [{ id: "revoked" }] });
+    client.setQueryData(queryKeys.companies.list("two"), { companies: [{ id: "unrelated" }] });
+    let release!: (value: unknown) => void;
+    const pending = client.fetchQuery({ queryKey: sessionKey, queryFn: () => new Promise(resolve => { release = resolve; }) })
+      .catch(() => null);
+    refreshBoardAccessAfterMembershipChange(client);
+    release({ ...restored, boardBootstrap: bootstrap("one") });
+    await pending;
+    expect(client.getQueryData(sessionKey)).toEqual(restored);
+    expect(client.getQueryData(queryKeys.companies.list("one"))).toBeUndefined();
+    expect(client.getQueryData(queryKeys.companies.list("two"))).toMatchObject({ companies: [{ id: "unrelated" }] });
+    client.clear();
+  });
+
   it("refreshes identity instead of caching a response from a changed account", async () => {
     const changed = vi.fn();
     readAccess.mockResolvedValue({ userId: "two", isInstanceAdmin: true, companyIds: ["foreign"] });

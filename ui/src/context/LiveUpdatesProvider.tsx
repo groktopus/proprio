@@ -49,7 +49,7 @@ import type { CompanyUserDirectoryResponse } from "../api/access";
 import type { CaseDetail, IssueCaseLink } from "../api/cases";
 import { issuesApi } from "../api/issues";
 import { refreshBoardAccessAfterMembershipChange } from "../api/board-access-query";
-import { detachInflightGet } from "../api/client";
+import { projectsApi } from "../api/projects";
 import { authApi } from "../api/auth";
 import type { CompanyListResult } from "../api/companies-query";
 import { healthApi } from "../api/health";
@@ -1570,13 +1570,18 @@ function invalidateIssueDetailsEmbeddingRelation(queryClient: QueryClient, refs:
 }
 
 function resetCompanyTaskAudienceQueries(queryClient: QueryClient, companyId: string) {
-  for (const queryKey of [queryKeys.issues.summaries(companyId), queryKeys.issues.searches(companyId), queryKeys.budgets.overview(companyId)]) {
+  for (const queryKey of [queryKeys.issues.list(companyId), queryKeys.budgets.overview(companyId)]) {
     void queryClient.resetQueries({ queryKey });
   }
-  const projectsPath = `/companies/${encodeURIComponent(companyId)}/projects`;
-  detachInflightGet(projectsPath);
-  detachInflightGet(`${projectsPath}?includeArchived=true`);
+  projectsApi.detachInflightList(companyId);
   void queryClient.resetQueries({ queryKey: queryKeys.projects.all(companyId) });
+  void queryClient.resetQueries({
+    queryKey: ["projects", "detail"],
+    predicate: query => {
+      const companyScope = query.queryKey[3] ?? (query.state.data as { companyId?: string } | undefined)?.companyId;
+      return !companyScope || companyScope === companyId;
+    },
+  });
 }
 
 function invalidateActivityQueries(
@@ -2623,8 +2628,8 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         // too. Reconcile that gap as well as reconnects: events are not replayed.
         const initialHealthyOpen = !hasOpenedSocket.current && !hasNeededSocketRecovery.current;
         hasOpenedSocket.current = true;
+        resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
         if (!initialHealthyOpen) {
-          resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
           refreshBoardAccessAfterMembershipChange(queryClient);
         }
         // Browser lists stop polling on an empty result. A reconcile that joins

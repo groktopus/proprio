@@ -23,6 +23,7 @@ import type {
   ProviderQuotaResult,
 } from "@groktopus/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
+import { BUDGET_POLICY_EXISTS_ERROR_CODE } from "@groktopus/shared";
 import { ApiError } from "../api/client";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
@@ -48,7 +49,6 @@ import { useCompany } from "../context/CompanyContext";
 import { useDateRange, PRESET_KEYS, PRESET_LABELS } from "../hooks/useDateRange";
 import { retainQuotaWindows } from "../lib/quota-refresh";
 import { queryKeys } from "../lib/queryKeys";
-import { canBoardManageRuntime } from "../lib/recovery-reconcile";
 import { billingTypeDisplayName, cn, formatCents, formatTokens, providerDisplayName } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -59,7 +59,7 @@ const TASK_BUDGET_PAGE_SIZE = 12;
 
 function isBudgetCreationConflict(error: unknown) {
   return error instanceof ApiError && error.status === 409
-    && (error.body as { code?: string } | null)?.code === "budget_policy_exists";
+    && (error.body as { code?: string } | null)?.code === BUDGET_POLICY_EXISTS_ERROR_CODE;
 }
 
 export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "finance" | "decisions" | "fast-responses";
@@ -276,19 +276,21 @@ export function Costs({
   const { data: cachedBudgetData, isLoading: budgetLoading, error: budgetError } = useQuery({
     queryKey: queryKeys.budgets.overview(companyId),
     queryFn: ({ signal }) => budgetsApi.overview(companyId, { signal }),
-    enabled: !!selectedCompanyId && customReady,
+    enabled: Boolean(selectedCompanyId),
     refetchInterval: 30_000,
     staleTime: 5_000,
   });
   const budgetData = budgetError instanceof ApiError && (budgetError.status === 401 || budgetError.status === 403)
     ? undefined : cachedBudgetData;
-  const { data: boardAccess } = useQuery({
+  const { data: boardAccess, error: boardAccessError, isFetching: boardAccessFetching, refetch: refetchBoardAccess } = useQuery({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: ({ signal }) => accessApi.getCurrentBoardAccess({ signal }),
     enabled: Boolean(selectedCompanyId),
     staleTime: 60_000,
   });
-  const canManageTaskTreeBudgets = canBoardManageRuntime(selectedCompanyId, boardAccess);
+  const canManageTaskTreeBudgets = Boolean(selectedCompanyId && boardAccess && !boardAccessError &&
+    (boardAccess.source === "local_implicit" || (boardAccess.source !== "cloud_tenant" && boardAccess.isInstanceAdmin)
+      || boardAccess.memberships?.some(item => item.companyId === selectedCompanyId && item.status === "active" && item.membershipRole !== "viewer")));
 
   const invalidateBudgetViews = (budgetCompanyId: string) => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(budgetCompanyId) });
@@ -308,7 +310,12 @@ export function Costs({
       windowKind: summary.windowKind,
       ...changes,
     }),
-    onSuccess: (_result, { summary }) => invalidateBudgetViews(summary.companyId),
+    onSuccess: (_result, { summary }) => {
+      if (summary.scopeType === "task_tree") {
+        setTaskBudgetPagination({ companyId: summary.companyId, page: 0, policyId: summary.policyId });
+      }
+      invalidateBudgetViews(summary.companyId);
+    },
   });
   const createTaskTreeBudgetMutation = useMutation({
     mutationFn: ({ companyId: budgetCompanyId, rootTaskId, amount }: { companyId: string; rootTaskId: string; amount: number }) =>
@@ -337,7 +344,7 @@ export function Costs({
       onRaiseAndResume={(amount) => incidentMutation.mutate({ incident, resolution: { action: "raise_budget_and_resume", amount } })}
     />
   );
-  const [taskBudgetPagination, setTaskBudgetPagination] = useState<{ companyId: string; page: number }>();
+  const [taskBudgetPagination, setTaskBudgetPagination] = useState<{ companyId: string; page: number; policyId?: string }>();
 
   const { data: spendData, isLoading: spendLoading, error: spendError } = useQuery({
     queryKey: queryKeys.costs(companyId, reportQueryFrom, reportQueryTo),
@@ -646,8 +653,11 @@ export function Costs({
     .filter(policy => policy.windowKind === "lifetime").map(policy => policy.scopeId), [budgetPoliciesByScope.task_tree]);
   const taskTreePolicies = budgetPoliciesByScope.task_tree;
   const totalTaskBudgetPages = Math.ceil(taskTreePolicies.length / TASK_BUDGET_PAGE_SIZE);
-  const taskBudgetPage = taskBudgetPagination?.companyId === companyId
-    ? Math.min(taskBudgetPagination.page, Math.max(0, totalTaskBudgetPages - 1)) : 0;
+  const taskBudgetSavedIndex = taskBudgetPagination?.companyId === companyId && taskBudgetPagination.policyId
+    ? taskTreePolicies.findIndex(policy => policy.policyId === taskBudgetPagination.policyId) : -1;
+  const taskBudgetPage = taskBudgetSavedIndex >= 0 ? Math.floor(taskBudgetSavedIndex / TASK_BUDGET_PAGE_SIZE)
+    : taskBudgetPagination?.companyId === companyId
+      ? Math.min(taskBudgetPagination.page, Math.max(0, totalTaskBudgetPages - 1)) : 0;
   const conflictingRootId = currentTaskTreeBudgetMutation && isBudgetCreationConflict(createTaskTreeBudgetMutation.error)
     ? createTaskTreeBudgetMutation.variables?.rootTaskId : null;
   const conflictingPage = conflictingRootId ? Math.floor(taskTreePolicies.findIndex(
@@ -1069,6 +1079,13 @@ export function Costs({
             </div>
             {conflictingRootId && (
               <p role="alert" className="text-sm text-destructive">This task already has a lifetime budget. Review its current policy below.</p>
+            )}
+            {boardAccessError && (
+              <div className="flex flex-wrap items-center gap-2">
+                <p role="alert" className="text-sm text-destructive">Could not verify your access to manage task budgets.</p>
+                <Button type="button" variant="outline" size="sm" disabled={boardAccessFetching}
+                  onClick={() => { void refetchBoardAccess(); }}>Retry access check</Button>
+              </div>
             )}
             <TaskTreeBudgetCreate
               key={companyId}

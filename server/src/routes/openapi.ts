@@ -1,4 +1,4 @@
-import { nativeCompletionHistorySchema } from "@groktopus/shared";
+import { BUDGET_POLICY_EXISTS_ERROR_CODE, nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
@@ -4516,6 +4516,9 @@ registry.registerPath({
     200: r.ok(),
     304: { description: "Not Modified" },
     401: r.unauthorized,
+    429: { description: "Too many concurrent task-list reads.",
+      headers: { "Retry-After": { schema: { type: "integer", minimum: 1 } } },
+      content: { "application/json": { schema: z.object({ error: z.string(), retryAfterSeconds: z.number().int().min(1) }) } } },
   },
 });
 
@@ -6394,7 +6397,7 @@ registry.registerPath({
     404: r.notFound,
     409: {
       description: "A policy already exists for the requested scope, metric, and window.",
-      content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("budget_policy_exists") }) } },
+      content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal(BUDGET_POLICY_EXISTS_ERROR_CODE) }) } },
     },
   },
 });
