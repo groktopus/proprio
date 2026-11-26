@@ -122,6 +122,7 @@ import {
 import { PropertyPicker } from "./property-picker";
 import { PropertyChip, PropertyRow, PropertySection } from "./primitives";
 import { IssueContextUsageRow } from "./context-usage-row";
+import { TaskExecutionReviewEvidence } from "./ExecutionReviewEvidence";
 import {
   buildWorkspaceSelectionUpdate,
   currentWorkspaceSelection,
@@ -202,6 +203,7 @@ function TruncatedCopyable({ value, icon: Icon }: { value: string; icon: Compone
 
 interface IssuePropertiesProps {
   issue: Issue;
+  showExecutionReviewEvidence?: boolean;
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
@@ -245,6 +247,7 @@ interface IssuePaneTabDescriptor {
 
 export function IssueProperties({
   issue,
+  showExecutionReviewEvidence = false,
   childIssues = [],
   issueLinkState,
   onAddSubIssue,
@@ -2675,6 +2678,7 @@ export function IssueProperties({
             <span role="status" className="text-sm text-muted-foreground">Execution policy unavailable. Refresh to try again.</span>
           </PropertyRow>
         ) : (<>
+        {showExecutionReviewEvidence ? <TaskExecutionReviewEvidence key={issue.id} issue={issue} /> : null}
         <PropertyPicker
           inline={inline}
           label="Reviewers"

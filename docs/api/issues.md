@@ -403,6 +403,21 @@ Resolving a card records the response only. Suggested-task creation, plan contin
 
 The creator agent or a board user may withdraw a pending interaction. Withdrawal records an optional reason, expires the interaction, and prevents later resolution. Low-trust and task-watchdog agent runs cannot withdraw interactions.
 
+## Review evidence
+
+`GET /api/issues/{ref}/execution-review-evidence` reads signoff evidence for an
+authorized board user. Explicit break-glass access applies the board's trusted
+origin check and records the access and owner notice before returning.
+
+The response pairs `submittedSignoff.binding` and `submittedSignoff.stale` with
+the current review requests and `requiredQualityReviewState` from one database
+snapshot. A replacement can have human quality approval while the earlier
+signoff still needs a fresh submission. The board labels outdated requests.
+
+Bound decisions remain readable after policy changes. The endpoint returns up
+to 20 decisions. Send the returned `nextCursor` as `?cursor=<value>` for the next
+page. An absent cursor starts at the newest bound decision.
+
 ## Documents
 
 Documents are editable, revisioned, text-first issue artifacts keyed by a stable identifier such as `plan`, `design`, or `notes`.

@@ -161,6 +161,29 @@ describe("live-event run read boundaries", () => {
       expect(activity(1)).toEqual([]);
       expect(received.flat().join("")).not.toContain(project!.id);
       expect(received.flat().join("")).not.toContain(userId);
+
+      const [task] = await db.insert(issues).values({
+        companyId, title: "Hidden after placement change", status: "todo", visibility: "private",
+        createdByUserId: unrelatedUserId,
+      }).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "issue.updated",
+        entityType: "issue", entityId: task!.id, issueId: task!.id,
+        details: { changes: { visibility: { from: "open", to: "private" } } },
+      });
+      await expect.poll(() => activity(0).length).toBe(2);
+      expect(activity(0)[1]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(task!.id);
+
+      const [membership] = await db.update(companyMemberships).set({ status: "archived" })
+        .where(eq(companyMemberships.principalId, userId)).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
+        entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
+      });
+      await expect.poll(() => activity(0).length).toBe(3);
+      expect(activity(0)[2]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(membership!.id);
     } finally {
       sockets.forEach(socket => socket.terminate());
       wss.close();

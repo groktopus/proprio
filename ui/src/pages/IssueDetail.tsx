@@ -4041,7 +4041,6 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     if (!issue?.id) return;
     const anchor = taskChatHashAnchor(location.hash);
     if (!anchor || (!anchor.startsWith("interaction-") && !anchor.startsWith("decision-"))) return;
-    if (!coordinatorWorkspaceEnabled && !anchor.startsWith("decision-")) return;
     const focusDecision = () => {
       const target = document.getElementById(anchor);
       if (!target) return false;
@@ -4055,7 +4054,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     observer.observe(document.getElementById("main-content") ?? document.body, { subtree: true, childList: true });
     const timeout = window.setTimeout(() => observer.disconnect(), 10_000);
     return () => { observer.disconnect(); window.clearTimeout(timeout); };
-  }, [coordinatorWorkspaceEnabled, issue?.id, location.hash, location.key]);
+  }, [issue?.id, location.hash, location.key]);
   const taskPanelAccountScope = coordinatorWorkspaceEnabled ? `coordinator:${currentUserId ?? "anonymous"}` : currentUserId ?? "anonymous";
   const { panels: pluginPanels, isLoading: pluginPanelsLoading } = useTaskPluginPanels(issue, taskChatShellEnabled);
   const revealedPluginPanels = useRef(new Set<string>());
@@ -6259,6 +6258,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     }
     const sharedProps = {
       issue: panelIssue,
+      showExecutionReviewEvidence: panelVisible,
       childIssues: panelChildIssues,
       issueLinkState: streamlinedTaskDetailEnabled
         ? relationIssueLinkState
@@ -6341,6 +6341,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     handleSkillOpened,
     panelChildIssues,
     panelIssue,
+    panelVisible,
     persistedAgentChat,
     setPanelShowsArtifact,
     suppressPanelUntilPlan,
@@ -8955,6 +8956,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                     onBrowserOpened={handleBrowserOpened}
                     key={`${issue.id}:mobile`}
                     issue={issue}
+                    showExecutionReviewEvidence={mobilePropsOpen}
                     showDocumentSourceTask={persistedAgentChat}
                     accountScope={taskPanelAccountScope}
                     childIssues={childIssues}
@@ -9023,6 +9025,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                     <div className="px-4 pb-4">
                       <IssueProperties
                         issue={issue}
+                        showExecutionReviewEvidence={mobilePropsOpen}
                         childIssues={childIssues}
                         issueLinkState={
                           streamlinedTaskDetailEnabled

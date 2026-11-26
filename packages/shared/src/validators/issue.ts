@@ -526,6 +526,35 @@ export const issueExecutionReviewTargetBindingSchema = z.object({
   deliverables: qualityReviewDeliverables(qualityReviewDeliverableSchema.extend({ target: issueExecutionReviewTargetReferenceSchema })),
 }).strict();
 
+export const issueExecutionReviewEvidenceQuerySchema = z.object({
+  cursor: z.string().guid().optional(),
+});
+
+export const issueExecutionReviewEvidenceSchema = z.object({
+  submittedSignoff: z.object({ binding: issueExecutionReviewTargetBindingSchema.nullable(), stale: z.boolean() }).nullable(),
+  currentRequests: z.array(qualityReviewDeliverableSchema.extend({
+    interactionId: z.string().guid(),
+    target: issueExecutionReviewTargetReferenceSchema,
+    requirementHash: issueExecutionReviewTargetBindingSchema.shape.requirementHash,
+    outdated: z.boolean(),
+  })),
+  executionDecisions: z.array(z.object({
+    id: z.string().guid(),
+    stageType: z.enum(ISSUE_EXECUTION_STAGE_TYPES),
+    outcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES),
+    reviewTargetBinding: issueExecutionReviewTargetBindingSchema,
+  })),
+  nextCursor: z.string().guid().nullable(),
+  requiredQualityReviewState: z.object({
+    required: z.boolean(),
+    satisfied: z.boolean(),
+    missing: z.array(qualityReviewDeliverableSchema.extend({
+      reason: z.enum(["missing", "pending", "not_approved", "stale"]),
+      interactionId: z.string().guid().optional(),
+    })),
+  }),
+});
+
 export const issueExecutionPolicySchema = z.object({
   requiredQualityReview: requiredQualityReviewSchema.optional(),
   reviewTargetBinding: issueExecutionReviewTargetBindingPolicySchema.optional(),

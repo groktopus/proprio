@@ -31,6 +31,7 @@ import type {
   IssueRecentComments,
   IssueQueuedCommentQueue,
   IssueDocument,
+  IssueExecutionReviewEvidence,
   IssueLabel,
   IssueRecoveryAction,
   WorkspaceSourceInspection,
@@ -389,6 +390,11 @@ export const issuesApi = {
   createLabel: (companyId: string, data: { name: string; color: string }) =>
     api.post<IssueLabel>(`/companies/${companyId}/labels`, data),
   deleteLabel: (id: string) => api.delete<IssueLabel>(`/labels/${id}`),
+  executionReviewEvidence: (id: string, cursor: string | null, signal?: AbortSignal) =>
+    api.get<IssueExecutionReviewEvidence>(
+      `/issues/${id}/execution-review-evidence${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+      { signal, cache: "no-store" },
+    ),
   getCore: (id: string, options?: RequestOptions) => api.get<Issue>(`/issues/${id}?view=core`, options),
   recentComments: (id: string, options?: RequestOptions) => api.get<IssueRecentComments>(`/issues/${id}/recent-comments`, options),
   get: (id: string, options?: RequestOptions) =>

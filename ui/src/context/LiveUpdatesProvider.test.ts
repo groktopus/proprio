@@ -140,9 +140,11 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const taskRecordKey = queryKeys.decisions.taskRecord("company-1", "task-1", "user-1", "decision-1");
     const completionHistoryKey = queryKeys.issues.completionHistory("another-task");
     const caseRecoveryKey = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+    const signoffEvidenceKey = queryKeys.issues.executionReviewEvidence("task-1");
     const diagnosisKey = queryKeys.issues.dependencyInvestigation("parent-issue");
     client.setQueryData(completionHistoryKey, [{ id: "revoked-history" }]);
     client.setQueryData(caseRecoveryKey, { entries: [{ purpose: "Private recovery history" }] });
+    client.setQueryData(signoffEvidenceKey, { executionDecisions: [{ label: "Private signoff" }] });
     client.setQueryData(diagnosisKey, { dependencyPath: [{ title: "Private dependency" }] });
     client.setQueryData(taskRecordKey, { title: "Private decision" });
     client.setQueryData(questionKey, [{ title: "Private question" }]);
@@ -156,6 +158,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(questionKey)).toBeUndefined();
     expect(client.getQueryData(taskRecordKey)).toBeUndefined();
     expect(client.getQueryData(caseRecoveryKey)).toBeUndefined();
+    expect(client.getQueryData(signoffEvidenceKey)).toBeUndefined();
     expect(client.getQueryData(diagnosisKey)).toBeUndefined();
     expect(client.getQueryData(completionHistoryKey)).toBeUndefined();
     client.clear();
@@ -1258,7 +1261,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
   });
 
-  it("keeps visible issue detail refetches inactive for downstream agent updates", () => {
+  it("refreshes visible signoff evidence while keeping downstream agent detail refetches inactive", () => {
     const invalidations: unknown[] = [];
     const queryClient = {
       getQueryCache: () => ({ findAll: () => [] }),
@@ -1295,6 +1298,10 @@ describe("LiveUpdatesProvider issue invalidation", () => {
       { pathname: "/PAP/issues/PAP-759", isForegrounded: true },
     );
 
+    expect(invalidations).toContainEqual({
+      queryKey: queryKeys.issues.executionReviewEvidence("issue-1"),
+      refetchType: "active",
+    });
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.issues.detail("issue-1"),
       refetchType: "inactive",

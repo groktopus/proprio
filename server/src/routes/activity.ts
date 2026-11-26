@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { ipKeyGenerator, rateLimit } from "express-rate-limit";
+import { evidenceHistoryRateLimit } from "../middleware/evidence-history-rate-limit.js";
 import { z } from "zod";
 import type { Db } from "@groktopus/db";
 import { normalizeIssueIdentifier } from "@groktopus/shared";
@@ -375,19 +375,7 @@ export function activityRoutes(db: Db) {
     res.json(await svc.withActorNames(result));
   });
 
-  const completionHistoryRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: 30,
-    keyGenerator: req => {
-      const actor = req.actor;
-      if (actor?.type === "agent" && actor.companyId && actor.agentId) return `agent:${actor.companyId}:${actor.agentId}`;
-      if (actor?.type === "board" && actor.userId) return `user:${actor.userId}`;
-      return ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0");
-    },
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    message: { error: "Completion history request limit exceeded" },
-  });
+  const completionHistoryRateLimit = evidenceHistoryRateLimit("Completion history request limit exceeded");
   router.get("/issues/:id/completion-history", completionHistoryRateLimit, async (req, res) => {
     assertAuthenticated(req);
     const rawId = req.params.id as string;

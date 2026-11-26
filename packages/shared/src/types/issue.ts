@@ -964,6 +964,29 @@ export type IssueSummary = Pick<
   unreadSubtaskCount?: number;
 };
 
+export interface RequiredQualityReviewState {
+  required: boolean;
+  satisfied: boolean;
+  missing: Array<{ key: string; label: string; reason: "missing" | "pending" | "not_approved" | "stale"; interactionId?: string }>;
+}
+
+export interface IssueExecutionReviewEvidence {
+  submittedSignoff: { binding: IssueExecutionReviewTargetBinding | null; stale: boolean } | null;
+  currentRequests: Array<{
+    key: string;
+    label: string;
+    interactionId: string;
+    target: IssueExecutionReviewTargetReference;
+    requirementHash: string;
+    outdated: boolean;
+  }>;
+  executionDecisions: Array<Pick<IssueExecutionDecision, "id" | "stageType" | "outcome"> & {
+    reviewTargetBinding: IssueExecutionReviewTargetBinding;
+  }>;
+  nextCursor: string | null;
+  requiredQualityReviewState: RequiredQualityReviewState;
+}
+
 export interface Issue {
   /** Read-only status for task presentation; never use it for execution admission. */
   displayStatus?: IssueDisplayStatus;
