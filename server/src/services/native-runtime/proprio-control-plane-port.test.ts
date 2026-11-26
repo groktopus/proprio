@@ -3,7 +3,7 @@ import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external
 import { plugins } from "@groktopus/db";
 import { readTaskPanelActivations } from "../plugin-task-panels.js";
 import { startServerMetrics, stopServerMetrics } from "../server-metrics.js";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -3026,7 +3026,6 @@ describe("ProprioControlPlanePort conformance", () => {
     let issueBeforeFinalization = initialIssue;
     let correctedDigest: string | undefined;
     if (usesCaseService) {
-      await instanceSettingsService(db).updateExperimental({ enableCases: true });
       await db.update(agents).set({ adapterType: "proprio_runner" }).where(eq(agents.id, agentId));
       const [correctionSource] = await db.insert(heartbeatRuns).values({
         companyId, agentId: sourceAgentId, issueId, nativeIssueId: issueId, runtimeMode: "native", status: "running",
@@ -3038,6 +3037,12 @@ describe("ProprioControlPlanePort conformance", () => {
         .where(eq(issues.id, issueId)).returning();
       const service = caseHandoffService(db);
       const prerequisites = ["Verify the publication receipt"];
+      const settings = instanceSettingsService(db);
+      const { enableCases } = await settings.getExperimental();
+      if (!enableCases) {
+        onTestFinished(async () => { await settings.updateExperimental({ enableCases }); });
+        await settings.updateExperimental({ enableCases: true });
+      }
       const correction = await service.handoff(companyId, {
         type: "agent", source: "agent_jwt", companyId, agentId: sourceAgentId, runId: correctionRunId,
       }, {
@@ -3116,6 +3121,10 @@ describe("ProprioControlPlanePort conformance", () => {
         expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest,
       });
       if (usesCaseService) {
+        const [original] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, handoffId));
+        expect(original).toMatchObject({ state: "delivered", version: 1, offerContract,
+          recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
+            requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest } });
         expect(successor).toMatchObject({ sourceRunId: issueBeforeFinalization.executionRunId, assignmentAppliedAt: null });
         expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, successor!.wakeupRequestId))).toEqual([]);
       }
