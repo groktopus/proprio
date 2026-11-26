@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_CANCELLABLE_STATES } from "./case-handoff-states.js";
 import { and, eq, getTableColumns, inArray } from "drizzle-orm";
 import { agents, caseHandoffs, issues, workflows, type Db } from "@groktopus/db";
 import { authorizationService, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -27,7 +28,7 @@ export async function enrichCaseWork<T extends CaseWorkIdentity>(
     }).from(issues).where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds), readCondition)) : [],
     db.select(publicHandoffColumns).from(caseHandoffs).where(and(
       eq(caseHandoffs.companyId, companyId), inArray(caseHandoffs.caseId, rows.map(row => row.id)),
-      inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch", "awaiting_completion"]),
+      inArray(caseHandoffs.state, CASE_HANDOFF_CANCELLABLE_STATES),
     )),
   ]);
   const access = authorizationService(db);

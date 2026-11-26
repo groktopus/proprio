@@ -38,7 +38,7 @@ import {
 } from "@groktopus/db";
 import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON, isUuidLike } from "@groktopus/shared";
 import { withOperationAccountingTransaction } from "../../../services/accounting-transaction.js";
-import { lockBudgetAdmissionControls } from "../../../services/budget-admission-controls.js";
+import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "../../../services/budget-admission-controls.js";
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
@@ -133,6 +133,7 @@ type LoadStalenessFactsInput = {
   issueId: string;
   contextSnapshot: Record<string, unknown>;
   scheduledRetryReason: string | null;
+  wakeupRequestId: string | null;
 };
 type CancelSuppressedRetryInput = {
   runId: string;
@@ -207,6 +208,22 @@ function buildReviewParticipantFacts(input: {
   };
 }
 
+async function verifyDispatchStallWake(db: Db, input: {
+  companyId: string;
+  issueId: string;
+  runId: string;
+  contextSnapshot: Record<string, unknown>;
+  wakeupRequestId: string | null;
+}) {
+  const { wakeupRequestId, ...wake } = input;
+  const requestedByActorType = wakeupRequestId
+    ? await db.select({ actor: agentWakeupRequests.requestedByActorType }).from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, input.companyId), eq(agentWakeupRequests.id, wakeupRequestId)))
+      .then(rows => rows[0]?.actor ?? null)
+    : null;
+  return verifyBlockerStallWake(db, { ...wake, requestedByActorType, wakeupRequestId });
+}
+
 function queuedEffect(run: HeartbeatRun): PostCommitEffect {
   return {
     kind: "run_queued",
@@ -273,6 +290,7 @@ export function createPostgresRunDispatchAdapter(
 
       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
         if (mode === "accounting") {
+          await lockTaskTreeBudgetConfiguration(typedTx, input.companyId, "shared");
           await lockBudgetAdmissionControls(typedTx, input.companyId, hint.projectId);
           await typedTx.select({ id: agents.id }).from(agents)
             .where(and(eq(agents.id, hint.agentId), eq(agents.companyId, input.companyId))).for("share");
@@ -520,12 +538,11 @@ export function createPostgresRunDispatchAdapter(
     const readiness = dependencyReadiness.get(issueId);
     // A verified stall wake runs while its stalled dependency is unresolved,
     // including after a resource wait replaced it with a scheduled retry.
-    const stallAdmitted = readiness && !readiness.isDependencyReady && input.contextSnapshot.blockerStall
-      ? await verifyBlockerStallWake(db, { companyId: input.companyId, issueId, contextSnapshot: input.contextSnapshot,
-          requestedByActorType: input.wakeupRequestId ? await db.select({ actor: agentWakeupRequests.requestedByActorType })
-            .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, input.companyId),
-              eq(agentWakeupRequests.id, input.wakeupRequestId))).then(rows => rows[0]?.actor ?? null) : null })
+    const diagnosisWake = Boolean(input.contextSnapshot.dependencyDiagnosis);
+    const stallAdmitted = (diagnosisWake || (readiness?.isDependencyReady === false && input.contextSnapshot.blockerStall))
+      ? await verifyDispatchStallWake(dbOrTx, { ...input, issueId })
       : false;
+    facts.dependencyDiagnosisSuperseded = diagnosisWake && !stallAdmitted;
     const responseAdmitted = readiness && !readiness.isDependencyReady
       && input.contextSnapshot.dependencyBlockedInteraction === true
       && await isVerifiedDependencyInteractionResponse(dbOrTx, { companyId: input.companyId,
@@ -743,10 +760,10 @@ export function createPostgresRunDispatchAdapter(
     const replacementReadiness = issue && retryReasonKind === "native_safe_replacement"
       ? (await issueService(dbOrTx).listDependencyReadiness(input.companyId, [issueId])).get(issueId)
       : null;
-    const readiness = replacementReadiness && !replacementReadiness.isDependencyReady && context.blockerStall
-      && await verifyBlockerStallWake(dbOrTx as unknown as Db, { companyId: input.companyId, issueId,
-        contextSnapshot: context, requestedByActorType: null })
-      ? null : replacementReadiness;
+    const diagnosisWake = Boolean(context.dependencyDiagnosis);
+    const stallAdmitted = (diagnosisWake || (replacementReadiness?.isDependencyReady === false && context.blockerStall))
+      && await verifyDispatchStallWake(dbOrTx, { ...input, contextSnapshot: context });
+    const readiness = stallAdmitted ? null : replacementReadiness;
     const continuesNoWorkRun = retryReasonKind === "native_safe_replacement" && issue?.status === "blocked"
       && await continuesNoWorkRunOnBlockedTask(dbOrTx as unknown as Db, { companyId: input.companyId, runId: input.runId });
     let pendingResponse: QueuedRunFacts["pendingResponse"] = null;
@@ -767,6 +784,7 @@ export function createPostgresRunDispatchAdapter(
       issueId,
       retryReasonKind,
       continuesNoWorkRunOnBlockedTask: continuesNoWorkRun,
+      dependencyDiagnosisSuperseded: diagnosisWake && !stallAdmitted,
       dependenciesBlocked: readiness && !readiness.isDependencyReady && !continuesNoWorkRun ? {
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
@@ -1391,6 +1409,7 @@ export function createPostgresRunDispatchAdapter(
         issueId,
         contextSnapshot,
         scheduledRetryReason: run.scheduledRetryReason,
+        wakeupRequestId: run.wakeupRequestId,
       },
       now,
       tx,
@@ -1640,7 +1659,8 @@ export function createPostgresRunDispatchAdapter(
           const facts = await loadStalenessFacts({ runId: run.id, companyId: run.companyId, agentId: run.agentId,
             responsibleUserId: run.responsibleUserId,
             conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
-            issueId, contextSnapshot, scheduledRetryReason: run.scheduledRetryReason }, input.now, tx);
+            issueId, contextSnapshot, scheduledRetryReason: run.scheduledRetryReason,
+            wakeupRequestId: run.wakeupRequestId }, input.now, tx);
           const semantic = decideQueuedRunStaleness(facts, input.now);
           const decision = semantic.stale || facts.issueExecutionRunId === run.id ? semantic : {
             stale: true as const, errorCode: "issue_execution_lock_changed" as const,

@@ -8,7 +8,7 @@ import type {
   WorkspaceOperation,
   WorkspaceRuntimeControlTarget,
 } from "@groktopus/shared";
-import { api } from "./client";
+import { api, detachInflightGet } from "./client";
 import { sanitizeWorkspaceRuntimeControlTarget } from "./workspace-runtime-control";
 
 function withCompanyScope(path: string, companyId?: string) {
@@ -21,19 +21,23 @@ function projectPath(id: string, companyId?: string, suffix = "") {
   return withCompanyScope(`/projects/${encodeURIComponent(id)}${suffix}`, companyId);
 }
 
+function projectListPath(companyId: string, includeArchived = false) {
+  return `/companies/${encodeURIComponent(companyId)}/projects${includeArchived ? "?includeArchived=true" : ""}`;
+}
+
 export const projectsApi = {
   environmentOptions: (companyId: string) => api.get<ProjectEnvironmentOptions>(`/companies/${companyId}/project-environments`),
   gitAuthorization: (id: string) => api.get<ProjectGitAuthorization>(projectPath(id, undefined, "/git-authorization")),
   setGitAuthorization: (id: string, grantId: string | null) => api.put<ProjectGitAuthorization>(projectPath(id, undefined, "/git-authorization"), { grantId }),
   repositoryOptions: (companyId: string) => api.get<ProjectRepositoryOptions>(`/companies/${companyId}/project-repositories`),
   setRepositories: (id: string, repositoryIds: string[]) => api.put<Project>(projectPath(id, undefined, "/repositories"), { repositoryIds }),
-  list: (companyId: string, opts: { includeArchived?: boolean } = {}) => {
-    const params = new URLSearchParams();
-    if (opts.includeArchived) params.set("includeArchived", "true");
-    const query = params.toString();
-    return api.get<Project[]>("/companies/" + encodeURIComponent(companyId) + "/projects" + (query ? "?" + query : ""));
+  list: (companyId: string, opts: { includeArchived?: boolean } = {}) =>
+    api.get<Project[]>(projectListPath(companyId, opts.includeArchived)),
+  detachInflightList: (companyId: string) => {
+    detachInflightGet(projectListPath(companyId));
+    detachInflightGet(projectListPath(companyId, true));
   },
-  get: (id: string, companyId?: string) => api.get<Project>(projectPath(id, companyId)),
+  get: (id: string, companyId?: string) => api.get<Project>(projectPath(id, companyId), { fresh: true, cache: "no-store" }),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>

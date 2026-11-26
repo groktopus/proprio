@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Loader2, RefreshCw, Search, TriangleAlert, X } from "lucide-react";
 import type {
@@ -234,15 +235,6 @@ function normalizeDraftKey(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const handle = window.setTimeout(() => setDebounced(value), delayMs);
-    return () => window.clearTimeout(handle);
-  }, [value, delayMs]);
-  return debounced;
-}
-
 interface PreviewState {
   candidates: RemoteSecretImportCandidate[];
   nextToken: string | null;
@@ -269,7 +261,7 @@ export function ImportFromVaultDialog({
   const [step, setStep] = useState<Step>("select");
   const [vaultId, setVaultId] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const debouncedQuery = useDebounced(searchInput.trim(), 250);
+  const debouncedQuery = useDebouncedValue(searchInput.trim(), 250);
 
   const [preview, setPreview] = useState<PreviewState>(EMPTY_PREVIEW);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -949,6 +941,7 @@ function SelectStep(props: SelectStepProps) {
               const conflictNote =
                 candidate.status === "conflict" ? candidate.conflicts[0]?.message : undefined;
               return (
+                // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The checkbox is the keyboard control. Row clicks delegate to the same handler.
                 <li
                   key={candidate.externalRef}
                   className={cn(

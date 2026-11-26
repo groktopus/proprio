@@ -4,7 +4,13 @@ import { createHash } from "node:crypto";
 import { assets, companies, completionContracts, documents, documentRevisions, heartbeatRuns, issueDocuments, issueAttachments, issues, issueThreadInteractions, issueWorkProducts, mcpAttachmentUploads, dotRunnerAssignments, type Db } from "@groktopus/db";
 import { projectHumanInteractionResponse } from "../execution-continuation.js";
 
-export class NativeDeliverableEvidenceError extends Error {}
+export type NativeDeliverableTaskRemedy = "publish_task_document";
+
+export class NativeDeliverableEvidenceError extends Error {
+  constructor(message: string, readonly taskRemedy?: NativeDeliverableTaskRemedy) {
+    super(message);
+  }
+}
 
 function evidenceRefs(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -412,14 +418,14 @@ export async function validateNativeDeliverableEvidence(
     const localFile = /^(?:file:|\.{0,2}\/|[a-z]:[\\/])/iu.test(ref)
       || (!/^[a-z][a-z0-9+.-]*:/iu.test(ref) && /^[^\r\n]+\.[a-z0-9]{1,16}(?::\d+(?::\d+)?)?$/iu.test(ref));
     if (localFile && taskDocumentRequested && !publishedTaskDocument) {
-      throw new NativeDeliverableEvidenceError("The requested task document is only a workspace file. Publish it on this task with write_document, or attach the verified file with register_deliverable and cite deliverable:<attachmentId>. Reuse completed work; do not request a new completion approval.");
+      throw new NativeDeliverableEvidenceError("The requested task document is only a workspace file. Publish it on this task with write_document, or attach the verified file with register_deliverable and cite deliverable:<attachmentId>. Reuse completed work; do not request a new completion approval.", "publish_task_document");
     }
     if (localFile && (fileRequested || artifactRefs.has(value))) {
       throw new NativeDeliverableEvidenceError("Completion cites a workspace-only file that the user cannot download. Before finishing, use register_deliverable for requested file outputs and cite deliverable:<attachmentId> from the receipt, with /api/attachments/<attachmentId>/content as the download link. For repository changes, cite an accessible PR or registered work product instead. No human completion approval was created.");
     }
   }
   if (taskDocumentRequested && !publishedTaskDocument && !registeredAttachment) {
-    throw new NativeDeliverableEvidenceError("The requested document has not been published on this task. Use write_document, or register_deliverable with its verified attachment receipt. A workspace path or final message alone is not the requested task document. Reuse completed work without requesting a new completion approval.");
+    throw new NativeDeliverableEvidenceError("The requested document has not been published on this task. Use write_document, or register_deliverable with its verified attachment receipt. A workspace path or final message alone is not the requested task document. Reuse completed work without requesting a new completion approval.", "publish_task_document");
   }
   if (fileRequested && !registeredAttachment) {
     const query = db.select().from(issueWorkProducts).where(and(

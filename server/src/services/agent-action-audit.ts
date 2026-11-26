@@ -1,3 +1,4 @@
+import { readableTaskTreeBudgetActivityCondition, redactBudgetReceiptActivity } from "./budget-scope-visibility.js";
 import { dashboardActivityCondition, dashboardAuditConversationCondition } from "./responsibility-privacy.js";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
@@ -23,6 +24,7 @@ export interface AgentActionAuditFilters {
   cursor?: string;
   limit: number;
   caseReadCondition?: SQL<boolean>;
+  issueReadCondition?: SQL<boolean>;
   dashboardUserId?: string | null;
 }
 
@@ -61,6 +63,7 @@ export function agentActionAuditService(db: Db) {
       const conditions = [eq(activityLog.companyId, filters.companyId),
         dashboardActivityCondition(filters.dashboardUserId), dashboardAuditConversationCondition(filters.dashboardUserId),
         filters.caseReadCondition ?? sql<boolean>`${activityLog.entityType} <> 'case'`];
+      if (filters.issueReadCondition) conditions.push(readableTaskTreeBudgetActivityCondition(filters.issueReadCondition));
       // Preserve the historical agent-audit query unless the caller opts into
       // the unified all-actors feed explicitly.
       if (filters.actorScope !== "all") conditions.push(isNotNull(activityLog.agentId));
@@ -189,7 +192,7 @@ export function agentActionAuditService(db: Db) {
           runId: row.runId,
           responsibleUserId: row.responsibleUserId,
           createdAt: row.createdAt,
-          details: isIssueDerived && !issueSnippet ? null : redactDetails(row.details),
+          details: isIssueDerived && !issueSnippet ? null : redactDetails(redactBudgetReceiptActivity(row).details),
           entity: {
             ...(row.entityType === "case" ? { case: caseMap.get(row.entityId) ?? null } : {}),
             issue: issueSnippet,

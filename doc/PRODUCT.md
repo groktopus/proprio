@@ -625,15 +625,23 @@ Manual Stop and authorization remain independently enforced. Unknown charges
 remain visible, and stale unevaluated accounting blocks new limited-budget work
 until reconciliation catches up.
 
-A board operator with access to the root task can set a shared spend limit for
-its task tree. Each admitted run records the task and its ancestors. The limit
+A board operator with access to the root task can set a shared lifetime spend
+limit for its task tree. Open **More → Audit → Budgets** in Coordinator or
+**Costs → Budgets** in Classic. Select the root, enter the limit, and choose
+**Set task budget**. Each admitted run records the task and its ancestors. The limit
 covers billed provider usage linked to those runs, including attributable
 retries, continuations, and reviews. Pending reservations and linked usage
 without a reliable price affect admission. Charges without a run or a saved
 ancestry stay in the existing accounting views. A later move changes where a
 new run is charged and preserves the attribution of past runs.
+Preflight for new work checks the current tree. When an admitted run resumes
+or retries dispatch, its budget checks use the ancestry saved for that run.
 
 Sibling admissions reserve against the same balance. Work outside the held tree
 stays eligible under its own company, project, agent, and task limits. A board
 operator who can read the root can review the incident and decide whether to
 raise the limit or keep work paused.
+
+**Keep paused** dismisses the incident and retains the budget stop. A later
+policy edit that lifts the stop can resume cancelled work on tasks the editor
+can read and change.
