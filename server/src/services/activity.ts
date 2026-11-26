@@ -1,6 +1,7 @@
 import { dashboardActivityCondition, dashboardAuditConversationCondition } from "./responsibility-privacy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { skillAccessService } from "./skill-access.js";
+import { readableTaskTreeBudgetActivityCondition, redactBudgetReceiptActivity } from "./budget-scope-visibility.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
 import { acceptedFirstTurnCommentIdsSql } from "./queued-comment-delivery.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -447,6 +448,7 @@ export function activityService(db: Db) {
         .where(
           and(
             ...conditions,
+            filters.readCondition ? readableTaskTreeBudgetActivityCondition(filters.readCondition) : undefined,
             or(
               sql`${activityLog.entityType} != 'issue'`,
               and(visibleIssueCondition(), filters.readCondition ?? sql<boolean>`true`),
@@ -455,7 +457,7 @@ export function activityService(db: Db) {
         )
         .orderBy(desc(activityLog.createdAt))
         .limit(limit)
-        .then((rows) => rows.map((r) => r.activityLog));
+        .then((rows) => rows.map((r) => redactBudgetReceiptActivity(r.activityLog)));
     },
 
     inputFactsForIssue: async (companyId: string, issueId: string, commentIds: string[]) => {
@@ -501,7 +503,7 @@ export function activityService(db: Db) {
           ),
         )
         .orderBy(desc(activityLog.createdAt), desc(activityLog.id));
-      return limit === undefined ? query : query.limit(limit);
+      return (limit === undefined ? query : query.limit(limit)).then(rows => rows.map(redactBudgetReceiptActivity));
     },
 
     runsForIssue: async (

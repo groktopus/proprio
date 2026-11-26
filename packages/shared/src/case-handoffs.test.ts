@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { handoffCaseSchema, type HandoffCaseInput } from "./case-handoffs.js";
 
 const recipient = randomUUID();
+const offer = { expectedDeliverable: "A patch with passing focused checks", prerequisites: ["Read the acceptance criteria"] };
 const kickoff = {
   idempotencyKey: "kickoff-1", case: { create: { caseType: "bug", title: "Fix the bug" } },
   toAgentId: recipient, phase: "triage", instructions: "Investigate and route this task.",
@@ -12,6 +13,21 @@ const kickoff = {
 describe("handoff_case input", () => {
   it("accepts kickoff without inventing routing state or attribution", () => {
     expect(handoffCaseSchema.parse(kickoff)).toEqual(kickoff);
+  });
+  it("accepts a bounded opt-in handoff offer while leaving ordinary handoffs unchanged", () => {
+    const { workflow_document_text: _workflow, ...base } = kickoff;
+    const existing = { ...base, case: { id: randomUUID() }, expectedHandoffVersion: 1 };
+    expect(handoffCaseSchema.parse({ ...existing, offer })).toMatchObject({ offer });
+    expect(handoffCaseSchema.parse(existing)).not.toHaveProperty("offer");
+    expect(handoffCaseSchema.safeParse({ ...kickoff, offer }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...kickoff, offer, bindIssueId: randomUUID(), expectedIssueStatusVersion: 0 }).success).toBe(true);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, recipientId: randomUUID() } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { expectedDeliverable: " " } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: Array.from({ length: 21 }, () => "step") } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, expectedDeliverable: "null\u0000byte" } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["lone \uD800 surrogate"] } }).success).toBe(false);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["🧾".repeat(2_000)] } }).success).toBe(true);
+    expect(handoffCaseSchema.safeParse({ ...existing, offer: { ...offer, prerequisites: ["🧾".repeat(2_001)] } }).success).toBe(false);
   });
   it("accepts a reusable workflow at kickoff and reserves routing for handoff", () => {
     const { workflow_document_text: _inline, ...input } = kickoff;

@@ -1,3 +1,5 @@
+import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
+import type { WakeupOptions } from "../heartbeat/run-preparation.js";
 import { SESSION_GOAL_RECOVERY_OPEN_CONTROLS } from "../heartbeat/session-goal-recovery.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
@@ -30,19 +32,19 @@ import { currentProcessProbe, proveOwnerGone, type OwnerProof, type LocalOwnerSt
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { taskInterruptionPresentations } from "../task-interruption-presentation.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
-import { CHAT_CONTROL_RECOVERY_STOP_CODE, CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-stop.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { workspaceRecoverySourceEligible } from "../workspace-recovery-source.js";
 import { PENDING_CONTINUATION_BOUND_MS } from "../recovery-continuation-pacing.js";
 import { HELD_RECOVERY_WAKE_KEYS, queuedRecoveryRunsOf } from "../recovery-queue-admission.js";
 import { listPersonOriginSourceRunIds } from "../heartbeat/queued-run-line.js";
-import { aliasedRun, queuedRunStalledSql } from "./stalled-queued-run-sql.js";
+import { aliasedRun, aliasedWake, pendingWakeSql, queuedRunStalledSql } from "./stalled-queued-run-sql.js";
 import { attributeBlock, BLOCK_ATTRIBUTION_WINDOW_MS, blockedStatusDetailsSql } from "../interruption-block-release.js";
 import { ASSIGNED_WORK_CONTINUED_ACTION, PAUSED_FOR_AUTOMATIC_WORK, taskAutomaticAttempts } from "./task-automatic-attempts.js";
 import { automaticRunCreationHeldUntil, readAutomaticWorkStatus, reserveAutomaticRunCreation } from "./automatic-run-brake.js";
 import { isReattachPhaseActive, reattachPhaseRecheckAt } from "../heartbeat/run-admission.js";
 import { wakeBecameFreshContinuation } from "./wake-became-fresh-continuation.js";
 import { continueSweepTaskFromSavedWork } from "./sweep-saved-work-continuation.js";
+import { isOperatorStoppedRun, reconcileParentDependencyDiagnosis } from "./parent-dependency-diagnosis.js";
 import { STRANDED_CONTINUATION_MAX_AGE_MS, STRANDED_KIND, strandedHoldContinuesAutomatically, type StrandedHoldRun } from "./stranded-hold-continuation.js";
 import {
   continuationActivityMessage,
@@ -79,10 +81,9 @@ export const UNCHANGED_REFUSAL_MAX_WAIT_MS = 6 * 60 * 60_000;
 const UNCHANGED_REFUSAL_CHAIN = 9;
 
 const OPEN_STATUSES = ["todo", "in_progress", "blocked"] as const;
-const PENDING_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"];
-const DEFERRED_WAKE_PENDING_BOUND_MS = 5 * 60_000;
 export { PENDING_CONTINUATION_BOUND_MS };
 const NON_TERMINAL_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
+const PENDING_WAKE_STATUSES = ["queued", "deferred_issue_execution", "claimed"];
 const NATIVE_PENDING_RECOVERY_STATES = ["awaiting_evidence", "awaiting_runner_reattach", "resuming_session", "bootstrap_incomplete"];
 const PROVIDER_LIMIT_CAUSES = ["provider_quota", "native_provider_usage_limit"];
 
@@ -94,13 +95,7 @@ type RunRow = Pick<typeof heartbeatRuns.$inferSelect, "id" | "status" | "agentId
   | "scheduledRetryAt" | "controllerBootId" | "controllerLeaseExpiresAt" | "controllerProcess" | "resultJson"> & { issueId: string };
 
 export type AssignedWorkDeps = {
-  enqueueWakeup: (agentId: string, opts: {
-    source: "automation" | "assignment"; triggerDetail: "system"; reason: string;
-    payload: Record<string, unknown>; requestedByActorType: "system"; requestedByActorId: null;
-    contextSnapshot: Record<string, unknown>;
-    idempotencyKey?: string;
-    sessionGoalRecovery?: { sessionId: string; revision: number };
-  }) => Promise<{ id: string } | null>;
+  enqueueWakeup: (agentId: string, opts: WakeupOptions) => Promise<{ id: string } | null>;
   /** Runs this process executes now. */
   liveRunExecutions?: Readonly<{ has(id: string): boolean }>;
   /** Heartbeat's lost-process settle path for a running run whose owner is gone. */
@@ -231,16 +226,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         ) latest`),
       database.select({ issueId: sql<string>`${agentWakeupRequests.payload}->>'issueId'`, count: sql<number>`count(*)::int` })
         .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-          inArray(agentWakeupRequests.status, PENDING_WAKE_STATUSES),
-          sql`(${agentWakeupRequests.status} = 'queued'
-            or (${agentWakeupRequests.status} = 'deferred_issue_execution'
-              and ${agentWakeupRequests.createdAt} > ${at.toISOString()}::timestamptz - ${`${DEFERRED_WAKE_PENDING_BOUND_MS} milliseconds`}::interval)
-            -- A claimed wake becomes a run within seconds; one claimed long ago with no run never will.
-            or (${agentWakeupRequests.status} = 'claimed' and (${agentWakeupRequests.runId} is not null
-              or coalesce(${agentWakeupRequests.claimedAt}, ${agentWakeupRequests.createdAt})
-                > ${at.toISOString()}::timestamptz - ${`${DEFERRED_WAKE_PENDING_BOUND_MS} milliseconds`}::interval)))`,
-          sql`not exists (select 1 from heartbeat_runs wake_run where wake_run.id = ${agentWakeupRequests.runId}
-            and ${queuedRunStalledSql(aliasedRun("wake_run"), at)})`,
+          pendingWakeSql(agentWakeupRequests, at),
           sql`${agentWakeupRequests.payload}->>'issueId' = any(${idParam})`))
         .groupBy(sql`${agentWakeupRequests.payload}->>'issueId'`),
       database.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId), inArray(issues.id, ids),
@@ -258,7 +244,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
         sql`coalesce(${nativeRunFinalizations.failureDetail}->>'replacementDenied', '') <> 'explicit_user_continuation'`)),
       database.selectDistinct({ issueId: caseHandoffs.issueId }).from(caseHandoffs).where(and(eq(caseHandoffs.companyId, companyId),
         inArray(caseHandoffs.issueId, ids), eq(caseHandoffs.destinationKind, "agent"),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]))),
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES))),
       database.select({ taskKey: agentTaskSessions.taskKey, agentId: agentTaskSessions.agentId,
         sessionId: agentTaskSessions.id, revision: agentTaskSessions.goalRevision,
         goalStatus: agentTaskSessions.goalStatus, goalDesiredState: agentTaskSessions.goalDesiredState,
@@ -446,9 +432,7 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
           id: latest.id, status: latest.status, errorCode: latest.errorCode, finishedAt: latestFinishedAt,
           settlingUntil: latest.runtimeMode === "legacy" && latest.controllerBootId && leaseUntil
             && !NON_TERMINAL_RUN_STATUSES.includes(latest.status) ? leaseUntil : null,
-          operatorStopped: latest.agentId === issue.assigneeAgentId && (
-            [CHAT_CONTROL_RECOVERY_STOP_CODE, CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE, "operator_interrupted"].includes(latest.errorCode ?? "")
-            || (latest.status === "cancelled" && ["user", "board"].includes(String(json(latest.resultJson).cancelledByActorType)))),
+          operatorStopped: latest.agentId === issue.assigneeAgentId && isOperatorStoppedRun(latest),
         } : null,
         pendingWakes: (wakeCounts.get(issue.id) ?? 0) + (chatWakeIds.has(issue.id) ? 1 : 0),
         nativeRecoveryPending: nativeIds.has(issue.id),
@@ -552,21 +536,15 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
       sql`(${issues.status} = 'blocked' or not ${liveUnstalledRun})`,
       sql`((${issues.status} = 'blocked' and ${liveRun}) or not exists (select 1 from agent_wakeup_requests w where w.company_id = ${issues.companyId}
         and (w.payload->>'issueId') = ${issues.id}::text
-        and (w.status = 'queued'
-          or (w.status = 'deferred_issue_execution' and w.created_at > ${new Date(at.getTime() - DEFERRED_WAKE_PENDING_BOUND_MS).toISOString()}::timestamptz)
-          or (w.status = 'claimed' and (w.run_id is not null
-            or coalesce(w.claimed_at, w.created_at) > ${new Date(at.getTime() - DEFERRED_WAKE_PENDING_BOUND_MS).toISOString()}::timestamptz)))
-        and not exists (select 1 from heartbeat_runs wake_run where wake_run.id = w.run_id
-          and ${queuedRunStalledSql(aliasedRun("wake_run"), at)})))`,
+        and ${pendingWakeSql(aliasedWake("w"), at)}))`,
       sql`not exists (select 1 from ${issueThreadInteractions} where ${issueThreadInteractions.companyId} = ${issues.companyId}
         and ${issueThreadInteractions.issueId} = ${issues.id} and ${issueThreadInteractions.status} = 'pending'
         and ${activeIssueInteractionCondition()})`,
       // Plain waits on someone else, decided without the full read. The
       // predicate re-checks every task this lets through.
-      sql`not exists (select 1 from issue_relations rel inner join issues blocker
-        on blocker.id = rel.issue_id and blocker.company_id = rel.company_id
-        where rel.company_id = ${issues.companyId} and rel.related_issue_id = ${issues.id}
-          and rel.type = 'blocks' and blocker.status not in ('done', 'cancelled'))`,
+      // Explicit blocker waits need the full predicate so dependency diagnosis
+      // can distinguish active work, named holds, and a missing path. Parent
+      // hierarchy alone is not a blocker.
       sql`not exists (select 1 from issue_approvals ia inner join approvals ap on ap.id = ia.approval_id
         where ia.company_id = ${issues.companyId} and ia.issue_id = ${issues.id} and ap.status = 'pending')`,
       // A credential or board-confirmation hold waits on a person; any active
@@ -603,6 +581,16 @@ export function assignedWorkSweep(db: Db, deps: AssignedWorkDeps) {
     const facts = (await loadFacts(scope.companyId, [issue])).get(issue.id)!;
     const at = now();
     const verdict = evaluateAssignedWork(facts, at);
+    if (facts.openBlockers > 0 && verdict.kind === "ok" && verdict.clause === "waiting" && verdict.reason === "dependency") {
+      const diagnosis = await reconcileParentDependencyDiagnosis(db, { companyId: issue.companyId, issueId: issue.id,
+        enqueueWakeup: deps.enqueueWakeup, now: at });
+      if (diagnosis.accepted) {
+        const check = { verdict, outcome: "repaired" as const, retryAt: null };
+        passLog.record(check);
+        return check;
+      }
+      if (diagnosis.retryAt) scope.onDeferredDeadline?.(diagnosis.retryAt.getTime(), { unchanged: false });
+    }
     const check = await act(issue, facts, verdict, at);
     if (check.retryAt) scope.onDeferredDeadline?.(check.retryAt.getTime(), { unchanged: check.outcome === "waiting_unchanged" });
     passLog.record(check);

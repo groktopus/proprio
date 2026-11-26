@@ -36,6 +36,7 @@ import {
 } from "./attention.js";
 import { approvalReadSqlCondition, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { budgetScopeName } from "./budgets.js";
+import { readableTaskTreeBudgetActivityCondition } from "./budget-scope-visibility.js";
 import { deferrableInteractionCondition } from "./issue-question-context.js";
 
 /**
@@ -93,6 +94,7 @@ export async function resolveAttentionCardAudience(
   let title: string | null;
   let since: Date;
   let required: boolean;
+  let budgetRootId: string | null = null;
   if (source.sourceKind === "issue_thread_interaction") {
     const [row] = await db
       .select({
@@ -140,8 +142,7 @@ export async function resolveAttentionCardAudience(
     since = row.updatedAt;
     required = true;
   } else if (source.sourceKind === "budget_alert") {
-    // The budget owner's card is the open hard stop (PAP-749 task 1d). It has
-    // no issue; everything else about a budget card is a Company alert.
+    // A hard stop can be assigned to the budget owner. Tree receipts retain their root ACL.
     const [row] = await db
       .select({
         scopeType: budgetIncidents.scopeType,
@@ -155,6 +156,7 @@ export async function resolveAttentionCardAudience(
       .limit(1);
     if (!row || row.status !== "open") return null;
     const hard = row.thresholdType === "hard";
+    budgetRootId = row.scopeType === "task_tree" ? row.scopeId : null;
     input = { issueId: null, companyScoped: true, escalatesToBudgetOwner: hard };
     const scopeName = await budgetScopeName(db, row.scopeType as BudgetScopeType, row.scopeId);
     title = `${scopeName} budget ${hard ? "hard stop" : "warning"}`;
@@ -189,7 +191,7 @@ export async function resolveAttentionCardAudience(
     companyConfig,
     ctx,
   });
-  return { audience, issueId: input.issueId, title };
+  return { audience, issueId: budgetRootId ?? input.issueId, title };
 }
 
 /**
@@ -296,6 +298,7 @@ export function attentionReceiptService(db: Db) {
     ): Promise<AttentionReceipt[]> => {
       const now = options.now ?? Date.now();
       const since = new Date(now - ATTENTION_RECEIPT_DAYS * DAY_MS);
+      const readCondition = await issueReadSqlCondition(db, options.actor);
       const rows = await db
         .select({ id: activityLog.id, createdAt: activityLog.createdAt, details: activityLog.details })
         .from(activityLog)
@@ -303,6 +306,7 @@ export function attentionReceiptService(db: Db) {
           eq(activityLog.companyId, companyId),
           handledForUserCondition(options.userId),
           gte(activityLog.createdAt, since),
+          readableTaskTreeBudgetActivityCondition(readCondition),
         ))
         .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
         .limit(RECEIPT_SCAN_LIMIT);
@@ -323,7 +327,6 @@ export function attentionReceiptService(db: Db) {
 
       const keys = candidates.map((candidate) => attentionReceiptDismissalKey(candidate.id));
       const issueIds = [...new Set(candidates.map((candidate) => candidate.receipt.issueId).filter((id): id is string => Boolean(id)))];
-      const readCondition = await issueReadSqlCondition(db, options.actor);
       const approvalIds = candidates.filter(candidate => candidate.receipt.sourceKind === "approval").map(candidate => candidate.receipt.sourceId);
       const approvalRead = await approvalReadSqlCondition(db, options.actor);
       const [dismissedRows, issueRows, company, approvalRows] = await Promise.all([

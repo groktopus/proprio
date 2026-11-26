@@ -23,6 +23,7 @@ const fixture = vi.hoisted(() => ({
   receipts: [] as AttentionReceipt[],
 }));
 const decisionListMock = vi.hoisted(() => vi.fn());
+const renderHistoryDecision = vi.hoisted(() => vi.fn());
 vi.mock("../hooks/useCoordinatorWorkspaceEnabled", () => ({ useCoordinatorWorkspaceEnabled: () => ({ enabled: false, userId: fixture.userId }) }));
 vi.mock("../hooks/useCombinedInboxTasksEnabled", () => ({ useCombinedInboxTasksEnabled: () => ({ enabled: false, loaded: true }) }));
 vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company" }) }));
@@ -51,7 +52,12 @@ vi.mock("../api/attention", () => ({ attentionApi: {
 vi.mock("../components/DecisionsToolbar", () => ({ DecisionsToolbar: () => null }));
 vi.mock("../components/DecisionQueueRail", () => ({ DecisionQueueRail: () => null }));
 vi.mock("../components/DecisionDateChips", () => ({ DecisionDateChips: () => null }));
-vi.mock("../components/DecisionResolver", () => ({ DecisionResolver: ({ decisionId }: { decisionId: string }) => <div data-decision-card={decisionId}>Decision</div> }));
+vi.mock("../components/DecisionResolver", () => ({
+  DecisionResolver: ({ decisionId, recordedDecision }: { decisionId: string; recordedDecision?: object }) => {
+    if (recordedDecision) renderHistoryDecision(decisionId, recordedDecision);
+    return <div data-decision-card={decisionId}>Decision</div>;
+  },
+}));
 vi.mock("../components/AttentionQueueRow", () => ({
   AttentionQueueRow: ({ item, onClaim, onDismiss, onRestore, onSnooze, currentUserId }: { item: AttentionItem; onClaim?: (item: AttentionItem) => void; onDismiss?: (item: AttentionItem) => void; onRestore?: (item: AttentionItem) => void; onSnooze?: (item: AttentionItem, until: string) => void; currentUserId?: string | null }) => (
     <div data-row={item.id} data-viewer={currentUserId ?? ""}>
@@ -93,6 +99,7 @@ beforeEach(() => {
     unassigned: [card("pool-1", { kind: "pool", userId: null, reason: "none" })],
   };
   decisionListMock.mockReset();
+  renderHistoryDecision.mockClear();
   decisionListMock.mockResolvedValue([]);
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -160,6 +167,28 @@ describe("classic Decisions views", () => {
     expect(historySection).not.toBeNull();
     await act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(null))); });
     expect(document.activeElement).toBe(historySection);
+  });
+
+  it("keeps a full history window stable when the attention view changes", async () => {
+    const rows = Array.from({ length: 50 }, (_, index) => ({ id: `history-${index}` }));
+    decisionListMock.mockResolvedValueOnce(rows);
+    await render();
+    const decided = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Decided"))!;
+    await act(async () => decided.click());
+    await flush();
+    const previous = new Map(renderHistoryDecision.mock.calls.map(([id, decision]) => [id, decision]));
+    expect(previous.size).toBe(rows.length);
+    expect(previous.get("history-0")).toMatchObject({ executions: [] });
+    renderHistoryDecision.mockClear();
+
+    const openUnassigned = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("Open Unassigned"))!;
+    await act(async () => openUnassigned.click());
+    await flush();
+    expect(container.querySelector("[data-location]")?.textContent).toBe("?view=unassigned");
+    const recorded = new Map(renderHistoryDecision.mock.calls.map(([id, decision]) => [id, decision]));
+    expect(recorded.size).toBe(rows.length);
+    for (const [id, decision] of recorded) expect(decision).toBe(previous.get(id));
   });
 
   it("does not render cached history after an access denial", async () => {
