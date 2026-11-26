@@ -825,8 +825,8 @@ export interface IssueExecutionReviewTargetBindingPolicy {
 }
 
 export type IssueExecutionReviewTargetReference =
-  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "issueId" | "key" | "revisionId">
-  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "issueId" | "attachmentId" | "assetId" | "sha256">;
+  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "key" | "revisionId">
+  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "attachmentId" | "assetId" | "sha256">;
 
 /** Immutable requirement and artifact references captured when a stage is submitted for signoff. */
 export interface IssueExecutionReviewTargetBinding {

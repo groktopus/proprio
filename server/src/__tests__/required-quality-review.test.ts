@@ -1,17 +1,21 @@
 import { readFile, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import express, { type Request } from "express";
+import request from "supertest";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, assets, companies, createDb, documents, heartbeatRuns, issueAttachments, issueThreadInteractionIdempotencyKeys, issueThreadInteractions, issues, type Db } from "@groktopus/db";
+import { agents, assets, companies, companyMemberships, createDb, documents, heartbeatRuns, issueAttachments, issueExecutionDecisions, issueThreadInteractionIdempotencyKeys, issueThreadInteractions, issues, type Db } from "@groktopus/db";
 import { issueExecutionReviewTargetBindingSchema, requiredQualityReviewSchema } from "@groktopus/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { issueService } from "../services/issues.js";
+import { issueRoutes } from "../routes/issues.js";
+import { errorHandler } from "../middleware/index.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
-import { captureRequiredQualityReviewBinding, captureRequiredQualityReviewDecisionBinding, qualityReviewRequirementHash, readRequiredQualityReview } from "../services/required-quality-review.js";
+import { bindPendingExecutionReviewTargets, captureRequiredQualityReviewDecisionBinding, qualityReviewRequirementHash, readDeferredSignoffTargetCurrent, readRequiredQualityReview } from "../services/required-quality-review.js";
 import { nativeCompletionFeedback } from "../services/native-runtime/native-completion-feedback.js";
 import { ProprioRunnerToolAuthority } from "../services/native-runtime/proprio-runner-tool-authority.js";
 import type { PrpStructuredRunResult } from "../vendor/proprio-runner/index.js";
@@ -50,6 +54,17 @@ const support = await getEmbeddedPostgresTestSupport();
     };
     return { task, companyId, agentId, issueId, userId, saved, copy, visual, service, approve };
   }
+  async function bindSubmission(issueId: string) {
+    return db.transaction(async tx => {
+      const issue = await issueService(db).getByIdForUpdate(issueId, tx);
+      if (!issue) throw new Error("Expected task to submit");
+      const state = await bindPendingExecutionReviewTargets(tx as unknown as Db, {
+        issue, nextPolicy: issue.executionPolicy, nextState: { status: "pending", currentStageId: randomUUID() },
+      });
+      return state.reviewTargetBinding ? issueExecutionReviewTargetBindingSchema.parse(state.reviewTargetBinding) : null;
+    });
+  }
+
   it("retains the optional policy and validates unique required output keys", () => {
     expect(normalizeIssueExecutionPolicy({ requiredQualityReview: requirement })?.requiredQualityReview).toEqual(requirement);
     const optInPolicy = { source: "required_quality_review" as const };
@@ -85,10 +100,10 @@ const support = await getEmbeddedPostgresTestSupport();
   it("captures opt-in signoff targets as immutable requirement and artifact references", async () => {
     const f = await fixture(true, true);
     expect(f.task.executionPolicy).toMatchObject({ reviewTargetBinding: { source: "required_quality_review" } });
-    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+    await expect(bindSubmission(f.issueId)).rejects.toMatchObject({ details: { code: "required_quality_review_incomplete" } });
     await f.approve("copy");
     await f.approve("visual");
-    const binding = await captureRequiredQualityReviewBinding(db, f.task);
+    const binding = await bindSubmission(f.issueId);
     expect(issueExecutionReviewTargetBindingSchema.safeParse(binding).success).toBe(true);
     expect(binding).toEqual({
       version: 1,
@@ -101,8 +116,16 @@ const support = await getEmbeddedPostgresTestSupport();
     });
     await documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy", body: "Changed copy",
       format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
-    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+    await expect(bindSubmission(f.issueId)).rejects.toMatchObject({ details: { code: "required_quality_review_incomplete" } });
   });
+  it("does not bind an output from an expired quality confirmation", async () => {
+    const f = await fixture(true, true);
+    const copyCard = await f.approve("copy");
+    await f.approve("visual");
+    await db.update(issueThreadInteractions).set({ status: "expired" }).where(eq(issueThreadInteractions.id, copyCard.id));
+    await expect(bindSubmission(f.issueId)).rejects.toMatchObject({ details: { code: "required_quality_review_incomplete" } });
+  });
+
   it("keeps a submitted review immutable even after a newer artifact gains human approval", async () => {
     const f = await fixture(true, true);
     await f.approve("copy");
@@ -156,16 +179,117 @@ const support = await getEmbeddedPostgresTestSupport();
     ]) });
   });
 
+  it("keeps task status and the exact submitted decision atomic through the approval PATCH", async () => {
+    const f = await fixture(true, true);
+    await f.approve("copy");
+    await f.approve("visual");
+    const stageId = randomUUID();
+    const reviewerId = f.userId;
+    await db.insert(companyMemberships).values({ companyId: f.companyId, principalId: reviewerId,
+      principalType: "user", status: "active", membershipRole: "operator" });
+    const policy = executionPolicyRecord({ ...f.task.executionPolicy,
+      stages: [{ id: stageId, type: "review", participants: [{ type: "user", userId: reviewerId }] }] });
+    const service = issueService(db);
+    const assigned = await service.update(f.issueId, { executionPolicy: policy, actorUserId: f.userId });
+    const submission = applyIssueExecutionPolicyTransition({
+      issue: assigned!, policy: normalizeIssueExecutionPolicy(policy), requestedStatus: "done",
+      requestedAssigneePatch: {}, actor: { agentId: f.agentId },
+    });
+    const submitted = await service.update(f.issueId, { ...submission.patch, actorAgentId: f.agentId });
+    const originalBinding = submitted?.executionState?.reviewTargetBinding;
+    expect(originalBinding).toBeDefined();
+
+    const app = express();
+    app.use(express.json());
+    const actor: Request["actor"] = { type: "board", userId: reviewerId, companyIds: [f.companyId], isInstanceAdmin: true, source: "local_implicit" };
+    app.use((req, _res, next) => { req.actor = actor; next(); });
+    app.use("/api", issueRoutes(db, {} as Parameters<typeof issueRoutes>[1]));
+    app.use(errorHandler);
+    const decision = () => request(app).patch(`/api/issues/${f.issueId}`).send({ status: "done", comment: "Approved the submitted output." });
+    const readDecisions = () => db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issueId));
+
+    const replacement = await documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
+      body: "New copy needs its own signoff", format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
+    await f.approve("copy", { ...f.copy, revisionId: replacement.document.latestRevisionId! });
+    const rejected = await decision();
+    expect(rejected.status, JSON.stringify(rejected.body)).toBe(422);
+    expect(rejected.body.details).toMatchObject({ code: "required_quality_review_stale" });
+    expect(await readDecisions()).toEqual([]);
+    expect(await service.getById(f.issueId)).toMatchObject({ status: "in_review", executionState: { reviewTargetBinding: originalBinding } });
+
+    const returnForChanges = await request(app).patch(`/api/issues/${f.issueId}`)
+      .send({ status: "in_progress", comment: "Return the replacement for a new review." });
+    expect(returnForChanges.status, JSON.stringify(returnForChanges.body)).toBe(200);
+    const rework = await service.getById(f.issueId);
+    const resubmission = applyIssueExecutionPolicyTransition({
+      issue: rework!, policy: normalizeIssueExecutionPolicy(policy), requestedStatus: "done",
+      requestedAssigneePatch: {}, actor: { agentId: f.agentId },
+    });
+    const resubmitted = await service.update(f.issueId, { ...resubmission.patch, actorAgentId: f.agentId });
+    const newBinding = resubmitted?.executionState?.reviewTargetBinding;
+    expect(newBinding).not.toEqual(originalBinding);
+    await expect(db.transaction(async transaction => {
+      const locked = await service.getByIdForUpdate(f.issueId, transaction);
+      if (!locked) throw new Error("Expected locked stage");
+      return captureRequiredQualityReviewDecisionBinding(transaction as unknown as Db, {
+        issue: locked, previousPolicy: locked.executionPolicy, nextPolicy: locked.executionPolicy,
+        previousExecutionState: locked.executionState, stage: { stageId, stageType: "review" }, actorUserId: reviewerId,
+        expectedExecutionState: { ...locked.executionState, lastDecisionId: submitted?.executionState?.lastDecisionId ?? null },
+      });
+    })).rejects.toMatchObject({ details: { code: "required_quality_review_stale" } });
+    const approved = await decision();
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(await service.getById(f.issueId)).toMatchObject({ status: "done" });
+    expect((await readDecisions()).filter(row => row.outcome === "approved")).toMatchObject([
+      { actorUserId: reviewerId, stageId, reviewTargetBinding: newBinding },
+    ]);
+  });
+
+  it("rechecks an approved native decision before the final Done write", async () => {
+    const f = await fixture(true, true);
+    await f.approve("copy");
+    await f.approve("visual");
+    const binding = await bindSubmission(f.issueId);
+    expect(binding).toBeTruthy();
+    const decisionId = randomUUID();
+    const stageId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId: f.agentId,
+      nativeIssueId: f.issueId, status: "running", runtimeMode: "native", contextSnapshot: { issueId: f.issueId } });
+    await db.insert(issueExecutionDecisions).values({
+      id: decisionId, companyId: f.companyId, issueId: f.issueId, stageId, stageType: "review",
+      actorAgentId: f.agentId, outcome: "approved", body: "Reviewed the earlier output.",
+      reviewTargetBinding: binding, createdByRunId: runId,
+    });
+    const [deferred] = await db.update(issues).set({ status: "in_review", executionRunId: runId,
+      executionState: { status: "completed", lastDecisionId: decisionId, lastDecisionOutcome: "approved", completedStageIds: [stageId] },
+    }).where(eq(issues.id, f.issueId)).returning();
+    expect(await readDeferredSignoffTargetCurrent(db, deferred)).toBe(true);
+
+    const replacement = await documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
+      body: "New copy after deferred approval", format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
+    await f.approve("copy", { ...f.copy, revisionId: replacement.document.latestRevisionId! });
+    expect(await readRequiredQualityReview(db, deferred)).toMatchObject({ satisfied: true });
+    expect(await readDeferredSignoffTargetCurrent(db, deferred)).toBe(false);
+
+    const service = issueService(db);
+    await expect(service.update(f.issueId, { status: "done", actorAgentId: f.agentId }))
+      .rejects.toMatchObject({ details: { code: "required_quality_review_stale" } });
+    expect(await service.getById(f.issueId)).toMatchObject({ status: "in_review", executionState: { lastDecisionId: decisionId } });
+    expect((await db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.id, decisionId)))[0])
+      .toMatchObject({ reviewTargetBinding: binding });
+  });
+
   it("locks reviewed artifacts while an approved decision snapshots them", async () => {
     const f = await fixture(true, true);
     await f.approve("copy"); await f.approve("visual");
     const stageId = randomUUID();
-    const submitted = await captureRequiredQualityReviewBinding(db, f.task);
+    const submitted = await bindSubmission(f.issueId);
     const captured: { value: Awaited<ReturnType<typeof captureRequiredQualityReviewDecisionBinding>> } = { value: null };
     let release!: () => void;
     const hold = new Promise<void>(resolve => { release = resolve; });
-    let ready!: () => void;
-    const snapshotReady = new Promise<void>(resolve => { ready = resolve; });
+    let ready!: (pid: number) => void;
+    const snapshotReady = new Promise<number>(resolve => { ready = resolve; });
     const snapshot = db.transaction(async tx => {
       captured.value = await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
         issue: f.task, previousPolicy: f.task.executionPolicy, nextPolicy: f.task.executionPolicy,
@@ -173,16 +297,29 @@ const support = await getEmbeddedPostgresTestSupport();
           currentParticipant: { type: "user", userId: f.userId }, reviewTargetBinding: submitted },
         stage: { stageId, stageType: "review" }, actorUserId: f.userId,
       });
-      ready();
+      const [backend] = await tx.execute(sql`select pg_backend_pid() as pid`);
+      ready(Number(backend.pid));
       await hold;
     });
-    await Promise.race([snapshotReady, snapshot]);
-    const edit = documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
+    const snapshotPid = await Promise.race([snapshotReady, snapshot.then(() => 0)]);
+    expect(snapshotPid).toBeGreaterThan(0);
+    const applicationName = `review-target-edit-${randomUUID()}`;
+    const competingDb = createDb(temporary.connectionString, { applicationName, maxConnections: 1 });
+    const edit = documentService(competingDb).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
       body: "Edited while approval commits", format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
-    let editFinished = false;
-    void edit.then(() => { editFinished = true; });
-    await new Promise(resolve => setTimeout(resolve, 50));
-    try { expect(editFinished).toBe(false); } finally { release(); }
+    void edit.catch(() => undefined);
+    try {
+      await expect.poll(async () => {
+        const [observed] = await db.execute(sql`select query from pg_stat_activity
+          where application_name = ${applicationName} and wait_event_type = 'Lock'
+          and ${snapshotPid} = any(pg_blocking_pids(pid))`);
+        return observed?.query;
+      }).toMatch(/"document_revisions"|"documents"/);
+    } finally {
+      release();
+      await Promise.allSettled([snapshot, edit]);
+      await competingDb.$client.end();
+    }
     await snapshot;
     await edit;
     expect(captured.value?.deliverables.find(item => item.key === "copy")?.target).toEqual({
@@ -194,7 +331,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const f = await fixture();
     await f.approve("copy");
     await f.approve("visual");
-    expect(await captureRequiredQualityReviewBinding(db, f.task)).toBeNull();
+    expect(await bindSubmission(f.issueId)).toBeNull();
     expect(await captureRequiredQualityReviewDecisionBinding(db, {
       issue: f.task, previousPolicy: f.task.executionPolicy, nextPolicy: f.task.executionPolicy,
     })).toBeNull();
@@ -211,6 +348,11 @@ const support = await getEmbeddedPostgresTestSupport();
     const service = issueService(db);
     const unboundPolicy = executionPolicyRecord({ requiredQualityReview: requirement });
     await expect(service.update(f.issueId, { executionPolicy: unboundPolicy, actorAgentId: f.agentId }))
+      .rejects.toMatchObject({ details: { code: "required_quality_review_policy_protected" } });
+    const stagePolicy = executionPolicyRecord({ ...f.task.executionPolicy,
+      stages: [{ id: randomUUID(), type: "review", participants: [{ type: "user", userId: f.userId }] }] });
+    await service.update(f.issueId, { executionPolicy: stagePolicy, actorUserId: f.userId });
+    await expect(service.update(f.issueId, { executionPolicy: f.task.executionPolicy, actorAgentId: f.agentId }))
       .rejects.toMatchObject({ details: { code: "required_quality_review_policy_protected" } });
     const older = await service.create(f.companyId, { title: "Existing unbound review", executionPolicy: unboundPolicy });
     await expect(service.create(f.companyId, {

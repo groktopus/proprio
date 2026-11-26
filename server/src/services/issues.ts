@@ -219,7 +219,7 @@ import {
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
 } from "./issue-execution-policy.js";
-import { assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, bindPendingExecutionReviewTargets, requiredQualityReview } from "./required-quality-review.js";
+import { assertDeferredSignoffTargetCurrent, assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, bindPendingExecutionReviewTargets, requiredQualityReview } from "./required-quality-review.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -12134,7 +12134,9 @@ export function issueService(db: Db) {
         }
         if ((patch.status ?? receiptExisting.status) === "done" &&
             (receiptExisting.status !== "done" || issueData.executionPolicy !== undefined)) {
-          await assertRequiredQualityReviewComplete(tx as Db, { ...receiptExisting, executionPolicy: nextReviewPolicy }, true);
+          const issueForReview = { ...receiptExisting, executionPolicy: nextReviewPolicy };
+          await assertDeferredSignoffTargetCurrent(tx as Db, issueForReview);
+          await assertRequiredQualityReviewComplete(tx as Db, issueForReview, true);
         }
         if (actorRunId) await assertNoCaseHandoffMutation(tx, actorRunId, id);
         if (expectedStatusVersion !== undefined && (

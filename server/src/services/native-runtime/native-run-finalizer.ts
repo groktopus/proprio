@@ -14,7 +14,7 @@ import { notifyUnsafeWorkspaceExportRunChange } from "../unsafe-workspace-export
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
-import { readRequiredQualityReview } from "../required-quality-review.js";
+import { isDeferredSignoffTargetFailure, readDeferredSignoffTargetCurrent, readRequiredQualityReview } from "../required-quality-review.js";
 import { NativeDeliverableEvidenceError, validateNativeDeliverableEvidence } from "./native-deliverable-feedback.js";
 import { OWN_QUESTION_UNANSWERED_REASON, pendingOwnQuestionId, reportsOnlyProviderMessage } from "./own-question-wait.js";
 import { conversationTurnPresentsAnswer, pendingNativeGovernance } from "./native-governance.js";
@@ -1769,7 +1769,10 @@ export async function finalizeNativeRun(input: {
       ? { kind: "none" as const } : completionReviewStageEntry(authoritativeIssue, run.agentId);
     await cancelStoppedRunContinuation(input.db, { companyId: run.companyId, resultJson: savedStop }, toolCallLoopContinuationKey(run.id));
     const caseHandoff = await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result);
+    const deferredSignoffTargetCurrent = result.reportedWorkDisposition !== "done" ||
+      await readDeferredSignoffTargetCurrent(input.db, authoritativeIssue);
     const statusInput: Parameters<typeof resolveNativeFinalizerStatus>[0] = {
+      deferredSignoffTargetCurrent,
       requiredQualityReviewSatisfied: qualityReview.satisfied,
       executionStageApprovedByRun: await executionStageApprovedByRun(input.db, run, authoritativeIssue),
       executionReviewStageStarts: reviewStage.kind === "starts",
@@ -2150,7 +2153,8 @@ export async function finalizeNativeRun(input: {
         decisionId: committed.decision.id,
       };
     } catch (error) {
-      if (error instanceof NativeStatusRaceError && attempt < 2) {
+      if ((error instanceof NativeStatusRaceError ||
+          (decision.statusAction === "done" && isDeferredSignoffTargetFailure(error))) && attempt < 2) {
         supersedesAssessmentId = assessmentRow.id;
         await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
         continue;

@@ -2176,8 +2176,6 @@ export {
   stalledReviewDecisionSchema,
   issueExecutionPolicySchema,
   requiredQualityReviewSchema,
-  issueExecutionReviewTargetBindingPolicySchema,
-  issueExecutionReviewTargetReferenceSchema,
   issueExecutionReviewTargetBindingSchema,
   issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,

@@ -63,6 +63,15 @@ describe("native status authority", () => {
     expect(arbitrate({ assessment: freeText, priorIssueStatus: "in_review", executionStageApprovedByRun: true, governanceGate: { kind: "execution_stage", id: "run" } }))
       .toMatchObject({ toStatus: "in_review", reasonCode: "governed_gate_pending" });
   });
+  it("retains the task and records recovery when a deferred signoff target changed", () => {
+    expect(arbitrate({ priorIssueStatus: "in_review", executionStageApprovedByRun: true,
+      requiredQualityReviewSatisfied: true, deferredSignoffTargetCurrent: false }))
+      .toMatchObject({
+        statusAction: "preserve", toStatus: "in_review", reasonCode: "required_quality_review_stale",
+        effects: [{ kind: "release_checkout" }, { kind: "record_recovery", cause: "required_quality_review_stale" }],
+      });
+  });
+
   it("cannot complete an explicitly required quality review from claims or file evidence", () => {
     expect(arbitrate({ completionClaimPolicyAccepted: true, requiredQualityReviewSatisfied: false }))
       .toMatchObject({ toStatus: "in_progress", reasonCode: "required_quality_review_incomplete" });

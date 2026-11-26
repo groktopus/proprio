@@ -221,6 +221,7 @@ export function arbitrateNativeStatus(input: {
   completionClaimPolicyAccepted?: boolean;
   /** Canonical exact-output human verdicts, only for an explicitly opted-in requirement. */
   requiredQualityReviewSatisfied?: boolean;
+  deferredSignoffTargetCurrent?: boolean;
   allowIncompleteContinuation?: boolean;
   /**
    * True when the issue already has a durable unresolved dependency edge.
@@ -544,6 +545,15 @@ export function arbitrateNativeStatus(input: {
       // Dependency completion owns the wake. Do not immediately rerun the
       // blocked issue merely because the provider mislabeled its scope/status.
       effects: [],
+    };
+  }
+  if (input.deferredSignoffTargetCurrent === false && input.assessment.reportedDisposition === "done") {
+    return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "preserve", toStatus: input.priorIssueStatus,
+      reasonCode: "required_quality_review_stale", unblockDescriptor: null,
+      effects: [{ kind: "release_checkout" }, { kind: "record_recovery", cause: "required_quality_review_stale",
+        nextAction: "Return the task to In Progress and resubmit the current outputs to an available reviewer for signoff.", agentId: input.agentId }],
     };
   }
   if (input.requiredQualityReviewSatisfied === false && input.assessment.reportedDisposition === "done") {

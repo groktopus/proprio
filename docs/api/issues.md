@@ -138,6 +138,15 @@ human quality review. A `422` with code `required_quality_review_stale` means th
 reviewer needs a fresh submission. Request changes and submit the current
 outputs to start a new review.
 
+These errors also apply when `POST /api/issues/{issueId}/comments` auto-approves
+a stage or `POST /api/issues/{issueId}/recovery-actions/resolve` approves one.
+An auto-approval comment records its own decision. An ordinary earlier comment
+cannot satisfy the decision comment guard on a later PATCH.
+
+For `POST /api/issues/{id}/stalled-review-decision`, an approval that would bypass
+immutable signoff returns `required_quality_review_stale`. Request changes and
+resubmit the current outputs to an available reviewer.
+
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
 
 When changing `projectId` and `goalId` together, the supplied goal is validated
