@@ -197,7 +197,8 @@ for (const scenario of [
       restartEvidence = { stoppedAt, readyAt, wakeupRequestId: pending.wakeupRequestId, beforeController, afterController,
         attemptsBefore: pending.attemptCount, attemptsAfterStartup: rediscovered.attemptCount };
     }
-    let revokedAuthorityEvidence: { state: string; reason: string; wakeupRequestId: string; restoredAt: string } | undefined;
+    let revokedAuthorityEvidence: { state: string; reason: string; wakeupRequestId: string; attempts: number[];
+      boardHoldVisible: true; restoredAt: string } | undefined;
     if (revokeBuilder) {
       let held: Awaited<ReturnType<typeof outgoingState>>;
       await expect.poll(async () => (held = await outgoingState()), { timeout: 45_000 })
@@ -205,9 +206,23 @@ for (const scenario of [
           state: "awaiting_release", lastErrorCode: "access_or_admission_blocked", wakeupRequestId: expect.any(String),
           leaseExpiresAt: null });
       expect(held.lastError).toMatch(/protected-agent policy/);
+      const firstDenial = held;
+      await expect.poll(async () => {
+        held = await outgoingState();
+        return held?.attemptCount > firstDenial.attemptCount && held.leaseExpiresAt === null;
+      }, { timeout: 45_000 }).toBe(true);
+      expect(held).toMatchObject({ id: firstDenial.id, version: firstDenial.version, sourceRunId: firstDenial.sourceRunId,
+        state: firstDenial.state, lastErrorCode: firstDenial.lastErrorCode, wakeupRequestId: firstDenial.wakeupRequestId });
+      expect(held.lastError).toMatch(/protected-agent policy/);
       expect(await api(runsPath)).toEqual([expect.objectContaining({ id: outgoing.runId, agentId: lead.id, status: "succeeded" })]);
       expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ status: "in_progress", assigneeAgentId: lead.id });
-      expect((await request.get(`${base}/api/issues/${taskId}/documents/result`)).status()).toBe(404);
+      const missingResult = await request.get(`${base}/api/issues/${taskId}/documents/result`);
+      expect(missingResult.status()).toBe(404);
+      expect(await missingResult.json()).toEqual({ error: "Document not found" });
+      const heldCase = await api(`/cases/${caseId}`);
+      await page.goto(`${base}/${company.issuePrefix}/cases/${heldCase.identifier}`, { waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("region", { name: "Case work", exact: true }).getByText(/protected-agent policy/))
+        .toBeVisible({ timeout: 30_000 });
 
       const builderState = await api(`/agents/${builder.id}`);
       await api(`/agents/${builder.id}/permissions`, "PATCH", {
@@ -217,9 +232,9 @@ for (const scenario of [
         trustPreset: builderState.permissions?.trustPreset ?? "standard",
         authorizationPolicy: {},
       });
-      revokedAuthorityEvidence = { state: held.state, reason: held.lastErrorCode,
-        wakeupRequestId: held.wakeupRequestId, restoredAt: new Date().toISOString() };
-      const dueInMs = Date.parse(held.nextAttemptAt) - Date.now();
+      revokedAuthorityEvidence = { state: held.state, reason: held.lastErrorCode, wakeupRequestId: held.wakeupRequestId,
+        attempts: [firstDenial.attemptCount, held.attemptCount], boardHoldVisible: true, restoredAt: new Date().toISOString() };
+      const dueInMs = Date.parse((await outgoingState()).nextAttemptAt) - Date.now();
       builderWaitMs += Math.max(0, Number.isFinite(dueInMs) ? dueInMs : 0);
     }
 
@@ -252,7 +267,8 @@ for (const scenario of [
       const run = await api(`/heartbeat-runs/${entry.id}`);
       const operations = await api(`/heartbeat-runs/${entry.id}/workspace-operations`);
       return { id: run.id, agentId: run.agentId, issueId: run.nativeIssueId ?? run.issueId ?? run.contextSnapshot?.issueId,
-        runtimeMode: run.runtimeMode, status: run.status, incomingHandoffId: run.contextSnapshot?.caseHandoffId,
+        runtimeMode: run.runtimeMode, status: run.status, wakeupRequestId: run.wakeupRequestId,
+        incomingHandoffId: run.contextSnapshot?.caseHandoffId,
         handoffVersion: run.contextSnapshot?.proprioCase?.handoffVersion,
         admittedAt: run.createdAt, release: run.resultJson?.caseHandoffExecutionReleased ?? null,
         workspaceFinalizations: operations.filter((operation: { heartbeatRunId: string | null; phase: string }) =>
@@ -260,6 +276,11 @@ for (const scenario of [
           ({ status, finishedAt }: { status: string; finishedAt: string | null }) => ({ status, finishedAt })),
       };
     }));
+    if (revokedAuthorityEvidence) {
+      expect(runs.filter(run => run.agentId === builder.id)).toEqual([
+        expect.objectContaining({ wakeupRequestId: revokedAuthorityEvidence.wakeupRequestId, incomingHandoffId: outgoing.handoffId }),
+      ]);
+    }
     const observed: MixedHandoffObservation = { task: { id: task.id, status: task.status, assigneeAgentId: task.assigneeAgentId },
       caseRecord: { workIssueId: caseRecord.workIssueId, handoffVersion: caseRecord.handoffVersion },
       agents: { lead: lead.id, builder: builder.id, verifier: verifier.id },
