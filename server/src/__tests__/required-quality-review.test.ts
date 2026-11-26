@@ -15,7 +15,7 @@ import { errorHandler } from "../middleware/index.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
-import { bindPendingExecutionReviewTargets, captureRequiredQualityReviewDecisionBinding, qualityReviewRequirementHash, readDeferredSignoffTargetCurrent, readRequiredQualityReview } from "../services/required-quality-review.js";
+import { bindPendingExecutionReviewTargets, captureRequiredQualityReviewDecisionBinding, qualityReviewRequirementHash, readDeferredSignoffTargetCurrent, readExecutionReviewEvidence, readRequiredQualityReview } from "../services/required-quality-review.js";
 import { nativeCompletionFeedback } from "../services/native-runtime/native-completion-feedback.js";
 import { ProprioRunnerToolAuthority } from "../services/native-runtime/proprio-runner-tool-authority.js";
 import type { PrpStructuredRunResult } from "../vendor/proprio-runner/index.js";
@@ -208,13 +208,17 @@ const support = await getEmbeddedPostgresTestSupport();
     const decision = () => request(app).patch(`/api/issues/${f.issueId}`).send({ status: "done", comment: "Approved the submitted output." });
     const readDecisions = () => db.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, f.issueId));
     const readEvidence = () => request(app).get(`/api/issues/${f.issueId}/execution-review-evidence`).expect(200);
-    expect((await readEvidence()).body).toMatchObject({ submittedSignoffStale: false });
+    expect((await readEvidence()).body).toMatchObject({ submittedSignoff: { stale: false, binding: originalBinding } });
 
     const replacement = await documentService(db).upsertIssueDocument({ issueId: f.issueId, key: "copy", title: "Blog copy",
       body: "New copy needs its own signoff", format: "markdown", baseRevisionId: f.copy.revisionId, createdByUserId: f.userId });
     await f.approve("copy", { ...f.copy, revisionId: replacement.document.latestRevisionId! });
     expect((await readEvidence()).body).toMatchObject({
-      submittedSignoffStale: true, requiredQualityReviewState: { satisfied: true },
+      submittedSignoff: { stale: true, binding: originalBinding },
+      requiredQualityReviewState: { satisfied: true },
+      currentRequests: expect.arrayContaining([expect.objectContaining({
+        key: "copy", outdated: false, target: expect.objectContaining({ revisionId: replacement.document.latestRevisionId }),
+      })]),
     });
     const rejected = await decision();
     expect(rejected.status, JSON.stringify(rejected.body)).toBe(422);
@@ -233,7 +237,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const resubmitted = await service.update(f.issueId, { ...resubmission.patch, actorAgentId: f.agentId });
     const newBinding = resubmitted?.executionState?.reviewTargetBinding;
     expect(newBinding).not.toEqual(originalBinding);
-    expect((await readEvidence()).body).toMatchObject({ submittedSignoffStale: false });
+    expect((await readEvidence()).body).toMatchObject({ submittedSignoff: { stale: false, binding: newBinding } });
     await expect(db.transaction(async transaction => {
       const locked = await service.getByIdForUpdate(f.issueId, transaction);
       if (!locked) throw new Error("Expected locked stage");
@@ -277,6 +281,9 @@ const support = await getEmbeddedPostgresTestSupport();
     await f.approve("copy", { ...f.copy, revisionId: replacement.document.latestRevisionId! });
     expect(await readRequiredQualityReview(db, deferred)).toMatchObject({ satisfied: true });
     expect(await readDeferredSignoffTargetCurrent(db, deferred)).toBe(false);
+    expect(await readExecutionReviewEvidence(db, deferred)).toMatchObject({
+      submittedSignoff: { stale: true, binding }, requiredQualityReviewState: { satisfied: true },
+    });
 
     const service = issueService(db);
     await expect(service.update(f.issueId, { status: "done", actorAgentId: f.agentId }))

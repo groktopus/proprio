@@ -330,6 +330,15 @@ export function setupLiveEventsWebSocketServer(
         }
         return event;
       }
+      const payload = event.payload;
+      const details = payload.details && typeof payload.details === "object" && !Array.isArray(payload.details)
+        ? payload.details as Record<string, unknown> : {};
+      const boardActivity = event.type === "activity.logged" && context!.actorType === "board";
+      const audienceChanged = () => ({ ...event, payload: { action: "resource_membership.changed" } });
+      // An archived principal may receive a content-free invalidation on its already authenticated socket.
+      if (boardActivity && payload.entityType === "company_membership" && payload.action === "company_member.archived" &&
+          details.principalId === context!.actorId) return audienceChanged();
+
       const principalActive = await sharedDeliveryRead(reads, "principal", async () => {
         if (context!.apiKeyId) {
           const active = await db.select({ id: agentApiKeys.id }).from(agentApiKeys)
@@ -354,16 +363,11 @@ export function setupLiveEventsWebSocketServer(
         return membership.length > 0 || admin;
       });
       if (!principalActive) return null;
-      const payload = event.payload;
-      // Reauthorize the removed viewer without disclosing the now-hidden project or its members.
-      if (event.type === "activity.logged" && payload.entityType === "project" &&
-          payload.action === "project.access_member_removed" && context!.actorType === "board") {
-        const details = payload.details && typeof payload.details === "object" && !Array.isArray(payload.details)
-          ? payload.details as Record<string, unknown> : {};
-        if (details.subjectType === "user" && details.subjectId === context!.actorId) {
-          return { ...event, payload: { action: "resource_membership.changed" } };
-        }
-      }
+      // Reauthorize only the removed viewer without disclosing the now-hidden resource.
+      if (boardActivity && (
+        (payload.entityType === "project" && payload.action === "project.access_member_removed") ||
+        (payload.entityType === "issue_access_grant" && payload.action === "issue_access_grant.revoked")
+      ) && details.subjectType === "user" && details.subjectId === context!.actorId) return audienceChanged();
       const issueId = typeof payload.issueId === "string" ? payload.issueId
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
       const runId = typeof payload.runId === "string" ? payload.runId
@@ -393,7 +397,13 @@ export function setupLiveEventsWebSocketServer(
         if (run.issueId) navigationTask = { id: run.issueId, parentId: run.parentId };
       }
       if (!(await sharedDeliveryRead(reads, `read:${issueId ?? ""}:${runId ?? ""}`, async () =>
-        (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) return null;
+        (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) {
+        // A visibility or placement change can remove access to a task already open in the board.
+        const changes = details.changes && typeof details.changes === "object" ? details.changes : {};
+        const taskAudienceChanged = issueId && payload.action === "issue.updated" &&
+          ["visibility", "projectId", "parentId"].some(key => key in changes);
+        return boardActivity && taskAudienceChanged ? audienceChanged() : null;
+      }
       if (["company_skill", "company_skill_source"].includes(String(payload.entityType)) && typeof payload.entityId === "string") {
         try {
           const skills = skillAccessService(db, context!.actor);

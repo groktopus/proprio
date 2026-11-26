@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { assets, documents, issueAttachments, issueDocuments, issueExecutionDecisions, issueThreadInteractions, type Db } from "@groktopus/db";
-import { issueExecutionReviewTargetBindingSchema, requiredQualityReviewSchema, type IssueExecutionDecision, type IssueExecutionReviewTargetBinding, type IssueExecutionReviewTargetReference, type RequiredQualityReview, type RequestConfirmationTarget, type QualityReviewBinding } from "@groktopus/shared";
+import { issueExecutionReviewEvidenceSchema, issueExecutionReviewTargetBindingSchema, requiredQualityReviewSchema, type IssueExecutionDecision, type IssueExecutionReviewEvidence, type IssueExecutionReviewTargetBinding, type IssueExecutionReviewTargetReference, type RequiredQualityReview, type RequiredQualityReviewState, type RequestConfirmationTarget, type QualityReviewBinding } from "@groktopus/shared";
 import { forbidden, HttpError, unprocessable } from "../errors.js";
 import { isExecutionStageParticipant } from "./issue-execution-policy.js";
 
@@ -89,22 +89,18 @@ export async function currentQualityReviewTarget(db: Db, companyId: string, issu
 
 type ReviewIssue = { id: string; companyId: string; executionPolicy?: unknown };
 
-export interface RequiredQualityReviewState {
-  required: boolean;
-  satisfied: boolean;
-  missing: Array<{ key: string; label: string; reason: "missing" | "pending" | "not_approved" | "stale"; interactionId?: string }>;
-}
-
 /** At most ten indexed task-local lookups. Only canonical human decisions count as approval. */
-async function inspectRequiredQualityReview(db: Db, issue: ReviewIssue, lock: boolean, requireHumanApproval: boolean): Promise<{
+async function inspectRequiredQualityReview(db: Db, issue: ReviewIssue, lock: boolean): Promise<{
   state: RequiredQualityReviewState;
   binding: IssueExecutionReviewTargetBinding | null;
+  currentRequests: IssueExecutionReviewEvidence["currentRequests"];
 }> {
   const requirement = requiredQualityReview(issue.executionPolicy);
-  if (!requirement) return { state: { required: false, satisfied: true, missing: [] }, binding: null };
+  if (!requirement) return { state: { required: false, satisfied: true, missing: [] }, binding: null, currentRequests: [] };
   const fingerprint = qualityReviewRequirementHash(requirement);
   const missing: RequiredQualityReviewState["missing"] = [];
   const deliverables: IssueExecutionReviewTargetBinding["deliverables"] = [];
+  const currentRequests: IssueExecutionReviewEvidence["currentRequests"] = [];
   for (const slot of requirement.deliverables) {
     const interactionQuery = db.select().from(issueThreadInteractions).where(and(
       eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
@@ -125,29 +121,35 @@ async function inspectRequiredQualityReview(db: Db, issue: ReviewIssue, lock: bo
       ? row.status === "accepted" && result.outcome === "accepted" && Boolean(row.resolvedByUserId) && !row.resolvedByAgentId
       : ["pending", "answered"].includes(row.status) && result.outcome === "resolved" && verdict?.verdict === "approve" && Boolean(verdict.resolvedByUserId) && !verdict.resolvedByAgentId);
     const actionable = (row.status === "pending" && !verdict) || humanApproved;
-    const reason = item?.qualityReview?.requirementHash !== fingerprint ? "stale"
-      : !requireHumanApproval && !actionable ? "not_approved"
-      : requireHumanApproval && !humanApproved ? row.status === "pending" && !verdict ? "pending" : "not_approved"
-      : !await currentQualityReviewTarget(db, issue.companyId, issue.id, item.target, lock) ? "stale" : null;
-    if (reason) {
-      missing.push({ ...slot, reason, interactionId: row.id });
-      continue;
-    }
     const target = record(item.target);
-    const targetReference: IssueExecutionReviewTargetReference = target.type === "issue_document"
-      ? { type: "issue_document", key: String(target.key), revisionId: String(target.revisionId) }
-      : { type: "issue_attachment", attachmentId: String(target.attachmentId), assetId: String(target.assetId), sha256: String(target.sha256) };
-    deliverables.push({ key: slot.key, label: slot.label, target: targetReference });
+    const requirementHash = item?.qualityReview?.requirementHash;
+    const sameRequirement = requirementHash === fingerprint;
+    const current = sameRequirement && actionable && await currentQualityReviewTarget(db, issue.companyId, issue.id, target, lock);
+    const reason = !sameRequirement ? "stale"
+      : !humanApproved ? row.status === "pending" && !verdict ? "pending" : "not_approved"
+      : !current ? "stale" : null;
+    if (reason) missing.push({ ...slot, reason, interactionId: row.id });
+
+    if (target.issueId && target.issueId !== issue.id) continue;
+    const targetReference: IssueExecutionReviewTargetReference | null = target.type === "issue_document" &&
+        typeof target.key === "string" && target.key !== "plan" && typeof target.revisionId === "string"
+      ? { type: "issue_document", key: target.key, revisionId: target.revisionId }
+      : target.type === "issue_attachment" && typeof target.attachmentId === "string" &&
+          typeof target.assetId === "string" && typeof target.sha256 === "string"
+        ? { type: "issue_attachment", attachmentId: target.attachmentId, assetId: target.assetId, sha256: target.sha256 } : null;
+    if (!targetReference || typeof requirementHash !== "string") continue;
+    currentRequests.push({ ...slot, interactionId: row.id, target: targetReference, requirementHash, outdated: !current });
+    if (current) deliverables.push({ key: slot.key, label: slot.label, target: targetReference });
   }
   const state = { required: true, satisfied: missing.length === 0, missing };
-  const decoded = state.satisfied
+  const decoded = deliverables.length === requirement.deliverables.length
     ? issueExecutionReviewTargetBindingSchema.safeParse({ version: 1, requirementHash: fingerprint, deliverables })
     : null;
-  return { state, binding: decoded?.success ? decoded.data : null };
+  return { state, binding: decoded?.success ? decoded.data : null, currentRequests };
 }
 
 export async function readRequiredQualityReview(db: Db, issue: ReviewIssue, lock = false): Promise<RequiredQualityReviewState> {
-  return (await inspectRequiredQualityReview(db, issue, lock, true)).state;
+  return (await inspectRequiredQualityReview(db, issue, lock)).state;
 }
 
 /** Update the target only when a new pending stage is submitted under the task lock. */
@@ -160,7 +162,7 @@ export async function bindPendingExecutionReviewTargets(db: Db, input: {
   const previous = record(input.issue.executionState);
   const samePendingStage = previous.status === "pending" && previous.currentStageId === input.nextState.currentStageId;
   if (samePendingStage) return { ...input.nextState, reviewTargetBinding: previous.reviewTargetBinding ?? null };
-  const { binding } = await inspectRequiredQualityReview(db, { ...input.issue, executionPolicy: input.nextPolicy }, true, false);
+  const { binding } = await inspectRequiredQualityReview(db, { ...input.issue, executionPolicy: input.nextPolicy }, true);
   if (!binding) throw unprocessable("Submit the current output revisions for human quality review before requesting signoff", {
     code: "required_quality_review_incomplete",
   });
@@ -174,16 +176,6 @@ function sameReviewTarget(left: IssueExecutionReviewTargetBinding, right: IssueE
     const current = rightByKey.get(key);
     return current?.label === label && isDeepStrictEqual(target, current.target);
   });
-}
-
-export async function readSubmittedSignoffIsStale(db: Db, issue: ReviewIssue & { executionState?: unknown }): Promise<boolean> {
-  if (!requiresImmutableReviewTarget(issue.executionPolicy)) return false;
-  const state = record(issue.executionState);
-  if (state.status !== "pending") return false;
-  const submitted = issueExecutionReviewTargetBindingSchema.safeParse(state.reviewTargetBinding);
-  if (!submitted.success) return true;
-  const { binding } = await inspectRequiredQualityReview(db, issue, false, false);
-  return !binding || !sameReviewTarget(submitted.data, binding);
 }
 
 /** Validate and save the target submitted to this reviewer under the task lock. */
@@ -261,7 +253,7 @@ export async function recordExecutionStageDecision(db: Db, input: Omit<Parameter
 }
 
 async function assertCurrentSignoffTarget(db: Db, issue: ReviewIssue, submitted: IssueExecutionReviewTargetBinding, lock = true) {
-  const { state: qualityReview, binding } = await inspectRequiredQualityReview(db, issue, lock, true);
+  const { state: qualityReview, binding } = await inspectRequiredQualityReview(db, issue, lock);
   if (!qualityReview.satisfied) {
     throw unprocessable("Required human quality review is not approved for the current outputs", {
       code: "required_quality_review_incomplete", missing: qualityReview.missing,
@@ -290,10 +282,8 @@ export async function readDeferredSignoffTargetCurrent(db: Db, issue: DeferredSi
   }
 }
 
-export async function assertDeferredSignoffTargetCurrent(db: Db, issue: DeferredSignoffIssue, lock = true) {
-  if (!requiresImmutableReviewTarget(issue.executionPolicy)) return;
+async function readCompletedSignoffBinding(db: Db, issue: DeferredSignoffIssue) {
   const state = record(issue.executionState);
-  if (state.status !== "completed") return;
   const configuredStages = record(issue.executionPolicy).stages;
   const finalStage = Array.isArray(configuredStages) ? configuredStages.at(-1) : undefined;
   const [decision] = typeof state.lastDecisionId === "string"
@@ -306,11 +296,58 @@ export async function assertDeferredSignoffTargetCurrent(db: Db, issue: Deferred
       )).limit(1)
     : [];
   const submitted = issueExecutionReviewTargetBindingSchema.safeParse(decision?.binding);
-  if (!submitted.success || (finalStage && (decision?.stageId !== finalStage.id ||
-      !isDeepStrictEqual(state.completedStageIds, configuredStages.map((stage: { id: string }) => stage.id))))) {
-    throw unprocessable("The final stage needs a new signoff decision", { code: "required_quality_review_stale" });
+  const valid = !finalStage || (decision?.stageId === finalStage.id &&
+    isDeepStrictEqual(state.completedStageIds, configuredStages.map((stage: { id: string }) => stage.id)));
+  return { binding: submitted.success ? submitted.data : null, valid };
+}
+
+export async function assertDeferredSignoffTargetCurrent(db: Db, issue: DeferredSignoffIssue, lock = true) {
+  if (!requiresImmutableReviewTarget(issue.executionPolicy) || record(issue.executionState).status !== "completed") return;
+  const submitted = await readCompletedSignoffBinding(db, issue);
+  if (!submitted.binding || !submitted.valid) throw unprocessable("The final stage needs a new signoff decision", { code: "required_quality_review_stale" });
+  await assertCurrentSignoffTarget(db, issue, submitted.binding, lock);
+}
+
+export async function readExecutionReviewEvidence(db: Db, issue: DeferredSignoffIssue & { status: string }, cursor?: string): Promise<IssueExecutionReviewEvidence> {
+  const decisionScope = and(eq(issueExecutionDecisions.companyId, issue.companyId),
+    eq(issueExecutionDecisions.issueId, issue.id), isNotNull(issueExecutionDecisions.reviewTargetBinding));
+  const before = cursor ? db.select({ createdAt: issueExecutionDecisions.createdAt, id: issueExecutionDecisions.id })
+    .from(issueExecutionDecisions).where(and(decisionScope, eq(issueExecutionDecisions.id, cursor))) : null;
+  const pageSize = 20;
+  const [review, decisions] = await Promise.all([
+    inspectRequiredQualityReview(db, issue, false),
+    db.select({ id: issueExecutionDecisions.id, stageType: issueExecutionDecisions.stageType,
+      outcome: issueExecutionDecisions.outcome, reviewTargetBinding: issueExecutionDecisions.reviewTargetBinding,
+    }).from(issueExecutionDecisions).where(and(decisionScope, before
+      ? sql`(${issueExecutionDecisions.createdAt}, ${issueExecutionDecisions.id}) < (${before})` : undefined))
+      .orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id)).limit(pageSize + 1),
+  ]);
+
+  const state = record(issue.executionState);
+  let submittedSignoff: IssueExecutionReviewEvidence["submittedSignoff"] = null;
+  if (requiresImmutableReviewTarget(issue.executionPolicy)) {
+    if (state.status === "pending") {
+      const submitted = issueExecutionReviewTargetBindingSchema.safeParse(state.reviewTargetBinding);
+      const binding = submitted.success ? submitted.data : null;
+      submittedSignoff = { binding, stale: !binding || !review.binding || !sameReviewTarget(binding, review.binding) };
+    } else if (state.status === "completed" && issue.status === "in_review") {
+      const submitted = await readCompletedSignoffBinding(db, issue);
+      const { binding } = submitted;
+      submittedSignoff = { binding, stale: !binding || !submitted.valid || !review.state.satisfied ||
+        !review.binding || !sameReviewTarget(binding, review.binding) };
+    }
   }
-  await assertCurrentSignoffTarget(db, issue, submitted.data, lock);
+
+  return {
+    requiredQualityReviewState: review.state,
+    submittedSignoff,
+    currentRequests: review.currentRequests,
+    executionDecisions: decisions.slice(0, pageSize).flatMap(row => {
+      const decision = issueExecutionReviewEvidenceSchema.shape.executionDecisions.element.safeParse(row);
+      return decision.success ? [decision.data] : [];
+    }),
+    nextCursor: decisions.length > pageSize ? decisions[pageSize - 1]!.id : null,
+  };
 }
 
 export async function assertRequiredQualityReviewComplete(db: Db, issue: { id: string; companyId: string; executionPolicy?: unknown }, lock = false) {

@@ -88,6 +88,8 @@ import {
   createIssueSchema,
   setIssueTitleSchema,
   updateIssueSchema,
+  issueExecutionReviewEvidenceQuerySchema,
+  issueExecutionReviewEvidenceSchema,
   stalledReviewDecisionSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
@@ -1490,7 +1492,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/approvals/{id}/reject",
   "GET /api/agents/{id}/project-access",
   "POST /api/agents/{id}/project-access",
-  "GET /api/issues/{id}/execution-review-evidence",
+  "GET /api/issues/{ref}/execution-review-evidence",
   "GET /api/issues/{id}/pending-questions",
   "GET /api/issues/{id}/decision-receipts",
   "GET /api/issues/{id}/chat-handoffs",
@@ -4575,12 +4577,12 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
-  path: "/api/issues/{id}/execution-review-evidence",
+  path: "/api/issues/{ref}/execution-review-evidence",
   tags: ["issues"],
   summary: "Get execution review evidence for an issue",
-  description: "Returns recent execution decisions, required output review readiness, and whether the submitted signoff target is stale. Decisions can include exact requirement digests, artifact revisions, and attachment hashes.",
-  request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 429: { description: "Review evidence request limit exceeded" } },
+  description: "For authorized board readers. Returns the submitted signoff target, current quality review requests and readiness, and one page of bound decisions in newest-first order. Send the returned nextCursor to read older decisions.",
+  request: { params: z.object({ ref: z.string() }), query: issueExecutionReviewEvidenceQuerySchema },
+  responses: { 200: r.ok(issueExecutionReviewEvidenceSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests },
 });
 
 registry.registerPath({

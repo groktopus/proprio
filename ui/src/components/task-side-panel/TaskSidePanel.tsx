@@ -23,7 +23,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   isArtifactReviewDocumentKey,
   type Issue,
-  type IssueThreadInteraction,
   type IssueDocument,
 } from "@groktopus/shared";
 import {
@@ -109,7 +108,7 @@ const TaskWorkspaceFilePanel = lazy(() =>
 
 export interface TaskSidePanelProps {
   issue: Issue;
-  interactions?: IssueThreadInteraction[];
+  showExecutionReviewEvidence?: boolean;
   documentEditor?: TaskDocumentEditorOptions;
   pluginPanels?: TaskPluginPanel[];
   pluginPanelsLoading?: boolean;
@@ -277,7 +276,7 @@ function TaskSidePanelForScope({
   openBrowserId,
   onBrowserOpened,
   issue,
-  interactions,
+  showExecutionReviewEvidence,
   documentEditor,
   accountScope,
   childIssues = [],
@@ -837,7 +836,7 @@ function TaskSidePanelForScope({
     content = (
       <IssueProperties
         issue={issue}
-        interactions={interactions}
+        showExecutionReviewEvidence={showExecutionReviewEvidence}
         childIssues={childIssues}
         issueLinkState={issueLinkState}
         onAddSubIssue={onAddSubIssue}

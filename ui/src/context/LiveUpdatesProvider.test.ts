@@ -1261,7 +1261,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
   });
 
-  it("keeps visible issue detail refetches inactive for downstream agent updates", () => {
+  it("refreshes visible signoff evidence while keeping downstream agent detail refetches inactive", () => {
     const invalidations: unknown[] = [];
     const queryClient = {
       getQueryCache: () => ({ findAll: () => [] }),
@@ -1298,6 +1298,10 @@ describe("LiveUpdatesProvider issue invalidation", () => {
       { pathname: "/PAP/issues/PAP-759", isForegrounded: true },
     );
 
+    expect(invalidations).toContainEqual({
+      queryKey: queryKeys.issues.executionReviewEvidence("issue-1"),
+      refetchType: "active",
+    });
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.issues.detail("issue-1"),
       refetchType: "inactive",

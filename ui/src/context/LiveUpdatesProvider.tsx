@@ -1634,8 +1634,7 @@ function invalidateActivityQueries(
       predicate: query => query.queryKey[3] === "recovery-history",
     });
     void queryClient.resetQueries({
-      queryKey: ["issues", "detail"],
-      predicate: query => query.queryKey[3] === "execution-review-evidence",
+      queryKey: queryKeys.issues.executionReviewEvidenceFamily,
     });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     // Drop old permission-filtered payloads immediately while the API resolves
@@ -1798,6 +1797,11 @@ function invalidateActivityQueries(
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
         if (action === "issue.comment_added" || action === "issue.conversation_session_started" || visibleConversation) {
           queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...(visibleConversation ? undefined : invalidationOptions) });
+        }
+        if (action === "issue.updated" || action === "issue.status_decision_recorded" ||
+            action?.startsWith("issue.thread_interaction_") ||
+            action?.startsWith("issue.attachment_") || (action && ISSUE_DOCUMENT_ACTIVITY_ACTIONS.has(action))) {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.issues.executionReviewEvidence(ref), refetchType: "active" });
         }
         if (action?.startsWith("issue.attachment_") || action?.startsWith("issue.work_product_")) {
           // These cards are durable API objects, not streamed text. Refresh the
@@ -2521,6 +2525,8 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     if (!canConnectSocket || !liveCompanyId) return;
     if (wasHidden.current) {
       wasHidden.current = false;
+      // A revocation may have happened while the socket was closed.
+      void queryClient.resetQueries({ queryKey: queryKeys.issues.executionReviewEvidenceFamily });
       // Reconcile events missed while hidden, including completed runs/issues.
       void queryClient.invalidateQueries({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
     }

@@ -1,3 +1,5 @@
+const executionReviewEvidenceFamily = ["issues", "execution-review-evidence"] as const;
+
 export const queryKeys = {
   linkPreview: (companyId: string, userId: string | null, url: string) =>
     ["link-preview", companyId, userId, url] as const,
@@ -417,7 +419,10 @@ export const queryKeys = {
       options.excludeRoot
         ? (["issues", "cost-summary", issueId, "exclude-root"] as const)
         : (["issues", "cost-summary", issueId] as const),
-    executionReviewEvidence: (id: string) => ["issues", "detail", id, "execution-review-evidence"] as const,
+    executionReviewEvidenceFamily,
+    executionReviewEvidence: (id: string, cursor?: string | null) => [
+      ...executionReviewEvidenceFamily, id, ...(cursor ? [cursor] : []),
+    ] as const,
     privacyConstraints: (issueId: string) => ["issues", "privacy-constraints", issueId] as const,
     accessGrants: (issueId: string) => ["issues", "access-grants", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,

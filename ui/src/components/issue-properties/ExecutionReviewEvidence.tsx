@@ -1,158 +1,151 @@
 import { useState } from "react";
+import type { Issue, IssueExecutionReviewEvidence, IssueExecutionReviewTargetBinding, IssueExecutionReviewTargetReference } from "@groktopus/shared";
 import { issuesApi } from "@/api/issues";
 import { QueryErrorState } from "@/components/QueryView";
+import { Button } from "@/components/ui/button";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { decisionReceiptHref } from "@/lib/decision-receipt-navigation";
 import { queryKeys } from "@/lib/queryKeys";
+import { Link } from "@/lib/router";
 import { useAuthorizedHistory } from "@/lib/use-authorized-history";
-import type { Issue, IssueExecutionReviewEvidence, IssueExecutionReviewTargetReference, IssueThreadInteraction } from "@groktopus/shared";
 
-interface ExecutionReviewEvidenceProps {
-  issue: Issue;
-  evidence?: IssueExecutionReviewEvidence;
-  interactions?: IssueThreadInteraction[];
-  historyExpanded?: boolean;
-}
-
-type ReviewTarget = IssueExecutionReviewTargetReference | null;
-type ReviewPayload = { qualityReview?: { key?: string; requirementHash?: string }; target?: ReviewTarget; items?: Array<{ qualityReview?: { key?: string; requirementHash?: string }; target?: ReviewTarget }> };
-
-function targetLabel(target: ReviewTarget): string {
-  if (!target) return "No exact artifact attached";
+function targetLabel(target: IssueExecutionReviewTargetReference): string {
   return target.type === "issue_document"
     ? `Document ${target.key} · revision ${target.revisionId}`
     : `Attachment ${target.attachmentId} · asset ${target.assetId} · SHA-256 ${target.sha256}`;
 }
 
-function interactionForKey(interactions: IssueThreadInteraction[], key: string) {
-  for (let index = interactions.length - 1; index >= 0; index -= 1) {
-    const interaction = interactions[index]!;
-    const payload = interaction.payload as ReviewPayload;
-    if (interaction.kind === "request_confirmation" && payload.qualityReview?.key === key) {
-      return { interaction, target: payload.target ?? null, requirementHash: payload.qualityReview.requirementHash };
-    }
-    if (interaction.kind === "request_item_verdicts") {
-      const matching = payload.items?.filter((item) => item.qualityReview?.key === key) ?? [];
-      if (matching.length === 1) return { interaction, target: matching[0].target ?? null,
-        requirementHash: matching[0].qualityReview?.requirementHash };
-    }
-  }
-  return null;
-}
-
-export function ExecutionReviewEvidence({ issue, evidence, interactions = [], historyExpanded = false }: ExecutionReviewEvidenceProps) {
-  const requirement = issue.executionPolicy?.reviewTargetBinding?.source === "required_quality_review"
-    ? issue.executionPolicy.requiredQualityReview : null;
-  const submittedBinding = issue.executionState?.status === "pending" ? issue.executionState.reviewTargetBinding : null;
-  const history = evidence?.executionDecisions ?? [];
-  if (!requirement && !history.some(decision => decision.reviewTargetBinding)) return null;
-
-  const staleByKey = new Map((evidence?.requiredQualityReviewState?.missing ?? [])
-    .filter((entry) => entry.reason === "stale")
-    .map((entry) => [entry.key, entry]));
-
+function BindingDetails({ binding }: { binding: IssueExecutionReviewTargetBinding }) {
   return (
-    <section className="space-y-2" aria-label="Required output review">
-      <h3 className="text-sm font-medium">Required output review</h3>
-      {submittedBinding ? <div className="space-y-1">
-        <h4 className="text-sm font-medium">Submitted for signoff</h4>
-        <p className="wrap-anywhere font-mono text-xs text-muted-foreground">
-          Requirements SHA-256 {submittedBinding.requirementHash}
-        </p>
-        <ul className="space-y-1">
-          {submittedBinding.deliverables.map(item => <li key={item.key} className="wrap-anywhere font-mono text-xs text-muted-foreground">
-            {item.label} · {targetLabel(item.target)}
-          </li>)}
-        </ul>
-      </div> : null}
-      {evidence?.submittedSignoffStale ? <output className="block text-sm text-destructive">
-        Request changes and submit the current outputs for a new review.
-      </output> : null}
-      {requirement ? <ul className="space-y-2">
-        {requirement.deliverables.map((deliverable) => {
-          const current = interactionForKey(interactions, deliverable.key);
-          const stale = staleByKey.get(deliverable.key);
-          return (
-            <li key={deliverable.key} className="space-y-1 text-sm">
-              <div className="font-medium">{deliverable.label}</div>
-              <div className="break-all font-mono text-xs text-muted-foreground">{targetLabel(current?.target ?? null)}</div>
-              {current?.requirementHash ? <div className="break-all font-mono text-xs text-muted-foreground">
-                Requirements SHA-256 {current.requirementHash}
-              </div> : null}
-              {stale && current ? (
-                <a className="text-sm text-primary underline underline-offset-2" href={`/issues/${issue.identifier ?? issue.id}#interaction-${current.interaction.id}`}>
-                  Open the changed artifact’s review request
-                </a>
-              ) : stale ? (
-                <p className="text-sm text-destructive">Request a fresh review of the changed artifact from the task conversation.</p>
-              ) : current ? (
-                <a className="text-sm text-primary underline underline-offset-2" href={`/issues/${issue.identifier ?? issue.id}#interaction-${current.interaction.id}`}>
-                  Open review request
-                </a>
-              ) : (
-                <p className="text-sm text-muted-foreground">Waiting for an exact artifact and human review.</p>
-              )}
-            </li>
-          );
-        })}
-      </ul> : null}
-      {history.length > 0 && (historyExpanded ? renderHistory(history) : (
-        <details className="pt-1">
-          <summary className="cursor-pointer rounded-sm text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Decision history ({history.length})</summary>
-          {renderHistory(history)}
-        </details>
-      ))}
-    </section>
+    <div className={`space-y-1 wrap-anywhere font-mono text-xs text-muted-foreground ${ANALYTICS_MASK_CLASS}`}>
+      <ul className="space-y-1">
+        {binding.deliverables.map(item => <li key={item.key}>{item.label} · {targetLabel(item.target)}</li>)}
+      </ul>
+      <p>Requirements SHA-256 {binding.requirementHash}</p>
+    </div>
   );
 }
 
-function renderHistory(history: IssueExecutionReviewEvidence["executionDecisions"]) {
-  return (
-    <ul className="mt-2 space-y-2">
-      {history.map((decision) => (
-        <li key={decision.id} className="text-sm">
-          <div>{decision.stageType === "review" ? "Review" : "Approval"} {decision.outcome}</div>
-          {decision.reviewTargetBinding?.deliverables.map((item) => (
-            <div key={`${decision.id}:${item.key}`} className="break-all font-mono text-xs text-muted-foreground">
-              {item.label} · {targetLabel(item.target)}
-            </div>
+interface ExecutionReviewEvidenceProps {
+  issueHref: string;
+  evidence: IssueExecutionReviewEvidence;
+  historyExpanded?: boolean;
+  historyOpen?: boolean;
+  onHistoryToggle?: (open: boolean) => void;
+  onNewerPage?: () => void;
+  onOlderPage?: () => void;
+}
+
+export function ExecutionReviewEvidence({
+  issueHref, evidence, historyExpanded = false, historyOpen, onHistoryToggle, onNewerPage, onOlderPage,
+}: ExecutionReviewEvidenceProps) {
+  const { currentRequests, executionDecisions, requiredQualityReviewState, submittedSignoff } = evidence;
+  const requestsByKey = new Set(currentRequests.map(request => request.key));
+  const missing = requiredQualityReviewState.missing.filter(entry => !requestsByKey.has(entry.key));
+  const history = (
+    <div className="space-y-2 pt-2">
+      {executionDecisions.length === 0 ? <p className="text-sm text-muted-foreground">No bound signoff decisions recorded on this page.</p> : (
+        <ul className="space-y-2">
+          {executionDecisions.map(decision => (
+            <li key={decision.id} className="space-y-1 text-sm">
+              <div>{decision.stageType === "review" ? "Review" : "Approval"} {decision.outcome}</div>
+              <BindingDetails binding={decision.reviewTargetBinding} />
+            </li>
           ))}
-          {decision.reviewTargetBinding ? <div className="break-all font-mono text-xs text-muted-foreground">
-            Requirements SHA-256 {decision.reviewTargetBinding.requirementHash}
-          </div> : null}
-        </li>
-      ))}
-    </ul>
+        </ul>
+      )}
+      {(onNewerPage || onOlderPage) && <div className="flex flex-wrap gap-2">
+        {onNewerPage && <Button variant="outline" size="sm" onClick={onNewerPage}>Newer decisions</Button>}
+        {onOlderPage && <Button variant="outline" size="sm" onClick={onOlderPage}>Older decisions</Button>}
+      </div>}
+    </div>
+  );
+
+  return (
+    <section className="space-y-2" aria-label="Required output review">
+      {!historyExpanded && (
+        <>
+          <h3 className="text-sm font-medium">Required output review</h3>
+          {submittedSignoff?.binding && <div className="space-y-1">
+            <h4 className="text-sm font-medium">Submitted for signoff</h4>
+            <BindingDetails binding={submittedSignoff.binding} />
+          </div>}
+          {submittedSignoff?.stale && <output className="block text-sm text-destructive">
+            Request changes and submit the current outputs for a new review.
+          </output>}
+          {(currentRequests.length > 0 || missing.length > 0) && <ul className="space-y-2">
+            {currentRequests.map(review => <li key={review.key} className="space-y-1 text-sm">
+              <div className={`font-medium ${ANALYTICS_MASK_CLASS}`}>{review.label}</div>
+              <div className={`wrap-anywhere font-mono text-xs text-muted-foreground ${ANALYTICS_MASK_CLASS}`}>
+                <div>{targetLabel(review.target)}</div>
+                <div>Requirements SHA-256 {review.requirementHash}</div>
+              </div>
+              <Link
+                to={decisionReceiptHref({ issueHref, interactionId: review.interactionId })}
+                disableIssueQuicklook
+                className="text-sm text-primary underline underline-offset-2"
+              >
+                {review.outdated ? "Open previous review request" : "Open review request"}
+              </Link>
+            </li>)}
+            {missing.map(entry => <li key={entry.key} className="text-sm">
+              <span className={`font-medium ${ANALYTICS_MASK_CLASS}`}>{entry.label}</span>
+              <p className="text-sm text-muted-foreground">Waiting for an exact artifact and human review.</p>
+            </li>)}
+          </ul>}
+        </>
+      )}
+      {historyExpanded ? history : (executionDecisions.length > 0 || onNewerPage || onOlderPage) && (
+        <details open={historyOpen} onToggle={event => onHistoryToggle?.(event.currentTarget.open)}>
+          <summary className="cursor-pointer rounded-sm text-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Signoff decision history
+          </summary>
+          {history}
+        </details>
+      )}
+    </section>
   );
 }
 
 const noEvidence: IssueExecutionReviewEvidence = {
   executionDecisions: [],
   requiredQualityReviewState: { required: false, satisfied: true, missing: [] },
-  submittedSignoffStale: false,
+  submittedSignoff: null,
+  currentRequests: [],
+  nextCursor: null,
 };
 
-function TaskExecutionReviewEvidenceContent({
-  issue, interactions, historyExpanded,
-}: Pick<ExecutionReviewEvidenceProps, "issue" | "interactions" | "historyExpanded">) {
-  const history = useAuthorizedHistory(queryKeys.issues.executionReviewEvidence(issue.id),
-    signal => issuesApi.executionReviewEvidence(issue.id, signal), noEvidence);
+function TaskExecutionReviewEvidenceContent({ issue, historyExpanded }: { issue: Issue; historyExpanded?: boolean }) {
+  const [previousCursors, setPreviousCursors] = useState<(string | null)[]>([]);
+  const cursor = previousCursors.at(-1) ?? null;
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const history = useAuthorizedHistory(queryKeys.issues.executionReviewEvidence(issue.id, cursor),
+    signal => issuesApi.executionReviewEvidence(issue.id, cursor, signal), noEvidence);
   if (history.isLoading) return <output className="block text-sm text-muted-foreground">Loading signoff evidence…</output>;
   if (history.error) return <QueryErrorState size="inline" error={history.error} action="load signoff evidence" onRetry={history.onRetry} />;
-  if (historyExpanded && !history.data?.executionDecisions.some(decision => decision.reviewTargetBinding)) {
-    return <p className="text-sm text-muted-foreground">No bound signoff decisions recorded.</p>;
-  }
-  return <ExecutionReviewEvidence issue={issue} evidence={history.data} interactions={interactions} historyExpanded={historyExpanded} />;
+  if (!history.data) return null;
+  const { nextCursor } = history.data;
+  return <ExecutionReviewEvidence
+    issueHref={`/issues/${issue.identifier ?? issue.id}`}
+    evidence={history.data}
+    historyExpanded={historyExpanded}
+    historyOpen={historyOpen}
+    onHistoryToggle={setHistoryOpen}
+    onNewerPage={previousCursors.length > 0 ? () => setPreviousCursors(cursors => cursors.slice(0, -1)) : undefined}
+    onOlderPage={nextCursor ? () => setPreviousCursors(cursors => [...cursors, nextCursor]) : undefined}
+  />;
 }
 
-export function TaskExecutionReviewEvidence({ issue, interactions }: Pick<ExecutionReviewEvidenceProps, "issue" | "interactions">) {
+export function TaskExecutionReviewEvidence({ issue }: { issue: Issue }) {
   const [open, setOpen] = useState(false);
   const active = issue.executionPolicy?.reviewTargetBinding?.source === "required_quality_review";
-  if (active) return <TaskExecutionReviewEvidenceContent issue={issue} interactions={interactions} />;
+  if (active) return <TaskExecutionReviewEvidenceContent issue={issue} />;
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="cursor-pointer rounded-sm text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         Signoff decision history
       </summary>
-      {open && <TaskExecutionReviewEvidenceContent issue={issue} interactions={interactions} historyExpanded />}
+      {open && <TaskExecutionReviewEvidenceContent issue={issue} historyExpanded />}
     </details>
   );
 }

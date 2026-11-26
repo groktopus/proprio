@@ -405,15 +405,18 @@ The creator agent or a board user may withdraw a pending interaction. Withdrawal
 
 ## Review evidence
 
-`GET /api/issues/{id}/execution-review-evidence` reads recent execution decisions
-through task read access. A saved decision can include the exact requirement
-digest and artifact versions submitted for approval. Historical decisions
-remain readable after the execution policy changes.
+`GET /api/issues/{ref}/execution-review-evidence` reads signoff evidence for an
+authorized board user. Explicit break-glass access applies the board's trusted
+origin check and records the access and owner notice before returning.
 
-`requiredQualityReviewState` describes current human quality approval.
-`submittedSignoffStale` reports whether the active signoff needs a new submission.
-A replacement artifact can have human quality approval while the earlier
-signoff still needs to be resubmitted.
+The response pairs `submittedSignoff.binding` and `submittedSignoff.stale` with
+the current review requests and `requiredQualityReviewState` from one database
+snapshot. A replacement can have human quality approval while the earlier
+signoff still needs a fresh submission. The board labels outdated requests.
+
+Bound decisions remain readable after policy changes. The endpoint returns up
+to 20 decisions. Send the returned `nextCursor` as `?cursor=<value>` for the next
+page. An absent cursor starts at the newest bound decision.
 
 ## Documents
 

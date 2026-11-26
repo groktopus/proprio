@@ -4,7 +4,7 @@ import { expect, userEvent, within } from "storybook/test";
 import { installFixtureApi } from "../../support/capability-gaps/api";
 import { completionHistoryFixture } from "../../support/native-completion-history";
 import { creationVisibilityStories } from "../../support/issue-creation-visibility";
-import type { Issue, IssueLabel, Project } from "@groktopus/shared";
+import type { Issue, IssueExecutionReviewEvidence, IssueLabel, Project } from "@groktopus/shared";
 import type { RunForIssue } from "@/api/activity";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -947,6 +947,60 @@ export const IssuePropertiesCompletionHistory: Story = {
     await userEvent.click(disclosure);
     const history = await canvas.findByRole("region", { name: "Native completion history" });
     await expect(await within(history).findByText("Evidence not verified")).toBeVisible();
+  },
+};
+
+const signoffBinding = {
+  version: 1, requirementHash: "a".repeat(64),
+  deliverables: [{
+    key: "review-copy",
+    label: "Release review copy and readiness notes",
+    target: { type: "issue_document", key: "review-copy", revisionId: "8cf1eb17-1149-4dbd-9078-69392aabe3f5" },
+  }],
+} as const;
+const signoffIssue: Issue = {
+  ...primaryIssue,
+  status: "in_review",
+  executionPolicy: {
+    mode: "normal", commentRequired: true, stages: [],
+    requiredQualityReview: { version: 1, deliverables: [{ key: "review-copy", label: "Release review copy and readiness notes" }] },
+    reviewTargetBinding: { source: "required_quality_review" },
+  },
+};
+
+export const IssuePropertiesSignoffEvidence: Story = {
+  name: "IssueProperties - stale signoff evidence",
+  beforeEach: () => installFixtureApi([
+    { path: `/api/issues/${signoffIssue.id}/execution-review-evidence`, read: () => ({
+      submittedSignoff: { binding: { ...signoffBinding, deliverables: [...signoffBinding.deliverables] }, stale: true },
+      currentRequests: [{
+        key: "review-copy", label: "Release review copy and readiness notes",
+        interactionId: "f203d61e-6212-4900-ab2e-d38b35cb5bd5",
+        target: { type: "issue_attachment", attachmentId: "3849f879-2863-4a57-9ac4-6265d52e8efa", assetId: "9179c852-f45a-4b1c-80cd-68875873fe92", sha256: "b".repeat(64) },
+        requirementHash: "a".repeat(64), outdated: false,
+      }],
+      executionDecisions: [{
+        id: "271a836c-b131-4ca1-be2d-5248552fb064", stageType: "review", outcome: "approved",
+        reviewTargetBinding: { ...signoffBinding, deliverables: [...signoffBinding.deliverables] },
+      }],
+      requiredQualityReviewState: { required: true, satisfied: true, missing: [] },
+      nextCursor: null,
+    } satisfies IssueExecutionReviewEvidence) },
+  ]).cleanup,
+  render: () => (
+    <StorybookData>
+      <div className="proprio-story w-80 max-w-full border border-border p-4">
+        <IssueProperties issue={signoffIssue} onUpdate={() => undefined} showExecutionReviewEvidence inline />
+      </div>
+    </StorybookData>
+  ),
+  play: async ({ canvasElement }) => {
+    const region = await within(canvasElement).findByRole("region", { name: "Required output review" });
+    const signoff = within(region);
+    await expect(signoff.getByRole("heading", { name: "Submitted for signoff" })).toBeVisible();
+    await expect(signoff.getByRole("status")).toHaveTextContent("Request changes and submit the current outputs for a new review.");
+    await userEvent.click(signoff.getByText("Signoff decision history"));
+    await expect(signoff.getByText("Review approved")).toBeVisible();
   },
 };
 

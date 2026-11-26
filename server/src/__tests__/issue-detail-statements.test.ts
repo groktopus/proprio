@@ -124,10 +124,9 @@ describeEmbeddedPostgres("GET /api/issues/:id statements per request", () => {
     ]);
     const path = `/api/issues/${fixture.issue.id}/execution-review-evidence`;
     const response = await request(memberApp).get(path).expect(200).expect("Cache-Control", "private, no-store");
-    expect(response.body.submittedSignoffStale).toBe(false);
+    expect(response.body.submittedSignoff).toBeNull();
     expect(response.body.executionDecisions).toEqual([{
       id: decisionId, stageType: "review", outcome: "approved", reviewTargetBinding: binding,
-      createdAt: expect.any(String),
     }]);
     expect(response.body.requiredQualityReviewState).toEqual({ required: false, satisfied: true, missing: [] });
     await request(outsiderApp).get(path).expect(404);
@@ -135,10 +134,35 @@ describeEmbeddedPostgres("GET /api/issues/:id statements per request", () => {
     await request(memberApp).get(path).expect(404);
   }, 60_000);
 
+  it("paginates bound decisions after newer unbound history", async () => {
+    const fixture = await seed();
+    const app = boardSessionApp(ctx.db, () => fixture.userId);
+    const stageId = randomUUID();
+    const base = { companyId: fixture.companyId, issueId: fixture.issue.id, stageId, stageType: "review",
+      outcome: "approved", body: "Saved decision" };
+    const target = { type: "issue_document" as const, key: "draft", revisionId: randomUUID() };
+    const binding = { version: 1 as const, requirementHash: "a".repeat(64), deliverables: [{ key: "draft", label: "Draft", target }] };
+    const oldest = randomUUID();
+    await ctx.db.insert(issueExecutionDecisions).values([
+      { ...base, id: oldest, createdAt: new Date("2026-11-01T12:00:00Z"), reviewTargetBinding: binding },
+      ...Array.from({ length: 20 }, () => ({ ...base, createdAt: new Date("2026-11-02T12:00:00Z"), reviewTargetBinding: binding })),
+      ...Array.from({ length: 105 }, () => ({ ...base, createdAt: new Date("2026-11-03T12:00:00Z") })),
+    ]);
+
+    const path = `/api/issues/${fixture.issue.identifier ?? fixture.issue.id}/execution-review-evidence`;
+    const first = await request(app).get(path).expect(200);
+    expect(first.body.executionDecisions).toHaveLength(20);
+    expect(first.body.nextCursor).toBe(first.body.executionDecisions[19].id);
+    const last = await request(app).get(path).query({ cursor: first.body.nextCursor }).expect(200);
+    expect(last.body.executionDecisions).toMatchObject([{ id: oldest, reviewTargetBinding: binding }]);
+    expect(last.body.nextCursor).toBeNull();
+    await request(app).get(path).query({ cursor: "invalid" }).expect(400);
+  }, 60_000);
+
   it("rate limits review evidence reads per account", async () => {
     const fixture = await seed();
     const other = await seedBoardRouteFixture(ctx.db, "ReviewRateLimitOther");
-    const path = `/api/issues/${randomUUID()}/execution-review-evidence`;
+    const path = "/api/issues/ABSENT-123/execution-review-evidence";
     const app = boardSessionApp(ctx.db, () => fixture.userId);
     for (let requestCount = 0; requestCount < 30; requestCount++) {
       await request(app).get(path).expect(404);

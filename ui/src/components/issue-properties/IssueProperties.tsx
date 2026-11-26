@@ -21,7 +21,6 @@ import {
   type ExecutionWorkspace,
   type Issue,
   type IssueLabel,
-  type IssueThreadInteraction,
 } from "@groktopus/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../../api/access";
@@ -204,7 +203,7 @@ function TruncatedCopyable({ value, icon: Icon }: { value: string; icon: Compone
 
 interface IssuePropertiesProps {
   issue: Issue;
-  interactions?: IssueThreadInteraction[];
+  showExecutionReviewEvidence?: boolean;
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
@@ -248,7 +247,7 @@ interface IssuePaneTabDescriptor {
 
 export function IssueProperties({
   issue,
-  interactions,
+  showExecutionReviewEvidence = false,
   childIssues = [],
   issueLinkState,
   onAddSubIssue,
@@ -2679,7 +2678,7 @@ export function IssueProperties({
             <span role="status" className="text-sm text-muted-foreground">Execution policy unavailable. Refresh to try again.</span>
           </PropertyRow>
         ) : (<>
-        {interactions !== undefined ? <TaskExecutionReviewEvidence key={issue.id} issue={issue} interactions={interactions} /> : null}
+        {showExecutionReviewEvidence ? <TaskExecutionReviewEvidence key={issue.id} issue={issue} /> : null}
         <PropertyPicker
           inline={inline}
           label="Reviewers"

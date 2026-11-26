@@ -443,6 +443,8 @@ export {
   issueExecutionPolicySchema,
   requiredQualityReviewSchema,
   issueExecutionReviewTargetBindingSchema,
+  issueExecutionReviewEvidenceQuerySchema,
+  issueExecutionReviewEvidenceSchema,
   issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,

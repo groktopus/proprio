@@ -62,7 +62,7 @@ import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from ".
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
 import { withAuthorizationReadSnapshot } from "../services/authorization-read-scope.js";
-import { captureRequiredQualityReviewDecisionBinding, readRequiredQualityReview, readSubmittedSignoffIsStale, recordExecutionStageDecision } from "../services/required-quality-review.js";
+import { captureRequiredQualityReviewDecisionBinding, readExecutionReviewEvidence, recordExecutionStageDecision } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
 import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
@@ -99,7 +99,6 @@ import {
   issueAccessGrants,
   issueComments,
   issueDocuments,
-  issueExecutionDecisions,
   issueRelations,
   issueRecoveryActions,
   issueThreadInteractions,
@@ -112,6 +111,7 @@ import {
 } from "@groktopus/db";
 import {
   addIssueCommentSchema,
+  issueExecutionReviewEvidenceQuerySchema,
   acceptIssueThreadInteractionSchema,
   resolveConfirmationFromCommentSchema,
   attachmentArtifactWorkProductMetadataSchema,
@@ -297,6 +297,8 @@ import {
   unprocessable,
 } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
+import { evidenceHistoryRateLimit } from "../middleware/evidence-history-rate-limit.js";
+import { boardMutationOriginAllowed } from "../middleware/board-mutation-guard.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
 import {
   assertBoard,
@@ -2175,19 +2177,7 @@ const dependencyInvestigationRateLimit = rateLimit({
   message: { error: "Dependency investigation request limit exceeded" },
 });
 
-const executionReviewEvidenceRateLimit = rateLimit({
-  windowMs: 60_000,
-  limit: 30,
-  keyGenerator: (req) => {
-    const actor = req.actor;
-    if (actor?.type === "agent" && actor.companyId && actor.agentId) return `agent:${actor.companyId}:${actor.agentId}`;
-    if (actor?.type === "board" && actor.userId) return `board:${actor.userId}`;
-    return ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0");
-  },
-  standardHeaders: "draft-7",
-  legacyHeaders: false,
-  message: { error: "Execution review evidence request limit exceeded" },
-});
+const executionReviewEvidenceRateLimit = evidenceHistoryRateLimit("Execution review evidence request limit exceeded");
 
 function companySearchRateLimitActor(req: Request, companyId: string) {
   if (req.actor.type === "agent") {
@@ -3892,7 +3882,7 @@ export function issueRoutes(
   const issueDetailEtag = privateJsonEtag();
   router.use((req, res, next) => {
     // Chat bootstrap and signoff evidence use fresh, non-cacheable reads.
-    const uncached = /^\/issues\/[^/]+\/(?:chat-bootstrap|execution-review-evidence)\/?$/.test(req.path);
+    const uncached = /^\/issues\/[^/]+\/(?:chat-bootstrap|execution-review-evidence)\/?$/i.test(req.path);
     if (!uncached && /^\/issues\/[^/]+(?:\/|$)/.test(req.path)) {
       issueDetailEtag(req, res, next);
       return;
@@ -5418,15 +5408,15 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: Parameters<typeof decideIssueAccess>[1] & { identifier?: string | null },
-    options: { allowBreakGlass?: boolean; finalForAgents?: boolean; readDb?: Db } = {},
+    options: { allowBreakGlass?: boolean; finalForAgents?: boolean } = {},
   ) {
-    const decision = await decideIssueAccess(req, issue, "issue:read", options.readDb ? accessService(options.readDb) : access);
+    const decision = await decideIssueAccess(req, issue, "issue:read");
     if (decision.allowed) return true;
     if (
       options.allowBreakGlass === true
       && req.query.breakGlass === "true"
       && decision.reason === "deny_issue_private"
-      && await canUseIssueBreakGlass(req, issue, options.readDb)
+      && await canUseIssueBreakGlass(req, issue)
     ) {
       await recordIssueBreakGlassRead(req, issue);
       return true;
@@ -9815,32 +9805,26 @@ export function issueRoutes(
     res.json(response);
   });
 
-  router.get("/issues/:id/execution-review-evidence", executionReviewEvidenceRateLimit, async (req, res) => {
+  router.get("/issues/:ref/execution-review-evidence", executionReviewEvidenceRateLimit, async (req, res) => {
+    assertBoard(req);
     res.setHeader("Cache-Control", "private, no-store");
+    const { cursor } = issueExecutionReviewEvidenceQuerySchema.parse(req.query);
     const result = await db.transaction(transaction => withAuthorizationReadSnapshot(async () => {
       const readDb = transaction as unknown as Db;
-      const issue = await getAccessibleResource(req, res, issueService(readDb).getById(req.params.id as string),
+      const issue = await getAccessibleResource(req, res, issueService(readDb).getById(req.params.ref as string),
         "Issue not found", issueNotFoundBody(req));
-      if (!issue || !await assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true, finalForAgents: true, readDb })) return null;
+      if (!issue) return null;
+      const accessDecision = await decideIssueAccess(req, issue, "issue:read", accessService(readDb));
+      const breakGlass = !accessDecision.allowed && req.query.breakGlass === "true"
+        && accessDecision.reason === "deny_issue_private" && await canUseIssueBreakGlass(req, issue, readDb);
+      if (!accessDecision.allowed && !breakGlass) throw notFound("Issue not found");
+      if (breakGlass && !boardMutationOriginAllowed(req)) throw forbidden("Board mutation requires trusted browser origin");
 
-      const [executionDecisions, requiredQualityReviewState, submittedSignoffStale] = await Promise.all([
-        readDb.select({
-          id: issueExecutionDecisions.id,
-          stageType: issueExecutionDecisions.stageType,
-          outcome: issueExecutionDecisions.outcome,
-          reviewTargetBinding: issueExecutionDecisions.reviewTargetBinding,
-          createdAt: issueExecutionDecisions.createdAt,
-        }).from(issueExecutionDecisions).where(and(
-          eq(issueExecutionDecisions.companyId, issue.companyId),
-          eq(issueExecutionDecisions.issueId, issue.id),
-        )).orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id)).limit(100),
-        readRequiredQualityReview(readDb, issue),
-        readSubmittedSignoffIsStale(readDb, issue),
-      ]);
-      return { issue, evidence: { executionDecisions, requiredQualityReviewState, submittedSignoffStale } };
+      const evidence = await readExecutionReviewEvidence(readDb, issue, cursor);
+      return { issue, breakGlass, evidence };
     }), { isolationLevel: "repeatable read", accessMode: "read only" });
     if (!result) return;
-    await recordAgentChildTaskRead(db, req, result.issue);
+    if (result.breakGlass) await recordIssueBreakGlassRead(req, result.issue);
     res.json(result.evidence);
   });
 

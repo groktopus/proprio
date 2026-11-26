@@ -801,6 +801,7 @@ export type {
   QualityReviewBinding,
   IssueExecutionReviewTargetBindingPolicy,
   IssueExecutionReviewEvidence,
+  RequiredQualityReviewState,
   IssueExecutionReviewTargetReference,
   IssueExecutionReviewTargetBinding,
   IssueExecutionState,

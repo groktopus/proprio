@@ -42205,13 +42205,13 @@
         }
       }
     },
-    "/api/issues/{id}/execution-review-evidence": {
+    "/api/issues/{ref}/execution-review-evidence": {
       "get": {
         "tags": [
           "issues"
         ],
         "summary": "Get execution review evidence for an issue",
-        "description": "Returns recent execution decisions, required output review readiness, and whether the submitted signoff target is stale. Decisions can include exact requirement digests, artifact revisions, and attachment hashes.",
+        "description": "For authorized board readers. Returns the submitted signoff target, current quality review requests and readiness, and one page of bound decisions in newest-first order. Send the returned nextCursor to read older decisions.",
         "responses": {
           "200": {
             "description": "Success",
@@ -42219,7 +42219,436 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": {}
+                  "properties": {
+                    "submittedSignoff": {
+                      "type": "object",
+                      "properties": {
+                        "binding": {
+                          "type": "object",
+                          "properties": {
+                            "version": {
+                              "type": "number",
+                              "enum": [
+                                1
+                              ]
+                            },
+                            "requirementHash": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "deliverables": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string",
+                                    "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                                  },
+                                  "label": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 120
+                                  },
+                                  "target": {
+                                    "oneOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "issue_document"
+                                            ]
+                                          },
+                                          "key": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 64,
+                                            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                          },
+                                          "revisionId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          }
+                                        },
+                                        "required": [
+                                          "type",
+                                          "key",
+                                          "revisionId"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "issue_attachment"
+                                            ]
+                                          },
+                                          "attachmentId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          },
+                                          "assetId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          },
+                                          "sha256": {
+                                            "type": "string",
+                                            "pattern": "^[a-f0-9]{64}$"
+                                          }
+                                        },
+                                        "required": [
+                                          "type",
+                                          "attachmentId",
+                                          "assetId",
+                                          "sha256"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "key",
+                                  "label",
+                                  "target"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "requirementHash",
+                            "deliverables"
+                          ],
+                          "additionalProperties": false,
+                          "nullable": true
+                        },
+                        "stale": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "binding",
+                        "stale"
+                      ],
+                      "nullable": true
+                    },
+                    "currentRequests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "interactionId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "target": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "issue_document"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 64,
+                                    "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                  },
+                                  "revisionId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "key",
+                                  "revisionId"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "issue_attachment"
+                                    ]
+                                  },
+                                  "attachmentId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "assetId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "attachmentId",
+                                  "assetId",
+                                  "sha256"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "requirementHash": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "outdated": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "label",
+                          "interactionId",
+                          "target",
+                          "requirementHash",
+                          "outdated"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "executionDecisions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "stageType": {
+                            "type": "string",
+                            "enum": [
+                              "review",
+                              "approval"
+                            ]
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "approved",
+                              "changes_requested"
+                            ]
+                          },
+                          "reviewTargetBinding": {
+                            "type": "object",
+                            "properties": {
+                              "version": {
+                                "type": "number",
+                                "enum": [
+                                  1
+                                ]
+                              },
+                              "requirementHash": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "deliverables": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "key": {
+                                      "type": "string",
+                                      "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                                    },
+                                    "label": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 120
+                                    },
+                                    "target": {
+                                      "oneOf": [
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "issue_document"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 64,
+                                              "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                            },
+                                            "revisionId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            }
+                                          },
+                                          "required": [
+                                            "type",
+                                            "key",
+                                            "revisionId"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "issue_attachment"
+                                              ]
+                                            },
+                                            "attachmentId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            },
+                                            "assetId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            },
+                                            "sha256": {
+                                              "type": "string",
+                                              "pattern": "^[a-f0-9]{64}$"
+                                            }
+                                          },
+                                          "required": [
+                                            "type",
+                                            "attachmentId",
+                                            "assetId",
+                                            "sha256"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "key",
+                                    "label",
+                                    "target"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "version",
+                              "requirementHash",
+                              "deliverables"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "stageType",
+                          "outcome",
+                          "reviewTargetBinding"
+                        ]
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "format": "uuid",
+                      "nullable": true
+                    },
+                    "requiredQualityReviewState": {
+                      "type": "object",
+                      "properties": {
+                        "required": {
+                          "type": "boolean"
+                        },
+                        "satisfied": {
+                          "type": "boolean"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                              },
+                              "label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "missing",
+                                  "pending",
+                                  "not_approved",
+                                  "stale"
+                                ]
+                              },
+                              "interactionId": {
+                                "type": "string",
+                                "format": "uuid"
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "label",
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "required",
+                        "satisfied",
+                        "missing"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "submittedSignoff",
+                    "currentRequests",
+                    "executionDecisions",
+                    "nextCursor",
+                    "requiredQualityReviewState"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -42255,16 +42684,32 @@
             }
           },
           "429": {
-            "description": "Review evidence request limit exceeded"
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "parameters": [
           {
-            "name": "id",
+            "name": "ref",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
