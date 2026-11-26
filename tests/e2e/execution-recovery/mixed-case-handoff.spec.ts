@@ -1,14 +1,16 @@
 import { expect, test } from "@playwright/test";
-import { execFileSync, spawn } from "node:child_process";
-import { once } from "node:events";
-import { rename, readFile, mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { rename, readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { stripVTControlCharacters } from "node:util";
 import { gradeMixedHandoff, type MixedHandoffObservation } from "./mixed-handoff-evidence";
-import { stopTestDrive } from "../fixtures/test-drive-process";
+import { launchTestDrive } from "../fixtures/test-drive-process";
+import { makeDirectoryTreeRemovable } from "../../runner-e2e/directory-cleanup";
+import { createProcessTreeOwner, stopOwnedProcessTree } from "../../runner-e2e/process-tree-owner";
 
-test("a legacy lead hands the same Case to a native builder and legacy verifier", async ({ page, request }, info) => {
+for (const restart of [false, true]) test(
+  `a legacy lead hands the same Case to a native builder and legacy verifier${restart ? " after controller restart" : ""}`, async ({ page, request }, info) => {
   const repo = resolve(import.meta.dirname, "../../..");
   const fixtureDir = resolve(import.meta.dirname, "../fixtures");
   const scratch = info.outputPath("mixed-handoff-fixture");
@@ -28,20 +30,37 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     MIXED_HANDOFF_CODEX_COMMAND: codex, OPENAI_API_KEY: "mixed-handoff-fixture", CODEX_API_KEY: "", DATABASE_URL: undefined, DATABASE_MIGRATION_URL: undefined,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${codexLoader}` };
   delete env.FORCE_COLOR;
+  const dataDir = await mkdtemp(resolve(tmpdir(), "proprio-mixed-handoff-"));
+  const instance = basename(dataDir);
   let logs = "";
-  const drive = spawn(process.execPath, ["--import", "./cli/node_modules/tsx/dist/loader.mjs", "cli/src/index.ts", "test-drive",
-    "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Mixed Case Handoff Fixture", "--no-browser"],
-  { cwd: repo, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-  drive.stdout.on("data", chunk => { logs += chunk.toString(); });
-  drive.stderr.on("data", chunk => { logs += chunk.toString(); });
-  const exited = once(drive, "exit");
-  const readyUrl = () => stripVTControlCharacters(logs).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+  let drive: { child: ReturnType<typeof launchTestDrive>["child"]; owner: ReturnType<typeof createProcessTreeOwner> } | undefined;
+  const checkpoints: Array<{ phase: string; observedAt: string; details: Record<string, unknown> }> = [];
+  async function recordCheckpoint(phase: string, details: Record<string, unknown>) {
+    checkpoints.push({ phase, observedAt: new Date().toISOString(), details });
+    await writeFile(info.outputPath("mixed-handoff-restart-checkpoints.json"), JSON.stringify(checkpoints, null, 2));
+  }
+  async function startDrive() {
+    const launched = launchTestDrive({ cwd: repo, env,
+      args: ["--data-dir", dataDir, "--instance", instance, "--harness", "codex", "--api-key-env", "OPENAI_API_KEY",
+        "--company-name", "Mixed Case Handoff Fixture", "--no-browser"],
+      onOutput: chunk => { logs += chunk; },
+    });
+    drive = { child: launched.child, owner: createProcessTreeOwner(launched.child) };
+    return launched.ready;
+  }
+  async function stopDrive() {
+    const active = drive;
+    if (!active) return;
+    try {
+      await stopOwnedProcessTree(active.child, active.owner);
+      drive = undefined;
+    } finally {
+      active.owner.stopObserving();
+    }
+  }
+
   try {
-    await Promise.race([
-      expect.poll(readyUrl, { timeout: 100_000 }).toBeTruthy(),
-      exited.then(([code, signal]) => { throw new Error(`Fixture controller exited during startup (${code ?? signal})\n${logs}`); }),
-    ]);
-    const base = readyUrl()!;
+    let base = await startDrive();
     const api = async (path: string, method = "GET", data?: unknown) => {
       const response = await request.fetch(`${base}/api${path}`, { method, data });
       const body = await response.text();
@@ -66,6 +85,10 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
       const agent = await api(`/agents/${builder.id}`);
       return { status: agent.status, lifecycleHolds: agent.lifecycleHolds ?? [] };
     }, { timeout: 25_000 }).toEqual({ status: "idle", lifecycleHolds: [] });
+    if (restart) {
+      await api(`/agents/${builder.id}/pause`, "POST", {});
+      await expect.poll(async () => (await api(`/agents/${builder.id}`)).status).toBe("paused");
+    }
     const title = "Verify the mixed-runner arithmetic handoff";
     const brief = { first: 17, second: 29 };
     const started = await api(`${companyPath}/case-handoffs`, "POST", { idempotencyKey: "mixed-handoff-start",
@@ -85,7 +108,82 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
     expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
     expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ title, assigneeAgentId: lead.id });
     await writeFile(releaseFile, "release", { flag: "wx" });
-    await expect.poll(() => readFile(builderReceipt, "utf8").catch(() => ""), { timeout: 30_000 }).not.toBe("");
+
+    const handoffPath = `/cases/${caseId}/handoffs?limit=20`;
+    async function outgoingState() {
+      const ledger = await api(handoffPath);
+      return ledger.items.find((handoff: { id: string }) => handoff.id === outgoing.handoffId);
+    }
+    const handoffCheckpoint = (row: Awaited<ReturnType<typeof outgoingState>>) => row ? ({
+      handoffId: row.id, state: row.state, wakeupRequestId: row.wakeupRequestId,
+      attemptCount: row.attemptCount, updatedAt: row.updatedAt, nextAttemptAt: row.nextAttemptAt,
+      leaseExpiresAt: row.leaseExpiresAt, lastErrorCode: row.lastErrorCode,
+    }) : null;
+    let restartEvidence: { stoppedAt: string; readyAt: string; wakeupRequestId: string; beforeController: string;
+      afterController: string; attemptsBefore: number; attemptsAfterStartup: number } | undefined;
+    let builderWaitMs = 30_000;
+    if (restart) {
+      const beforeController = (await api("/health")).serverInfo.processStartedAt;
+      let pending: Awaited<ReturnType<typeof outgoingState>>;
+      try {
+        await expect.poll(async () => {
+          pending = await outgoingState();
+          return pending?.state === "pending_dispatch" && pending.leaseExpiresAt === null
+            && typeof pending.lastErrorCode === "string" && Date.parse(pending.nextAttemptAt) > Date.now();
+        }, { timeout: 45_000 }).toBe(true);
+      } finally {
+        await recordCheckpoint("before_stop", { controllerBoot: beforeController, handoff: handoffCheckpoint(pending) });
+      }
+      expect(pending).toMatchObject({ sourceRunId: outgoing.runId, wakeupRequestId: expect.any(String),
+        attemptCount: expect.any(Number), leaseExpiresAt: null });
+      expect(await api(runsPath)).toEqual([expect.objectContaining({ id: outgoing.runId, status: "succeeded" })]);
+      await stopDrive();
+      const stoppedAt = new Date().toISOString();
+      await recordCheckpoint("controller_stopped", { stoppedAt });
+      base = await startDrive();
+      const readyAt = new Date().toISOString();
+      const afterController = (await api("/health")).serverInfo.processStartedAt;
+      const reopened = await outgoingState();
+      await recordCheckpoint("controller_ready", { controllerBoot: afterController, handoff: handoffCheckpoint(reopened) });
+      expect(beforeController).toEqual(expect.any(String));
+      expect(afterController).toEqual(expect.any(String));
+      expect(afterController).not.toBe(beforeController);
+      expect((await api("/companies"))[0].id).toBe(company.id);
+      expect(reopened).toMatchObject({ id: pending.id, state: "pending_dispatch",
+        sourceRunId: outgoing.runId, wakeupRequestId: pending.wakeupRequestId });
+
+      // Observe the replacement worker discover the saved work without a new
+      // producer notification. The builder stays paused through this attempt.
+      let rediscovered = reopened;
+      try {
+        await expect.poll(async () => {
+          rediscovered = await outgoingState();
+          return rediscovered?.attemptCount > pending.attemptCount && rediscovered.leaseExpiresAt === null
+            && Date.parse(rediscovered.updatedAt) >= Date.parse(afterController);
+        }, { timeout: 90_000 }).toBe(true);
+      } finally {
+        await recordCheckpoint("startup_delivery", { handoff: handoffCheckpoint(rediscovered) });
+      }
+      expect(rediscovered).toMatchObject({ state: "pending_dispatch", wakeupRequestId: pending.wakeupRequestId });
+      expect(await api(runsPath)).toEqual([expect.objectContaining({ id: outgoing.runId, status: "succeeded" })]);
+      const retryPath = `/cases/${caseId}/handoffs/${outgoing.handoffId}/retry`;
+      const retries = await Promise.all([api(retryPath, "POST", {}), api(retryPath, "POST", {})]);
+      await recordCheckpoint("concurrent_retries", { receipts: retries.map(handoffCheckpoint) });
+      for (const receipt of retries) expect(receipt).toMatchObject({ id: pending.id, wakeupRequestId: pending.wakeupRequestId });
+      await api(`/agents/${builder.id}/resume`, "POST", {});
+      await expect.poll(async () => {
+        const agent = await api(`/agents/${builder.id}`);
+        return agent.lifecycleState === "ready" && agent.status !== "paused";
+      }).toBe(true);
+      const resumed = await outgoingState();
+      await recordCheckpoint("builder_resumed", { handoff: handoffCheckpoint(resumed) });
+      // Earlier paused attempts can leave a backoff deadline even after Resume.
+      const dueInMs = Date.parse(resumed.nextAttemptAt) - Date.now();
+      builderWaitMs += Math.max(0, Number.isFinite(dueInMs) ? dueInMs : 0);
+      restartEvidence = { stoppedAt, readyAt, wakeupRequestId: pending.wakeupRequestId, beforeController, afterController,
+        attemptsBefore: pending.attemptCount, attemptsAfterStartup: rediscovered.attemptCount };
+    }
+    await expect.poll(() => readFile(builderReceipt, "utf8").catch(() => ""), { timeout: builderWaitMs }).not.toBe("");
     const builderInput = JSON.parse(await readFile(builderReceipt, "utf8"));
     expect(builderInput).toEqual({ caseId, taskId, handoffId: outgoing.handoffId,
       handoffVersion: outgoing.handoffVersion, instructionsMatch: true });
@@ -95,7 +193,12 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
       .toEqual(["succeeded", "succeeded", "succeeded"]);
     const task = await api(`/issues/${taskId}?view=core`);
     const caseRecord = await api(`/cases/${caseId}`);
-    const ledger = await api(`/cases/${caseId}/handoffs?limit=20`);
+    const ledger = await api(handoffPath);
+    if (restartEvidence) {
+      const delivered = await outgoingState();
+      await recordCheckpoint("delivered", { handoff: handoffCheckpoint(delivered) });
+      expect(delivered).toMatchObject({ state: "delivered", wakeupRequestId: restartEvidence.wakeupRequestId });
+    }
     const artifact = await api(`/issues/${taskId}/documents/result`);
     const expectedArtifact = JSON.stringify({ total: brief.first + brief.second });
     expect(artifact.body).toBe(expectedArtifact);
@@ -124,21 +227,37 @@ test("a legacy lead hands the same Case to a native builder and legacy verifier"
         createdByRunId: revision.createdByRunId },
       verification: JSON.parse(await readFile(verificationReceipt, "utf8")) };
     const verdict = gradeMixedHandoff(observed, expectedArtifact);
+    expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
+    const boardRoute = `/${company.issuePrefix}/issues/${task.identifier ?? task.id}`;
+    const doneStatus = page.getByRole("button", { name: "Change status (current: Done)", exact: true });
+    let boardHttpStatus: number | null = null;
+    try {
+      const boardResponse = await page.goto(`${base}${boardRoute}`, { waitUntil: "domcontentloaded" });
+      boardHttpStatus = boardResponse?.status() ?? null;
+      expect(boardResponse?.ok()).toBe(true);
+      // Hosted source runs can still be compiling Vite modules on the first navigation.
+      await expect(doneStatus).toBeVisible({ timeout: 30_000 });
+    } catch (error) {
+      const boardDiagnostic = { requestedPath: boardRoute, actualPath: new URL(page.url()).pathname,
+        httpStatus: boardHttpStatus, doneStatusVisible: await doneStatus.isVisible() };
+      const diagnosticFile = info.outputPath("mixed-handoff-board-diagnostic.json");
+      await writeFile(diagnosticFile, JSON.stringify(boardDiagnostic, null, 2));
+      throw error;
+    }
     const evidence = info.outputPath("mixed-handoff-evidence.json");
     await writeFile(evidence, JSON.stringify({
       revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
       profiles: ["legacy/process", "native/codex-app-server fixture", "legacy/process"],
-      outgoing, builderInput, observed, verdict,
+      outgoing, builderInput, restartEvidence, observed, verdict, boardStatus: "done",
     }, null, 2));
     await info.attach("mixed-handoff-evidence", { contentType: "application/json", path: evidence });
-    expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
-    await page.goto(`${base}/${company.issuePrefix}/issues/${task.identifier ?? task.id}`, { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("button", { name: "Change status (current: Done)", exact: true })).toBeVisible();
   } catch (error) {
     await info.attach("test-drive-logs", { body: logs, contentType: "text/plain" });
     throw error;
   } finally {
-    await stopTestDrive(drive);
+    await stopDrive();
+    await makeDirectoryTreeRemovable(dataDir);
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

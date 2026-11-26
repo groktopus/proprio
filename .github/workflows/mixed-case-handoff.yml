@@ -11,6 +11,11 @@ on:
       - tests/e2e/fixtures/mixed-handoff-*.mjs
       - tests/e2e/fixtures/codex-fixture-resolver.mjs
       - tests/e2e/fixtures/test-drive-process.ts
+      - tests/runner-e2e/directory-cleanup.ts
+      - tests/runner-e2e/process-tree-owner.ts
+      - tests/runner-e2e/process-tree.ts
+      - cli/src/commands/test-drive.ts
+      - cli/src/index.ts
 
 permissions:
   contents: read
@@ -60,7 +65,15 @@ jobs:
       - name: Verify the same Case through three roles
         run: |
           fixture_tmp=$(mktemp -d "$RUNNER_TEMP/mixed-case-handoff-fixture.XXXXXX")
-          trap 'chmod -R u+w -- "$fixture_tmp"; rm -rf -- "$fixture_tmp"' EXIT
+          cleanup() {
+            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d -name 'proprio-mixed-handoff-*' -print -quit)" ]]; then
+              echo "The browser fixture retained instance data because its cleanup did not settle."
+              return
+            fi
+            chmod -R u+w -- "$fixture_tmp"
+            rm -rf -- "$fixture_tmp"
+          }
+          trap cleanup EXIT
           TMPDIR="$fixture_tmp" pnpm exec playwright test \
             --config tests/e2e/execution-recovery/playwright.config.ts mixed-case-handoff.spec.ts \
             --output "$RUNNER_TEMP/mixed-case-handoff-results"
@@ -69,6 +82,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mixed-case-handoff-evidence
-          path: ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-evidence.json
+          path: |
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-evidence.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-restart-checkpoints.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-board-diagnostic.json
           if-no-files-found: ignore
           retention-days: 14
