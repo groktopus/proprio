@@ -16,7 +16,7 @@ export type RetryReasonKind =
 export type BudgetBlockFacts = {
   reason: string;
   scopeType: string;
-  scopeId: string;
+  scopeId?: string;
 };
 
 export type PauseHoldFacts = {
@@ -288,7 +288,7 @@ export function decideScheduledRetryGate(
       issueId: facts.issueId,
       details: {
         scopeType: facts.budgetBlock.scopeType,
-        scopeId: facts.budgetBlock.scopeId,
+        ...(facts.budgetBlock.scopeId ? { scopeId: facts.budgetBlock.scopeId } : {}),
       },
     };
   }

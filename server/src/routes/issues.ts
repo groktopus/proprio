@@ -212,6 +212,7 @@ import { isUniqueViolation } from "../db-errors.js";
 import type { StorageService } from "../storage/types.js";
 import { validate, validateIssueMutationBody } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
+import { visibleAdmissionBlock } from "../services/budget-scope-visibility.js";
 import { conversationDecisionReceiptsService } from "../services/conversation-decision-receipts.js";
 import { attentionHandledDetails, attentionHandledFor, type AttentionHandledFor } from "../services/attention-receipts.js";
 import {
@@ -7691,7 +7692,7 @@ export function issueRoutes(
           code: "recovery_safe_hand_back_budget_blocked",
           issueId: input.issue.id,
           returnOwnerAgentId,
-          budgetBlock,
+          budgetBlock: visibleAdmissionBlock(budgetBlock),
         },
       );
     }

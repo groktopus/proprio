@@ -127,6 +127,63 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     expect(next!.taskLineageJson).toEqual({ version: 1, pathIssueIds: [task.id, newRoot.id] });
   });
 
+  it("applies overlapping root and child limits using the admitted run's captured ancestry", async () => {
+    const f = await fixture();
+    const agent = await f.makeAgent("Worker");
+    const capturedRoot = await f.makeIssue("Captured root"), currentRoot = await f.makeIssue("Current root");
+    const child = await f.makeIssue("Child task", capturedRoot.id);
+    const capturedPolicy = await f.makePolicy(capturedRoot.id, { amount: 100, reservationCents: "0" });
+    await f.makePolicy(child.id, { amount: 50, reservationCents: "0" });
+    await f.makePolicy(currentRoot.id, { amount: 500, reservationCents: "0" });
+    const run = await f.makeRun(agent.id, child.id, "running");
+    await reserveRunBudget(db, f.companyId, run.id, null);
+    await db.update(issues).set({ parentId: currentRoot.id }).where(eq(issues.id, child.id));
+    await db.insert(costEvents).values({ companyId: f.companyId, agentId: agent.id, issueId: child.id, heartbeatRunId: run.id,
+      provider: "test", biller: "test", billingType: "metered_api", costStatus: "priced", model: "test-model", costCents: 60,
+      occurredAt: new Date() });
+
+    const admittedRun = await budgetService(db).evaluateAdmission(f.companyId, agent.id, {
+      issueId: child.id, projectId: null, runId: run.id,
+    });
+    expect(admittedRun.policies.map(policy => policy.scopeId).sort()).toEqual([capturedRoot.id, child.id].sort());
+    expect(admittedRun.observations.map(observed => observed.totalExact)).toEqual(["60.0000000", "60.0000000"]);
+    expect(admittedRun.block).toMatchObject({ scopeType: "task_tree", scopeId: child.id });
+    await expect(budgetService(db).getInvocationBlock(f.companyId, agent.id, {
+      issueId: child.id, runId: run.id,
+    })).resolves.toMatchObject({ scopeType: "task_tree", scopeId: child.id });
+
+    const freshPreflight = await budgetService(db).evaluateAdmission(f.companyId, agent.id, { issueId: child.id });
+    expect(freshPreflight.policies.map(policy => policy.scopeId).sort()).toEqual([currentRoot.id, child.id].sort());
+
+    await db.update(budgetPolicies).set({ amount: 100 }).where(eq(budgetPolicies.scopeId, child.id));
+    await db.update(budgetPolicies).set({ amount: 50 }).where(eq(budgetPolicies.id, capturedPolicy.id));
+    await expect(budgetService(db).getInvocationBlock(f.companyId, agent.id, { runId: run.id }))
+      .resolves.toMatchObject({ scopeType: "task_tree", scopeId: capturedRoot.id });
+    await db.delete(issues).where(eq(issues.id, capturedRoot.id));
+    const retained = await budgetService(db).evaluateAdmission(f.companyId, agent.id, { runId: run.id });
+    expect(retained.policies.map(policy => policy.scopeId)).toEqual([child.id]);
+    expect(retained.block).toBeNull();
+    expect((await computeObservedSpend(db, capturedPolicy)).totalExact).toBe("60.0000000");
+  });
+
+  it("resolves a legacy queued task key for its current tree before a reservation exists", async () => {
+    const f = await fixture();
+    const agent = await f.makeAgent("Legacy worker");
+    const root = await f.makeIssue("Shared root"), child = await f.makeIssue("Legacy task", root.id);
+    const identifier = `T${f.companyId.slice(0, 5).toUpperCase()}-7`;
+    await db.update(issues).set({ identifier }).where(eq(issues.id, child.id));
+    await f.makePolicy(root.id, { amount: 500, reservationCents: "0" });
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: agent.id, status: "queued", contextSnapshot: { taskKey: identifier },
+    }).returning();
+
+    const preflight = await budgetService(db).evaluateAdmission(f.companyId, agent.id, { runId: run!.id });
+    expect(preflight.policies.map(policy => policy.scopeId)).toEqual([root.id]);
+    const [saved] = await db.select({ lineage: heartbeatRuns.taskLineageJson })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    expect(saved?.lineage).toBeNull();
+  });
+
   it("reevaluates the matching historical tree after queued cost changes", async () => {
     const f = await fixture();
     const agent = await f.makeAgent("Worker");

@@ -43,3 +43,10 @@ export function redactBudgetReceiptActivity<Row extends { action: string; detail
   }
   return row;
 }
+
+/** Admission can block a shared descendant without granting access to the root. */
+export function visibleAdmissionBlock<T extends { scopeType: string; reason: string }>(
+  block: T,
+): T | Pick<T, "scopeType" | "reason"> {
+  return block.scopeType === "task_tree" ? { scopeType: block.scopeType, reason: block.reason } : block;
+}

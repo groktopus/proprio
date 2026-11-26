@@ -42,6 +42,7 @@ import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "..
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+import { visibleAdmissionBlock } from "../../../services/budget-scope-visibility.js";
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
@@ -423,9 +424,10 @@ export function createPostgresRunDispatchAdapter(
     const budgetBlock = await budgetsForRead.getInvocationBlock(input.companyId, input.agentId, {
       issueId,
       projectId: readNonEmptyString(input.contextSnapshot.projectId),
+      runId: input.runId,
     });
     facts.budgetBlock = budgetBlock
-      ? { reason: budgetBlock.reason, scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId }
+      ? visibleAdmissionBlock({ reason: budgetBlock.reason, scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId })
       : null;
     if (facts.budgetBlock) return { agentFound: true, facts };
 

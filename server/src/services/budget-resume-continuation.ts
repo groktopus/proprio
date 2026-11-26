@@ -104,17 +104,12 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
     // Admission saves the stamp before it cancels; the recorded cancellation
     // must carry the stamp's reason, so a stamped run that later ran, or was
     // cancelled for another reason, never matches.
-    const admissionStop = and(
-      sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeType' = ${input.scopeType}`,
-      sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeId' = ${input.scopeId}`,
-      sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'reason'`)!;
-    const stoppedByThisScope = or(budgetCancellationScopePredicate(input), lifecycleStop, admissionStop)!;
-    // A queued run admission stamped for this budget but has not cancelled
-    // yet. Delivery waits for its Stop, and abandons the claim if the run was
-    // cancelled for another reason.
     const pendingAdmissionStop = and(
       sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeType' = ${input.scopeType}`,
       sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeId' = ${input.scopeId}`)!;
+    const admissionStop = and(pendingAdmissionStop,
+      sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'reason'`)!;
+    const stoppedByThisScope = or(budgetCancellationScopePredicate(input), lifecycleStop, admissionStop)!;
     // A person's Stop stays stopped, even if budget enforcement also fenced
     // the run while that Stop was being delivered.
     const stoppedByPerson = sql`(coalesce(${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type', '') = 'user'
@@ -125,7 +120,8 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
       sql`not ${stoppedByPerson}`,
       sql`${runIssueId} is not null`,
       input.scopeType === "task_tree"
-        ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`
+        // A run stopped before reservation has the admission stamp as its recovery proof.
+        ? or(pendingAdmissionStop, sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`)
         : undefined,
     );
     const stoppedSinceIncident = and(stoppedByThisScope,
