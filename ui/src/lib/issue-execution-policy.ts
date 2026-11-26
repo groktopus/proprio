@@ -93,7 +93,8 @@ export function buildExecutionPolicy(input: {
   }
 
   if (stages.length === 0 && !monitor && !existingPolicy?.authorizationPolicy
-    && !existingPolicy?.reviewPreset && existingPolicy?.maxReviewRounds == null) return null;
+    && !existingPolicy?.reviewPreset && existingPolicy?.maxReviewRounds == null
+    && !existingPolicy?.requiredQualityReview && !existingPolicy?.reviewTargetBinding) return null;
 
   return {
     ...input.existingPolicy,

@@ -1,9 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { listenOnFetchAllowedPort } from "../fetch-allowed-port";
+import { launchTestDrive } from "../fixtures/test-drive-process";
 
 // Each attempt starts the source CLI's test-drive without --data-dir. The model
 // and MCP provider are deterministic fixtures; authorization/cards/wakes are real.
@@ -131,44 +132,18 @@ for (const journey of [
         CODEX_HOME: codexHome,
         NODE_ENV: "test",
         PATH: `${root}/tests/e2e/fixtures/recovery-bin:${process.env.PATH}`,
-        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(root, "tests/e2e/fixtures/mixed-handoff-codex-loader.mjs")}`,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(root, "tests/e2e/fixtures/recovery-codex-loader.mjs")}`,
       };
       delete env.DATABASE_URL;
       delete env.DATABASE_MIGRATION_URL;
-      processHandle = spawn(
-        process.execPath,
-        [
-          "cli/node_modules/tsx/dist/cli.mjs",
-          "cli/src/index.ts",
-          "test-drive",
-          "--harness",
-          "codex",
-          "--api-key-env",
-          "IN_FEED_FIXTURE_KEY",
-          "--company-name",
-          "Execution recovery fixture",
-          "--no-browser",
-        ],
-        { cwd: root, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
-      );
-      processHandle.stdout!.on("data", (chunk) => {
-        logs += chunk.toString();
+      const instance = `execution-recovery-${process.pid}-${info.workerIndex}`;
+      const drive = launchTestDrive({ cwd: root, env,
+        args: ["--instance", instance, "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY",
+          "--company-name", "Execution recovery fixture", "--no-browser"],
+        onOutput: chunk => { logs += chunk; },
       });
-      processHandle.stderr!.on("data", (chunk) => {
-        logs += chunk.toString();
-      });
-      await expect
-        .poll(
-          () =>
-            logs.match(
-              /Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/,
-            )?.[1],
-          { timeout: 100_000 },
-        )
-        .toBeTruthy();
-      let base = logs.match(
-        /Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/,
-      )![1]!;
+      processHandle = drive.child;
+      let base = await drive.ready;
       const api = async (path: string, method = "GET", data?: unknown) => {
         const response = await page.request.fetch(`${base}/api${path}`, {
           method,
@@ -464,43 +439,12 @@ for (const journey of [
           fullPage: true,
         });
         await stopDrive();
-        const startOffset = logs.length;
-        processHandle = spawn(
-          process.execPath,
-          [
-            "cli/node_modules/tsx/dist/cli.mjs",
-            "cli/src/index.ts",
-            "test-drive",
-            "--data-dir",
-            dataDir,
-            "--harness",
-            "codex",
-            "--api-key-env",
-            "IN_FEED_FIXTURE_KEY",
-            "--no-browser",
-          ],
-          { cwd: root, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
-        );
-        processHandle.stdout!.on("data", (chunk) => {
-          logs += chunk.toString();
+        const restarted = launchTestDrive({ cwd: root, env,
+          args: ["--data-dir", dataDir, "--instance", instance, "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY", "--no-browser"],
+          onOutput: chunk => { logs += chunk; },
         });
-        processHandle.stderr!.on("data", (chunk) => {
-          logs += chunk.toString();
-        });
-        await expect
-          .poll(
-            () =>
-              logs
-                .slice(startOffset)
-                .match(
-                  /Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/,
-                )?.[1],
-            { timeout: 100_000 },
-          )
-          .toBeTruthy();
-        base = logs
-          .slice(startOffset)
-          .match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)![1]!;
+        processHandle = restarted.child;
+        base = await restarted.ready;
         expect((await api("/health")).serverInfo.git.branchName).toBe(
           health.serverInfo.git.branchName,
         );
@@ -544,18 +488,12 @@ for (const journey of [
           },
         });
         await stopDrive();
-        const startOffset = logs.length;
-        processHandle = spawn(
-          process.execPath,
-          ["cli/node_modules/tsx/dist/cli.mjs", "cli/src/index.ts", "test-drive", "--data-dir", dataDir,
-            "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY", "--no-browser"],
-          { cwd: root, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
-        );
-        processHandle.stdout!.on("data", (chunk) => { logs += chunk.toString(); });
-        processHandle.stderr!.on("data", (chunk) => { logs += chunk.toString(); });
-        await expect.poll(() => logs.slice(startOffset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1],
-          { timeout: 100_000 }).toBeTruthy();
-        base = logs.slice(startOffset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)![1]!;
+        const restarted = launchTestDrive({ cwd: root, env,
+          args: ["--data-dir", dataDir, "--instance", instance, "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY", "--no-browser"],
+          onOutput: chunk => { logs += chunk; },
+        });
+        processHandle = restarted.child;
+        base = await restarted.ready;
         expect((await api("/companies"))[0].id).toBe(company.id);
         await page.goto(base + prefix + `/issues/${task.id}`);
         await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 30_000 }).toBe("blocked");

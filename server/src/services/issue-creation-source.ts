@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { activityLog, agents, heartbeatRuns, issues } from "@groktopus/db";
-import { isUuidLike } from "@groktopus/shared";
+import { isUuidLike, normalizeIssueIdentifier } from "@groktopus/shared";
 
 type IssueRow = typeof issues.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
@@ -15,6 +15,15 @@ export interface IssueCreationSourceRecord {
   sourceIssue: IssueRow;
 }
 
+export const runBoundIssueContextColumn = sql<CreationSourceRun["contextSnapshot"]>`case
+  when coalesce(${heartbeatRuns.nativeIssueId}, ${heartbeatRuns.issueId}) is not null then null
+  else jsonb_build_object(
+    'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
+    'taskId', ${heartbeatRuns.contextSnapshot}->'taskId',
+    'taskKey', ${heartbeatRuns.contextSnapshot}->'taskKey',
+    'proprioIssue', jsonb_build_object('id', ${heartbeatRuns.contextSnapshot}->'proprioIssue'->'id')
+  ) end`;
+
 const CREATION_ACTIVITY_ACTIONS = ["issue.created", "issue.child_created"];
 
 /** The route supplies a fresh UUID; a different returned issue is reused. */
@@ -23,7 +32,7 @@ export function childCreatedByRequest(proposedIssueId: string, returnedIssueId: 
 }
 
 function readNonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 /**
@@ -57,7 +66,7 @@ export async function loadRunBoundIssue(
   if (!reference) return null;
   const condition = isUuidLike(reference)
     ? eq(issues.id, reference)
-    : eq(issues.identifier, reference);
+    : eq(issues.identifier, normalizeIssueIdentifier(reference) ?? reference);
   const [issue] = await db
     .select()
     .from(issues)
@@ -121,14 +130,7 @@ async function loadIssueCreationRun(
       scopeKind: heartbeatRuns.scopeKind,
       nativeIssueId: heartbeatRuns.nativeIssueId,
       issueId: heartbeatRuns.issueId,
-      contextSnapshot: sql<CreationSourceRun["contextSnapshot"]>`case
-        when coalesce(${heartbeatRuns.nativeIssueId}, ${heartbeatRuns.issueId}) is not null then null
-        else jsonb_build_object(
-          'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
-          'taskId', ${heartbeatRuns.contextSnapshot}->'taskId',
-          'taskKey', ${heartbeatRuns.contextSnapshot}->'taskKey',
-          'proprioIssue', jsonb_build_object('id', ${heartbeatRuns.contextSnapshot}->'proprioIssue'->'id')
-        ) end`,
+      contextSnapshot: runBoundIssueContextColumn,
     })
     .from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, issue.companyId)))
