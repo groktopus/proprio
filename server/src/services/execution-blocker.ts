@@ -8,6 +8,7 @@ import { z } from "zod";
 import { agentWakeupRequests, chatConversations, chatEndpoints, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueComments, issues, issueRecoveryActions, nativeRunFinalizations, nativeRunResults, toolConnections, workspaceOperations, type Db } from "@groktopus/db";
 import { canContinueCancelledRun, readRunCancellation } from "./run-cancellation.js";
 import { canRetryStoppedRun } from "./cancelled-native-startup.js";
+import { projectCaseCompletionRecoveryAction } from "./issue-recovery-actions.js";
 import { getCaseHandoffWithdrawalHold } from "./case-handoff-states.js";
 import { heldRetryOffersRetry, heldTaskRetryRefusals } from "./task-retry-eligibility.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
@@ -464,7 +465,7 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     ? { ...workspaceRecoveryState, message: recoveredWorkMessage(run?.status, retryOffered) }
     : workspaceRecoveryState && { ...workspaceRecoveryState, canRetry: workspaceRecoveryState.canRetry && retryOffered };
   let nextAction = action.status === "active" && action.cause === EXECUTION_FINALIZATION_DEADLINE_EXCEEDED
-    ? EXECUTION_FINALIZATION_DEADLINE_MESSAGE : action.nextAction;
+    ? EXECUTION_FINALIZATION_DEADLINE_MESSAGE : projectCaseCompletionRecoveryAction(action)?.nextAction ?? action.nextAction;
   // Retry is a person's control on this task. Say so, so an agent reading this
   // record points the person to it instead of re-running the work itself.
   if (canRetry && heldRetryOffersRetry(heldRefusal) && !eligibleContinuation) nextAction += ` ${EXECUTION_BLOCKER_PERSON_RETRY_ACTION}`;
