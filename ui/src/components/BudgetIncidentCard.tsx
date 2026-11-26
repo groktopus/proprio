@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { BudgetIncident } from "@groktopus/shared";
+import { BUDGET_AMOUNT_MAX_CENTS, type BudgetIncident } from "@groktopus/shared";
 import { AlertOctagon, AlertTriangle, ArrowUpRight, PauseCircle } from "lucide-react";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
@@ -43,6 +43,7 @@ export function BudgetIncidentCard({
   canResolve?: boolean;
 }) {
   const amountId = useId();
+  const amountErrorId = useId();
   const isWarning = incident.thresholdType === "soft";
   const isTaskTree = incident.scopeType === "task_tree";
   const [draftAmount, setDraftAmount] = useState(
@@ -51,6 +52,9 @@ export function BudgetIncidentCard({
       : Math.max(incident.amountObserved + 1000, incident.amountLimit)),
   );
   const parsed = isTaskTree ? parseBudgetDollarAmount(draftAmount) : parseDollarInput(draftAmount);
+  const amountError = isTaskTree && draftAmount.trim() && parsed === null
+    ? `Enter an amount from $0.01 to ${formatCents(BUDGET_AMOUNT_MAX_CENTS)} with up to two decimal places.`
+    : parsed !== null && parsed <= incident.amountObserved ? "The new budget must exceed current observed spend." : null;
   const stateLabel = incidentStateLabel(incident);
 
   return (
@@ -69,7 +73,7 @@ export function BudgetIncidentCard({
               </Badge>
             </div>
             <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>
-              {isTaskTree ? <Link to={createIssueDetailPath(incident.scopeId)} className={cn("hover:underline", ANALYTICS_MASK_CLASS)}>{incident.scopeName}</Link> : incident.scopeName}
+              {isTaskTree ? <Link to={createIssueDetailPath(incident.scopeId)} disableIssueQuicklook className={cn("hover:underline", ANALYTICS_MASK_CLASS)}>{incident.scopeName}</Link> : incident.scopeName}
             </CardTitle>
             <CardDescription className={isWarning ? "mt-1" : "mt-1 text-red-900/75 dark:text-red-100/70"}>
               {incident.thresholdType === "hard" && incident.amountObserved < incident.amountLimit
@@ -121,6 +125,8 @@ export function BudgetIncidentCard({
               onChange={(event) => setDraftAmount(event.target.value)}
               inputMode="decimal"
               placeholder="0.00"
+              aria-invalid={Boolean(amountError)}
+              aria-describedby={amountError ? amountErrorId : undefined}
             />
             <Button
               className="gap-2"
@@ -133,10 +139,8 @@ export function BudgetIncidentCard({
               {isMutating ? "Applying..." : isWarning ? "Raise budget" : "Raise budget & resume"}
             </Button>
           </div>
-          {parsed !== null && parsed <= incident.amountObserved ? (
-            <p className="mt-2 text-xs text-red-700 dark:text-red-200/80">
-              The new budget must exceed current observed spend.
-            </p>
+          {amountError ? (
+            <p id={amountErrorId} className="mt-2 text-xs text-destructive">{amountError}</p>
           ) : null}
         </div>
 

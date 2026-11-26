@@ -373,6 +373,9 @@ export function setupLiveEventsWebSocketServer(
         return membership.length > 0 || admin;
       });
       if (!principalActive) return null;
+      // Deleted tasks cannot pass object authorization. Tell the board to
+      // refresh without disclosing the removed task or its descendants.
+      if (boardActivity && payload.entityType === "issue" && payload.action === "issue.deleted") return audienceChanged();
       // Reauthorize only the removed viewer without disclosing the now-hidden resource.
       if (boardActivity && (
         (payload.entityType === "project" && payload.action === "project.access_member_removed") ||

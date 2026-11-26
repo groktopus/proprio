@@ -4496,7 +4496,8 @@ registry.registerPath({
   tags: ["issues"],
   summary: "List issues in a company",
   description:
-    "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false.",
+    "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false. " +
+    "Send Cache-Control: no-cache or no-store to bypass in-flight request coalescing and the compact response cache. These reads receive Cache-Control: private, no-store and still count toward the concurrency limit.",
   request: {
     params: z.object({ companyId: z.string() }),
     query: z.object({
@@ -6391,7 +6392,10 @@ registry.registerPath({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
-    409: r.conflict,
+    409: {
+      description: "A policy already exists for the requested scope, metric, and window.",
+      content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("budget_policy_exists") }) } },
+    },
   },
 });
 

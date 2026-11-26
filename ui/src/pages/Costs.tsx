@@ -1082,7 +1082,7 @@ export function Costs({
               <div className="grid gap-4 xl:grid-cols-2">
                 {visibleTaskTreePolicies.map(summary => (
                   <div key={summary.policyId}>
-                    <Link to={createIssueDetailPath(summary.scopeId)} className={cn("mb-2 inline-block text-sm font-medium text-primary hover:underline", ANALYTICS_MASK_CLASS)}>
+                    <Link to={createIssueDetailPath(summary.scopeId)} disableIssueQuicklook className={cn("mb-2 inline-block text-sm font-medium text-primary hover:underline", ANALYTICS_MASK_CLASS)}>
                       Open root task: {summary.scopeName}
                     </Link>
                     <BudgetPolicyCard
@@ -1099,12 +1099,12 @@ export function Costs({
             {totalTaskBudgetPages > 1 && (
               <div className="flex flex-wrap items-center gap-2" aria-label="Task budget pages">
                 <Button type="button" variant="outline" size="sm" disabled={shownTaskBudgetPage === 0} onClick={() => {
-                  createTaskTreeBudgetMutation.reset();
+                  if (conflictingRootId) createTaskTreeBudgetMutation.reset();
                   setTaskBudgetPagination({ companyId, page: shownTaskBudgetPage - 1 });
                 }}>Previous budgets</Button>
                 <output className="text-sm text-muted-foreground">Page {shownTaskBudgetPage + 1} of {totalTaskBudgetPages}</output>
                 <Button type="button" variant="outline" size="sm" disabled={shownTaskBudgetPage + 1 >= totalTaskBudgetPages} onClick={() => {
-                  createTaskTreeBudgetMutation.reset();
+                  if (conflictingRootId) createTaskTreeBudgetMutation.reset();
                   setTaskBudgetPagination({ companyId, page: shownTaskBudgetPage + 1 });
                 }}>Next budgets</Button>
               </div>

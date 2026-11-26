@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
 import { queryKeys } from "@/lib/queryKeys";
@@ -8,9 +8,11 @@ import { cn, formatCents } from "@/lib/utils";
 import { parseBudgetDollarAmount } from "@/lib/budget-amount";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 
 const ROOT_SEARCH_PAGE_SIZE = 20;
 const ROOT_SEARCH_DELAY_MS = 250;
+const ROOT_SEARCH_MAX_PAGES = 3;
 
 export function TaskTreeBudgetCreate({
   companyId,
@@ -33,36 +35,36 @@ export function TaskTreeBudgetCreate({
   const restoreSearchFocus = useRef(false);
   const submitting = useRef(false);
   const [search, setSearch] = useState("");
-  const [settledSearch, setSettledSearch] = useState("");
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
   const amountCents = parseBudgetDollarAmount(amount);
   const invalidAmount = Boolean(amount.trim()) && amountCents === null;
   const searchText = search.trim();
-  useEffect(() => {
-    const timeout = window.setTimeout(() => setSettledSearch(searchText), ROOT_SEARCH_DELAY_MS);
-    return () => window.clearTimeout(timeout);
-  }, [searchText]);
+  const settledSearch = useDebouncedValue(searchText, ROOT_SEARCH_DELAY_MS);
   const searchReady = searchText === settledSearch && settledSearch.length >= 2;
   const tasks = useInfiniteQuery({
-    queryKey: queryKeys.issues.search(companyId, settledSearch, undefined, ROOT_SEARCH_PAGE_SIZE, "task-budget-roots"),
+    queryKey: [...queryKeys.issues.search(companyId, settledSearch, undefined, ROOT_SEARCH_PAGE_SIZE), "task-budget-roots"],
     queryFn: ({ pageParam, signal }) => issuesApi.list(companyId, {
-      q: settledSearch, limit: ROOT_SEARCH_PAGE_SIZE, offset: pageParam, includeRoutineExecutions: true,
+      q: settledSearch, limit: ROOT_SEARCH_PAGE_SIZE, offset: pageParam,
     }, { fresh: true, cache: "no-store", signal }),
     initialPageParam: 0,
     getNextPageParam: (last, _pages, offset) => last.length === ROOT_SEARCH_PAGE_SIZE ? offset + ROOT_SEARCH_PAGE_SIZE : undefined,
+    getPreviousPageParam: (_first, _pages, offset) => offset > 0 ? offset - ROOT_SEARCH_PAGE_SIZE : undefined,
+    maxPages: ROOT_SEARCH_MAX_PAGES,
     enabled: !disabled && searchReady,
     staleTime: 10_000,
   });
   const existingIds = new Set(existingRootIds);
-  const matches = searchReady && !tasks.error ? tasks.data?.pages.flat() ?? [] : [];
+  const paginationFailed = tasks.isFetchNextPageError || tasks.isFetchPreviousPageError;
+  const searchFailed = Boolean(tasks.error) && !paginationFailed;
+  const matches = searchReady && !searchFailed ? tasks.data?.pages.flat() ?? [] : [];
   const choices = [...new Map(matches.filter(task => !existingIds.has(task.id)).map(task => [task.id, task])).values()];
   const rootFromSearch = choices.find(task => task.id === selectedRootId);
   const selectedRootNeedsRead = selectedRootId !== null && !existingIds.has(selectedRootId) && !rootFromSearch;
   // Resetting a paged search starts it at the first page. Reauthorize a root
   // selected from a later page without discarding the operator's draft.
   const selectedRoot = useQuery({
-    queryKey: [...queryKeys.issues.searches(companyId), "selected-budget-root", selectedRootId],
+    queryKey: [...queryKeys.issues.summaries(companyId), "selected-budget-root", selectedRootId],
     queryFn: ({ signal }) => selectedRootId ? issuesApi.summaries(companyId, [selectedRootId], { signal, fresh: true }) : [],
     enabled: !disabled && selectedRootNeedsRead,
   });
@@ -111,13 +113,13 @@ export function TaskTreeBudgetCreate({
               placeholder="Search tasks by title or ID" disabled={disabled || isSaving} />
             {searchText.length < 2 ? <p className="text-xs text-muted-foreground">Enter at least two characters to find a task.</p> : null}
             {searchReady && tasks.isFetching ? <output className="block text-xs text-muted-foreground">Searching tasks…</output> : null}
-            {searchReady && tasks.error ? <p role="alert" className="text-xs text-destructive">Could not search tasks. Try again.</p> : null}
-            {searchReady && tasks.data && !tasks.error && !tasks.hasNextPage && choices.length === 0 ? <output className="block text-xs text-muted-foreground">No tasks without a budget matched.</output> : null}
+            {searchReady && searchFailed ? <p role="alert" className="text-xs text-destructive">Could not search tasks. Try again.</p> : null}
+            {searchReady && tasks.data && !tasks.error && !tasks.hasNextPage && !tasks.hasPreviousPage && choices.length === 0 ? <output className="block text-xs text-muted-foreground">No tasks without a budget matched.</output> : null}
             {choices.length > 0 && !disabled ? (
               <ul className="max-h-48 space-y-1 overflow-auto" aria-label="Root task matches">
                 {choices.map(task => (
                   <li key={task.id}>
-                    <Button type="button" variant="ghost" className={cn("w-full justify-start whitespace-normal text-left", ANALYTICS_MASK_CLASS)} disabled={isSaving}
+                    <Button type="button" variant="ghost" className={cn("h-auto min-h-10 w-full justify-start whitespace-normal wrap-anywhere text-left", ANALYTICS_MASK_CLASS)} disabled={isSaving}
                       onClick={() => { setSelectedRootId(task.id); amountInput.current?.focus(); }}>
                       <span className="font-mono text-muted-foreground">{task.identifier ?? task.id.slice(0, 8)}</span> · {task.title}
                     </Button>
@@ -125,11 +127,16 @@ export function TaskTreeBudgetCreate({
                 ))}
               </ul>
             ) : null}
-            {searchReady && tasks.hasNextPage && !disabled ? (
-              <Button type="button" variant="outline" size="sm" disabled={isSaving || tasks.isFetching}
-                onClick={() => { void tasks.fetchNextPage(); }}>
-                More task results
-              </Button>
+            {searchReady && !searchFailed && !disabled && (tasks.hasPreviousPage || tasks.hasNextPage) ? (
+              <>
+                {paginationFailed ? <p role="alert" className="text-xs text-destructive">Could not load more task results. Try again.</p> : null}
+                <div className="flex flex-wrap gap-2">
+                  {tasks.hasPreviousPage ? <Button type="button" variant="outline" size="sm" disabled={isSaving || tasks.isFetching}
+                    onClick={() => { void tasks.fetchPreviousPage(); }}>Previous task results</Button> : null}
+                  {tasks.hasNextPage ? <Button type="button" variant="outline" size="sm" disabled={isSaving || tasks.isFetching}
+                    onClick={() => { void tasks.fetchNextPage(); }}>More task results</Button> : null}
+                </div>
+              </>
             ) : null}
           </>
         )}

@@ -192,12 +192,16 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const client = new QueryClient();
     const key = queryKeys.budgets.overview("company-1");
     const otherCompany = queryKeys.budgets.overview("company-2");
-    const rootSearch = queryKeys.issues.search("company-1", "Private", undefined, 20, "task-budget-roots");
-    const otherRootSearch = queryKeys.issues.search("company-2", "Public", undefined, 20, "task-budget-roots");
+    const rootSearch = [...queryKeys.issues.search("company-1", "Private", undefined, 20), "task-budget-roots"];
+    const otherRootSearch = [...queryKeys.issues.search("company-2", "Public", undefined, 20), "task-budget-roots"];
+    const projects = queryKeys.projects.list("company-1");
+    const selectedRoot = [...queryKeys.issues.summaries("company-1"), "selected-budget-root", "private-root"];
     const policies = [{ scopeId: "private-root", amount: 150 }];
     client.setQueryData(key, { policies });
     client.setQueryData(otherCompany, { policies: [] });
     client.setQueryData(rootSearch, [{ id: "private-root" }]);
+    client.setQueryData(selectedRoot, [{ id: "private-root" }]);
+    client.setQueryData(projects, [{ name: "Private project" }]);
     client.setQueryData(otherRootSearch, [{ id: "other-root" }]);
     __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
       action: "resource_membership.changed",
@@ -205,6 +209,8 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(key)).toBeUndefined();
     expect(client.getQueryData(otherCompany)).toEqual({ policies: [] });
     expect(client.getQueryData(rootSearch)).toBeUndefined();
+    expect(client.getQueryData(selectedRoot)).toBeUndefined();
+    expect(client.getQueryData(projects)).toBeUndefined();
     expect(client.getQueryData(otherRootSearch)).toEqual([{ id: "other-root" }]);
     client.clear();
   });

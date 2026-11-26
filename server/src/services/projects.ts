@@ -998,6 +998,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
     update: async (
       id: string,
       data: Partial<typeof projects.$inferInsert> & { goalIds?: string[] },
+      recordUpdate?: (tx: Db, project: typeof projects.$inferSelect, becamePrivate: boolean) => Promise<void>,
     ): Promise<ProjectWithGoals | null> => db.transaction(async tx => {
       const db = tx as unknown as Db;
       const { goalIds: inputGoalIds, ...projectData } = data;
@@ -1011,7 +1012,8 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
         await lockIssuePrivacyTree(tx, visibilityCompanyId);
       }
       const existingProject = await db
-        .select({ id: projects.id, companyId: projects.companyId, name: projects.name, archivedAt: projects.archivedAt, executionWorkspacePolicy: projects.executionWorkspacePolicy })
+        .select({ id: projects.id, companyId: projects.companyId, name: projects.name, archivedAt: projects.archivedAt,
+          visibility: projects.visibility, executionWorkspacePolicy: projects.executionWorkspacePolicy })
         .from(projects)
         .where(and(eq(projects.id, id), visibilityCompanyId ? eq(projects.companyId, visibilityCompanyId) : undefined)).for("update")
         .then((rows) => rows[0] ?? null);
@@ -1091,6 +1093,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       if (row.archivedAt && !existingProject.archivedAt) {
         await recordProjectLifecycleEvent(db, row.companyId, id, "archive");
       }
+      await recordUpdate?.(db, row, existingProject.visibility !== "private" && row.visibility === "private");
 
       const [withGoals] = await attachGoals(db, [row]);
       const [enriched] = withGoals ? await attachWorkspaces(db, [withGoals]) : [];

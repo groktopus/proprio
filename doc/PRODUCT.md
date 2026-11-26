@@ -639,3 +639,7 @@ Sibling admissions reserve against the same balance. Work outside the held tree
 stays eligible under its own company, project, agent, and task limits. A board
 operator who can read the root can review the incident and decide whether to
 raise the limit or keep work paused.
+
+**Keep paused** dismisses the incident and retains the budget stop. A later
+policy edit that lifts the stop can resume cancelled work on tasks the editor
+can read and change.

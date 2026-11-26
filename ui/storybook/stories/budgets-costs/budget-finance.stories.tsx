@@ -785,7 +785,7 @@ const meta = {
       ],
       "implementation": "production",
       "boundary": "fixtures",
-      "notes": "FullMatrix shows active BudgetIncidentCard examples for an open warning, a hard stop pending approval, and an escalated hard stop. Resolution handlers are no-ops; budget relief and resumption remain unverified. The upstream budget UI distinguishes soft warnings from hard stops; hard incidents retain raise-and-resume and keep-paused controls."
+      "notes": "FullMatrix shows active BudgetIncidentCard examples for an open warning, a hard stop pending approval, and an escalated hard stop. TaskBudgetForm uses fixture task search results and simulated submission to exercise root selection, amount validation, and read-only controls. Resolution handlers are no-ops; budget relief and resumption remain unverified. Hard incidents retain raise-and-resume and keep-paused controls."
     },
   },
 } satisfies Meta<typeof BudgetFinanceMatrix>;
@@ -808,6 +808,7 @@ function TaskBudgetFormFixture() {
       const url = new URL(address, window.location.origin);
       if (url.pathname === `/api/companies/${companyId}/issues`) {
         const rows = [
+          { id: "release-plan", identifier: "PRO-39", title: "Review the release plan, verify the build with a clean installation, and document the rollback steps for the next maintenance window" },
           { id: "release", identifier: "PRO-40", title: "Prepare the release checklist" },
           { id: "budgeted", identifier: "PRO-41", title: "Write release notes" },
         ];
@@ -842,10 +843,4 @@ function TaskBudgetFormFixture() {
 
 export const TaskBudgetForm: Story = {
   render: () => <TaskBudgetFormFixture />,
-  parameters: {
-    proprio: {
-      ...meta.parameters.proprio,
-      notes: "The production form uses fixture task search results. Use the operator view to select a root and check invalid amounts. The read-only view has disabled controls.",
-    },
-  },
 };

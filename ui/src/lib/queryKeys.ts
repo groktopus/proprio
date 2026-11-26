@@ -343,7 +343,6 @@ export const queryKeys = {
       q: string,
       projectId?: string,
       limit?: number,
-      mode?: "task-budget-roots",
     ) =>
       [
         "issues",
@@ -352,7 +351,6 @@ export const queryKeys = {
         q,
         projectId ?? "__all-projects__",
         limit ?? "__no-limit__",
-        ...(mode ? [mode] : []),
       ] as const,
     listAssignedToMe: (companyId: string) =>
       ["issues", companyId, "assigned-to-me"] as const,

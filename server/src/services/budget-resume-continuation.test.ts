@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agents, agentWakeupRequests, budgetIncidents, budgetPolicies, budgetResumeClaims, companies, createDb, heartbeatRuns, issues,
+  agents, agentWakeupRequests, authUsers, budgetIncidents, budgetPolicies, budgetResumeClaims, companies,
+  companyMemberships, createDb, heartbeatRuns, issues,
 } from "@groktopus/db";
 import { budgetService } from "./budgets.js";
 import { heartbeatService } from "./heartbeat.js";
+import { heldTaskRetryRefusals } from "./task-retry-eligibility.js";
 import { HttpError } from "../errors.js";
 import {
   deliverBudgetResumeContinuations, hasDeliverableBudgetResume, hasPendingBudgetResume, markBudgetCancelledWorkForResume,
@@ -114,15 +116,16 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     expect(await continuations(scope.company.id)).toHaveLength(2);
   });
 
-  it("resumes only runs carrying the stopped task tree's historical lineage", async () => {
+  it.each(["direct raise", "keep paused then raise", "private descendant", "access revoked before dispatch"] as const)(
+    "resumes eligible runs carrying the stopped task tree's historical lineage after %s", async mode => {
     const [company] = await db.insert(companies).values({ name: "Tree resume",
       issuePrefix: `B${randomUUID().slice(0, 4).toUpperCase()}` }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Worker" }).returning();
     const [root, child, unrelated, stoppedByCompany, legacyTask] = await db.insert(issues).values([
-      { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null },
+      { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null, assigneeAgentId: agent.id },
       { companyId: company.id, title: "Unrelated" },
       { companyId: company.id, title: "Stopped by company" },
-      { companyId: company.id, title: "Legacy child", identifier: "LEGACY-64" },
+      { companyId: company.id, title: "Legacy child", identifier: `${company.issuePrefix}-64`, assigneeAgentId: agent.id },
     ]).returning();
     const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
       scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true }).returning();
@@ -154,20 +157,45 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     ]).returning();
     await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
 
-    const actor = { type: "board" as const, source: "local_implicit" as const };
+    const sessionEditor = mode === "private descendant" || mode === "access revoked before dispatch";
+    const editorId = sessionEditor ? randomUUID() : "local-board";
+    const actor = { type: "board" as const, userId: editorId,
+      source: sessionEditor ? "session" as const : "local_implicit" as const };
+    if (sessionEditor) {
+      await db.insert(authUsers).values({ id: editorId, name: "Budget editor", email: `${editorId}@example.test`,
+        createdAt: new Date(), updatedAt: new Date() });
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: editorId, membershipRole: "operator", status: "active" });
+    }
+    if (mode === "private descendant") await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, child.id));
+    if (mode === "keep paused then raise") {
+      await budgetService(db).resolveIncident(company.id, incident.id, { action: "keep_paused" },
+        editorId, actor.source, { actor });
+      expect(await claimOf(inside.id)).toBeUndefined();
+    }
     await budgetService(db).upsertPolicy(company.id, {
       scopeType: "task_tree", scopeId: root.id, amount: 100, windowKind: "lifetime",
-    }, "local-board", actor);
+    }, editorId, actor);
     expect(await claimOf(inside.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
     expect(await claimOf(legacy.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
     const [closed] = await db.select({ status: budgetIncidents.status }).from(budgetIncidents).where(eq(budgetIncidents.id, incident.id));
-    expect(closed?.status).toBe("resolved");
+    expect(closed?.status).toBe(mode === "keep paused then raise" ? "dismissed" : "resolved");
     expect(await claimOf(outside.id)).toBeUndefined();
     expect(await claimOf(companyStop.id)).toBeUndefined();
-    const requestRetry = vi.fn(async () => ({ accepted: true, requestId: null }));
-    await deliverBudgetResumeContinuations(db, { requestRetry: requestRetry as never });
-    expect(requestRetry).toHaveBeenCalledWith(expect.objectContaining({ issueId: legacyTask.id, observedRunId: legacy.id }));
-    expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered" });
+    await deliverBudgetResumeContinuations(db);
+    const wakes = await continuations(company.id);
+    expect(wakes.map(wake => wake.payload?.issueId).sort()).toEqual(
+      (mode === "private descendant" ? [legacyTask.id] : [child.id, legacyTask.id]).sort());
+    expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered", requestId: expect.any(String) });
+    expect(await claimOf(inside.id)).toMatchObject({ state: mode === "private descendant" ? "abandoned" : "delivered" });
+    if (mode === "access revoked before dispatch") {
+      const wake = wakes.find(candidate => candidate.payload?.issueId === legacyTask.id)!;
+      await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, legacyTask.id));
+      await heartbeatService(db).resumeTaskRetry(company.id, wake.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(stored).toMatchObject({ runId: null, payload: { executionWait: { reason: "retry_authority_denied" } } });
+      expect((await heldTaskRetryRefusals(db, company.id, [legacyTask.id])).get(legacyTask.id)).toBe("retry_authority_denied");
+    }
     const receipt = mockLogActivity.mock.calls.find(([, activity]) =>
       activity.action === "budget.cancelled_work_continued" && activity.entityId === legacyTask.id)?.[1];
     expect(receipt?.details).toMatchObject({ interruptedRunId: legacy.id });

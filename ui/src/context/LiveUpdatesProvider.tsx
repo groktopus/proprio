@@ -48,6 +48,8 @@ import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 import type { CompanyUserDirectoryResponse } from "../api/access";
 import type { CaseDetail, IssueCaseLink } from "../api/cases";
 import { issuesApi } from "../api/issues";
+import { refreshBoardAccessAfterMembershipChange } from "../api/board-access-query";
+import { detachInflightGet } from "../api/client";
 import { authApi } from "../api/auth";
 import type { CompanyListResult } from "../api/companies-query";
 import { healthApi } from "../api/health";
@@ -1567,6 +1569,16 @@ function invalidateIssueDetailsEmbeddingRelation(queryClient: QueryClient, refs:
   invalidateDependencyDiagnoses(queryClient, changed, parentIds);
 }
 
+function resetCompanyTaskAudienceQueries(queryClient: QueryClient, companyId: string) {
+  for (const queryKey of [queryKeys.issues.summaries(companyId), queryKeys.issues.searches(companyId), queryKeys.budgets.overview(companyId)]) {
+    void queryClient.resetQueries({ queryKey });
+  }
+  const projectsPath = `/companies/${encodeURIComponent(companyId)}/projects`;
+  detachInflightGet(projectsPath);
+  detachInflightGet(`${projectsPath}?includeArchived=true`);
+  void queryClient.resetQueries({ queryKey: queryKeys.projects.all(companyId) });
+}
+
 function invalidateActivityQueries(
   queryClient: ReturnType<typeof useQueryClient>,
   companyId: string,
@@ -1605,9 +1617,6 @@ function invalidateActivityQueries(
   }
   queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
-  if (entityType === "issue" && activityChangesTaskIdentity(payload, action, details)) {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.issues.searches(companyId) });
-  }
   const decisionProjectionChanged = entityType === "decision" ||
     // Approvals are cards too: a decision by another person must leave every open list.
     entityType === "approval" ||
@@ -1623,8 +1632,8 @@ function invalidateActivityQueries(
     action === "issue.status_decision_recorded" ||
     action === "issue.conversation_session_started" ||
     (entityType === "issue" && ["issue.created", "issue.updated", "issue.deleted"].includes(action ?? ""));
-  const companyMembershipChanged = entityType === "company_membership" ||
-    action === "company_membership.changed" || action?.startsWith("membership.");
+  const companyMembershipChanged = action === "company_membership.changed" ||
+    (entityType === "company_membership" && action?.startsWith("company_member."));
   const decisionAudienceChanged = companyMembershipChanged || action?.startsWith("issue_access_grant.") ||
     action?.startsWith("resource_membership.") || action === "project.access_member_removed" || action?.includes("privacy");
   if (decisionAudienceChanged) {
@@ -1639,11 +1648,9 @@ function invalidateActivityQueries(
     void queryClient.resetQueries({
       queryKey: queryKeys.issues.executionReviewEvidenceFamily,
     });
-    void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
-    void queryClient.resetQueries({ queryKey: queryKeys.budgets.overview(companyId) });
-    void queryClient.resetQueries({ queryKey: queryKeys.issues.searches(companyId) });
+    resetCompanyTaskAudienceQueries(queryClient, companyId);
     if (companyMembershipChanged) {
-      void queryClient.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
+      refreshBoardAccessAfterMembershipChange(queryClient);
     }
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
@@ -2535,6 +2542,8 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       wasHidden.current = false;
       // A revocation may have happened while the socket was closed.
       void queryClient.resetQueries({ queryKey: queryKeys.issues.executionReviewEvidenceFamily });
+      resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+      refreshBoardAccessAfterMembershipChange(queryClient);
       // Reconcile events missed while hidden, including completed runs/issues.
       void queryClient.invalidateQueries({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
     }
@@ -2614,6 +2623,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         // too. Reconcile that gap as well as reconnects: events are not replayed.
         const initialHealthyOpen = !hasOpenedSocket.current && !hasNeededSocketRecovery.current;
         hasOpenedSocket.current = true;
+        if (!initialHealthyOpen) {
+          resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+          refreshBoardAccessAfterMembershipChange(queryClient);
+        }
         // Browser lists stop polling on an empty result. A reconcile that joins
         // an older read needs one more read after it. Scan before reconciling,
         // so the reconcile's own reads are not followed up again.
@@ -2638,6 +2651,8 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
           const parsed = JSON.parse(raw) as LiveEvent;
           if (transcripts.receive(parsed, recoverQueries)) {
             if ((parsed as { type: string }).type === "live.resync") {
+              resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+              refreshBoardAccessAfterMembershipChange(queryClient);
               refreshPendingTaskBrowserReads(queryClient);
               void queryClient.invalidateQueries({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
             }

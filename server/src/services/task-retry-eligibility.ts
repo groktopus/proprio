@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { CHAT_COMPLETION_SUPERSEDED } from "./chat-completion-delivery.js";
 import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@groktopus/db";
 
@@ -12,6 +12,19 @@ export function taskAttemptCondition(run: { status: SQL | typeof heartbeatRuns.s
     and not (${run.status} = 'cancelled' and ${run.startedAt} is null
       and coalesce(${run.errorCode}, '') in (
         ${sql.join(UNSTARTED_SUPERSEDED_RUN_CODES.map(code => sql`${code}`), sql`, `)}))`;
+}
+
+function taskLineageIssueId(lineage: typeof heartbeatRuns.taskLineageJson | SQL) {
+  return sql<string | null>`case when ${lineage}->>'version' = '1' then ${lineage}->'pathIssueIds'->>0 end`;
+}
+
+export const persistedTaskLineageIssueId = taskLineageIssueId(heartbeatRuns.taskLineageJson);
+
+export function taskRetryRunIssueCondition(issueId: string) {
+  const contextIssueId = sql<string | null>`${heartbeatRuns.contextSnapshot}->>'issueId'`;
+  return or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId), eq(contextIssueId, issueId),
+    and(isNull(heartbeatRuns.issueId), isNull(heartbeatRuns.nativeIssueId), isNull(contextIssueId),
+      eq(persistedTaskLineageIssueId, issueId)));
 }
 
 export function liveExecutionOwnerCondition(companyId: string, issueId: SQL | string) {
@@ -36,7 +49,9 @@ export async function heldTaskRetryRefusals(db: Pick<Db, "selectDistinctOn">, co
     latestRunId: sql<string | null>`(select latest.id::text from ${heartbeatRuns} latest
       where latest.company_id = ${companyId} and (latest.issue_id::text = ${agentWakeupRequests.payload}->>'issueId'
         or latest.native_issue_id::text = ${agentWakeupRequests.payload}->>'issueId'
-        or latest.context_snapshot->>'issueId' = ${agentWakeupRequests.payload}->>'issueId')
+        or latest.context_snapshot->>'issueId' = ${agentWakeupRequests.payload}->>'issueId'
+        or (latest.issue_id is null and latest.native_issue_id is null and latest.context_snapshot->>'issueId' is null
+          and ${taskLineageIssueId(sql`latest.task_lineage_json`)} = ${agentWakeupRequests.payload}->>'issueId'))
         and ${taskAttemptCondition({ status: sql`latest.status`, startedAt: sql`latest.started_at`, errorCode: sql`latest.error_code` })}
       order by latest.created_at desc, latest.id desc limit 1)` })
     .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),

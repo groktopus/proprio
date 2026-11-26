@@ -8,7 +8,7 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import type { AuthorizationActor } from "./authorization.js";
 import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
@@ -667,6 +667,17 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     });
   }
 
+  async function claimDismissedTaskTreeStops(policyId: string, companyId: string, actorUserId: string, actorSource?: string | null) {
+    // Keep paused dismisses the notification. Work stopped in the current
+    // window can still continue when an operator later lifts the block.
+    const incidents = await db.select().from(budgetIncidents).where(and(
+      eq(budgetIncidents.policyId, policyId), eq(budgetIncidents.companyId, companyId),
+      eq(budgetIncidents.scopeType, "task_tree"), eq(budgetIncidents.thresholdType, "hard"),
+      eq(budgetIncidents.status, "dismissed"), gt(budgetIncidents.windowEnd, now),
+    )).orderBy(desc(budgetIncidents.createdAt));
+    for (const incident of incidents) await claimCancelledWork(incident, actorUserId, actorSource);
+  }
+
   async function resolveOpenIncidentsForPolicy(
     policyId: string,
     companyId: string,
@@ -689,6 +700,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           await claimCancelledWork(incident, policyEditor.userId, policyEditor.source);
         }
       }
+      await claimDismissedTaskTreeStops(policyId, companyId, policyEditor.userId, policyEditor.source);
     }
 
     await db
@@ -1221,6 +1233,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
 
         await resumeScopeFromBudget(policy);
         await claimCancelledWork(incident, actorUserId, actorSource);
+        if (incident.scopeType === "task_tree") {
+          await claimDismissedTaskTreeStops(policy.id, companyId, actorUserId, actorSource);
+        }
         await db
           .update(budgetIncidents)
           .set({

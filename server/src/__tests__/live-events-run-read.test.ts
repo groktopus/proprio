@@ -24,6 +24,7 @@ import * as schema from "@groktopus/db/schema/index";
 import { setupLiveEventsWebSocketServer } from "../realtime/live-events-ws.js";
 import { publishLiveEvent } from "../services/live-events.js";
 import { authorizationService, type AuthorizationActor } from "../services/authorization.js";
+import { accessService } from "../services/access.js";
 import { getHeartbeatRunReadDecisions } from "../services/heartbeat-run-privacy.js";
 import { startRecoveryPostgres } from "./helpers/recovery-postgres.js";
 
@@ -228,12 +229,20 @@ describe("live-event run read boundaries", () => {
       await expect.poll(() => activity(0).length).toBe(7);
       expect(activity(0)[6]!.payload).toEqual({ action: "company_membership.changed" });
 
-      await db.update(companyMemberships).set({ status: "archived" })
-        .where(eq(companyMemberships.id, membership!.id));
+      const [removedTask] = await db.insert(issues).values({
+        companyId, title: "Removed top-level task", status: "todo",
+      }).returning({ id: issues.id });
+      const audienceResetCount = () => activity(1).filter(event => event.payload.action === "resource_membership.changed").length;
+      const resetsBeforeRemoval = audienceResetCount();
+      await db.delete(issues).where(eq(issues.id, removedTask!.id));
       await logActivity(db, {
-        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
-        entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "issue.deleted",
+        entityType: "issue", entityId: removedTask!.id, details: { parentId: null },
       });
+      await expect.poll(audienceResetCount).toBe(resetsBeforeRemoval + 1);
+      expect(received.flat().join("")).not.toContain(removedTask!.id);
+
+      await accessService(db).setUserCompanyAccess(userId, [], { actorUserId: unrelatedUserId });
       await expect.poll(() => activity(0).length).toBe(8);
       expect(activity(0)[7]!.payload).toEqual({ action: "company_membership.changed" });
       expect(received[0]!.join("")).not.toContain(membership!.id);
