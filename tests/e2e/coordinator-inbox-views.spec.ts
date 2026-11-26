@@ -41,7 +41,7 @@ for (const mobile of [false, true]) test(`Mine retains Inbox behavior inside Tas
     await expect(unreadRow).toHaveAttribute("data-unread", "true");
     await expect(unreadRow.locator('[data-slot="task-row-title"]')).toHaveClass(/font-semibold/);
     await expect(readRow.locator('[data-slot="task-row-title"]')).not.toHaveClass(/font-semibold/);
-    await expect(page.getByRole("link", { name: /^Inbox(?:,|$)/ }).first()).toHaveAttribute("href", `/${company.issuePrefix}/decisions`);
+    await expect(page.getByRole("link", { name: /^Needs You(?:,|$)/ }).first()).toHaveAttribute("href", `/${company.issuePrefix}/decisions`);
 
     await page.getByRole("button", { name: "Columns", exact: true }).click();
     const creatorColumn = page.getByRole("menuitemcheckbox", { name: /^Kicked off by/ });
@@ -90,7 +90,7 @@ for (const mobile of [false, true]) test(`Mine retains Inbox behavior inside Tas
       await expect(unreadRow).toHaveCount(0);
       await page.keyboard.press("u");
       await expect(unreadRow).toBeVisible();
-      await page.getByRole("link", { name: "Inbox", exact: true }).click();
+      await page.getByRole("link", { name: /^Needs You(?:,|$)/ }).first().click();
       const inbox = page.getByRole("region", { name: "Needs You", exact: true });
       await expect(inbox.getByRole("toolbar", { name: "Decisions controls" })).toBeVisible();
       await expect(inbox.getByLabel("Filter decisions by assignee")).toHaveValue("me");

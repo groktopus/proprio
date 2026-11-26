@@ -4,6 +4,7 @@ import { BUILTIN_ADAPTER_TYPES } from "../../adapters/builtin-adapter-types.js";
 import {
   NativeRuntimeEligibilityError,
   isRunnerIngressAuthorized,
+  nativeRuntimeSupportsCaseOfferDecision,
   resolveHeartbeatNativeRuntimeMode,
   resolveNativeRuntimeMode,
 } from "./runtime-mode.js";
@@ -17,6 +18,19 @@ const eligible = {
   target: { kind: "local" },
   workspaceId: "workspace",
 } as const;
+
+describe("nativeRuntimeSupportsCaseOfferDecision", () => {
+  it("admits invokable native recipients while keeping paused recipients ineligible", () => {
+    const agent = { ...eligible.agent, adapterConfig: eligible.adapterConfig, runtimeConfig: eligible.runtimeConfig };
+    const settings = { enableNativeRunner: true, enableMuse: false, enableOpenAiDot: false, enableGrokBot: false };
+    for (const status of ["active", "idle", "running", "error"]) {
+      expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status }, eligible.issue.id, settings), status).toBe(true);
+    }
+    for (const status of ["paused", "terminated", "pending_approval"]) {
+      expect(nativeRuntimeSupportsCaseOfferDecision({ ...agent, status }, eligible.issue.id, settings), status).toBe(false);
+    }
+  });
+});
 
 describe("resolveNativeRuntimeMode", () => {
   it("requires experimental opt-in and a local controller for Cursor Cloud while retaining its backend on recovery", () => {

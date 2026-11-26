@@ -1,5 +1,7 @@
 import { and, eq, or } from "drizzle-orm";
+import type { NativeCompletionEvidenceKind, NativeCompletionEvidenceOutcome } from "@groktopus/shared";
 import type { Db } from "@groktopus/db";
+import { record, text } from "./evidence-json.js";
 import { nativeBlockerUserId } from "./native-blocker-owner.js";
 import {
   approvals,
@@ -18,11 +20,11 @@ import {
   type PrpVerificationReasonCode,
 } from "../../vendor/proprio-runner/index.js";
 
-export type NativeEvidenceOutcome = "accepted" | "missing" | "rejected" | "unverifiable";
+export type NativeEvidenceOutcome = NativeCompletionEvidenceOutcome;
 
 export interface NativeEvidenceRefAssessment {
   ref: string;
-  kind: "event" | "work_product" | "approval" | "interaction" | "attachment" | "case_handoff" | "unknown";
+  kind: NativeCompletionEvidenceKind;
   outcome: NativeEvidenceOutcome;
   reasonCode: string;
   durableRecordId: string | null;
@@ -87,16 +89,6 @@ export interface NativeEvidenceAssessment {
   /** Actionable, blocking requests only. */
   attentionRequests: PrpNormalizedAttentionRequest[];
   ignoredAttentionRequests: PrpIgnoredAttentionRequest[];
-}
-
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function uuidRef(ref: string, prefixes: string[]): string | null {

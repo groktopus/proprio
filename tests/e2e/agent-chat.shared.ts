@@ -6,16 +6,11 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
+import { json } from "./http";
 
 // Per-file Playwright configuration (test.use, test.setTimeout) must stay in
 // the spec files themselves: calling test.use() from a shared helper makes
 // Playwright fail the whole worker with "inconsistent test.use() options".
-export async function json(response: Awaited<ReturnType<APIRequestContext["get"]>>) {
-  expect(response.ok(), `${response.status()} ${await response.text()}`).toBe(
-    true,
-  );
-  return response.json();
-}
 export async function setup(request: APIRequestContext) {
   const company = await json(
     await request.post("/api/companies", {

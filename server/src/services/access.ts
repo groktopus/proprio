@@ -800,6 +800,20 @@ export function accessService(db: Db) {
     });
   }
 
+  async function countOpenIssuesAssignedToUser(companyId: string, userId: string) {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.assigneeUserId, userId),
+          sql`${issues.status} not in ('done', 'cancelled')`,
+        ),
+      );
+    return row?.count ?? 0;
+  }
+
   async function promoteInstanceAdmin(userId: string) {
     const existing = await db
       .select()
@@ -1235,6 +1249,7 @@ export function accessService(db: Db) {
     copyActiveUserMemberships,
     ensureRoleDefaultGrants,
     archiveMember,
+    countOpenIssuesAssignedToUser,
     setMemberPermissions,
     updateMemberAndPermissions,
     promoteInstanceAdmin,

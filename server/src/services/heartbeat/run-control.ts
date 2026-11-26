@@ -10,7 +10,7 @@ import { readNativeStopExecutionEvidence } from "./native-stop-evidence-read.js"
 import { LEASE_RELEASE_DEFERRAL_KEY, nativeRunNeverLaunchedRunner, readLeaseReleaseDeferral,
   settleUnchangedNativeWorkspace, wakeStoppingAgentLifecycle, nextLeaseReleaseTriggers, nextLeaseReleaseBootIds, nextLeaseReleaseRetryAt,
   type LeaseReleaseDeferral } from "../environment-lease-release-deferral.js";
-import { hasRecordedStopAcknowledgement, pendingFailedNativeRetryCancellationCondition } from "../native-runtime/native-cancellation-request.js";
+import { pendingFailedNativeRetryCancellationCondition } from "../native-runtime/native-cancellation-request.js";
 import { readTaskRetryIntent, reconcileTaskChatRetryReceipts } from "../task-retry.js";
 import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED, readNativeLocalProcessStop, recordedLocalExecutionStopped } from "../native-local-process-stop.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
@@ -318,7 +318,7 @@ export type CancelRunOptions = {
 function runCancellationFenceSql(input: {
   cancellation: ReturnType<typeof requestedRunCancellation>;
   errorCode: string;
-  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId">;
+  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId"> & { operatorRunStop?: true };
   reassignmentStopRequested?: boolean;
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
@@ -1258,6 +1258,16 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       throw conflict("Execution evidence changed before acknowledging budget Stop", { runId: run.id });
   }
 
+  function hasRecordedStopAcknowledgement(run: typeof heartbeatRuns.$inferSelect) {
+    if (parseObject(run.resultJson?.executionCancellation).state === "acknowledged") return true;
+    const intent = parseObject(run.resultJson?.nativeCancellation);
+    return intent.schema === "proprio.native-cancellation.v1" && intent.runId === run.id
+      && intent.companyId === run.companyId && intent.issueId === run.nativeIssueId
+      && intent.scope === "run" && intent.reasonCode === "cancellation_run_only"
+      && intent.dispatchState === "acknowledged" && intent.dispatched === true
+      && typeof intent.intentAuditId === "string" && typeof intent.acknowledgementAuditId === "string";
+  }
+
   async function completedRunTerminationProof(run: typeof heartbeatRuns.$inferSelect): Promise<string | null> {
     // Logical completion can win the race with queued Stop delivery. It does
     // not prove a provider exited, and an in-process owner must still settle.
@@ -1312,6 +1322,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const attribution = {
       cancelledByActorType: options.resultJson?.cancelledByActorType,
       cancelledByUserId: options.resultJson?.cancelledByUserId,
+      ...(options.resultJson?.operatorRunStop === true ? { operatorRunStop: true as const } : {}),
     };
     const handoffIssueId = run.nativeIssueId ?? run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
     const supersedesCaseHandoff = options.resultJson?.cancelledByActorType === "user" || options.errorCode === "issue_reassigned";

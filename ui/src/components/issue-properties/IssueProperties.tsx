@@ -132,6 +132,7 @@ import {
   reusableWorkspaceOptionMatches,
 } from "../../lib/reusable-execution-workspaces";
 import { issueReviewPolicyBadge } from "../../lib/review-policy";
+import { TaskCompletionHistoryDisclosure } from "../NativeCompletionHistory";
 import { IssueCasesPanel } from "../IssueCasesPanel";
 import { ExpandRelationListButton, RemovableIssueReferencePill } from "./relation-controls";
 import { RoutineOriginRow } from "./routine-origin-row";
@@ -2658,6 +2659,7 @@ export function IssueProperties({
       </PropertySection>
 
       <PropertySection title="Execution" streamlined={streamlinedPropertiesEnabled}>
+        <TaskCompletionHistoryDisclosure key={issue.id} issueId={issue.id} />
         {/* Read-only: agents set the policy, the board does not. */}
         {reviewPolicyBadge ? (
           <PropertyRow label="Approvals">
@@ -3065,7 +3067,7 @@ export function IssueProperties({
       {/* Experimental Cases rail (PAP-12969) — self-gates on the flag and
           renders nothing when no cases are linked. */}
       <div className="pt-3">
-        <IssueCasesPanel issueId={issue.id} />
+        <IssueCasesPanel task={issue} />
       </div>
     </div>
   );

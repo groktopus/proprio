@@ -27,6 +27,7 @@ import { AttentionInteractionResolver } from "@/components/AttentionInteractionR
 import { ApprovalResolver, JoinRequestResolver } from "@/components/AttentionQueueRow";
 import { AttentionObligationEvidence } from "@/components/AttentionObligationEvidence";
 import { DecisionHistoryPanel } from "@/components/DecisionHistoryPanel";
+import { AttentionTasksHint } from "@/components/AttentionTasksHint";
 import { DecisionResolver } from "@/components/DecisionResolver";
 import { DecisionCardFooter } from "@/components/DecisionCardFooter";
 import { useSidePanelTabs } from "@/components/side-panel";
@@ -388,6 +389,7 @@ export function CoordinatorNeedsYou() {
   </h2>;
   return <LayoutGroup id="coordinator-decisions"><section className="coordinator-needs-you mx-auto w-full max-w-4xl space-y-6" aria-label="Needs You">
     {archivedView ? <div className="flex items-center gap-2"><Button variant="ghost" size="icon-sm" aria-label="Back to Needs You" onClick={() => setView("mine")}><ArrowLeft className="size-4" /></Button><h1 className="text-2xl font-medium">Archived</h1></div> : null}
+    {!archivedView ? <p className="text-sm text-muted-foreground"><AttentionTasksHint /></p> : null}
     {/* Assigned to you by default (PAP-775); the assignee filter widens to all
         assignees, one person, no owner yet or company alerts. Archived and
         Decision history sit in View. */}

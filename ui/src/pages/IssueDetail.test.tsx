@@ -112,12 +112,14 @@ const mockIssuesApi = vi.hoisted(() => ({
   deleteAttachment: vi.fn(),
   upsertDocument: vi.fn(),
   getDocument: vi.fn(),
+  getCostSummary: vi.fn(),
   acceptInteraction: vi.fn(),
   rejectInteraction: vi.fn(),
 }));
 
 const mockActivityApi = vi.hoisted(() => ({
   forIssue: vi.fn(),
+  completionHistoryForIssue: vi.fn(),
   recentForIssue: vi.fn(),
   inputFactsForIssue: vi.fn(),
   runsForIssue: vi.fn(),
@@ -1431,6 +1433,7 @@ describe("IssueDetail", () => {
     });
     mockIssuesApi.listTreeHolds.mockResolvedValue([]);
     mockActivityApi.forIssue.mockResolvedValue([]);
+    mockActivityApi.completionHistoryForIssue.mockResolvedValue([]);
     mockActivityApi.runsForIssue.mockResolvedValue([]);
     mockHeartbeatsApi.liveRunsForIssue.mockResolvedValue([]);
     mockHeartbeatsApi.activeRunForIssue.mockResolvedValue(null);
@@ -1458,6 +1461,15 @@ describe("IssueDetail", () => {
     });
     mockIssuesApi.listAcceptedPlanDecompositions.mockResolvedValue([]);
     mockIssuesApi.getDocument.mockResolvedValue(null);
+    mockIssuesApi.getCostSummary.mockResolvedValue({
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      costCents: 0,
+      runtimeMs: 0,
+      runCount: 0,
+      issueCount: 0,
+    });
     mockOpenPanel.mockClear();
     mockClosePanel.mockClear();
     mockSetPanelVisible.mockClear();
@@ -1860,7 +1872,7 @@ describe("IssueDetail", () => {
     queryClient.setQueryData(queryKeys.auth.session, { user: { id: "title-editor-user" } });
     await act(async () => renderIssueView());
     await waitForAssertion(() => expect(container.querySelector('[data-testid="issue-detail-header"] h2')).not.toBeNull());
-    await act(async () => (container.querySelector('[data-testid="issue-detail-header"] h2') as HTMLElement).click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="issue-detail-header"] h2 button')!.click());
     const input = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     expect(input).not.toBeNull();
     expect(document.activeElement).toBe(input);
@@ -1933,7 +1945,7 @@ describe("IssueDetail", () => {
     };
     await act(async () => renderIssueView());
     await waitForAssertion(() => expect(container.querySelector('[data-testid="issue-detail-header"] h2')).not.toBeNull());
-    await act(async () => (container.querySelector('[data-testid="issue-detail-header"] h2') as HTMLElement).click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="issue-detail-header"] h2 button')!.click());
     const firstInput = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     await act(async () => type(firstInput, "Only the first task's draft"));
     mockRouteParams.issueId = "PAP-2";
@@ -1943,7 +1955,7 @@ describe("IssueDetail", () => {
     expect(container.querySelector('[data-testid="issue-detail-header"] textarea')).toBeNull();
     const secondHeading = container.querySelector<HTMLElement>('[data-testid="issue-detail-header"] h2')!;
     expect(secondHeading.textContent).toBe(second.title);
-    await act(async () => secondHeading.click());
+    await act(async () => secondHeading.querySelector("button")!.click());
     const secondInput = container.querySelector<HTMLTextAreaElement>('[data-testid="issue-detail-header"] textarea')!;
     expect(secondInput.value).toBe(second.title);
     await act(async () => type(secondInput, "Only the second task's draft"));
@@ -2409,6 +2421,90 @@ describe("IssueDetail", () => {
     });
     expect(Array.from(document.body.querySelectorAll("button"))
       .some((button) => button.textContent?.trim() === "Show task activity")).toBe(false);
+  });
+
+  it("starts Activity cost totals alongside history and renders the consumer result", async () => {
+    const activity = createDeferred<unknown[]>();
+    const runs = createDeferred<unknown[]>();
+    const cost = createDeferred<unknown>();
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockActivityApi.forIssue.mockReturnValue(activity.promise);
+    mockActivityApi.runsForIssue.mockReturnValue(runs.promise);
+    mockIssuesApi.getCostSummary.mockReturnValue(cost.promise);
+
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => {
+      expect(mockActivityApi.forIssue).toHaveBeenCalledWith("issue-1");
+      expect(mockActivityApi.runsForIssue).toHaveBeenCalledWith("issue-1");
+      expect(mockIssuesApi.getCostSummary).toHaveBeenCalledWith("issue-1");
+    });
+    expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledWith("issue-1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    activity.resolve([]);
+    runs.resolve([{
+      runId: "run-cost",
+      status: "succeeded",
+      agentId: "agent-1",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:02.000Z",
+      usageJson: { inputTokens: 100, outputTokens: 50 },
+      resultJson: { costUsd: 0.0123 },
+    }]);
+    cost.resolve({
+      inputTokens: 200,
+      outputTokens: 100,
+      cachedInputTokens: 0,
+      costCents: 2,
+      runtimeMs: 2000,
+      runCount: 1,
+      issueCount: 2,
+    });
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Cost Summary");
+      expect(container.textContent).toContain("Including sub-tasks");
+      expect(container.textContent).toContain("2 tasks");
+    });
+  });
+
+  it.each([401, 403, 404])("hides cached completion evidence after HTTP %i", async (status) => {
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockActivityApi.completionHistoryForIssue.mockResolvedValue([{
+      id: "assessment-1", runId: "run-1", createdAt: "2026-05-01T12:00:00.000Z",
+      result: { summary: "Private verification transcript" },
+      contract: null, assessment: null, decision: null, lineageGaps: [],
+    }]);
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => expect(container.textContent).toContain("Private verification transcript"));
+
+    mockActivityApi.completionHistoryForIssue.mockRejectedValue(new ApiError("Access denied", status, null));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.issues.completionHistory("issue-1") });
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Completion history could not be loaded.");
+      expect(container.textContent).not.toContain("Private verification transcript");
+    });
+  });
+
+  it("refreshes visible completion history with task Activity", async () => {
+    coordinatorPreference.enabled = false;
+    mockLocation.hash = "#document-continuation-summary";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableStreamlinedUi: false, enableClassicTaskInterface: true });
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    await act(async () => renderIssueView());
+    await waitForAssertion(() => expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity("issue-1") });
+    });
+
+    await waitForAssertion(() => expect(mockActivityApi.completionHistoryForIssue).toHaveBeenCalledTimes(2));
   });
 
   it("does not add a history disclosure when a second run is observed while the page stays open", async () => {

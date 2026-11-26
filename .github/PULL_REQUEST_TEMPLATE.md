@@ -60,6 +60,11 @@
 <!--
   How can a reviewer confirm this works? Include test commands, manual
   steps, or both.
+
+  For interactive board UI changes, record the keyboard path and where focus
+  goes on activation, dismissal, or retry. Include applicable screen-reader
+  checks for navigation, dialogs, forms, and custom controls. See
+  CONTRIBUTING.md → UI accessibility.
 -->
 
 -

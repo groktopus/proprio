@@ -62824,6 +62824,528 @@
         }
       }
     },
+    "/api/issues/{id}/completion-history": {
+      "get": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Read native completion criteria, evidence and status decisions for a task",
+        "description": "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "runId": {
+                        "type": "string"
+                      },
+                      "contract": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "number"
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "risk": {
+                            "type": "string"
+                          },
+                          "completionAuthority": {
+                            "type": "string"
+                          },
+                          "incompleteCriteriaPolicy": {
+                            "type": "string"
+                          },
+                          "criteria": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "requirement": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "id",
+                                "requirement"
+                              ]
+                            }
+                          },
+                          "supersedesContractId": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "revision",
+                          "policyVersion",
+                          "risk",
+                          "completionAuthority",
+                          "incompleteCriteriaPolicy",
+                          "criteria",
+                          "supersedesContractId"
+                        ],
+                        "nullable": true
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "summary": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "schemaStatus": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "disposition",
+                          "summary",
+                          "schemaStatus",
+                          "createdAt"
+                        ],
+                        "nullable": true
+                      },
+                      "assessment": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "triggerKind": {
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "reportedDisposition": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "allCriteriaSatisfied": {
+                            "type": "boolean",
+                            "nullable": true
+                          },
+                          "verificationPassed": {
+                            "type": "boolean",
+                            "nullable": true
+                          },
+                          "criterionAssessments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "criterionId": {
+                                  "type": "string"
+                                },
+                                "claimStatus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "satisfied",
+                                    "not_satisfied",
+                                    "unknown",
+                                    null
+                                  ],
+                                  "nullable": true
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "accepted",
+                                    "missing",
+                                    "rejected",
+                                    "unverifiable"
+                                  ]
+                                },
+                                "reasonCode": {
+                                  "type": "string"
+                                },
+                                "evidence": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "kind": {
+                                        "type": "string",
+                                        "enum": [
+                                          "event",
+                                          "work_product",
+                                          "approval",
+                                          "interaction",
+                                          "attachment",
+                                          "case_handoff",
+                                          "unknown"
+                                        ]
+                                      },
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": [
+                                          "accepted",
+                                          "missing",
+                                          "rejected",
+                                          "unverifiable"
+                                        ]
+                                      },
+                                      "visibility": {
+                                        "type": "string",
+                                        "enum": [
+                                          "available",
+                                          "restricted",
+                                          "missing",
+                                          "unverifiable"
+                                        ]
+                                      },
+                                      "reasonCode": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      },
+                                      "recordId": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "outcome",
+                                      "visibility",
+                                      "reasonCode",
+                                      "label"
+                                    ]
+                                  }
+                                }
+                              },
+                              "required": [
+                                "criterionId",
+                                "claimStatus",
+                                "outcome",
+                                "reasonCode",
+                                "evidence"
+                              ]
+                            }
+                          },
+                          "verificationAssessments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "commandOrCheck": {
+                                  "type": "string"
+                                },
+                                "claimStatus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed",
+                                    "not_run"
+                                  ]
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "accepted",
+                                    "missing",
+                                    "rejected",
+                                    "unverifiable"
+                                  ]
+                                },
+                                "reasonCode": {
+                                  "type": "string"
+                                },
+                                "reportedReasonCode": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "detail": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "evidence": {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "enum": [
+                                        "event",
+                                        "work_product",
+                                        "approval",
+                                        "interaction",
+                                        "attachment",
+                                        "case_handoff",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "outcome": {
+                                      "type": "string",
+                                      "enum": [
+                                        "accepted",
+                                        "missing",
+                                        "rejected",
+                                        "unverifiable"
+                                      ]
+                                    },
+                                    "visibility": {
+                                      "type": "string",
+                                      "enum": [
+                                        "available",
+                                        "restricted",
+                                        "missing",
+                                        "unverifiable"
+                                      ]
+                                    },
+                                    "reasonCode": {
+                                      "type": "string"
+                                    },
+                                    "label": {
+                                      "type": "string"
+                                    },
+                                    "recordId": {
+                                      "type": "string"
+                                    },
+                                    "title": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "outcome",
+                                    "visibility",
+                                    "reasonCode",
+                                    "label"
+                                  ],
+                                  "nullable": true
+                                }
+                              },
+                              "required": [
+                                "commandOrCheck",
+                                "claimStatus",
+                                "outcome",
+                                "reasonCode",
+                                "reportedReasonCode",
+                                "detail",
+                                "evidence"
+                              ]
+                            }
+                          },
+                          "priorDecisionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "supersedesAssessmentId": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policyVersion",
+                          "triggerKind",
+                          "summary",
+                          "reportedDisposition",
+                          "allCriteriaSatisfied",
+                          "verificationPassed",
+                          "criterionAssessments",
+                          "verificationAssessments",
+                          "priorDecisionId",
+                          "supersedesAssessmentId"
+                        ],
+                        "nullable": true
+                      },
+                      "decision": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "applicationState": {
+                            "type": "string"
+                          },
+                          "fromStatus": {
+                            "type": "string"
+                          },
+                          "toStatus": {
+                            "type": "string"
+                          },
+                          "reasonCode": {
+                            "type": "string"
+                          },
+                          "statusAction": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "supersedesDecisionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "appliedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "applicationState",
+                          "fromStatus",
+                          "toStatus",
+                          "reasonCode",
+                          "statusAction",
+                          "policyVersion",
+                          "supersedesDecisionId",
+                          "createdAt",
+                          "appliedAt"
+                        ],
+                        "nullable": true
+                      },
+                      "lineageGaps": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "contract",
+                            "result",
+                            "decision"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "createdAt",
+                      "runId",
+                      "contract",
+                      "result",
+                      "assessment",
+                      "decision",
+                      "lineageGaps"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
     "/api/issues/{id}/runs": {
       "get": {
         "tags": [
@@ -73261,6 +73783,107 @@
           },
           "required": true
         },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
+        }
+      }
+    },
+    "/api/companies/{companyId}/members/{memberId}/archive-preview": {
+      "get": {
+        "tags": [
+          "access"
+        ],
+        "summary": "Preview task reassignment before archiving a company member",
+        "description": "Board-only. Requires permission to manage company membership and authority to archive the selected member. Returns the number of open tasks assigned to that member.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reassignmentIssueCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "reassignmentIssueCount"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "memberId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "security": [
           {
             "BoardSessionAuth": []
@@ -108698,6 +109321,215 @@
         }
       }
     },
+    "/api/issues/{id}/dependency-investigation": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get required dependency diagnosis and parent wake state",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      },
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Ask the current assignee to investigate a stalled dependency",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before the request may be retried",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "idempotencyKey"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
     "/api/issues/{id}/retry": {
       "post": {
         "tags": [
@@ -136400,28 +137232,6 @@
                         "type": "string",
                         "format": "uuid",
                         "nullable": true
-                      },
-                      "offer": {
-                        "type": "object",
-                        "properties": {
-                          "expectedDeliverable": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 8000
-                          },
-                          "prerequisites": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
-                            }
-                          }
-                        },
-                        "required": [
-                          "expectedDeliverable"
-                        ],
-                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -136543,28 +137353,6 @@
                       "workflowId": {
                         "type": "string",
                         "format": "uuid"
-                      },
-                      "offer": {
-                        "type": "object",
-                        "properties": {
-                          "expectedDeliverable": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 8000
-                          },
-                          "prerequisites": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
-                            }
-                          }
-                        },
-                        "required": [
-                          "expectedDeliverable"
-                        ],
-                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -136658,28 +137446,6 @@
                         "type": "string",
                         "format": "uuid",
                         "nullable": true
-                      },
-                      "offer": {
-                        "type": "object",
-                        "properties": {
-                          "expectedDeliverable": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 8000
-                          },
-                          "prerequisites": {
-                            "type": "array",
-                            "items": {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
-                            }
-                          }
-                        },
-                        "required": [
-                          "expectedDeliverable"
-                        ],
-                        "additionalProperties": false
                       }
                     },
                     "required": [
@@ -136874,13 +137640,160 @@
         }
       }
     },
+    "/api/companies/{companyId}/case-handoff-offers": {
+      "get": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "List your pending case handoff offers",
+        "description": "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "caseId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "handoffId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "handoffVersion": {
+                            "type": "integer"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "caseId",
+                          "handoffId",
+                          "handoffVersion",
+                          "createdAt"
+                        ]
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 400
+            }
+          }
+        ],
+        "security": [
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "agent"
+        }
+      }
+    },
     "/api/cases/{caseId}/handoffs/{handoffId}/decision": {
       "post": {
         "tags": [
           "Cases"
         ],
         "summary": "Record a recipient decision on a versioned handoff offer",
-        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt.",
+        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The receipt contains decision metadata. Read the Case handoff history to see submitted messages. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
         "responses": {
           "200": {
             "description": "Success",
@@ -136939,6 +137852,35 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }
@@ -137087,17 +138029,11 @@
         },
         "security": [
           {
-            "BoardSessionAuth": []
-          },
-          {
-            "BoardApiKeyAuth": []
-          },
-          {
             "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "agent"
         }
       }
     },
@@ -137319,7 +138255,7 @@
           "Cases"
         ],
         "summary": "Withdraw an accepted delivered handoff after a confirmed Stop",
-        "description": "Board operators only. Requires the current handoff version, current recipient assignment, and the exact recipient heartbeat run's acknowledged operator Stop receipt. Preserves the accepted decision and handoff history, prevents stale task status advancement, creates a board-owned next-action hold, and does not wake a successor. Stop cannot undo external effects or workspace edits already made; inspect them before reassigning or creating a replacement handoff.",
+        "description": "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
         "responses": {
           "200": {
             "description": "Success",
@@ -137435,13 +138371,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       }
     },
