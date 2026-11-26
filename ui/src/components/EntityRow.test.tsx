@@ -11,6 +11,13 @@ vi.mock("@/lib/router", () => ({
 }));
 
 describe("EntityRow", () => {
+  it("uses a named native button for a row action", () => {
+    const markup = renderToStaticMarkup(<EntityRow title="Open file" selected onClick={vi.fn()} />);
+    expect(markup).toMatch(/^<button type="button"[^>]*aria-pressed="true">/);
+    expect(markup).toContain("Open file");
+    expect(markup).not.toContain("<div");
+  });
+
   it("keeps caller text color classes on linked rows", () => {
     const markup = renderToStaticMarkup(
       <EntityRow

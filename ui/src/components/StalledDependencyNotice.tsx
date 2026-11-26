@@ -60,6 +60,7 @@ function StalledDependencyRow({ entry, child, readError, isFetching, refetch }: 
 }) {
   const ref = entry.stalledIssueIdentifier ?? entry.stalledIssueId;
   const retry = useTaskRetry(child);
+  const mayRetry = child?.viewerCanRetry === true;
   const canRetry = child?.interruption?.canRetry === true;
   // Same states as the task's own Retry (ExecutionBlockerNotice): a refused
   // request explains why, and a lost response can be retried.
@@ -90,7 +91,7 @@ function StalledDependencyRow({ entry, child, readError, isFetching, refetch }: 
       {retry.takingLonger ? (
         <span role="status" className="basis-full text-xs text-muted-foreground">Taking longer than usual…</span>
       ) : null}
-      {canRetry || failed || retry.takingLonger ? (
+      {mayRetry && (canRetry || failed || retry.takingLonger) ? (
         <Button
           size="sm"
           variant="outline"
