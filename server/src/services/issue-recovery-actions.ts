@@ -98,9 +98,13 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
     ? exhaustedSystemRecoveryAction(system, row.evidence) : row.nextAction;
 }
 
-function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
+export function projectCaseCompletionRecoveryAction(row: Pick<IssueRecoveryActionRow, "evidence" | "attemptCount">) {
   const exhaustedAttempts = isRecoveryBudgetExhausted(row.evidence) ? row.attemptCount : undefined;
-  const recovery = projectTaskCompletionRecovery(row.evidence, exhaustedAttempts)
+  return projectTaskCompletionRecovery(row.evidence, exhaustedAttempts);
+}
+
+function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
+  const recovery = projectCaseCompletionRecoveryAction(row)
     ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
   return {
     id: row.id,

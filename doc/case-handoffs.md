@@ -130,7 +130,8 @@ delivered handoff and its recipient. Task recovery shows counts of unmet
 criteria and evidence gaps. It directs readers to the authorized Case view for
 the checklist and keeps the Case receipt in durable storage. When the recovery
 budget runs out, the task guidance states how many attempts were used and asks
-the board to review the assessment before assigning further work.
+the board to review the assessment before assigning further work. The same
+guidance appears on a waiting task when its stalled dependency is readable.
 
 Status commitment rechecks the accepted handoff for the receiving run and
 its completion corrective wake. If the Case is cancelled, the handoff is

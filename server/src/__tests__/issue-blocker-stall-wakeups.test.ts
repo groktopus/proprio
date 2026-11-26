@@ -111,6 +111,31 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     expect(later[1]!.input.contextSnapshot.blockerStall.recoveryAction.id).toBe(again.id);
   });
 
+  it("shows the same safe Case exhaustion guidance in a waiting task and its wake", async () => {
+    const f = await fixture();
+    await db.update(issueRecoveryActions).set({ cause: "completion_evidence_incomplete", attemptCount: 2,
+      evidence: {
+        recoveryBudget: { state: "exhausted", attemptsUsed: 2 },
+        caseHandoffCompletion: {
+          schema: "proprio.case-handoff-completion-recovery.v1",
+          caseHandoff: { id: "private-handoff-id", prerequisiteCount: 1 },
+          assessment: { criteriaNeedingWork: [{ reasonCode: "criterion_evidence_missing", requirement: "Private criterion" }] },
+        },
+      },
+    }).where(eq(issueRecoveryActions.id, f.action.id));
+
+    const [listed] = await listStalledDependencies(db, { companyId: f.companyId, issueId: f.parent.id });
+    expect(listed?.recoveryAction.nextAction).toContain("Completion recovery stopped after 2 attempts.");
+    expect(listed?.recoveryAction.nextAction).toContain("Review the assessment before assigning further work.");
+    expect(listed?.recoveryAction.nextAction).toContain("Review the prerequisite checklist in the authorized Case view.");
+    expect(listed?.recoveryAction.nextAction).toContain("Add or correct evidence for 1 task criterion.");
+    const { calls, enqueueWakeup } = wakeRecorder();
+    await wakeWaitersOfStalledIssues(db, enqueueWakeup as never, { companyId: f.companyId });
+    const wake = calls.find(call => call.agentId === f.parentAgent);
+    expect(wake?.input.contextSnapshot.blockerStall).toEqual(listed);
+    expect(JSON.stringify([listed, wake])).not.toMatch(/private-handoff-id|Private criterion|caseHandoffCompletion/);
+  });
+
   it("wakes the assignee of an issue the stalled one blocks", async () => {
     const f = await fixture();
     const dependentAgent = randomUUID();

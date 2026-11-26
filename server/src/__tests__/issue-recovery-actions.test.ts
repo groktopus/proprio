@@ -624,6 +624,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const exhausted = await svc.upsertSourceScoped(input);
     expect(exhausted).toMatchObject({ status: "escalated", ownerType: "board", attemptCount: 2, wakePolicy: null });
     expect(exhausted.nextAction).toContain("Completion recovery stopped after 2 attempts.");
+    expect(exhausted.nextAction).toContain("Review the assessment before assigning further work.");
     expect(exhausted.nextAction).toContain("Review the prerequisite checklist in the authorized Case view.");
     expect(exhausted.nextAction).toContain("Add or correct evidence for 1 task criterion.");
     expect(exhausted.nextAction).not.toContain("then retry completion");

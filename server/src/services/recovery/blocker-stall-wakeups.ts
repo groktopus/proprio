@@ -34,6 +34,7 @@ import { agents, agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueR
 import { ISSUE_BLOCKER_STALLED_WAKE_REASON, readRemoteWorkspaceAuthority, type IssueBlockerStalledWakeContext,
   type IssueBlockerStallRelation } from "@groktopus/shared";
 import { logActivity } from "../activity-log.js";
+import { projectCaseCompletionRecoveryAction } from "../issue-recovery-actions.js";
 import { parseHeartbeatPolicy } from "../heartbeat/timer-policy.js";
 import { authorizationService } from "../authorization.js";
 import { preparedStatements } from "../prepared-statements.js";
@@ -112,6 +113,12 @@ async function readStalls(db: Db, filter: StallFilter, limit = MAX_STALLS_PER_PA
     actionId: issueRecoveryActions.id, companyId: issueRecoveryActions.companyId,
     kind: issueRecoveryActions.kind, cause: issueRecoveryActions.cause, status: issueRecoveryActions.status,
     ownerType: issueRecoveryActions.ownerType, nextAction: issueRecoveryActions.nextAction,
+    attemptCount: issueRecoveryActions.attemptCount,
+    evidence: sql<Record<string, unknown>>`case when ${issueRecoveryActions.evidence} ? 'caseHandoffCompletion'
+      then jsonb_build_object(
+        'caseHandoffCompletion', ${issueRecoveryActions.evidence}->'caseHandoffCompletion',
+        'recoveryBudget', ${issueRecoveryActions.evidence}->'recoveryBudget')
+      else '{}'::jsonb end`,
     issueId: issues.id, identifier: issues.identifier, title: issues.title, issueStatus: issues.status, parentId: issues.parentId,
     projectId: issues.projectId, assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId,
   }).from(issueRecoveryActions)
@@ -250,7 +257,7 @@ function stallContext(stall: StallRow, relation: IssueBlockerStallRelation): Iss
     stalledIssueStatus: stall.issueStatus,
     relation,
     recoveryAction: { id: stall.actionId, kind: stall.kind, cause: stall.cause, status: stall.status,
-      ownerType: stall.ownerType, nextAction: stall.nextAction },
+      ownerType: stall.ownerType, nextAction: projectCaseCompletionRecoveryAction(stall)?.nextAction ?? stall.nextAction },
   };
 }
 
