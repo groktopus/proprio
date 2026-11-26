@@ -220,6 +220,7 @@ import { HEARTBEAT_RUN_TERMINAL_STATUSES } from "./recovery.js";
 import { executeIssuePostCommitActions, type IssuePostCommitAction, type issueService } from "../issues.js";
 import type { issueTreeControlService } from "../issue-tree-control.js";
 import type { budgetService } from "../budgets.js";
+import { visibleAdmissionBlock } from "../budget-scope-visibility.js";
 import { isBoardOwnedBudgetBlock } from "../budget-block-ownership.js";
 import type { instanceSettingsService } from "../instance-settings.js";
 import type { createRunDispatch } from "../../modules/run-dispatch/index.js";
@@ -1186,15 +1187,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     if (!run.startedAt && !await canStartNewExternalBotWork(agent)) return null;
 
     const context = parseObject(run.contextSnapshot);
-    const budgetBlock = await budgets.getInvocationBlock(
-      run.companyId,
-      run.agentId,
-      {
-        issueId: readNonEmptyString(context.issueId),
-        projectId: readNonEmptyString(context.projectId),
-        runId: run.id,
-      },
-    );
+    const budgetContext = {
+      issueId: readNonEmptyString(context.issueId),
+      projectId: readNonEmptyString(context.projectId),
+      runId: run.id,
+    };
+    const budgetBlock = await budgets.getInvocationBlock(run.companyId, run.agentId, budgetContext);
     if (budgetBlock) {
       if (caseHandoffReceipt) return null;
       // A temporary hold (accounting that is still settling) only delays
@@ -1231,8 +1229,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       if (!stamped) {
         // No open incident: a resume may have just closed it and raised the
         // budget. Read the block again; resumed work stays queued.
-        const current = await budgets.getInvocationBlock(run.companyId, run.agentId, {
-          issueId: readNonEmptyString(context.issueId), projectId: readNonEmptyString(context.projectId), runId: run.id });
+        const current = await budgets.getInvocationBlock(run.companyId, run.agentId, budgetContext);
         if (!current) return null;
         if (!run.startedAt && !(await isBoardOwnedBudgetBlock(db, run.companyId, current))) return null;
         await cancelRunInternal(run.id, current.reason);
@@ -3425,16 +3422,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     );
     if (budgetBlock) {
       // A budget block that is not a reached hard stop is an explicit pause.
-      if ((await canSaveDeferredMessage()) && !(await isBoardOwnedBudgetBlock(db, agent.companyId, budgetBlock)))
-        throw await saveDeferredMessage("budget.blocked", budgetBlock.reason,
-          { scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId });
-      const wait = await writeSkippedRequest("budget.blocked", { error: budgetBlock.reason }, {
-        scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId,
+      const { reason, ...details } = visibleAdmissionBlock({
+        reason: budgetBlock.reason, scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId,
       });
+      if ((await canSaveDeferredMessage()) && !(await isBoardOwnedBudgetBlock(db, agent.companyId, budgetBlock)))
+        throw await saveDeferredMessage("budget.blocked", reason, details);
+      const wait = await writeSkippedRequest("budget.blocked", { error: reason }, details);
       if (caseRequest) return null;
-      const details = { scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId };
-      throw wait.waitSaved ? new PersistedExecutionWaitRefusal(budgetBlock.reason, details)
-        : conflict(budgetBlock.reason, details);
+      throw wait.waitSaved ? new PersistedExecutionWaitRefusal(reason, details) : conflict(reason, details);
     }
 
     // Setup delays execution, but must not discard work accepted by a caller.

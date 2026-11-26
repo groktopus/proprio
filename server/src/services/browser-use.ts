@@ -510,9 +510,11 @@ export function browserUseService(
         || JSON.stringify(current.grant.credentialSecretRefs) !== JSON.stringify(selected.grant.credentialSecretRefs)
         || !secret || secret.status !== "active" || secret.latestVersion !== selected.credentialSnapshot.latestVersion)
         return { reason: "Browser access or its credential changed before dispatch." };
-      const admission = await budgetServiceInTransaction(tx, publications).evaluateAdmission(binding.companyId, binding.agentId, { projectId: issue.projectId });
+      const admission = await budgetServiceInTransaction(tx, publications).evaluateAdmission(
+        binding.companyId, binding.agentId, { issueId: issue.id, projectId: issue.projectId, runId: parent.id },
+      );
       if (admission.block) return { reason: admission.block.reason };
-      if (hold && centsToUnits(hold.amountCents) === 0n && admission.policies.length)
+      if (hold && centsToUnits(hold.amountCents) === 0n && admission.policies.some(policy => policy.scopeType !== "task_tree"))
         return { reason: "Browser budget changed before dispatch; try again with a bounded cost cap." };
       const [currentConfig] = await tx.select().from(settings).where(and(eq(settings.companyId, binding.companyId), eq(settings.grantId, grant.id)));
       if (args.profileId && !currentConfig?.allowedProfileIds.includes(args.profileId)) return { reason: "This profile is not allowed for this credential." };
@@ -523,6 +525,8 @@ export function browserUseService(
         amount = amount === undefined || value < amount ? value : amount;
       }
       for (const [index, policy] of admission.policies.entries()) {
+        // Task-tree exposure is accounted against the owning run.
+        if (policy.scopeType === "task_tree") continue;
         const observed = admission.observations[index];
         const committed = centsToUnits(observed.ledgerCents) + centsToUnits(observed.effectiveHeldCents);
         const available = centsToUnits(policy.amount) - committed;
@@ -1207,18 +1211,19 @@ export function browserUseService(
       )
     )
       end = true;
-    if (
-      await budgets.getInvocationBlock(s.companyId, s.agentId, {
-        issueId: s.issueId,
-        projectId: issue?.projectId,
-      })
-    )
-      end = true;
     const allRuns = await db
       .select()
       .from(runs)
       .where(and(eq(runs.sessionId, s.id), eq(runs.companyId, s.companyId)))
       .orderBy(desc(runs.createdAt));
+    if (
+      await budgets.getInvocationBlock(s.companyId, s.agentId, {
+        issueId: s.issueId,
+        projectId: issue?.projectId,
+        runId: allRuns[0]?.heartbeatRunId,
+      })
+    )
+      end = true;
     if (
       allRuns[0] &&
       authorizeSession &&

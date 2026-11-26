@@ -132,7 +132,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const agent = await f.makeAgent("Worker");
     const capturedRoot = await f.makeIssue("Captured root"), currentRoot = await f.makeIssue("Current root");
     const child = await f.makeIssue("Child task", capturedRoot.id);
-    await f.makePolicy(capturedRoot.id, { amount: 100, reservationCents: "0" });
+    const capturedPolicy = await f.makePolicy(capturedRoot.id, { amount: 100, reservationCents: "0" });
     await f.makePolicy(child.id, { amount: 50, reservationCents: "0" });
     await f.makePolicy(currentRoot.id, { amount: 500, reservationCents: "0" });
     const run = await f.makeRun(agent.id, child.id, "running");
@@ -155,10 +155,15 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const freshPreflight = await budgetService(db).evaluateAdmission(f.companyId, agent.id, { issueId: child.id });
     expect(freshPreflight.policies.map(policy => policy.scopeId).sort()).toEqual([currentRoot.id, child.id].sort());
 
+    await db.update(budgetPolicies).set({ amount: 100 }).where(eq(budgetPolicies.scopeId, child.id));
+    await db.update(budgetPolicies).set({ amount: 50 }).where(eq(budgetPolicies.id, capturedPolicy.id));
+    await expect(budgetService(db).getInvocationBlock(f.companyId, agent.id, { runId: run.id }))
+      .resolves.toMatchObject({ scopeType: "task_tree", scopeId: capturedRoot.id });
     await db.delete(issues).where(eq(issues.id, capturedRoot.id));
     const retained = await budgetService(db).evaluateAdmission(f.companyId, agent.id, { runId: run.id });
-    expect(retained.policies.map(policy => policy.scopeId).sort()).toEqual([capturedRoot.id, child.id].sort());
-    expect(retained.block).toMatchObject({ scopeType: "task_tree", scopeId: child.id });
+    expect(retained.policies.map(policy => policy.scopeId)).toEqual([child.id]);
+    expect(retained.block).toBeNull();
+    expect((await computeObservedSpend(db, capturedPolicy)).totalExact).toBe("60.0000000");
   });
 
   it("resolves a legacy queued task key for its current tree before a reservation exists", async () => {

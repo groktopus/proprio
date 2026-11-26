@@ -11,6 +11,7 @@ import { canActorReadCase, retainCaseAccessSource } from "../services/case-acces
 import { renderProprioWakePrompt } from "@groktopus/adapter-utils/server-utils";
 import {
   costEvents,
+  budgetPolicies,
   agents,
   agentRuntimeState,
   authUsers,
@@ -240,6 +241,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(costEvents);
+    await db.delete(budgetPolicies);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -3200,6 +3202,43 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
       }),
     );
+  });
+
+  it("keeps a private ancestor out of a child-only recovery hand-back refusal", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const [root] = await db.insert(issues).values({
+      companyId, title: "Private budget title", visibility: "private",
+    }).returning();
+    await db.update(issues).set({ status: "blocked", parentId: root.id }).where(eq(issues.id, sourceIssueId));
+    const [billed] = await db.insert(heartbeatRuns).values({ companyId, agentId: managerId, issueId: root.id,
+      status: "succeeded", taskLineageJson: { version: 1, pathIssueIds: [root.id] } }).returning();
+    await db.insert(costEvents).values({ companyId, agentId: managerId, issueId: root.id, heartbeatRunId: billed.id,
+      provider: "fixture", biller: "fixture", billingType: "metered_api", costStatus: "priced", model: "fixture",
+      costCents: 5, occurredAt: new Date() });
+    await db.insert(budgetPolicies).values({ companyId, scopeType: "task_tree", scopeId: root.id, amount: 1,
+      windowKind: "lifetime", hardStopEnabled: true });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "workspace_validation", ownerType: "agent", ownerAgentId: coderId,
+      returnOwnerAgentId: coderId, cause: "workspace_validation_failed", fingerprint: "private-tree-budget",
+      nextAction: "Repair the workspace and return the task.", wakePolicy: { type: "wake_owner" },
+    });
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, runId, agentId: coderId, issueId: sourceIssueId });
+    const app = createApp({ type: "agent", source: "agent_jwt", companyId, agentId: coderId, runId });
+    vi.stubEnv("PROPRIO_ISSUE_PRIVACY_MODE", "enforce");
+    try {
+      await request(app).get(`/api/issues/${root.id}`).expect(404);
+      await request(app).get(`/api/issues/${sourceIssueId}`).expect(200);
+      const refused = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+        actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      }).expect(409);
+      expect(refused.body.details).toMatchObject({ code: "recovery_safe_hand_back_budget_blocked",
+        budgetBlock: { scopeType: "task_tree", reason: expect.any(String) } });
+      expect(refused.text).not.toContain(root.id);
+      expect(refused.text).not.toContain(root.title);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {

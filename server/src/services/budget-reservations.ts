@@ -1,17 +1,17 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { agents, budgetPolicies, budgetReservations, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
-import { centsToUnits, isUuidLike, unitsToCents } from "@groktopus/shared";
+import { centsToUnits, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
-import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "./budget-admission-controls.js";
+import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration, resolveRunTaskTreeLineage } from "./budget-admission-controls.js";
 import { budgetServiceInTransaction } from "./budgets.js";
 import { withBudgetSpan } from "./budget-tracing.js";
 import type { ActivityPublication } from "./activity-log.js";
 import { readClaimedNativeStopRecovery } from "./native-runtime/native-cancellation-request.js";
 import { extendOwnNativeRecoveryClaimInTransaction, readOwnNativeRecoveryClaimLease } from "./native-runtime/native-execution-lease.js";
-import { loadAncestorIssueIds, lockIssuePrivacyTree } from "./issue-hierarchy.js";
-import { loadRunBoundIssue, runBoundIssueContextColumn, runBoundIssueReference } from "./issue-creation-source.js";
+import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
+import { runBoundIssueContextColumn, runBoundIssueReference } from "./issue-creation-source.js";
 
 /** Native finalization takes its coordinator before issue/run locks. Recovery
  * admission uses the same order after the company accounting lock, so its
@@ -144,10 +144,7 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
       throw conflict("Provider dispatch has already reserved this run");
     }
     if (stopRecovery) throw conflict("Native Stop recovery requires the original held reservation");
-    const taskReference = run.taskLineageJson ? null : runBoundIssueReference(run);
-    const taskId = taskReference && !isUuidLike(taskReference)
-      ? (await loadRunBoundIssue(tx, run))?.id : taskReference;
-    const pathIssueIds = run.taskLineageJson?.pathIssueIds ?? await loadAncestorIssueIds(tx, companyId, taskId);
+    const pathIssueIds = await resolveRunTaskTreeLineage(tx, run);
     if (pathIssueIds.length > 0) {
       const treePolicies = await tx.select({ scopeId: budgetPolicies.scopeId }).from(budgetPolicies).where(and(
         eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, "task_tree"),

@@ -1,6 +1,23 @@
 import { and, eq, sql } from "drizzle-orm";
-import { companies, projects, type Db } from "@groktopus/db";
+import { isUuidLike } from "@groktopus/shared";
+import { companies, heartbeatRuns, projects, type Db } from "@groktopus/db";
 import { notFound } from "../errors.js";
+import { loadAncestorIssueIds } from "./issue-hierarchy.js";
+import { loadRunBoundIssue, runBoundIssueReference } from "./issue-creation-source.js";
+
+type BudgetLineageRun = Pick<typeof heartbeatRuns.$inferSelect,
+  "companyId" | "issueId" | "nativeIssueId" | "contextSnapshot" | "taskLineageJson">;
+
+/** Resolve a run's recorded billing tree or the current ancestry before its first admission. */
+export async function resolveRunTaskTreeLineage(db: Db, run: BudgetLineageRun, fallbackIssueId?: string | null) {
+  if (run.taskLineageJson?.version === 1 && Array.isArray(run.taskLineageJson.pathIssueIds)) {
+    return run.taskLineageJson.pathIssueIds;
+  }
+  const reference = runBoundIssueReference(run);
+  const issueId = reference && !isUuidLike(reference) ? (await loadRunBoundIssue(db, run))?.id
+    : reference ?? (fallbackIssueId && isUuidLike(fallbackIssueId) ? fallbackIssueId : null);
+  return loadAncestorIssueIds(db, run.companyId, issueId);
+}
 
 /** Shared execution-authority fences allow concurrent admissions. Acquire
  * before feature/agent/run locks; they exclude manual pause/delete until this

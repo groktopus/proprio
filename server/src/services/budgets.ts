@@ -8,12 +8,12 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, BUDGET_POLICY_EXISTS_ERROR_CODE, compareCents, isUuidLike, normalizeCents } from "@groktopus/shared";
-import { and, asc, desc, eq, gt, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, ne, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import type { AuthorizationActor } from "./authorization.js";
 import { loadAncestorIssueIds, lockIssuePrivacyTree } from "./issue-hierarchy.js";
-import { loadRunBoundIssue, runBoundIssueContextColumn, runBoundIssueReference } from "./issue-creation-source.js";
-import { lockTaskTreeBudgetConfiguration } from "./budget-admission-controls.js";
+import { runBoundIssueContextColumn } from "./issue-creation-source.js";
+import { lockTaskTreeBudgetConfiguration, resolveRunTaskTreeLineage } from "./budget-admission-controls.js";
 import { resolveOwnerInstanceAdmin } from "./cloud-tenant-authority.js";
 import { budgetTaskTreeRootReadCondition, canReadBudgetTaskTreeRoot, readableTaskTreeBudgetCondition } from "./budget-scope-visibility.js";
 
@@ -243,17 +243,13 @@ type AdmissionContext = { issueId?: string | null; projectId?: string | null; ru
 
 async function admissionTaskLineageIssueIds(db: Db, companyId: string, context?: AdmissionContext) {
   if (context?.taskLineageIssueIds) return context.taskLineageIssueIds;
-  let issueId = context?.issueId ?? null;
+  const issueId = context?.issueId;
   if (context?.runId) {
     const [run] = await db.select({ companyId: heartbeatRuns.companyId, issueId: heartbeatRuns.issueId,
       nativeIssueId: heartbeatRuns.nativeIssueId, contextSnapshot: runBoundIssueContextColumn,
       taskLineageJson: heartbeatRuns.taskLineageJson })
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, context.runId))).limit(1);
-    if (run?.taskLineageJson?.version === 1 && run.taskLineageJson.pathIssueIds?.length) {
-      return run.taskLineageJson.pathIssueIds;
-    }
-    const reference = run ? runBoundIssueReference(run) : null;
-    if (run && reference) issueId = isUuidLike(reference) ? reference : (await loadRunBoundIssue(db, run))?.id ?? null;
+    if (run) return resolveRunTaskTreeLineage(db, run, issueId);
   }
   return issueId && isUuidLike(issueId) ? loadAncestorIssueIds(db, companyId, issueId) : [];
 }
@@ -261,16 +257,18 @@ async function admissionTaskLineageIssueIds(db: Db, companyId: string, context?:
 async function readAdmissionScopes(db: Db, companyId: string, agentId: string | null, context?: AdmissionContext) {
   const taskLineageIssueIds = await admissionTaskLineageIssueIds(db, companyId, context);
   const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
-    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null, taskLineageIssueIds)));
+    budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null, taskLineageIssueIds),
+    // Deleted roots retain their accounting history without gating new work.
+    taskLineageIssueIds.length ? or(ne(budgetPolicies.scopeType, "task_tree"),
+      exists(db.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, budgetPolicies.scopeId), eq(issues.companyId, companyId))))) : undefined));
   const taskTreeScopeIds = [...new Set(policies.filter(policy => policy.scopeType === "task_tree").map(policy => policy.scopeId))];
   const scopes: Array<{ scopeType: BudgetScopeType; scopeId: string }> = [
     { scopeType: "company", scopeId: companyId }, ...(agentId ? [{ scopeType: "agent" as const, scopeId: agentId }] : []),
     ...(context?.projectId ? [{ scopeType: "project" as const, scopeId: context.projectId }] : []),
     ...taskTreeScopeIds.map(scopeId => ({ scopeType: "task_tree" as const, scopeId })),
   ];
-  const records = await Promise.all(scopes.map(scope => scope.scopeType === "task_tree"
-    ? resolveSummaryScopeRecord(db, companyId, scope.scopeType, scope.scopeId)
-    : resolveScopeRecord(db, scope.scopeType, scope.scopeId)));
+  const records = await Promise.all(scopes.map(scope => resolveScopeRecord(db, scope.scopeType, scope.scopeId)));
   if (records.some(scope => scope.companyId !== companyId)) throw notFound("Budget scope not found");
   return { scopes, records, policies };
 }

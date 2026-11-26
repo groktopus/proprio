@@ -1675,6 +1675,30 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       });
     }
 
+    it("checks captured ancestry without exposing the former private root in retry events", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID(), runId = randomUUID(), now = new Date();
+      const [root] = await db.insert(issues).values({ companyId, title: "Private previous tree", visibility: "private" }).returning();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await seedScheduledRetryRun({ runId, companyId, agentId, issueId, now });
+      await db.update(heartbeatRuns).set({ taskLineageJson: { version: 1, pathIssueIds: [issueId, root.id] } })
+        .where(eq(heartbeatRuns.id, runId));
+      await db.insert(budgetPolicies).values({ companyId, scopeType: "task_tree", scopeId: root.id,
+        windowKind: "lifetime", amount: 1, hardStopEnabled: true });
+      await db.insert(costEvents).values({ companyId, agentId, issueId, heartbeatRunId: runId, provider: "fixture",
+        biller: "fixture", billingType: "metered_api", costStatus: "priced", model: "fixture",
+        costCents: 5, occurredAt: now });
+      const adapter = createPostgresRunDispatchAdapter(db);
+      const gate = await adapter.evaluateScheduledRetryGate({ runId, companyId, now, retryReasonOverride: null });
+      expect(gate).toMatchObject({ allowed: false, errorCode: "budget_blocked", details: { scopeType: "task_tree" } });
+      expect(await adapter.promoteOrCancelDueRetry({ runId, companyId, now }))
+        .toMatchObject({ outcome: "gate_suppressed", errorCode: "budget_blocked" });
+      const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+      expect(events).toEqual([expect.objectContaining({ payload: expect.objectContaining({ scopeType: "task_tree" }) })]);
+      expect(JSON.stringify(events)).not.toContain(root.id);
+      expect(JSON.stringify(events)).not.toContain(root.title);
+    });
+
     it("promotes an allowed due retry", async () => {
       const { companyId, agentId } = await seedCompanyAndAgent();
       const issueId = randomUUID();

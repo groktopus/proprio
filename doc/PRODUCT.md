@@ -634,8 +634,9 @@ retries, continuations, and reviews. Pending reservations and linked usage
 without a reliable price affect admission. Charges without a run or a saved
 ancestry stay in the existing accounting views. A later move changes where a
 new run is charged and preserves the attribution of past runs.
-Preflight for new work checks the current tree. When an admitted run resumes
-or retries dispatch, its budget checks use the ancestry saved for that run.
+New work, including a successor run, checks the current tree. When an admitted
+run resumes or retries dispatch, its budget checks use the ancestry saved for
+that run. A deleted root retains its accounting history and stops gating work.
 
 Sibling admissions reserve against the same balance. Work outside the held tree
 stays eligible under its own company, project, agent, and task limits. A board

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { budgetService } from "../budgets.js";
+import { deliverBudgetResumeContinuations } from "../budget-resume-continuation.js";
 import { contextCompactionService } from "../context-compaction.js";
 import { claimNativeSessionResumptions } from "../native-runtime/native-finalization-reconciler.js";
 import type { Db } from "@groktopus/db";
-import { authUsers, agents, agentTaskSessions, agentWakeupRequests, budgetIncidents, budgetPolicies, caseHandoffs, cases, chatCompletionDeliveries, companies, companyMemberships, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues, nativeRunFinalizations, routines, routineRuns } from "@groktopus/db";
+import { authUsers, agents, agentTaskSessions, agentWakeupRequests, budgetIncidents, budgetPolicies, budgetResumeClaims, caseHandoffs, cases, chatCompletionDeliveries, companies, companyMemberships, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues, nativeRunFinalizations, routines, routineRuns } from "@groktopus/db";
 import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external-test-database.js";
@@ -1347,6 +1349,47 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(deps.cancelRunInternal).toHaveBeenCalledWith(run.id, expect.stringContaining("budget"), expect.anything());
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].resultJson)
       .toMatchObject({ budgetAdmissionStop: { scopeType: "company", scopeId: company.id } });
+  });
+
+  it("resumes a task-tree budget stop before the queued run captures accounting ancestry", async () => {
+    const { company, agent, issue, run } = await fixture("queued");
+    const [root] = await db.insert(issues).values({ companyId: company.id, title: "Budget root" }).returning();
+    await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, issue.id));
+    const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
+      scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true, isActive: true }).returning();
+    const [billedRun] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, issueId: root.id, status: "succeeded",
+      taskLineageJson: { version: 1, pathIssueIds: [root.id] },
+    }).returning();
+    await db.insert(costEvents).values({ companyId: company.id, agentId: agent.id, issueId: root.id, heartbeatRunId: billedRun.id,
+      provider: "test", biller: "test", billingType: "metered_api", costStatus: "priced", model: "test",
+      costCents: 5, occurredAt: new Date() });
+    const [incident] = await db.insert(budgetIncidents).values({
+      companyId: company.id, policyId: policy.id, scopeType: "task_tree", scopeId: root.id,
+      metric: "billed_cents", windowKind: "lifetime", windowStart: new Date(0),
+      windowEnd: new Date(Date.now() + 86_400_000), thresholdType: "hard", amountLimit: 1, amountObserved: 5,
+    }).returning();
+    const deps = callbacks(db);
+    deps.getAgent.mockResolvedValue(agent);
+    deps.budgets.getInvocationBlock.mockImplementation(budgetService(db).getInvocationBlock);
+    deps.cancelRunInternal.mockImplementation(createHeartbeatRunControl(db, runControlCallbacks(db)).cancelRunInternal);
+
+    expect(await createHeartbeatQueue(db, deps).claimQueuedRun({ ...run, responsibleUserId: "queue-test-user" })).toBeNull();
+    const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(stopped).toMatchObject({ status: "cancelled", taskLineageJson: null, resultJson: {
+      budgetAdmissionStop: { scopeType: "task_tree", scopeId: root.id },
+    } });
+
+    await budgetService(db).resolveIncident(company.id, incident.id, { action: "raise_budget_and_resume", amount: 500 },
+      "local-board", "local_implicit");
+    await deliverBudgetResumeContinuations(db);
+    await deliverBudgetResumeContinuations(db);
+    const claims = await db.select().from(budgetResumeClaims).where(eq(budgetResumeClaims.runId, run.id));
+    expect(claims).toEqual([expect.objectContaining({ state: "delivered", requestId: expect.any(String) })]);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, company.id));
+    expect(wakes.filter(wake => wake.reason === "task_retry")).toEqual([
+      expect.objectContaining({ id: claims[0].requestId, payload: expect.objectContaining({ issueId: issue.id }) }),
+    ]);
   });
 
   it("rechecks a handoff's assignment version under the issue claim lock", async () => {
