@@ -85,5 +85,6 @@ jobs:
           path: |
             ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-evidence.json
             ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-restart-checkpoints.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-board-diagnostic.json
           if-no-files-found: ignore
           retention-days: 14

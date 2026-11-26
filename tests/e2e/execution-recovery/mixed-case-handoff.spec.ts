@@ -227,16 +227,30 @@ for (const restart of [false, true]) test(
         createdByRunId: revision.createdByRunId },
       verification: JSON.parse(await readFile(verificationReceipt, "utf8")) };
     const verdict = gradeMixedHandoff(observed, expectedArtifact);
+    expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
+    const boardRoute = `/${company.issuePrefix}/issues/${task.identifier ?? task.id}`;
+    const doneStatus = page.getByRole("button", { name: "Change status (current: Done)", exact: true });
+    let boardHttpStatus: number | null = null;
+    try {
+      const boardResponse = await page.goto(`${base}${boardRoute}`, { waitUntil: "domcontentloaded" });
+      boardHttpStatus = boardResponse?.status() ?? null;
+      expect(boardResponse?.ok()).toBe(true);
+      // Hosted source runs can still be compiling Vite modules on the first navigation.
+      await expect(doneStatus).toBeVisible({ timeout: 30_000 });
+    } catch (error) {
+      const boardDiagnostic = { requestedPath: boardRoute, actualPath: new URL(page.url()).pathname,
+        httpStatus: boardHttpStatus, doneStatusVisible: await doneStatus.isVisible() };
+      const diagnosticFile = info.outputPath("mixed-handoff-board-diagnostic.json");
+      await writeFile(diagnosticFile, JSON.stringify(boardDiagnostic, null, 2));
+      throw error;
+    }
     const evidence = info.outputPath("mixed-handoff-evidence.json");
     await writeFile(evidence, JSON.stringify({
       revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
       profiles: ["legacy/process", "native/codex-app-server fixture", "legacy/process"],
-      outgoing, builderInput, restartEvidence, observed, verdict,
+      outgoing, builderInput, restartEvidence, observed, verdict, boardStatus: "done",
     }, null, 2));
     await info.attach("mixed-handoff-evidence", { contentType: "application/json", path: evidence });
-    expect(Object.entries(verdict).filter(([, passed]) => !passed).map(([check]) => check)).toEqual([]);
-    await page.goto(`${base}/${company.issuePrefix}/issues/${task.identifier ?? task.id}`, { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("button", { name: "Change status (current: Done)", exact: true })).toBeVisible();
   } catch (error) {
     await info.attach("test-drive-logs", { body: logs, contentType: "text/plain" });
     throw error;
