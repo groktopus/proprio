@@ -192,16 +192,50 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const client = new QueryClient();
     const key = queryKeys.budgets.overview("company-1");
     const otherCompany = queryKeys.budgets.overview("company-2");
+    const rootSearch = [...queryKeys.issues.search("company-1", "Private", undefined, 20), "task-budget-roots"];
+    const otherRootSearch = [...queryKeys.issues.search("company-2", "Public", undefined, 20), "task-budget-roots"];
+    const projects = queryKeys.projects.list("company-1");
+    const selectedRoot = [...queryKeys.issues.summaries("company-1"), "selected-budget-root", "private-root"];
+    const detail = [...queryKeys.projects.detail("private"), "company-1"];
+    const otherDetail = [...queryKeys.projects.detail("visible"), "company-2"];
+    const taskIndex = queryKeys.issues.listIndex("company-1");
     const policies = [{ scopeId: "private-root", amount: 150 }];
     client.setQueryData(key, { policies });
     client.setQueryData(otherCompany, { policies: [] });
+    client.setQueryData(rootSearch, [{ id: "private-root" }]);
+    client.setQueryData(selectedRoot, [{ id: "private-root" }]);
+    client.setQueryData(projects, [{ name: "Private project" }]);
+    client.setQueryData(detail, { name: "Private project", companyId: "company-1" });
+    client.setQueryData(otherDetail, { name: "Other project", companyId: "company-2" });
+    client.setQueryData(taskIndex, [{ id: "private-root" }]);
+    client.setQueryData(otherRootSearch, [{ id: "other-root" }]);
     __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
       action: "resource_membership.changed",
     }, { userId: "user-1", agentId: null });
     expect(client.getQueryData(key)).toBeUndefined();
     expect(client.getQueryData(otherCompany)).toEqual({ policies: [] });
+    expect(client.getQueryData(rootSearch)).toBeUndefined();
+    expect(client.getQueryData(selectedRoot)).toBeUndefined();
+    expect(client.getQueryData(projects)).toBeUndefined();
+    expect(client.getQueryData(detail)).toBeUndefined();
+    expect(client.getQueryData(otherDetail)).toMatchObject({ name: "Other project" });
+    expect(client.getQueryData(taskIndex)).toBeUndefined();
+    expect(client.getQueryData(otherRootSearch)).toEqual([{ id: "other-root" }]);
     client.clear();
   });
+  it.each([
+    { action: "company_member.updated", entityType: "company_membership" },
+    { action: "company_member.access_updated", entityType: "company_membership" },
+    { action: "company_membership.changed" },
+  ])("clears cached board authority on $action", (event) => {
+    const client = new QueryClient();
+    const key = queryKeys.access.currentBoardAccess;
+    client.setQueryData(key, { userId: "user-1", companyIds: ["company-1"] });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", event, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
+    client.clear();
+  });
+
   it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {
     const client = new QueryClient();
     const parent = queryKeys.issues.dependencyInvestigation("parent");

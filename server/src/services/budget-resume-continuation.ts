@@ -6,6 +6,7 @@ import { logActivity, publishActivity, type ActivityPublication } from "./activi
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { budgetCancellationScopePredicate } from "./heartbeat/budget-cancellation.js";
 import { AGENT_LIFECYCLE_STOP_REASON } from "./governance-pause-stop.js";
+import { retryRunTaskIssueId } from "./task-retry-eligibility.js";
 
 /**
  * Resuming after a budget hard stop continues the work that the stop
@@ -55,8 +56,7 @@ export type BudgetResumeDelivery = {
   requestRetry?: typeof import("./task-retry.js").requestTaskRetry;
 };
 
-const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.nativeIssueId}::text,
-  ${heartbeatRuns.taskLineageJson}->'pathIssueIds'->>0, ${heartbeatRuns.contextSnapshot}->>'issueId')`;
+const runIssueId = retryRunTaskIssueId();
 
 /**
  * Stamp every task run this scope's budget stop cancelled since the incident
@@ -309,7 +309,7 @@ async function deliverOne(db: Db, delivery: BudgetResumeDelivery, now: Date, run
   let receipt: Awaited<ReturnType<typeof requestTaskRetry>>;
   try {
     receipt = await requestTaskRetry({ db, companyId: run.companyId, issueId: run.issueId,
-      observedRunId: run.id, idempotencyKey: `budget-resume:${run.id}`, actorId: claim.actorUserId,
+      observedRunId: run.id, idempotencyKey: `budget-resume:${run.id}`, actorId: claim.actorUserId, reauthorize: true,
       ...(claim.actorSource ? { actorSource: claim.actorSource } : {}),
       ...(delivery.prepareChatRetry ? { prepareChatRetry: delivery.prepareChatRetry } : {}) });
   } catch (error) {

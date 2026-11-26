@@ -24,6 +24,7 @@ import * as schema from "@groktopus/db/schema/index";
 import { setupLiveEventsWebSocketServer } from "../realtime/live-events-ws.js";
 import { publishLiveEvent } from "../services/live-events.js";
 import { authorizationService, type AuthorizationActor } from "../services/authorization.js";
+import { accessService } from "../services/access.js";
 import { getHeartbeatRunReadDecisions } from "../services/heartbeat-run-privacy.js";
 import { startRecoveryPostgres } from "./helpers/recovery-postgres.js";
 
@@ -70,18 +71,24 @@ describe("live-event run read boundaries", () => {
     expect(await readTaskPanelActivations(db, companyId, run.id)).toEqual([]);
   });
 
-  it.each(["revoked", "expired"] as const)("stops company events when the browser session is %s", async (state) => {
+  it.each([
+    ["revoked", "ordinary activity"],
+    ["expired", "ordinary activity"],
+    ["revoked", "membership reset"],
+    ["expired", "membership reset"],
+  ] as const)("closes the %s browser session before sending %s", async (state, eventKind) => {
     const companyId = randomUUID();
     const userId = randomUUID();
     const sessionId = randomUUID();
     const now = new Date();
-    await db.insert(companies).values({ id: companyId, name: "Session fixture", issuePrefix: state.toUpperCase() });
+    const issuePrefix = `${eventKind === "membership reset" ? "M" : ""}${state.toUpperCase()}`;
+    await db.insert(companies).values({ id: companyId, name: "Session fixture", issuePrefix });
     await db.insert(authUsers).values({
       id: userId, email: `${userId}@example.test`, name: "Session fixture", createdAt: now, updatedAt: now,
     });
-    await db.insert(companyMemberships).values({
+    const [membership] = await db.insert(companyMemberships).values({
       companyId, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
+    }).returning({ id: companyMemberships.id });
     await db.insert(authSessions).values({
       id: sessionId, token: randomUUID(), userId, createdAt: now, updatedAt: now,
       expiresAt: new Date(now.getTime() + 60_000),
@@ -104,9 +111,13 @@ describe("live-event run read boundaries", () => {
       await expect.poll(() => received.length).toBe(1);
       if (state === "revoked") await db.delete(authSessions).where(eq(authSessions.id, sessionId));
       else await db.update(authSessions).set({ expiresAt: new Date(0) }).where(eq(authSessions.id, sessionId));
-      publishLiveEvent(activity);
-      await expect.poll(() => socket.readyState).toBe(WebSocket.CLOSED);
-      expect(received).toHaveLength(1);
+      publishLiveEvent(eventKind === "ordinary activity" ? activity : {
+        companyId,
+        type: "activity.logged",
+        payload: { entityType: "company_membership", entityId: membership!.id, action: "company_member.updated" },
+      });
+      await expect.poll(() => ({ readyState: socket.readyState, messages: received.length }))
+        .toEqual({ readyState: WebSocket.CLOSED, messages: 1 });
     } finally {
       socket.terminate();
       wss.close();
@@ -175,14 +186,65 @@ describe("live-event run read boundaries", () => {
       expect(activity(0)[1]!.payload).toEqual({ action: "resource_membership.changed" });
       expect(received[0]!.join("")).not.toContain(task!.id);
 
-      const [membership] = await db.update(companyMemberships).set({ status: "archived" })
-        .where(eq(companyMemberships.principalId, userId)).returning();
+      const [newlyPrivate] = await db.insert(projects).values({ companyId, name: "Changed audience project" }).returning();
+      await db.update(projects).set({ visibility: "private" }).where(eq(projects.id, newlyPrivate!.id));
       await logActivity(db, {
-        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
-        entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "project.updated",
+        entityType: "project", entityId: newlyPrivate!.id, details: { changedKeys: ["visibility"], becamePrivate: true },
       });
       await expect.poll(() => activity(0).length).toBe(3);
       expect(activity(0)[2]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(newlyPrivate!.id);
+
+      const [membership] = await db.update(companyMemberships).set({ membershipRole: "viewer" })
+        .where(eq(companyMemberships.principalId, userId)).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.updated",
+        entityType: "company_membership", entityId: membership!.id,
+        details: { principalId: userId, principalType: "user", membershipRole: "viewer" },
+      });
+      await expect.poll(() => activity(0).length).toBe(4);
+      expect(activity(0)[3]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.permissions_updated",
+        entityType: "company_membership", entityId: membership!.id, details: { grantCount: 1 },
+      });
+      await expect.poll(() => activity(0).length).toBe(5);
+      expect(activity(0)[4]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await db.update(companyMemberships).set({ status: "suspended" }).where(eq(companyMemberships.id, membership!.id));
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.access_updated",
+        entityType: "company_membership", entityId: membership!.id,
+        details: { principalId: userId, principalType: "user", status: "suspended" },
+      });
+      await expect.poll(() => activity(0).length).toBe(6);
+      expect(activity(0)[5]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await logActivity(db, {
+        companyId, actorType: "plugin", actorId: "membership-fixture-plugin", action: "company_member.updated_by_plugin",
+        entityType: "company_membership", entityId: membership!.id, details: { patch: { status: "suspended" } },
+      });
+      await expect.poll(() => activity(0).length).toBe(7);
+      expect(activity(0)[6]!.payload).toEqual({ action: "company_membership.changed" });
+
+      const [removedTask] = await db.insert(issues).values({
+        companyId, title: "Removed top-level task", status: "todo",
+      }).returning({ id: issues.id });
+      const audienceResetCount = () => activity(1).filter(event => event.payload.action === "resource_membership.changed").length;
+      const resetsBeforeRemoval = audienceResetCount();
+      await db.delete(issues).where(eq(issues.id, removedTask!.id));
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "issue.deleted",
+        entityType: "issue", entityId: removedTask!.id, details: { parentId: null },
+      });
+      await expect.poll(audienceResetCount).toBe(resetsBeforeRemoval + 1);
+      expect(received.flat().join("")).not.toContain(removedTask!.id);
+
+      await accessService(db).setUserCompanyAccess(userId, [], { actorUserId: unrelatedUserId });
+      await expect.poll(() => activity(0).length).toBe(8);
+      expect(activity(0)[7]!.payload).toEqual({ action: "company_membership.changed" });
       expect(received[0]!.join("")).not.toContain(membership!.id);
     } finally {
       sockets.forEach(socket => socket.terminate());

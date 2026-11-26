@@ -273,6 +273,26 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
       .where(and(eq(budgetPolicies.companyId, f.companyId), eq(budgetPolicies.scopeId, root.id)))).toHaveLength(1);
   });
 
+  it("allows exactly one create-only lifetime policy for the same root", async () => {
+    const f = await fixture();
+    const root = await f.makeIssue("Shared outcome");
+    const budgets = budgetService(db);
+    const actor = { type: "board" as const, source: "local_implicit" as const };
+    await budgets.upsertPolicy(f.companyId, { scopeType: "task_tree", scopeId: root.id,
+      windowKind: "calendar_month_utc", amount: 40 }, "local-board", actor);
+    const saves = await Promise.allSettled([100, 250].map(amount => budgets.upsertPolicy(f.companyId, {
+      scopeType: "task_tree", scopeId: root.id, windowKind: "lifetime", amount, createOnly: true,
+    }, "local-board", actor)));
+    const saved = saves.filter(result => result.status === "fulfilled");
+    expect(saved).toHaveLength(1);
+    expect(saves.find(result => result.status === "rejected")).toMatchObject({
+      reason: { status: 409, details: { code: "budget_policy_exists" } },
+    });
+    const overview = await budgets.overview(f.companyId, { actor });
+    expect(overview.policies.find(policy => policy.windowKind === "lifetime")?.amount).toBe(saved[0]!.value.amount);
+    expect(overview.policies.find(policy => policy.windowKind === "calendar_month_utc")?.amount).toBe(40);
+  });
+
   it("keeps a hidden root's active budget manageable and rejects stale incident decisions", async () => {
     const f = await fixture();
     const root = await f.makeIssue("Archived outcome");

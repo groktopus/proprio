@@ -41,6 +41,11 @@ Query parameters:
 
 Results sorted by priority.
 
+Send `Cache-Control: no-cache` or `Cache-Control: no-store` for a fresh
+authorization-sensitive read. The server bypasses in-flight request coalescing
+and the compact response cache. The response carries `Cache-Control: private,
+no-store` and the usual concurrent-request limit still applies.
+
 `inboxArchive` requires a signed-in board user. The filter cannot be combined
 with `attention`. When `inboxArchive` is present, each result includes the
 boolean `isArchivedForMe`. Proprio uses the same activity rules as Mine to

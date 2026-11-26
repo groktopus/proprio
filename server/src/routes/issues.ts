@@ -357,6 +357,7 @@ import {
 } from "../services/issues.js";
 import {
   loadParentChainWith,
+  lockIssuePrivacyTree,
   placeTaskParent,
   planParentChange,
   type IssueParentDepthPolicy,
@@ -3461,6 +3462,7 @@ async function coordinateIssueListGet(input: {
   companyId: string;
   requestKey: ReturnType<typeof issueListRequestKey>;
   allowTtlCache: boolean;
+  joinInflight?: boolean;
   retireOnCompanyChange?: boolean;
   diagnostics?: IssueListDiagnostics;
   compute: () => Promise<IssueListPreparedResponse>;
@@ -3485,7 +3487,8 @@ async function coordinateIssueListGet(input: {
     };
   }
 
-  const existing = issueListInflight.get(input.requestKey.key);
+  const joinInflight = input.joinInflight !== false;
+  const existing = joinInflight ? issueListInflight.get(input.requestKey.key) : undefined;
   if (existing) {
     existing.waiterCount += 1;
     const identicalInFlightCount = existing.waiterCount + 1;
@@ -3550,11 +3553,11 @@ async function coordinateIssueListGet(input: {
     waiterCount: 0,
     stormLogged: false,
   };
-  issueListInflight.set(input.requestKey.key, inflightEntry);
+  if (joinInflight) issueListInflight.set(input.requestKey.key, inflightEntry);
   // Mine reads its primary rows before its optional context has necessarily
   // settled. A mutation must make subsequent GETs read again, while this work
   // and its existing readers keep their original admission until completion.
-  const unsubscribe = input.retireOnCompanyChange
+  const unsubscribe = joinInflight && input.retireOnCompanyChange
     ? subscribeCompanyLiveEvents(input.companyId, (event) => {
       if (event.type !== "activity.logged" && event.type !== "heartbeat.run.queued" && event.type !== "heartbeat.run.status") return;
       if (issueListInflight.get(input.requestKey.key) === inflightEntry) {
@@ -9078,13 +9081,16 @@ export function issueRoutes(
         view,
       },
     });
+    const fresh = req.header("cache-control")?.split(",")
+      .some(directive => ["no-cache", "no-store"].includes(directive.trim().toLowerCase())) === true;
     const coordinated = await coordinateIssueListGet({
       req,
       companyId,
       requestKey,
-      // The new collection projections must reflect read/archive/undo mutations
-      // immediately. Keep in-flight coalescing and ETags, without a stale TTL body.
-      allowTtlCache: view === "compact" && !inboxArchive,
+      // Authorization-sensitive clients can require a new read while normal
+      // projections retain their in-flight coalescing and compact cache.
+      allowTtlCache: !fresh && view === "compact" && !inboxArchive,
+      joinInflight: !fresh,
       diagnostics: opts.issueListDiagnostics,
       compute: async () => {
         return prepareIssueListForActor(req, companyId, listFilters, view, { reportPagination: true });
@@ -9092,6 +9098,7 @@ export function issueRoutes(
     });
 
     res.setHeader("X-Proprio-Request-Cache", coordinated.cacheStatus);
+    if (fresh) res.setHeader("Cache-Control", "private, no-store");
     if (!coordinated.response) {
       const body = {
         error: "Too many concurrent issue-list requests for this actor/client",
@@ -9117,9 +9124,11 @@ export function issueRoutes(
       setIssueListPaginationHeaders(res, coordinated.response.pagination);
     }
     if (coordinated.response.kind === "compact") {
-      res.setHeader("Cache-Control", coordinated.response.cacheControl);
-      res.setHeader("ETag", coordinated.response.etag);
-      const etagMatched = requestMatchesEtag(
+      if (!fresh) {
+        res.setHeader("Cache-Control", coordinated.response.cacheControl);
+        res.setHeader("ETag", coordinated.response.etag);
+      }
+      const etagMatched = !fresh && requestMatchesEtag(
         req.header("if-none-match"),
         coordinated.response.etag,
       );
@@ -14374,15 +14383,14 @@ export function issueRoutes(
       if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
       const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
       if (!managedIssue) return;
-      const [grant] = await db
-        .update(issueAccessGrants)
-        .set({ revokedAt: new Date() })
-        .where(and(
+      const [grant] = await db.transaction(async tx => {
+        await lockIssuePrivacyTree(tx, issue.companyId);
+        return tx.update(issueAccessGrants).set({ revokedAt: new Date() }).where(and(
           eq(issueAccessGrants.id, req.params.grantId as string),
           eq(issueAccessGrants.issueId, managedIssue.id),
           isNull(issueAccessGrants.revokedAt),
-        ))
-        .returning();
+        )).returning();
+      });
       if (!grant) {
         res.status(404).json({ error: "Issue access grant not found" });
         return;

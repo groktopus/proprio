@@ -1054,6 +1054,9 @@ export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 export const BUDGET_METRICS = ["billed_cents"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 
+export const BUDGET_AMOUNT_MAX_CENTS = 2_147_483_647;
+export const BUDGET_POLICY_EXISTS_ERROR_CODE = "budget_policy_exists";
+
 export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 

@@ -39,6 +39,7 @@ import { notifyChatResponseAvailability } from "../chat-response-availability.js
 import { notifyChatInboundWakeNotices } from "../chat-inbound-wake-notice-notifications.js";
 import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { assertTaskRetryConversationAllowed, readTaskRetryIntent, readTaskRetryBoardMessageOrigin, retireSupersededTaskRetry, taskRetryMutationAllowed } from "../task-retry.js";
+import { loadCurrentCloudOwnerAuthority, type CurrentCloudOwnerAuthority } from "../cloud-tenant-authority.js";
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -2863,6 +2864,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     if (executionReconciliationWake && !issueId) return null;
     const durableRequest = opts.durableChatRequest;
     let taskRetryActorId: string | null = null;
+    let taskRetryCloudAuthority: CurrentCloudOwnerAuthority | null = null;
     delete enrichedContextSnapshot.boardMessageRetry;
     if (opts.taskRetryRequestId) {
       const [receipt] = await db.select().from(agentWakeupRequests).where(and(
@@ -2879,6 +2881,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       if (retry.chatActionId ? !chatRetry :
           opts.requestedByActorType !== "user" || retry.actorId !== opts.requestedByActorId) return null;
       taskRetryActorId = retry.actorId;
+      if (retry.actorSource === "cloud_tenant") taskRetryCloudAuthority = await loadCurrentCloudOwnerAuthority(retry.actorId);
       enrichedContextSnapshot.forceFreshSession = true;
       enrichedContextSnapshot.previousRunId = retry.sourceRunId;
       enrichedContextSnapshot.taskRetryRequestId = receipt.id;
@@ -3587,7 +3590,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 return { kind: "deferred" as const };
               };
               if (!await taskRetryMutationAllowed(tx as unknown as Db, { companyId: agent.companyId, issueId,
-                actorId: retry.actorId, actorSource: retry.actorSource }))
+                actorId: retry.actorId, actorSource: retry.actorSource, cloudAuthority: taskRetryCloudAuthority }))
                 return declineRetry("retry_authority_denied", "The user who requested Retry can no longer change this task.");
               if (retry.boardMessageOrigin) {
                 const origin = await readTaskRetryBoardMessageOrigin(tx as unknown as Db, { companyId: agent.companyId,
@@ -3741,7 +3744,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   retry.actorId !== taskRetryActorId || retry.sourceRunId !== durableRequest.failedRunRetry?.failedRunId)
                 throw new FailedChatRunRetryAuthorizationError();
               if (!await taskRetryMutationAllowed(tx as unknown as Db, { companyId: agent.companyId, issueId,
-                actorId: retry.actorId, actorSource: retry.actorSource })) return { kind: "deferred" as const };
+                actorId: retry.actorId, actorSource: retry.actorSource, cloudAuthority: taskRetryCloudAuthority })) return { kind: "deferred" as const };
             }
           } else {
             if (

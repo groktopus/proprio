@@ -2,10 +2,14 @@ import { randomUUID } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agents, agentWakeupRequests, budgetIncidents, budgetPolicies, budgetResumeClaims, companies, createDb, heartbeatRuns, issues,
+  agents, agentWakeupRequests, authUsers, budgetIncidents, budgetPolicies, budgetResumeClaims, companies,
+  companyMemberships, createDb, heartbeatRuns, issues,
 } from "@groktopus/db";
 import { budgetService } from "./budgets.js";
 import { heartbeatService } from "./heartbeat.js";
+import { heldTaskRetryRefusals } from "./task-retry-eligibility.js";
+import { readFreshWorkspaceReadiness } from "./fresh-workspace-continuation.js";
+import { taskInterruptionPresentation } from "./task-interruption-presentation.js";
 import { HttpError } from "../errors.js";
 import {
   deliverBudgetResumeContinuations, hasDeliverableBudgetResume, hasPendingBudgetResume, markBudgetCancelledWorkForResume,
@@ -114,15 +118,16 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     expect(await continuations(scope.company.id)).toHaveLength(2);
   });
 
-  it("resumes only runs carrying the stopped task tree's historical lineage", async () => {
+  it.each(["direct raise", "keep paused then raise", "private descendant", "access revoked before dispatch"] as const)(
+    "resumes eligible runs carrying the stopped task tree's historical lineage after %s", async mode => {
     const [company] = await db.insert(companies).values({ name: "Tree resume",
       issuePrefix: `B${randomUUID().slice(0, 4).toUpperCase()}` }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Worker" }).returning();
     const [root, child, unrelated, stoppedByCompany, legacyTask] = await db.insert(issues).values([
-      { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null },
+      { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null, assigneeAgentId: agent.id },
       { companyId: company.id, title: "Unrelated" },
       { companyId: company.id, title: "Stopped by company" },
-      { companyId: company.id, title: "Legacy child", identifier: "LEGACY-64" },
+      { companyId: company.id, title: "Legacy child", identifier: `${company.issuePrefix}-64`, assigneeAgentId: agent.id, status: "in_progress" },
     ]).returning();
     const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
       scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true }).returning();
@@ -147,22 +152,66 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
           startupCancellation: { requestedAt: new Date().toISOString() },
         } },
       { companyId: company.id, agentId: agent.id, status: "cancelled", runtimeMode: "legacy",
-        contextSnapshot: { taskKey: legacyTask.identifier },
+        contextSnapshot: { issueId: legacyTask.identifier, taskKey: legacyTask.identifier },
         taskLineageJson: { version: 1, pathIssueIds: [legacyTask.id, root.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
     ]).returning();
     await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
 
-    const claimed = await markBudgetCancelledWorkForResume(db, { companyId: company.id, scopeType: "task_tree",
-      scopeId: root.id, incidentId: incident.id, incidentOpenedAt: incident.createdAt, actorUserId: "local-board" });
-    expect(claimed.sort()).toEqual([inside.id, legacy.id].sort());
+    const sessionEditor = mode === "private descendant" || mode === "access revoked before dispatch";
+    const editorId = sessionEditor ? randomUUID() : "local-board";
+    const actor = { type: "board" as const, userId: editorId,
+      source: sessionEditor ? "session" as const : "local_implicit" as const };
+    if (sessionEditor) {
+      await db.insert(authUsers).values({ id: editorId, name: "Budget editor", email: `${editorId}@example.test`,
+        createdAt: new Date(), updatedAt: new Date() });
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: editorId, membershipRole: "operator", status: "active" });
+    }
+    if (mode === "private descendant") await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, child.id));
+    if (mode === "keep paused then raise") {
+      await budgetService(db).resolveIncident(company.id, incident.id, { action: "keep_paused" },
+        editorId, actor.source, { actor });
+      expect(await claimOf(inside.id)).toBeUndefined();
+    }
+    await budgetService(db).upsertPolicy(company.id, {
+      scopeType: "task_tree", scopeId: root.id, amount: 100, windowKind: "lifetime",
+    }, editorId, actor);
+    expect(await claimOf(inside.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
+    expect(await claimOf(legacy.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
+    const [closed] = await db.select({ status: budgetIncidents.status }).from(budgetIncidents).where(eq(budgetIncidents.id, incident.id));
+    expect(closed?.status).toBe(mode === "keep paused then raise" ? "dismissed" : "resolved");
     expect(await claimOf(outside.id)).toBeUndefined();
     expect(await claimOf(companyStop.id)).toBeUndefined();
-    const requestRetry = vi.fn(async () => ({ accepted: true, requestId: null }));
-    await deliverBudgetResumeContinuations(db, { requestRetry: requestRetry as never });
-    expect(requestRetry).toHaveBeenCalledWith(expect.objectContaining({ issueId: legacyTask.id, observedRunId: legacy.id }));
-    expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered" });
+    await deliverBudgetResumeContinuations(db);
+    const wakes = await continuations(company.id);
+    expect(wakes.map(wake => wake.payload?.issueId).sort()).toEqual(
+      (mode === "private descendant" ? [legacyTask.id] : [child.id, legacyTask.id]).sort());
+    expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered", requestId: expect.any(String) });
+    expect(await claimOf(inside.id)).toMatchObject({ state: mode === "private descendant" ? "abandoned" : "delivered" });
+    if (mode === "direct raise") {
+      const wake = wakes.find(candidate => candidate.payload?.issueId === legacyTask.id)!;
+      await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, issueId: legacyTask.id,
+        status: "succeeded", createdAt: new Date(Date.now() - 86_400_000) });
+      expect(await taskInterruptionPresentation(db, legacyTask)).toMatchObject({ observedRunId: legacy.id });
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, agent.id));
+      await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, status: "running" });
+      await heartbeatService(db).resumeTaskRetry(company.id, wake.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(stored?.runId).toEqual(expect.any(String));
+      const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, stored!.runId!));
+      expect(successor).toMatchObject({ status: "queued", issueId: legacyTask.id, contextSnapshot: { previousRunId: legacy.id } });
+      expect(await readFreshWorkspaceReadiness(db, successor!)).toMatchObject({ mode: "fresh_isolated_workspace", sourceRunId: legacy.id });
+    }
+    if (mode === "access revoked before dispatch") {
+      const wake = wakes.find(candidate => candidate.payload?.issueId === legacyTask.id)!;
+      await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, legacyTask.id));
+      await heartbeatService(db).resumeTaskRetry(company.id, wake.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(stored).toMatchObject({ runId: null, payload: { executionWait: { reason: "retry_authority_denied" } } });
+      expect((await heldTaskRetryRefusals(db, company.id, [legacyTask.id])).get(legacyTask.id)).toBe("retry_authority_denied");
+    }
     const receipt = mockLogActivity.mock.calls.find(([, activity]) =>
       activity.action === "budget.cancelled_work_continued" && activity.entityId === legacyTask.id)?.[1];
     expect(receipt?.details).toMatchObject({ interruptedRunId: legacy.id });
@@ -184,6 +233,39 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     await deliverBudgetResumeContinuations(db);
     expect(await continuations(scope.company.id)).toEqual([expect.objectContaining({
       payload: expect.objectContaining({ issueId: task.issue.id }) })]);
+  });
+
+  it("rechecks current Cloud owner elevation for a private task in deferred budget recovery", async () => {
+    const scope = await seedScope("cloud owner");
+    const task = await seedTask(scope);
+    const cloudUserId = randomUUID();
+    await db.insert(companyMemberships).values({ companyId: scope.company.id, principalType: "user",
+      principalId: cloudUserId, status: "active", membershipRole: "owner" });
+    await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, task.issue.id));
+    vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "fixture-cloud-authority");
+    vi.stubEnv("PROPRIO_CLOUD_API_ORIGIN", "https://cloud.example.test");
+    vi.stubEnv("PROPRIO_CLOUD_STACK_ID", "fixture-stack-id");
+    vi.stubEnv("PROPRIO_STACK_SLUG", "budget-retry");
+    vi.stubEnv("PROPRIO_MANAGED_CONFIG", JSON.stringify({ v: 1, mode: "cloud", catalogVersion: "test",
+      features: { enableOwnerInstanceAdmin: true }, plugins: { autoInstall: [] } }));
+    const portfolio = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({ stacks: [{ stackSlug: "budget-retry", role: "owner", isCurrent: true }] }),
+    ).mockResolvedValueOnce(Response.json({ stacks: [{ stackSlug: "budget-retry", role: "member", isCurrent: true }] }));
+    try {
+      await budgetService(db).resolveIncident(scope.company.id, scope.incident.id,
+        { action: "raise_budget_and_resume", amount: 500 }, cloudUserId, "cloud_tenant");
+      await deliverBudgetResumeContinuations(db);
+      const [wake] = await continuations(scope.company.id);
+      expect(wake?.requestedByActorId).toBe(cloudUserId);
+      await heartbeatService(db).resumeTaskRetry(scope.company.id, wake!.id);
+      const [stored] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
+      expect(stored).toMatchObject({ runId: null, payload: { executionWait: { reason: "retry_authority_denied" } } });
+      expect(portfolio).toHaveBeenCalledTimes(2);
+      expect(portfolio.mock.calls[0]?.[1]?.headers).toMatchObject({ "x-proprio-cloud-user-id": cloudUserId });
+    } finally {
+      portfolio.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("dispatches the continuation through the real Retry path into a queued run", async () => {
