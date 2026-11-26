@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { agents, budgetReservations, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
-import { centsToUnits, unitsToCents } from "@groktopus/shared";
+import { centsToUnits, isUuidLike, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
@@ -10,6 +10,8 @@ import { withBudgetSpan } from "./budget-tracing.js";
 import type { ActivityPublication } from "./activity-log.js";
 import { readClaimedNativeStopRecovery } from "./native-runtime/native-cancellation-request.js";
 import { extendOwnNativeRecoveryClaimInTransaction, readOwnNativeRecoveryClaimLease } from "./native-runtime/native-execution-lease.js";
+import { loadAncestorIssueIds, lockIssuePrivacyTree } from "./issue-hierarchy.js";
+import { loadRunBoundIssue, runBoundIssueContextColumn, runBoundIssueReference } from "./issue-creation-source.js";
 
 /** Native finalization takes its coordinator before issue/run locks. Recovery
  * admission uses the same order after the company accounting lock, so its
@@ -90,10 +92,14 @@ export async function recheckRunBudgetReservationInTransaction(
  * fence a duplicate reservation. */
 export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string) {
   const result = await withBudgetSpan("budget.admission.reserve", () => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
-    await lockBudgetAdmissionControls(tx, companyId, projectId);
-    const [hint] = await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)));
+    const [hint] = await tx.select({
+      agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId,
+      contextSnapshot: runBoundIssueContextColumn,
+    }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)));
     if (!hint) throw notFound("Run not found");
+    // Match the tree-before-project order used by project visibility changes.
+    if (runBoundIssueReference(hint)) await lockIssuePrivacyTree(tx, companyId, "shared");
+    await lockBudgetAdmissionControls(tx, companyId, projectId);
     await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, hint.agentId))).for("share");
     await lockRunBudgetRecoveryOwnerInTransaction(tx, companyId, runId, recoveryLeaseOwner);
     const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId))).for("update");
@@ -156,7 +162,12 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     // A zero-valued row also fences duplicate dispatch when estimates are off.
     const [reservation] = await tx.insert(budgetReservations).values({ companyId, runId, agentId: run.agentId, projectId,
       amountCents: unitsToCents(amount), providerStartedAt: new Date() }).returning();
+    const taskReference = run.taskLineageJson ? null : runBoundIssueReference(run);
+    const taskId = taskReference && !isUuidLike(taskReference)
+      ? (await loadRunBoundIssue(tx, run))?.id : taskReference;
+    const pathIssueIds = await loadAncestorIssueIds(tx, companyId, taskId);
     await tx.update(heartbeatRuns).set({ costAccountingPending: true,
+      ...(pathIssueIds.length ? { taskLineageJson: { version: 1, pathIssueIds } } : {}),
       usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ accountingReceiptReady: false, ledgerScope: { ...(run.usageJson?.ledgerScope as object ?? {}), ...ledgerScope, projectId } })}::jsonb`,
     }).where(eq(heartbeatRuns.id, runId));
     await queueBudgetEvaluation(tx, { companyId, agentId: run.agentId, projectId });

@@ -2,7 +2,7 @@ import { assertAgentInteraction } from "../agent-interaction-policy.js";
 import { authorizationDeniedDetails } from "../authorization.js";
 import { budgetServiceInTransaction } from "../budgets.js";
 import { resolveTaskWatchdogMutationScope, taskWatchdogScopeAllowsIssueMutation } from "../task-watchdog-scope.js";
-import { resolveNewTaskParent } from "../issue-hierarchy.js";
+import { lockIssuePrivacyTree, resolveNewTaskParent } from "../issue-hierarchy.js";
 import { DOWNLOAD_ARTIFACT, DOWNLOAD_ARTIFACT_DEFINITION, downloadArtifactSchema, createArtifactInstaller, type ArtifactInstaller } from "./artifact-transfer.js";
 import { GENERATE_IMAGE, GENERATE_IMAGE_DEFINITION, GENERATE_IMAGE_MODEL, generateImageSchema, generatedImageDestination, imageChargeCostEvent, imageIdentity, ImageGenerationProviderError, priceGeneratedImage, requestOpenAiImage, uncertainImageCharge, writeGeneratedImageLocally } from "./generate-image-tool.js";
 import { aiConnectionService } from "../ai-connections.js";
@@ -3302,7 +3302,7 @@ export class ProprioRunnerToolAuthority {
     return this.db.transaction(async tx => {
       if (operationId === "create_task") {
         await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, this.binding.companyId)).for("no key update");
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${this.binding.companyId}`}, 0))`);
+        await lockIssuePrivacyTree(tx, this.binding.companyId);
       }
       return mutate(tx);
     });

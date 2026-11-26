@@ -146,7 +146,7 @@ import {
 } from "../services/index.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PROPRIO_CORE_SKILL_KEYS } from "../services/company-skills.js";
-import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, omitHeartbeatRunAccountingFields } from "../services/run-secret-redaction.js";
 import { agentBudgetPage, assertAuthenticated, assertBoard, assertCompanyAccess, COMPANY_BUDGETS_PAGE, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
@@ -6513,7 +6513,7 @@ export function agentRoutes(
       });
     }
 
-    res.status(202).json(run);
+    res.status(202).json(omitHeartbeatRunAccountingFields(run));
   };
 
   router.post("/agents/:id/wakeup", validate(wakeAgentSchema), async (req, res) => {
@@ -6639,7 +6639,7 @@ export function agentRoutes(
       });
     }
 
-    res.status(202).json(run);
+    res.status(202).json(omitHeartbeatRunAccountingFields(run));
   });
 
   router.post("/agents/:id/claude-login", async (req, res) => {

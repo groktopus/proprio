@@ -2,7 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { executionWorkspaces, issues } from "@groktopus/db";
 import { parseIssueExecutionWorkspaceSettings } from "./execution-workspace-policy.js";
-import { loadParentChain } from "./issue-hierarchy.js";
+import { loadAncestorIssueIds } from "./issue-hierarchy.js";
 
 type LineageReader = Pick<Db, "select" | "execute">;
 
@@ -99,17 +99,6 @@ export async function loadTaskLineageIssueIds(
   ]);
   ids.delete(task.id);
   return [...ids];
-}
-
-/** Ids of `parentId` and every ancestor above it (company-scoped). */
-export async function loadAncestorIssueIds(
-  db: Pick<Db, "execute">,
-  companyId: string,
-  parentId: string | null | undefined,
-): Promise<string[]> {
-  if (!parentId) return [];
-  const chain = await loadParentChain(db, companyId, parentId);
-  return chain.map((row) => row.id);
 }
 
 /**
