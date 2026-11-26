@@ -17,16 +17,6 @@ type StopRun = Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "age
 type StopRecoveryOwner = Pick<typeof nativeRunFinalizations.$inferSelect,
   "runId" | "companyId" | "issueId" | "phase" | "resultId" | "leaseOwner" | "leaseExpiresAt" | "controllerGeneration" | "attempt" | "recoveryState" | "recoveryHistory">;
 
-export function hasRecordedStopAcknowledgement(run: StopRun) {
-  if (record(run.resultJson?.executionCancellation).state === "acknowledged") return true;
-  const intent = record(run.resultJson?.nativeCancellation);
-  return intent.schema === "proprio.native-cancellation.v1" && intent.runId === run.id
-    && intent.companyId === run.companyId && intent.issueId === run.nativeIssueId
-    && intent.scope === "run" && intent.reasonCode === "cancellation_run_only"
-    && intent.dispatchState === "acknowledged" && intent.dispatched === true
-    && typeof intent.intentAuditId === "string" && typeof intent.acknowledgementAuditId === "string";
-}
-
 export function hasPendingNativeRunStop(run: StopRun): boolean {
   const intent = record(record(run.resultJson).nativeCancellation);
   return run.runtimeMode === "native" && !!run.nativeIssueId

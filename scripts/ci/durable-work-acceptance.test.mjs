@@ -42,7 +42,7 @@ test("unrelated docs and board changes skip durable-work qualification", () => {
   assert.equal(requiresDurableWorkAcceptance(["doc/GOAL.md", "ui/src/pages/Inbox.tsx", "packages/proprio-runner/docs/tutorials/replay.md"]), false);
 });
 
-test("the smoke workflow gates its verdict on the routing output and Linux job", () => {
+test("the smoke workflow gates its verdict on the routing outputs and applicable jobs", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/stability-smoke.yml", import.meta.url), "utf8");
   const routeOutput = "$" + "{{ steps.route.outputs.applicable }}";
   const applicability = "$" + "{{ needs.route-durable-work.outputs.applicable }}";
@@ -50,12 +50,15 @@ test("the smoke workflow gates its verdict on the routing output and Linux job",
   assert.ok(workflow.includes("applicable: " + routeOutput));
   assert.ok(workflow.includes("APPLICABLE: " + applicability));
   assert.ok(workflow.includes("DURABLE_WORK_RESULT: " + linuxResult));
+  assert.ok(workflow.includes("BOARD_ACCESSIBILITY_APPLICABLE: $" + "{{ needs.route-durable-work.outputs.board-accessibility }}"));
+  assert.ok(workflow.includes("BOARD_ACCESSIBILITY_RESULT: $" + "{{ needs.board-accessibility.result }}"));
   const gate = workflow.split("- name: Require smoke tests and applicable qualification").at(-1).split("run: |\n")[1];
   assert.ok(gate, "workflow must contain the smoke gate");
   function verdict(applicable, result, overrides = {}) {
     return spawnSync("bash", ["-e", "-c", gate], {
       env: { ...process.env, APPLICABLE: String(applicable), DURABLE_WORK_RESULT: result,
-        ROUTING_RESULT: "success", STABILITY_RESULT: "success", ...overrides },
+        ROUTING_RESULT: "success", STABILITY_RESULT: "success",
+        BOARD_ACCESSIBILITY_APPLICABLE: "false", BOARD_ACCESSIBILITY_RESULT: "skipped", ...overrides },
     }).status;
   }
   const relevant = requiresDurableWorkAcceptance(["packages/db/src/migrate.ts"]);
@@ -69,4 +72,18 @@ test("the smoke workflow gates its verdict on the routing output and Linux job",
   assert.notEqual(verdict(unrelated, "failure"), 0);
   assert.notEqual(verdict(relevant, "success", { ROUTING_RESULT: "failure" }), 0);
   assert.notEqual(verdict(relevant, "success", { STABILITY_RESULT: "failure" }), 0);
+
+  function boardVerdict(applicable, result) {
+    return verdict(unrelated, "skipped", {
+      BOARD_ACCESSIBILITY_APPLICABLE: applicable,
+      BOARD_ACCESSIBILITY_RESULT: result,
+    });
+  }
+  assert.equal(boardVerdict("true", "success"), 0);
+  assert.equal(boardVerdict("false", "skipped"), 0);
+  for (const result of ["", "skipped", "cancelled", "failure"]) {
+    assert.notEqual(boardVerdict("true", result), 0);
+  }
+  assert.notEqual(boardVerdict("", "skipped"), 0);
+  assert.notEqual(boardVerdict("false", "failure"), 0);
 });

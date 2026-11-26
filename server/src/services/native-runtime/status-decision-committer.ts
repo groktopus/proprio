@@ -97,6 +97,7 @@ import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
 import { NATIVE_TOOL_RECEIPT_LIMIT_CODE } from "./native-tool-receipt-limit.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import { nativeCaseHandoffStatusAuthorityIsCurrent } from "./native-case-handoff.js";
 
 export class NativeStatusRaceError extends Error {
@@ -957,12 +958,11 @@ async function materializeDecisionEffect(input: {
     failAt("recovery_materialization", input.failpoint);
     const handoffCompletionEvidence = effect.cause === "completion_evidence_incomplete"
       ? await readAcceptedCaseHandoffCompletionEvidence({
-        db: input.tx as unknown as Db,
+        db: input.tx,
         companyId: input.companyId,
         issueId: input.issue.id,
         runId: input.runId,
         decisionId: input.decisionId,
-        reasonCode: effect.cause,
       })
       : null;
     const recovery = await issueRecoveryActionService(
@@ -982,9 +982,12 @@ async function materializeDecisionEffect(input: {
       evidence: {
         runId: input.runId,
         decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? { caseHandoffCompletion: handoffCompletionEvidence } : {}),
+        ...(handoffCompletionEvidence ? {
+          caseHandoffCompletion: { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        } : {}),
       },
       nextAction: effect.nextAction,
+      supersedeOnIdentityChange: Boolean(handoffCompletionEvidence),
       wakePolicy: null,
       maxAttempts: 3,
     });
@@ -1743,11 +1746,12 @@ export async function commitNativeStatusDecision(input: {
   // the issue lock so no original status gate can still materialize effects.
   let reasonCode = input.decision.reasonCode;
   let verifiedMergedPullRequests: ReadonlySet<string> | undefined;
+  let pullRequestVerificationFailed = false;
   if (input.decision.statusAction === "done") {
     try { verifiedMergedPullRequests = await verifyNativePullRequestCompletion(input.db, input); }
     catch (error) {
-      if (error instanceof NativePullRequestCompletionError) throw new NativeStatusRaceError();
-      throw error;
+      if (!(error instanceof NativePullRequestCompletionError)) throw error;
+      pullRequestVerificationFailed = true;
     }
   }
   const publications: ActivityPublication[] = [];
@@ -1793,20 +1797,22 @@ export async function commitNativeStatusDecision(input: {
     const [originRun] = await tx.select({ agentId: heartbeatRuns.agentId, contextSnapshot: heartbeatRuns.contextSnapshot,
       wakeupRequestId: heartbeatRuns.wakeupRequestId }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
-    const caseHandoffAuthority = await nativeCaseHandoffStatusAuthorityIsCurrent(tx as unknown as Db, {
-      companyId: input.companyId, issue, runAgentId: originRun?.agentId ?? null,
+    const caseHandoffAuthority = await nativeCaseHandoffStatusAuthorityIsCurrent(tx, {
+      companyId: input.companyId, issue, runId: input.runId, runAgentId: originRun?.agentId ?? null,
       runWakeupRequestId: originRun?.wakeupRequestId ?? null, contextSnapshot: originRun?.contextSnapshot,
     });
     if (caseHandoffAuthority === false) {
-      reasonCode = "case_handoff_superseded";
-      input = { ...input, decision: { ...input.decision, statusAction: "preserve", toStatus: issue.status as NativeStatusDecision["toStatus"],
-        reasonCode, unblockDescriptor: null, effects: [] }, requireReassessmentSource: undefined,
-        supersededExternalReviewRequests: undefined, requireExternalChatResponseWaitAuthorization: undefined,
-        requirePreservedResultFinalization: undefined, requirePlanWaitSource: undefined, requireMonitorWait: undefined,
-        requireMonitorDelivery: undefined, requirePreservedMonitorWait: undefined, requireSupersededMonitorWait: undefined,
-        requireNoPendingChildCompletion: undefined, requireModelRejectionOwner: undefined, requireProviderFailureOwner: undefined,
-        requireBoardResponseWaitSource: undefined, requireBoardResponseWaitOrigin: undefined, reviewResponsePresentation: undefined };
+      reasonCode = CASE_HANDOFF_SUPERSEDED_REASON;
+      input = {
+        db: input.db, companyId: input.companyId, issueId: input.issueId, runId: input.runId,
+        assessmentId: input.assessmentId, priorStatus: input.priorStatus, priorStatusVersion: input.priorStatusVersion,
+        priorDecisionId: input.priorDecisionId, supersedesCommittedDecisionId: input.supersedesCommittedDecisionId,
+        requireReassessmentSource: input.requireReassessmentSource, failpoint: input.failpoint,
+        decision: { policyVersion: input.decision.policyVersion, statusAction: "preserve",
+          toStatus: issue.status as NativeStatusDecision["toStatus"], reasonCode, unblockDescriptor: null, effects: [] },
+      };
     } else {
+      if (pullRequestVerificationFailed) throw new NativeStatusRaceError();
       if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
         throw new Error("native_model_rejection_owner_required");
       }
@@ -1838,7 +1844,7 @@ export async function commitNativeStatusDecision(input: {
           (issue.executionRunId !== null && issue.executionRunId !== input.runId))) {
         throw new NativeStatusRaceError();
       }
-      if (expected.retiredAutomaticReview) {
+      if (caseHandoffAuthority !== false && expected.retiredAutomaticReview) {
         try {
           const [barrier] = await tx.select({ status: workspaceOperations.status }).from(workspaceOperations)
             .where(and(eq(workspaceOperations.companyId, input.companyId),

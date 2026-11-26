@@ -1,13 +1,15 @@
+import { projectTaskCompletionRecovery } from "./native-runtime/case-handoff-completion-evidence.js";
 import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { notifyIssueGraphRecovery } from "./issue-recovery-notifications.js";
 import { notifyNativeRecoveryNotices } from "./native-recovery-notice-notifications.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
 import { writeExecutionControl } from "./execution-control-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
-import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, workspaceOperations } from "@groktopus/db";
-import { isUuidLike } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, isUuidLike, requiresExecutionReconciliation } from "@groktopus/shared";
+import { conflict } from "../errors.js";
 import type {
   IssueRecoveryAction,
   IssueRecoveryActionKind,
@@ -26,10 +28,6 @@ type IssueRecoveryActionRow = typeof issueRecoveryActions.$inferSelect;
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type DbOrTransaction = Db | DbTransaction;
 
-function asDatabaseDate(value: string | Date | null) {
-  return typeof value === "string" ? new Date(value) : value;
-}
-
 function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
   const budget = evidence.recoveryBudget;
   return Boolean(
@@ -38,43 +36,6 @@ function isRecoveryBudgetExhausted(evidence: Record<string, unknown>) {
       !Array.isArray(budget) &&
       (budget as Record<string, unknown>).state === "exhausted",
   );
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-/** Case offer details have a stricter visibility boundary than the task card.
- * Keep the full receipt in durable storage, but only project generic task-local
- * gap counts into the task recovery read model. */
-function taskRecoveryEvidence(row: IssueRecoveryActionRow): { evidence: Record<string, unknown>; nextAction: string } {
-  const evidence = { ...row.evidence };
-  const receipt = asRecord(evidence.caseHandoffCompletion);
-  if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") {
-    return { evidence, nextAction: readModelNextAction(row) };
-  }
-  delete evidence.caseHandoffCompletion;
-  const caseHandoff = asRecord(receipt.caseHandoff);
-  const assessment = asRecord(receipt.assessment);
-  const criteria = Array.isArray(assessment.criteriaNeedingWork)
-    ? assessment.criteriaNeedingWork.map(asRecord) : [];
-  const reason = (item: Record<string, unknown>) => typeof item.reasonCode === "string" ? item.reasonCode : "";
-  const unmetCriterionCount = criteria.filter(item => ["criterion_claim_missing", "criterion_reported_not_satisfied", "criterion_claim_not_satisfied"].includes(reason(item))).length;
-  const evidenceIssueCount = criteria.filter(item => ["criterion_evidence_missing", "criterion_evidence_rejected", "criterion_evidence_unverifiable"].includes(reason(item))).length;
-  const hasPrerequisites = typeof caseHandoff.prerequisiteCount === "number"
-    ? caseHandoff.prerequisiteCount > 0
-    : Array.isArray(caseHandoff.prerequisites) && caseHandoff.prerequisites.length > 0;
-  evidence.completionRecovery = { schema: "proprio.task-completion-recovery.v1", prerequisiteChecklist: hasPrerequisites ? "review_in_case" : "none",
-    unmetCriterionCount, evidenceIssueCount };
-  const guidance = [
-    hasPrerequisites ? "Review the prerequisite checklist in the authorized Case view." : null,
-    unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
-    evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
-  ].filter((item): item is string => Boolean(item));
-  const opening = isRecoveryBudgetExhausted(evidence)
-    ? `Completion recovery stopped after ${row.attemptCount} attempts. Review the accepted handoff in the Case before assigning further work.`
-    : "Review the task completion assessment.";
-  return { evidence, nextAction: guidance.length ? `${opening} ${guidance.join(" ")}` : opening };
 }
 
 export type UpsertIssueRecoveryActionInput = {
@@ -124,6 +85,7 @@ export type ResolveIssueRecoveryActionInput = {
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
   sourceTerminal?: boolean;
+  boardConfirmedWithdrawalRelease?: boolean;
 };
 
 export const SOURCE_TERMINAL_RESOLUTION = "source_terminal";
@@ -137,7 +99,9 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
 }
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
-  const recovery = taskRecoveryEvidence(row);
+  const exhaustedAttempts = isRecoveryBudgetExhausted(row.evidence) ? row.attemptCount : undefined;
+  const recovery = projectTaskCompletionRecovery(row.evidence, exhaustedAttempts)
+    ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
   return {
     id: row.id,
     companyId: row.companyId,
@@ -281,12 +245,12 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     }
   }
 
-  async function getActiveForIssue(
+  async function getActiveRow(
     companyId: string,
     sourceIssueId: string,
     dbOrTx: DbOrTransaction = db,
-  ): Promise<IssueRecoveryAction | null> {
-    const row = await dbOrTx
+  ): Promise<IssueRecoveryActionRow | null> {
+    return dbOrTx
       .select()
       .from(issueRecoveryActions)
       .where(
@@ -299,10 +263,17 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
       .orderBy(desc(issueRecoveryActions.updatedAt))
       .limit(1)
       .then((rows) => rows[0] ?? null);
-    if (!row) return null;
+  }
+
+  async function projectActiveRow(row: IssueRecoveryActionRow, dbOrTx: DbOrTransaction = db) {
     const action = toReadModel(row);
-    await projectNativeRunActivity(companyId, [action], dbOrTx);
+    await projectNativeRunActivity(row.companyId, [action], dbOrTx);
     return action;
+  }
+
+  async function getActiveForIssue(companyId: string, sourceIssueId: string, dbOrTx: DbOrTransaction = db) {
+    const row = await getActiveRow(companyId, sourceIssueId, dbOrTx);
+    return row ? projectActiveRow(row, dbOrTx) : null;
   }
 
   async function listActiveForIssues(companyId: string, sourceIssueIds: string[]) {
@@ -378,7 +349,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
   // status stays satisfied because only the new row is active at commit.
   async function supersedePriorAndInsert(
     input: UpsertIssueRecoveryActionInput,
-    priorActionId: string,
+    priorAction: Pick<IssueRecoveryActionRow, "id" | "cause">,
     ownerType: IssueRecoveryActionOwnerType,
     now: Date,
     retryCount: number,
@@ -402,7 +373,8 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
           })
           .where(
             and(
-              eq(issueRecoveryActions.id, priorActionId),
+              eq(issueRecoveryActions.id, priorAction.id),
+              eq(issueRecoveryActions.cause, priorAction.cause),
               inArray(issueRecoveryActions.status, [...ACTIVE_RECOVERY_ACTION_STATUSES]),
             ),
           )
@@ -428,9 +400,15 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     input: UpsertIssueRecoveryActionInput,
     retryCount = 0,
   ): Promise<IssueRecoveryAction> {
-    const existing = await getActiveForIssue(input.companyId, input.sourceIssueId);
+    const existing = await getActiveRow(input.companyId, input.sourceIssueId);
     const now = new Date();
-    if (existing && input.createOnly) return existing;
+    if (existing && input.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE && requiresExecutionReconciliation(existing.cause)) {
+      throw conflict("Resolve the task’s existing execution hold before withdrawing the handoff.",
+        { code: "case_handoff_withdrawal_existing_hold", recoveryActionId: existing.id });
+    }
+    if (existing && (input.createOnly || existing.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE)) {
+      return projectActiveRow(existing);
+    }
     if (!existing) {
       const [source] = await db.select({ status: issues.status }).from(issues)
         .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.sourceIssueId))).limit(1);
@@ -455,7 +433,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
         input.supersedeOnIdentityChange &&
         (existing.cause !== input.cause || existing.fingerprint !== input.fingerprint)
       ) {
-        return supersedePriorAndInsert(input, existing.id, ownerType, now, retryCount);
+        return supersedePriorAndInsert(input, existing, ownerType, now, retryCount);
       }
       // `maxAttempts` is an execution budget, not display metadata. Once the
       // same recovery identity consumes it, retain one inspectable board-owned
@@ -476,7 +454,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
               sql`${issueRecoveryActions.evidence}->'workspaceOwnerStop' is null`)).returning(), { companyId: input.companyId, issueId: input.sourceIssueId });
           if (updated) return toReadModel(updated);
         }
-        return existing;
+        return projectActiveRow(existing);
       }
       const nextAttemptCount =
         input.attemptCount ?? existing.attemptCount + 1;
@@ -605,10 +583,10 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
                 ? existing.maxAttempts
                 : input.maxAttempts,
             timeoutAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.timeoutAt)
+              ? existing.timeoutAt
               : input.timeoutAt ?? null,
             lastAttemptAt: input.preserveExistingOwner
-              ? asDatabaseDate(existing.lastAttemptAt)
+              ? existing.lastAttemptAt
               : input.lastAttemptAt ?? now,
             outcome: input.preserveExistingOwner ? existing.outcome : null,
             resolutionNote: input.preserveExistingOwner ? existing.resolutionNote : null,
@@ -664,6 +642,9 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     ];
     if (input.actionId) {
       predicates.push(eq(issueRecoveryActions.id, input.actionId));
+    }
+    if (!input.actionId || !input.boardConfirmedWithdrawalRelease) {
+      predicates.push(ne(issueRecoveryActions.cause, CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE));
     }
     if (input.kind) {
       predicates.push(eq(issueRecoveryActions.kind, input.kind));
