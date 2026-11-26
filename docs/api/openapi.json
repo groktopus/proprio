@@ -137646,7 +137646,7 @@
           "Cases"
         ],
         "summary": "Read completion recovery for an accepted Case handoff revision",
-        "description": "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history.",
+        "description": "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
         "responses": {
           "200": {
             "description": "Success",
@@ -137859,6 +137859,16 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
             "content": {
               "application/json": {
                 "schema": {

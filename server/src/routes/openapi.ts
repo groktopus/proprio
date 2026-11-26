@@ -14055,10 +14055,10 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
 registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history", tags: ["Cases"],
   summary: "Read completion recovery for an accepted Case handoff revision",
-  description: "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history.",
+  description: "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
   responses: { 200: { ...r.ok(caseHandoffRecoveryHistorySchema), headers: { "Cache-Control": { schema: { enum: ["private, no-store"] } } } },
-    401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests } });
 registry.registerPath({ method: "get", path: "/api/companies/{companyId}/case-handoff-offers", tags: ["Cases"],
   summary: "List your pending case handoff offers",
   description: "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",

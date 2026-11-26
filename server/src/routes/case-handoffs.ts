@@ -18,9 +18,12 @@ export function caseHandoffRoutes(db: Db) {
   const handoffRateLimit = (limit: number, message: string) => rateLimit({
     windowMs: 60_000,
     limit,
-    keyGenerator: req => req.actor?.type === "agent" && req.actor.companyId && req.actor.agentId
-      ? `agent:${req.actor.companyId}:${req.actor.agentId}`
-      : ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0"),
+    keyGenerator: req => {
+      const actor = req.actor;
+      if (actor?.type === "agent" && actor.companyId && actor.agentId) return `agent:${actor.companyId}:${actor.agentId}`;
+      if (actor?.type === "board" && actor.userId) return `user:${actor.userId}`;
+      return ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0");
+    },
     standardHeaders: "draft-7",
     legacyHeaders: false,
     message: { error: message },
@@ -51,7 +54,8 @@ export function caseHandoffRoutes(db: Db) {
     const caseId = await readableCaseId(req);
     res.json(await service.list(req.actor, caseId, listSchema.parse(req.query)));
   });
-  router.get("/cases/:caseId/handoffs/:handoffId/recovery-history", async (req, res) => {
+  const recoveryHistoryRateLimit = handoffRateLimit(30, "Completion recovery history request limit exceeded");
+  router.get("/cases/:caseId/handoffs/:handoffId/recovery-history", recoveryHistoryRateLimit, async (req, res) => {
     assertAuthenticated(req);
     res.setHeader("Cache-Control", "private, no-store");
     res.json(await service.recoveryHistory(req.actor, req.params.caseId as string, req.params.handoffId as string));

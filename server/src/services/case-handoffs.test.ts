@@ -298,6 +298,20 @@ describe("durable same-task case handoffs", () => {
     await request(app).get(path).expect(404);
   });
 
+  it("limits recovery-history requests per actor", async () => {
+    const app = express();
+    app.use((req, _res, next) => {
+      req.actor = { ...board, userId: req.get("x-fixture-viewer") ?? "history-viewer" };
+      next();
+    });
+    app.use("/api", caseHandoffRoutes(db));
+    app.use(errorHandler);
+    const path = `/api/cases/${randomUUID()}/handoffs/${randomUUID()}/recovery-history`;
+    for (let attempt = 0; attempt < 30; attempt++) await request(app).get(path).expect(404);
+    await request(app).get(path).expect(429, { error: "Completion recovery history request limit exceeded" });
+    await request(app).get(path).set("x-fixture-viewer", "another-viewer").expect(404);
+  });
+
   function withdrawalRequest(actor: AuthorizationActor, f: Awaited<ReturnType<typeof versionedOffer>>) {
     const app = express();
     app.use(express.json());
