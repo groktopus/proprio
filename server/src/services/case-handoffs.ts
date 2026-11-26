@@ -21,6 +21,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { documentService } from "./documents.js";
+import { withAuthorizationReadSnapshot } from "./authorization-read-scope.js";
 import { readCaseHandoffRecoveryHistory } from "./case-handoff-recovery-history.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
@@ -705,19 +706,24 @@ export function caseHandoffService(db: Db) {
     },
 
     async recoveryHistory(actor: AuthorizationActor, caseId: string, handoffId: string) {
-      await assertEnabled(db);
-      const caseRow = await visible(actor, caseId);
-      if (!isUuidLike(handoffId)) throw notFound("Handoff not found");
-      const [handoff] = await db.select().from(caseHandoffs).where(and(
-        eq(caseHandoffs.companyId, caseRow.companyId), eq(caseHandoffs.caseId, caseId),
-        eq(caseHandoffs.id, handoffId),
-      )).limit(1);
-      if (!handoff) throw notFound("Handoff not found");
-      const [access] = await authorizationService(db).decideReads(actor, [{
-        type: "issue", companyId: caseRow.companyId, issueId: handoff.issueId,
-      }]);
-      if (!access?.allowed) throw notFound("Handoff not found");
-      return readCaseHandoffRecoveryHistory(db, handoff);
+      return db.transaction(transaction => withAuthorizationReadSnapshot(async () => {
+        const tx = transaction as unknown as Db;
+        await assertEnabled(tx);
+        const caseRow = await visible(actor, caseId, tx);
+        if (!isUuidLike(handoffId)) throw notFound("Handoff not found");
+        const [handoff] = await tx.select().from(caseHandoffs).where(and(
+          eq(caseHandoffs.companyId, caseRow.companyId), eq(caseHandoffs.caseId, caseId),
+          eq(caseHandoffs.id, handoffId),
+        )).limit(1);
+        if (!handoff) throw notFound("Handoff not found");
+        const access = authorizationService(tx);
+        const [taskRead, completionRead] = await access.decideReads(actor, [{
+          type: "issue", companyId: caseRow.companyId, issueId: handoff.issueId,
+        }, { type: "company", companyId: caseRow.companyId }]);
+        if (!taskRead?.allowed) throw notFound("Handoff not found");
+        if (!completionRead?.allowed) throw forbidden("Completion history is outside this actor's authorization boundary");
+        return readCaseHandoffRecoveryHistory(tx, handoff);
+      }), { isolationLevel: "repeatable read", accessMode: "read only" });
     },
 
     async recordRecipientDecision(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffRecipientDecisionInput) {

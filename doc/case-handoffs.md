@@ -190,8 +190,8 @@ earlier assessment remains under its original offer.
 
 `GET /api/cases/:caseId/handoffs/:handoffId/recovery-history` reads at most three
 retained completion-recovery records for that accepted revision. The caller
-needs both Case access and read access to the original task. Decision,
-assessment, and run references identify the saved evidence. The response
+needs company activity read permission, Case access, and read access to the
+original task. Run and decision references identify the saved attempts. The response
 includes criterion and evidence outcomes. Stored evidence bodies and provider
 references stay private. The board requests recovery history when the disclosure
 opens and removes the details when it closes.

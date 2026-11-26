@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { casesApi } from "@/api/cases";
-import { classifyError } from "@/api/errors";
 import { AgentIdentity } from "@/components/AgentIdentity";
-import { Button } from "@/components/ui/button";
+import { QueryErrorState } from "@/components/QueryView";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { queryKeys } from "@/lib/queryKeys";
+import { useAuthorizedHistory } from "@/lib/use-authorized-history";
+import { shortenEvidenceId } from "@/lib/utils";
 import { Link } from "@/lib/router";
 import type { CaseAgentMap } from "./CaseWorkSummary";
 
@@ -32,9 +32,10 @@ function recoveryLabel(value: string | null) {
   return recoveryLabels[value] ?? value.replaceAll("_", " ").slice(0, 120);
 }
 
-export function AcceptedRecoveryHistory({ caseId, handoffId, recipientId, acceptedRevision, agents }: {
+export function AcceptedRecoveryHistory({ caseId, handoffId, issueId, recipientId, acceptedRevision, agents }: {
   caseId: string;
   handoffId: string;
+  issueId: string;
   recipientId: string;
   acceptedRevision: number;
   agents?: CaseAgentMap;
@@ -45,46 +46,27 @@ export function AcceptedRecoveryHistory({ caseId, handoffId, recipientId, accept
       <ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground transition-transform duration-(--motion-duration-fast) group-open/recovery:rotate-90 motion-reduce:transition-none" />
       Recovery history <span className="text-xs font-normal text-muted-foreground">Accepted requirements · revision {acceptedRevision}</span>
     </summary>
-    {open && <RecoveryHistory caseId={caseId} handoffId={handoffId} recipientId={recipientId} agents={agents} />}
+    {open && <RecoveryHistory caseId={caseId} handoffId={handoffId} issueId={issueId} recipientId={recipientId} agents={agents} />}
   </details>;
 }
 
-function RecoveryHistory({ caseId, handoffId, recipientId, agents }: {
+function RecoveryHistory({ caseId, handoffId, issueId, recipientId, agents }: {
   caseId: string;
   handoffId: string;
+  issueId: string;
   recipientId: string;
   agents?: CaseAgentMap;
 }) {
-  const queryClient = useQueryClient();
-  const queryKey = queryKeys.cases.handoffRecoveryHistory(caseId, handoffId);
-  const query = useQuery({
-    queryKey,
-    refetchOnMount: "always",
-    retry: false,
-    queryFn: async ({ signal }) => {
-      try {
-        return await casesApi.getHandoffRecoveryHistory(caseId, handoffId, signal);
-      } catch (error) {
-        const kind = classifyError(error);
-        if (!signal.aborted && (kind === "auth" || kind === "forbidden" || kind === "not_found")) {
-          queryClient.setQueryData(queryKey, { entries: [] });
-        }
-        throw error;
-      }
-    },
-  });
-  const waiting = query.isPending || query.fetchStatus !== "idle";
-  const entries = query.isSuccess && !waiting ? query.data.entries : undefined;
+  const history = useAuthorizedHistory(queryKeys.cases.handoffRecoveryHistory(caseId, handoffId, issueId),
+    signal => casesApi.getHandoffRecoveryHistory(caseId, handoffId, signal), { entries: [] });
+  const entries = history.data?.entries;
   return (
-    <div className="space-y-2 py-2 pl-6">
-      {waiting ? <p role="status" className="text-sm text-muted-foreground">Loading recovery history…</p> : null}
-      {!waiting && query.isError ? <div className="space-y-2" role="alert">
-        <p className="text-sm text-destructive">Recovery history couldn’t be loaded.</p>
-        <Button size="sm" variant="ghost" onClick={() => void query.refetch()}>Retry</Button>
-      </div> : null}
+    <div className="min-w-0 space-y-2 wrap-anywhere py-2 pl-6">
+      {history.isLoading ? <p role="status" className="text-sm text-muted-foreground">Loading recovery history…</p> : null}
+      {history.error ? <QueryErrorState size="inline" error={history.error} action="load recovery history" onRetry={history.onRetry} /> : null}
       {entries?.length === 0 ? <p className="text-sm text-muted-foreground">No recovery actions were recorded for this revision.</p> : null}
       {entries?.map(entry => <div key={entry.id} className="space-y-2 text-sm">
-        <p className="font-medium">{recoveryLabel(entry.status)} · {recoveryLabel(entry.cause)}</p>
+        <p className="font-medium">{recoveryLabel(entry.status)} · Incomplete completion evidence</p>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>Owner</span>
           {entry.ownerAgentId
@@ -109,9 +91,9 @@ function RecoveryHistory({ caseId, handoffId, recipientId, agents }: {
         {entry.attempts.length > 0 ? <ol className="space-y-1 pl-3 text-xs text-muted-foreground">
           {entry.attempts.map(attempt => <li key={attempt.decisionId} className="flex flex-wrap items-center gap-2">
             <Link to={`/agents/${recipientId}/runs/${attempt.runId}`} className={`font-mono text-foreground underline underline-offset-2 ${ANALYTICS_MASK_CLASS}`}>
-              Run {attempt.runId.slice(0, 8)}
+              Run {shortenEvidenceId(attempt.runId)}
             </Link>
-            <span title={attempt.decisionId}>Decision <code className={ANALYTICS_MASK_CLASS}>{attempt.decisionId.slice(0, 8)}</code></span>
+            <span title={attempt.decisionId}>Decision <code className={ANALYTICS_MASK_CLASS}>{shortenEvidenceId(attempt.decisionId)}</code></span>
             <span>{recoveryLabel(attempt.reasonCode)}</span>
           </li>)}
         </ol> : null}

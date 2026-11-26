@@ -87,6 +87,7 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
         {open && handoff.recipientDecision?.outcome === "accepted" && handoff.offerContract ? <AcceptedRecoveryHistory
           caseId={handoff.caseId}
           handoffId={handoff.id}
+          issueId={handoff.issueId}
           recipientId={handoff.recipientDecision.actorId}
           acceptedRevision={handoff.offerContract.requirementRevision.revision}
           agents={agents}

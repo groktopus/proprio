@@ -52,9 +52,9 @@ export function caseHandoffRoutes(db: Db) {
     res.json(await service.list(req.actor, caseId, listSchema.parse(req.query)));
   });
   router.get("/cases/:caseId/handoffs/:handoffId/recovery-history", async (req, res) => {
-    res.setHeader("Cache-Control", "no-store");
-    const caseId = await readableCaseId(req);
-    res.json(await service.recoveryHistory(req.actor, caseId, req.params.handoffId as string));
+    assertAuthenticated(req);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(await service.recoveryHistory(req.actor, req.params.caseId as string, req.params.handoffId as string));
   });
   router.post("/cases/:caseId/handoffs/:handoffId/decision", decisionRateLimit, validate(caseHandoffRecipientDecisionSchema), async (req, res) => {
     const caseId = await readableCaseId(req);

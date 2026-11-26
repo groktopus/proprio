@@ -93,10 +93,11 @@ describe("read-only CaseDetail", () => {
   let container: HTMLDivElement;
   let root: Root;
   const clients: QueryClient[] = [];
-  function render() {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  function render(gcTime = 0) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime } } });
     clients.push(client);
     flushSync(() => root.render(<QueryClientProvider client={client}><CaseDetail /></QueryClientProvider>));
+    return client;
   }
   beforeEach(() => {
     vi.clearAllMocks();
@@ -426,10 +427,11 @@ describe("read-only CaseDetail", () => {
         { runId: "run-1", decisionId: "decision-1", assessmentId: "assessment-1", assessedContractId: "contract-1", reasonCode: "completion_evidence_incomplete" },
       ] }] };
     cases.getHandoffRecoveryHistory.mockResolvedValue(history);
-    render(); await waitFor(() => expect(container.textContent).toContain("verification"));
+    const client = render(Infinity); await waitFor(() => expect(container.textContent).toContain("verification"));
     expect(cases.getHandoffRecoveryHistory).not.toHaveBeenCalled();
     flushSync(() => { const disclosure = container.querySelector<HTMLDetailsElement>('[aria-label="Case handoffs"] li details')!; disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
     await waitFor(() => expect(Array.from(document.body.querySelectorAll("summary")).some(item => item.textContent?.includes("Recovery history"))).toBe(true));
+    expect(cases.getHandoffRecoveryHistory).not.toHaveBeenCalled();
     const recoverySummary = Array.from(document.body.querySelectorAll("summary")).find(item => item.textContent?.includes("Recovery history"))!;
     flushSync(() => { const disclosure = recoverySummary.parentElement as HTMLDetailsElement; disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
     await waitFor(() => expect(container.textContent).toContain("Incomplete completion evidence"));
@@ -441,13 +443,26 @@ describe("read-only CaseDetail", () => {
     expect(container.querySelector('a[href$="/agents/agent-2/runs/run-1"]')).toBeTruthy();
     expect(container.textContent).not.toContain("Supply the report");
 
-    cases.getHandoffRecoveryHistory.mockRejectedValue(new ApiError("Access changed", 403, {}));
+    let deny!: (error: unknown) => void;
+    cases.getHandoffRecoveryHistory.mockImplementation(() => new Promise((_, reject) => { deny = reject; }));
+    const cacheKey = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", accepted.issueId);
     const disclosure = recoverySummary.parentElement as HTMLDetailsElement;
     flushSync(() => { disclosure.open = false; disclosure.dispatchEvent(new Event("toggle")); });
     await waitFor(() => expect(container.textContent).not.toContain("Attach the report"));
     flushSync(() => { disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
-    await waitFor(() => expect(container.textContent).toContain("Recovery history couldn’t be loaded."));
+    await waitFor(() => expect(container.textContent).toContain("Loading recovery history"));
+    expect(client.getQueryData(cacheKey)).toEqual(history);
     expect(container.textContent).not.toContain("Attach the report");
+    deny(new ApiError("Access changed", 403, {}));
+    await waitFor(() => expect(container.querySelector('[data-query-view="error"]')).not.toBeNull());
+    expect(client.getQueryData(cacheKey)).toEqual({ entries: [] });
+    expect(container.textContent).not.toContain("Attach the report");
+    expect(container.textContent).not.toContain("Retry");
+
+    cases.getHandoffRecoveryHistory.mockRejectedValue(new ApiError("Temporary failure", 500, {}));
+    flushSync(() => { disclosure.open = false; disclosure.dispatchEvent(new Event("toggle")); });
+    flushSync(() => { disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(container.querySelector('[data-query-view="error"] button')).not.toBeNull());
     cases.getHandoffRecoveryHistory.mockResolvedValue(history);
     click(button("Retry"));
     await waitFor(() => expect(container.textContent).toContain("Attach the report"));

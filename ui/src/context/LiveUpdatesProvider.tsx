@@ -1623,7 +1623,7 @@ function invalidateActivityQueries(
   const decisionAudienceChanged = action?.startsWith("issue_access_grant.") ||
     action?.startsWith("resource_membership.") ||
     action?.startsWith("company_membership.") ||
-    action?.startsWith("membership.") || action?.includes("privacy");
+    action?.startsWith("membership.") || action === "project.access_member_removed" || action?.includes("privacy");
   if (decisionAudienceChanged) {
     void queryClient.resetQueries({
       queryKey: ["issues", "activity"],
@@ -1649,6 +1649,13 @@ function invalidateActivityQueries(
     queryClient.invalidateQueries({ queryKey: ["issues", "decision-receipts"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "chat-handoffs"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "pending-questions"] });
+  }
+  if (entityType === "issue" && entityId &&
+      (action === "issue.status_decision_recorded" || action === "issue.recovery_action_resolved")) {
+    void queryClient.invalidateQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history" && query.queryKey[5] === entityId,
+    });
   }
   const ownActorActivity =
     (actorType === "user" &&

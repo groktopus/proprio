@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { issueDocumentKeySchema, upsertIssueDocumentSchema } from "./validators/issue.js";
+import { issueDocumentKeySchema, issueRecoveryActionReadModelSchema, upsertIssueDocumentSchema } from "./validators/issue.js";
 
 /** Preserve the author's workflow text; blank text cannot define a workflow. */
 export const caseWorkflowDocumentTextSchema = z.string().min(1).max(200_000).regex(/\S/, "Workflow document text must not be blank")
@@ -60,20 +60,10 @@ export interface CaseHandoffRecipientDecision {
 }
 
 export const caseHandoffRecoveryHistorySchema = z.object({
-  entries: z.array(z.object({
-    id: z.string().uuid(),
-    status: z.string(),
-    ownerType: z.string(),
-    ownerAgentId: z.string().uuid().nullable(),
-    ownerUserId: z.string().nullable(),
-    cause: z.string(),
-    nextAction: z.string(),
-    attemptCount: z.number().int().nonnegative(),
-    maxAttempts: z.number().int().nullable(),
-    outcome: z.string().nullable(),
-    resolutionNote: z.string().nullable(),
-    decisionId: z.string().uuid(),
-    assessmentId: z.string().uuid(),
+  entries: z.array(issueRecoveryActionReadModelSchema.pick({
+    id: true, status: true, ownerType: true, ownerAgentId: true, ownerUserId: true, nextAction: true,
+    attemptCount: true, maxAttempts: true, outcome: true, resolutionNote: true,
+  }).extend({
     assessedRevision: z.number().int().positive(),
     criteria: z.array(z.object({
       criterionId: z.string(),
@@ -85,8 +75,6 @@ export const caseHandoffRecoveryHistorySchema = z.object({
     attempts: z.array(z.object({
       runId: z.string().uuid(),
       decisionId: z.string().uuid(),
-      assessmentId: z.string().uuid(),
-      assessedContractId: z.string().uuid(),
       reasonCode: z.string(),
     })),
   })),

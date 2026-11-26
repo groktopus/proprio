@@ -137646,7 +137646,7 @@
           "Cases"
         ],
         "summary": "Read completion recovery for an accepted Case handoff revision",
-        "description": "Requires enableCases, access to the Case, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history.",
+        "description": "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history.",
         "responses": {
           "200": {
             "description": "Success",
@@ -137665,10 +137665,22 @@
                             "format": "uuid"
                           },
                           "status": {
-                            "type": "string"
+                            "type": "string",
+                            "enum": [
+                              "active",
+                              "escalated",
+                              "resolved",
+                              "cancelled"
+                            ]
                           },
                           "ownerType": {
-                            "type": "string"
+                            "type": "string",
+                            "enum": [
+                              "agent",
+                              "user",
+                              "board",
+                              "system"
+                            ]
                           },
                           "ownerAgentId": {
                             "type": "string",
@@ -137679,11 +137691,9 @@
                             "type": "string",
                             "nullable": true
                           },
-                          "cause": {
-                            "type": "string"
-                          },
                           "nextAction": {
-                            "type": "string"
+                            "type": "string",
+                            "minLength": 1
                           },
                           "attemptCount": {
                             "type": "integer",
@@ -137691,23 +137701,27 @@
                           },
                           "maxAttempts": {
                             "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
                             "nullable": true
                           },
                           "outcome": {
                             "type": "string",
+                            "enum": [
+                              "restored",
+                              "handed_back",
+                              "owner_completed",
+                              "delegated",
+                              "false_positive",
+                              "blocked",
+                              "escalated",
+                              "cancelled"
+                            ],
                             "nullable": true
                           },
                           "resolutionNote": {
                             "type": "string",
                             "nullable": true
-                          },
-                          "decisionId": {
-                            "type": "string",
-                            "format": "uuid"
-                          },
-                          "assessmentId": {
-                            "type": "string",
-                            "format": "uuid"
                           },
                           "assessedRevision": {
                             "type": "integer",
@@ -137777,14 +137791,6 @@
                                   "type": "string",
                                   "format": "uuid"
                                 },
-                                "assessmentId": {
-                                  "type": "string",
-                                  "format": "uuid"
-                                },
-                                "assessedContractId": {
-                                  "type": "string",
-                                  "format": "uuid"
-                                },
                                 "reasonCode": {
                                   "type": "string"
                                 }
@@ -137792,8 +137798,6 @@
                               "required": [
                                 "runId",
                                 "decisionId",
-                                "assessmentId",
-                                "assessedContractId",
                                 "reasonCode"
                               ]
                             }
@@ -137805,14 +137809,11 @@
                           "ownerType",
                           "ownerAgentId",
                           "ownerUserId",
-                          "cause",
                           "nextAction",
                           "attemptCount",
                           "maxAttempts",
                           "outcome",
                           "resolutionNote",
-                          "decisionId",
-                          "assessmentId",
                           "assessedRevision",
                           "criteria",
                           "attempts"
@@ -137822,6 +137823,15 @@
                   },
                   "required": [
                     "entries"
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "enum": [
+                    "private, no-store"
                   ]
                 }
               }

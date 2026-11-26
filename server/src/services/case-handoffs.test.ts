@@ -245,7 +245,7 @@ describe("durable same-task case handoffs", () => {
     };
     const [old] = await db.insert(issueRecoveryActions).values([
       { ...recovery, fingerprint: "old", evidence: { runId, decisionId, caseHandoffCompletion: receipt } },
-      { ...recovery, fingerprint: "unrelated", evidence: { caseHandoffCompletion: {
+      { ...recovery, fingerprint: "unrelated", evidence: { runId, decisionId, caseHandoffCompletion: {
         ...receipt, caseHandoff: { ...receipt.caseHandoff, requirementsDigest: "different-revision" },
       } } },
     ]).returning();
@@ -253,25 +253,38 @@ describe("durable same-task case handoffs", () => {
     const result = await request(app).get(path).expect(200);
     expect(result.body.entries).toEqual([expect.objectContaining({
       id: old!.id, status: "cancelled", ownerType: "agent", ownerAgentId: f.engineer,
-      outcome: "cancelled", resolutionNote: recovery.resolutionNote, decisionId, assessmentId, attemptCount: 1, maxAttempts: 3,
-      attempts: [expect.objectContaining({ runId, decisionId, assessmentId })],
+      outcome: "cancelled", resolutionNote: recovery.resolutionNote, attemptCount: 1, maxAttempts: 3,
+      attempts: [{ runId, decisionId, reasonCode: receipt.decision.statusDecisionReasonCode }],
       criteria: [{ criterionId: "verified", requirement: "Verification passes", outcome: "missing", reasonCode: "criterion_evidence_missing",
         evidence: [{ outcome: "missing", reasonCode: "event_missing" }] }],
     })]);
     expect(result.text).not.toContain("private event body");
-    expect(result.headers["cache-control"]).toBe("no-store");
+    expect(result.headers["cache-control"]).toBe("private, no-store");
+    expect(result.body.entries[0]).not.toHaveProperty("cause");
+    expect(result.body.entries[0]).not.toHaveProperty("assessmentId");
+    expect(result.body.entries[0]).not.toHaveProperty("decisionId");
 
     const { attempts: _attempts, ...saved } = receipt;
     const oldDecisionId = randomUUID();
-    await db.update(issueRecoveryActions).set({ evidence: { runId, caseHandoffCompletion: {
-      ...saved, decision: { ...saved.decision, id: oldDecisionId },
-      assessment: { ...saved.assessment, assessedContractId: f.contract.id },
-    } } }).where(eq(issueRecoveryActions.id, old!.id));
+    await db.update(issueRecoveryActions).set({
+      status: "escalated", attemptCount: 3, nextAction: "Choose a replacement run or provider configuration.",
+      evidence: { runId, recoveryBudget: { state: "exhausted" }, caseHandoffCompletion: {
+        ...saved, taskRemedy: "publish_task_document", decision: { ...saved.decision, id: oldDecisionId },
+        assessment: { ...saved.assessment, assessedContractId: f.contract.id },
+      } },
+    }).where(eq(issueRecoveryActions.id, old!.id));
     const historical = await request(app).get(path).expect(200);
     expect(historical.body.entries).toEqual([expect.objectContaining({
-      decisionId: oldDecisionId, assessmentId,
-      attempts: [expect.objectContaining({ runId, decisionId: oldDecisionId, assessmentId, assessedContractId: f.contract.id })],
+      nextAction: expect.stringContaining("Completion recovery stopped after 3 attempts. Review the assessment before assigning further work."),
+      attempts: [{ runId, decisionId: oldDecisionId, reasonCode: receipt.decision.statusDecisionReasonCode }],
     })]);
+    expect(historical.body.entries[0].nextAction).toContain("Publish the requested task document");
+    expect(historical.text).not.toContain("Choose a replacement run");
+
+    actor = { ...recipient, agentId: f.triage, keyId: randomUUID(),
+      keyScope: { kind: "task_bridge", parentIssueId: f.first.taskId } };
+    expect(await canActorReadCase(db, actor, f.first.caseId)).toBe(true);
+    await request(app).get(path).expect(403);
     actor = { ...recipient, companyId: randomUUID() };
     await request(app).get(path).expect(404);
 
