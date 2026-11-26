@@ -1,3 +1,4 @@
+import { armCrashPointForTest, CrashPointReached } from "@groktopus/shared/crash-points";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -5,6 +6,7 @@ import {
   costEvents,
   activityLog,
   agents,
+  approvals,
   agentRuntimeState,
   agentWakeupRequests,
   companySkills,
@@ -25,10 +27,13 @@ import {
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueApprovals,
   issueComments,
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
+  issueRecoveryDeferrals,
+  issueRecoveryFullPasses,
   issueThreadInteractions,
   issueTreeHolds,
   issues,
@@ -44,7 +49,12 @@ import { runningProcesses } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
 import * as workspacePreparation from "../services/heartbeat/workspace-preparation.js";
+import type { WakeupOptions } from "../services/heartbeat/run-preparation.js";
 import { WorkspaceBusyDeferral } from "../services/heartbeat/retries.js";
+import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { assignedWorkSweep } from "../services/recovery/assigned-work-sweep.js";
+import { recoveryService } from "../services/recovery/service.js";
+import { registerIssueRecoveryWork } from "../services/recovery/work.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -153,6 +163,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issueTreeHolds);
     await db.delete(statusDecisionEffects);
     await db.delete(statusDecisions);
@@ -1084,6 +1096,281 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     // Once the stall's action is no longer current, the retry waits for the blocker like any other.
     await db.update(issueRecoveryActions).set({ outcome: "restored" }).where(eq(issueRecoveryActions.id, action.id));
     expect(await retryGate(replacement)).toMatchObject({ allowed: false, errorCode: "issue_dependencies_blocked" });
+
+  });
+
+  it("dispatches one diagnostic turn through the normal assigned-work check", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    const optionalSiblingId = randomUUID();
+    const siblingAgentId = randomUUID();
+    const earlier = new Date(Date.now() - 10 * 60_000);
+    await db.insert(companies).values({
+      id: companyId, name: "Proprio", issuePrefix: "WAKE", defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
+    });
+    await db.insert(agents).values([
+      { id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+        adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {} },
+      { id: siblingAgentId, companyId, name: "Sibling owner", role: "engineer", status: "active", adapterType: "codex_local" },
+    ]);
+    await db.insert(issues).values([
+      { id: parentId, companyId, title: "Waiting parent", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
+      { id: childId, companyId, title: "Stalled child", status: "blocked", parentId, createdAt: earlier, updatedAt: earlier },
+      { id: optionalSiblingId, companyId, title: "Independent child", status: "in_progress", parentId, assigneeAgentId: siblingAgentId },
+    ]);
+    const [siblingRun] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: siblingAgentId, status: "running", invocationSource: "assignment",
+      contextSnapshot: { issueId: optionalSiblingId },
+    }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
+    const probe = recoveryService(db, { enqueueWakeup: heartbeat.wakeup }).assignedWork;
+
+    await probe.checkIssue({ companyId, issueId: parentId });
+    await heartbeat.drainActiveRunExecutions();
+    await probe.checkIssue({ companyId, issueId: parentId });
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      sql`${agentWakeupRequests.idempotencyKey} like 'issue_blocker_stalled:diagnosis:%'`,
+    ));
+    expect(wakes).toHaveLength(1);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const [continued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id));
+    expect(continued?.status).toBe("succeeded");
+    expect(continued?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true, dependencyDiagnosis: true });
+    const [child] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, childId));
+    expect(child?.status).toBe("blocked");
+    const [sibling] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, siblingRun!.id));
+    expect(sibling?.status).toBe("running");
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, siblingRun!.id));
+  });
+
+  it("replays a diagnosis interrupted before enqueue after a recent full recovery pass", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const blockerId = randomUUID();
+    const earlier = new Date(Date.now() - 20 * 60_000);
+    await db.insert(companies).values({
+      id: companyId, name: "Proprio", issuePrefix: "DIAGRESUME", defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
+    });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Investigator", role: "engineer",
+      status: "active", adapterType: "codex_local", runtimeConfig: { heartbeat: { wakeOnDemand: true } },
+      createdAt: earlier, updatedAt: earlier });
+    await db.insert(issues).values([
+      { id: issueId, companyId, title: "Waiting task", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
+      { id: blockerId, companyId, title: "Stalled dependency", status: "blocked", createdAt: earlier, updatedAt: earlier },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    await db.insert(issueRecoveryFullPasses).values({ companyId, queue: "assigned-work-invariant",
+      startedAt: new Date(Date.now() - 60_000) });
+    const interrupted = assignedWorkSweep(db, { enqueueWakeup: heartbeat.wakeup });
+    const disarm = armCrashPointForTest("issue.dependency_diagnosis.after_claim_before_wake");
+    try {
+      await expect(interrupted.checkIssue({ companyId, issueId })).rejects.toBeInstanceOf(CrashPointReached);
+    } finally {
+      disarm();
+    }
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+
+    const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, canReconcile: () => true,
+      onError: error => { throw error; } });
+    try {
+      const resumed = registerIssueRecoveryWork(db, coordinator, {
+        assignedWork: assignedWorkSweep(db, { enqueueWakeup: heartbeat.wakeup }),
+        stranded: async () => {}, orphanBlockers: async () => {}, recoveryActions: async () => {},
+        dependencies: async () => ({ enqueueFailed: 0 }), locks: async () => {}, watchdogs: async () => ({ incomplete: 0 }),
+        schedulingSuppressed: async () => false,
+      }, () => true);
+      await resumed.ready;
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 8_000)).toBe(true);
+      await heartbeat.drainActiveRunExecutions();
+    } finally {
+      await coordinator.stop();
+    }
+    const claims = await db.select({ details: activityLog.details }).from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
+    const wakes = await db.select({ key: agentWakeupRequests.idempotencyKey }).from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(claims).toHaveLength(1);
+    expect(wakes).toHaveLength(1);
+    expect(claims[0]!.details).toMatchObject({ attempt: 1, outcome: "queued", idempotencyKey: wakes[0]!.key });
+  }, 15_000);
+
+  it("persists a retry deadline before enqueue and retries a refused diagnosis only when due", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const blockerId = randomUUID();
+    let now = new Date();
+    const earlier = new Date(now.getTime() - 10 * 60_000);
+    await db.insert(companies).values({ id: companyId, name: "Proprio", issuePrefix: "DIAGRETRY" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Investigator", role: "engineer",
+      status: "active", adapterType: "codex_local", runtimeConfig: { heartbeat: { wakeOnDemand: true } } });
+    await db.insert(issues).values([
+      { id: issueId, companyId, title: "Waiting task", status: "in_progress", assigneeAgentId: agentId, createdAt: earlier, updatedAt: earlier },
+      { id: blockerId, companyId, title: "Stalled dependency", status: "blocked", createdAt: earlier, updatedAt: earlier },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    const observedDeadlines: Date[] = [];
+    const enqueue = vi.fn(async (_agentId: string, options: WakeupOptions) => {
+      const [obligation] = await db.select().from(issueRecoveryDeferrals)
+        .where(and(eq(issueRecoveryDeferrals.queue, "assigned-work-invariant"),
+          eq(issueRecoveryDeferrals.companyId, companyId), eq(issueRecoveryDeferrals.issueId, issueId)));
+      if (obligation) observedDeadlines.push(obligation.dueAt);
+      await db.insert(agentWakeupRequests).values({
+        companyId, agentId, status: "skipped", source: "automation", idempotencyKey: options.idempotencyKey,
+        payload: { issueId }, finishedAt: now,
+      });
+      return null;
+    });
+    const checks = assignedWorkSweep(db, { enqueueWakeup: enqueue, now: () => now });
+    const onDeferredDeadline = vi.fn();
+    await checks.checkIssue({ companyId, issueId, onDeferredDeadline });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(observedDeadlines).toEqual([now]);
+    const retryDeadline = new Date(now.getTime() + 10 * 60_000);
+    expect(onDeferredDeadline).toHaveBeenCalledWith(retryDeadline.getTime(), { unchanged: false });
+    await checks.checkIssue({ companyId, issueId, onDeferredDeadline });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    now = retryDeadline;
+    await checks.checkIssue({ companyId, issueId, onDeferredDeadline });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    now = new Date(now.getTime() + 10 * 60_000);
+    await checks.checkIssue({ companyId, issueId, onDeferredDeadline });
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    now = new Date(now.getTime() + 10 * 60_000);
+    await checks.checkIssue({ companyId, issueId, onDeferredDeadline });
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(new Set(enqueue.mock.calls.map(([, options]) => options.idempotencyKey)).size).toBe(1);
+    const [claim] = await db.select({ details: activityLog.details }).from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
+    expect(claim?.details).toMatchObject({ outcome: "exhausted", attempt: 3, nextAttemptAt: null });
+    expect(await db.select().from(issueRecoveryDeferrals).where(eq(issueRecoveryDeferrals.issueId, issueId))).toHaveLength(0);
+  });
+
+  it.each(["resolved blocker", "pending approval", "pending question", "backlog", "operator stop"] as const)(
+    "does not dispatch a parent diagnosis superseded by %s during preparation",
+    async (change) => {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+      const blockerId = randomUUID();
+      const earlier = new Date(Date.now() - 10 * 60_000);
+      await db.insert(companies).values({
+        id: companyId, name: "Proprio", issuePrefix: "STALE", defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(companyMemberships).values({
+        companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
+      });
+      await db.insert(agents).values({
+        id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+        runtimeConfig: { heartbeat: { wakeOnDemand: true } },
+      });
+      await db.insert(issues).values([
+        { id: issueId, companyId, title: "Waiting task", status: "in_progress", assigneeAgentId: agentId,
+          responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
+        { id: blockerId, companyId, title: "Stalled dependency", status: "blocked", createdAt: earlier, updatedAt: earlier },
+      ]);
+      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+      let reachedDispatch = false;
+      const service = heartbeatService(db, {
+        beforeResolvedInteractionContinuationDispatchCheck: async () => {
+          reachedDispatch = true;
+          switch (change) {
+            case "resolved blocker":
+              await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
+              break;
+            case "pending approval": {
+              const [approval] = await db.insert(approvals).values({
+                companyId, type: "approve_ceo_strategy", status: "pending", payload: {},
+              }).returning();
+              await db.insert(issueApprovals).values({ companyId, issueId, approvalId: approval!.id });
+              break;
+            }
+            case "pending question":
+              await db.insert(issueThreadInteractions).values({
+                companyId, issueId, createdByAgentId: agentId, kind: "ask_user_questions", status: "pending",
+                title: "Approve the scope", payload: { version: 1, questions: [{ id: "scope", prompt: "Which scope?",
+                  selectionMode: "single", required: true, options: [{ id: "small", label: "Small" }] }] },
+              });
+              break;
+            case "backlog":
+              await db.update(issues).set({ status: "backlog" }).where(eq(issues.id, issueId));
+              break;
+            case "operator stop":
+              await db.insert(heartbeatRuns).values({
+                companyId, agentId, status: "cancelled", invocationSource: "assignment",
+                errorCode: "operator_interrupted", contextSnapshot: { issueId }, finishedAt: new Date(),
+              });
+              break;
+          }
+        },
+      });
+      const probe = recoveryService(db, { enqueueWakeup: service.wakeup }).assignedWork;
+      expect(await probe.checkIssue({ companyId, issueId })).toMatchObject({ outcome: "repaired" });
+      await service.drainActiveRunExecutions();
+
+      const [diagnosis] = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+          sql`${heartbeatRuns.contextSnapshot}->>'dependencyDiagnosis' = 'true'`));
+      expect(diagnosis).toMatchObject({ status: "cancelled", errorCode: "issue_dependency_diagnosis_superseded" });
+      expect(reachedDispatch).toBe(true);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    },
+  );
+
+  it("suppresses a real workspace retry when its diagnosis changes", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const blockerId = randomUUID();
+    const earlier = new Date(Date.now() - 10 * 60_000);
+    await db.insert(companies).values({
+      id: companyId, name: "Proprio", issuePrefix: "DIAG", defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member",
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Investigator", role: "engineer", status: "active", adapterType: "codex_local",
+      runtimeConfig: { heartbeat: { wakeOnDemand: true } },
+    });
+    await db.insert(issues).values([
+      { id: issueId, companyId, title: "Waiting task", status: "in_progress", assigneeAgentId: agentId,
+        responsibleUserId: "responsible-user", createdAt: earlier, updatedAt: earlier },
+      { id: blockerId, companyId, title: "Stalled dependency", status: "blocked", createdAt: earlier, updatedAt: earlier },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    const workspace = vi.spyOn(workspacePreparation, "prepareHeartbeatWorkspace")
+      .mockRejectedValueOnce(new WorkspaceBusyDeferral({ holder: { runId: randomUUID(), agentId,
+        issueId: blockerId, issueIdentifier: null }, executionWorkspaceId: randomUUID(),
+        wasIssueAssignee: true, deferralAttempt: 0 }));
+    const probe = recoveryService(db, { enqueueWakeup: heartbeat.wakeup }).assignedWork;
+    expect(await probe.checkIssue({ companyId, issueId })).toMatchObject({ outcome: "repaired" });
+    await heartbeat.drainActiveRunExecutions();
+    workspace.mockRestore();
+    const [retry] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.status, "scheduled_retry")));
+    expect(retry).toMatchObject({ scheduledRetryReason: "workspace_busy", contextSnapshot: { dependencyDiagnosis: true } });
+    const due = new Date(Date.now() + 5 * 60_000);
+    const dispatch = createPostgresRunDispatchAdapter(db);
+    const gate = { companyId, runId: retry!.id, retryReasonOverride: "workspace_busy", now: due };
+    expect(await dispatch.evaluateScheduledRetryGate(gate)).toMatchObject({ allowed: true });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
+    expect(await dispatch.evaluateScheduledRetryGate(gate))
+      .toMatchObject({ allowed: false, errorCode: "issue_dependency_diagnosis_superseded", details: { issueId } });
+    expect((await heartbeat.promoteDueScheduledRetries(due)).runIds).not.toContain(retry!.id);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
   it("defers issue_blockers_resolved as a follow-up when the same issue is already running", async () => {
