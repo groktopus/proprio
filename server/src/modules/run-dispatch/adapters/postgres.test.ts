@@ -1689,7 +1689,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         biller: "fixture", billingType: "metered_api", costStatus: "priced", model: "fixture",
         costCents: 5, occurredAt: now });
       const adapter = createPostgresRunDispatchAdapter(db);
-      const gate = await adapter.evaluateScheduledRetryGate({ runId, companyId, now, retryReasonOverride: null });
+      const gate = await adapter.evaluateScheduledRetryGate({ runId, companyId, now, retryReasonOverride: "max_turns_continuation" });
       expect(gate).toMatchObject({ allowed: false, errorCode: "budget_blocked", details: { scopeType: "task_tree" } });
       expect(await adapter.promoteOrCancelDueRetry({ runId, companyId, now }))
         .toMatchObject({ outcome: "gate_suppressed", errorCode: "budget_blocked" });
