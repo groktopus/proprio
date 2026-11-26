@@ -20,6 +20,8 @@ for (const journey of [
   }, info) => {
     if (journey === "uncertain") test.setTimeout(180_000);
     const root = resolve(import.meta.dirname, "../../..");
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const branchName = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim() || null;
     let processHandle: ChildProcess | undefined;
     let logs = "";
     let diagnosticState = async () => ({});
@@ -169,12 +171,7 @@ for (const journey of [
         deploymentMode: "local_trusted",
         bootstrapStatus: "ready",
         serverInfo: {
-          git: {
-            branchName: execFileSync("git", ["branch", "--show-current"], {
-              cwd: root,
-              encoding: "utf8",
-            }).trim(),
-          },
+          git: { available: true, fullSha: revision, branchName },
         },
       });
       const [company] = await api("/companies");
@@ -500,7 +497,9 @@ for (const journey of [
         });
         processHandle = restarted.child;
         base = await restarted.ready;
-        const afterBoot = (await api("/health")).serverInfo.processStartedAt;
+        const restartedHealth = (await api("/health")).serverInfo;
+        expect(restartedHealth.git).toMatchObject({ available: true, fullSha: revision, branchName });
+        const afterBoot = restartedHealth.processStartedAt;
         expect(beforeBoot).toEqual(expect.any(String));
         expect(afterBoot).toEqual(expect.any(String));
         expect(afterBoot).not.toBe(beforeBoot);
@@ -630,7 +629,7 @@ for (const journey of [
       if (uncertainRestart) {
         const restartFile = info.outputPath("uncertain-effect-evidence.json");
         await writeFile(restartFile, JSON.stringify({
-          revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+          revision,
           profile: "native/codex-app-server fixture",
           journey,
           taskId: task.id,
