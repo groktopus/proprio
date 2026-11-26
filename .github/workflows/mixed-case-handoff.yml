@@ -8,8 +8,13 @@ on:
       - tests/e2e/execution-recovery/mixed-case-handoff.spec.ts
       - tests/e2e/execution-recovery/mixed-handoff-evidence.ts
       - tests/e2e/execution-recovery/playwright.config.ts
+      - tests/e2e/execution-recovery/recovery.spec.ts
       - tests/e2e/fixtures/mixed-handoff-*.mjs
       - tests/e2e/fixtures/codex-fixture-resolver.mjs
+      - tests/e2e/fixtures/recovery-codex-loader.mjs
+      - tests/e2e/fixtures/recovery-bin/codex
+      - tests/e2e/fixtures/in-feed-codex.mjs
+      - tests/e2e/fetch-allowed-port.ts
       - tests/e2e/fixtures/test-drive-process.ts
       - tests/runner-e2e/directory-cleanup.ts
       - tests/runner-e2e/process-tree-owner.ts
@@ -62,12 +67,12 @@ jobs:
         run: node --test tests/e2e/fixtures/composer-stop-codex-loader.test.mjs
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
-      - name: Verify the same Case through three roles
+      - name: Verify mixed handoffs and the uncertain-effect restart
         run: |
           fixture_tmp=$(mktemp -d "$RUNNER_TEMP/mixed-case-handoff-fixture.XXXXXX")
           cleanup() {
-            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d -name 'proprio-mixed-handoff-*' -print -quit)" ]]; then
-              echo "The browser fixture retained instance data because its cleanup did not settle."
+            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'proprio-mixed-handoff-*' -o -name 'proprio-test-drive-*' \) -print -quit)" ]]; then
+              echo "Instance data is retained for the disposable hosted job to clean up."
               return
             fi
             chmod -R u+w -- "$fixture_tmp"
@@ -75,7 +80,8 @@ jobs:
           }
           trap cleanup EXIT
           TMPDIR="$fixture_tmp" pnpm exec playwright test \
-            --config tests/e2e/execution-recovery/playwright.config.ts mixed-case-handoff.spec.ts \
+            --config tests/e2e/execution-recovery/playwright.config.ts mixed-case-handoff.spec.ts recovery.spec.ts \
+            --grep 'mixed-handoff grader|a legacy lead hands the same Case|journey: uncertain$' \
             --output "$RUNNER_TEMP/mixed-case-handoff-results"
       - name: Retain the structured handoff evidence
         if: always()
@@ -86,5 +92,6 @@ jobs:
             ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-evidence.json
             ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-restart-checkpoints.json
             ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-board-diagnostic.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/uncertain-effect-evidence.json
           if-no-files-found: ignore
           retention-days: 14

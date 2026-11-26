@@ -627,6 +627,18 @@ for (const journey of [
         body: evidence,
         contentType: "application/json",
       });
+      if (uncertainRestart) {
+        const restartFile = info.outputPath("uncertain-effect-evidence.json");
+        await writeFile(restartFile, JSON.stringify({
+          revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+          profile: "native/codex-app-server fixture",
+          journey,
+          taskId: task.id,
+          disposition: "blocked",
+          ...uncertainRestart,
+        }, null, 2));
+        await info.attach("uncertain-effect-evidence", { path: restartFile, contentType: "application/json" });
+      }
     } finally {
       await writeFile(
         info.outputPath("diagnostics.json"),
