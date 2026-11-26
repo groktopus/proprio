@@ -355,6 +355,15 @@ export function setupLiveEventsWebSocketServer(
       });
       if (!principalActive) return null;
       const payload = event.payload;
+      // Reauthorize the removed viewer without disclosing the now-hidden project or its members.
+      if (event.type === "activity.logged" && payload.entityType === "project" &&
+          payload.action === "project.access_member_removed" && context!.actorType === "board") {
+        const details = payload.details && typeof payload.details === "object" && !Array.isArray(payload.details)
+          ? payload.details as Record<string, unknown> : {};
+        if (details.subjectType === "user" && details.subjectId === context!.actorId) {
+          return { ...event, payload: { action: "resource_membership.changed" } };
+        }
+      }
       const issueId = typeof payload.issueId === "string" ? payload.issueId
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
       const runId = typeof payload.runId === "string" ? payload.runId

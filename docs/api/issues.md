@@ -126,6 +126,18 @@ Headers: X-Proprio-Run-Id: {runId}
 
 The optional `comment` field adds a comment in the same call. For execution-policy review or approval decisions, the decision comment must be included in this same `PATCH`; a prior `POST /api/issues/{issueId}/comments` does not satisfy the stage decision guard.
 
+Set `executionPolicy.reviewTargetBinding` to `{"source":"required_quality_review"}`
+with `requiredQualityReview` to require immutable signoff. Submitting a stage
+records the requirements digest and the exact output document revisions or
+attachment byte hashes in `executionState.reviewTargetBinding`. Approval checks
+that the submitted values still match the current human-approved outputs. An
+approved decision retains its submitted binding.
+
+A `422` with code `required_quality_review_incomplete` identifies an outstanding
+human quality review. A `422` with code `required_quality_review_stale` means the
+reviewer needs a fresh submission. Request changes and submit the current
+outputs to start a new review.
+
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
 
 When changing `projectId` and `goalId` together, the supplied goal is validated
@@ -244,6 +256,34 @@ Saves a Retry request for the task's latest stopped run. The same `idempotencyKe
 - `200` with `accepted: false` and `stale: true`: `observedRunId` is no longer the task's latest run. Read the task again.
 
 Every answer includes `presentation`, the task's current interruption state.
+
+## Investigate a Stalled Dependency
+
+```http
+GET /api/issues/{issueId}/dependency-investigation
+```
+
+Reads the required dependency's state, its next owner and action, and the
+parent's wake state. The response is `null` when there is no current
+diagnosis. The response uses `Cache-Control: private, no-store`. When a
+prerequisite is outside the viewer's task access, the response identifies
+the dependency as restricted and shows the parent wake status. The response
+includes an investigation key only when the viewer can use it.
+
+```http
+POST /api/issues/{issueId}/dependency-investigation
+```
+
+A board member with permission to change the task can ask its current agent
+assignee to investigate. Agent Chat investigations require the conversation
+owner. Send the `wake.idempotencyKey` from the diagnosis as `idempotencyKey`.
+Repeating a saved request after a lost response acknowledges its existing claim.
+
+The response includes `accepted` and `message`. Read the diagnosis again to
+see the current wake state. An accepted request leaves the dependency open.
+Approval, budget, workspace and stop controls still apply. Each Board viewer
+can submit up to 12 investigation requests per minute. A `429` response
+includes `Retry-After` in seconds.
 
 ## Comments
 

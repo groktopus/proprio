@@ -1,11 +1,10 @@
 import { Sparkles } from "lucide-react";
 import { Link } from "@/lib/router";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, relativeTime, shortenEvidenceId } from "@/lib/utils";
 import {
   type SourceResolvedWatchdogFold,
   formatCleanupOutcome,
   formatSilenceAgeMs,
-  shortenEvidenceId,
 } from "@/lib/source-resolved-watchdog-fold";
 
 export interface SourceResolvedFoldCalloutProps {

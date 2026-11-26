@@ -458,6 +458,8 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
   const unboundFormDraft = useRef<IssueDraft | null>(null);
   const visualViewportLayout = useVisualViewportLayout(newIssueOpen);
   const dialogBodyRef = useRef<HTMLDivElement>(null);
+  const dialogOpenerRef = useRef<HTMLElement | null>(null);
+  const restoreDialogFocusRef = useRef(false);
   const { companies, selectedCompanyId: effectiveCompanyId } = useCompany();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -1494,7 +1496,9 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     <Dialog
       open={newIssueOpen}
       onOpenChange={(open) => {
-        if (!open && !submittingRecoveredCreate) closeNewIssue();
+        if (open || submittingRecoveredCreate) return;
+        restoreDialogFocusRef.current = true;
+        closeNewIssue();
       }}
     >
       <DialogContent
@@ -1504,8 +1508,18 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
         className="flex max-h-(--new-issue-dialog-height) flex-col gap-0 overflow-hidden rounded-(--radius-task-composer) border-0 bg-transparent p-0 shadow-none sm:max-w-2xl"
         onKeyDown={handleKeyDown}
         onOpenAutoFocus={(event) => {
+          const active = document.activeElement;
+          dialogOpenerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+          restoreDialogFocusRef.current = false;
           event.preventDefault();
           dialogBodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          const opener = dialogOpenerRef.current;
+          dialogOpenerRef.current = null;
+          if (!restoreDialogFocusRef.current || !opener?.isConnected) return;
+          event.preventDefault();
+          opener.focus({ preventScroll: true });
         }}
         onEscapeKeyDown={(event) => {
           if (event.defaultPrevented) return;

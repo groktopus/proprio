@@ -163,7 +163,7 @@ export function AgentActionButtons({
   size = "sm",
   assignLabel = "Assign Task",
   showAssignIcon = true,
-  assignIcon: AssignIcon = Plus,
+  assignIcon = <Plus aria-hidden="true" className="size-4" />,
   showChat = false,
   runLabel = "Run now",
   showStatus = true,
@@ -188,7 +188,7 @@ export function AgentActionButtons({
   size?: "sm" | "default";
   assignLabel?: string;
   showAssignIcon?: boolean;
-  assignIcon?: typeof Plus;
+  assignIcon?: ReactNode;
   showChat?: boolean;
   runLabel?: string;
   showStatus?: boolean;
@@ -543,7 +543,7 @@ export function AgentActionButtons({
             disabled={assignAndRunDisabled}
             title={workActionsDisabled ? workActionsDisabledReason : undefined}
           >
-            {showAssignIcon && <AssignIcon className="size-4" />}
+            {showAssignIcon && assignIcon}
             {assignLabel}
           </Button>
         )}

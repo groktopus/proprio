@@ -15,6 +15,8 @@ export interface BaselineRun {
   runId: string;
   adapter: string;
   environment: string;
+  /** Final server run status, retained for attempt accounting. */
+  status?: string;
   /** Driver intent: a new task, a follow-up comment on the same task, or a run crossed by a restart. */
   phase: "cold" | "warm" | "restart" | "midturn" | "verify" | "postfault";
   events: BaselineEvent[];
@@ -84,6 +86,12 @@ export interface RunMetrics {
    * from run creation (`task.time_to_first_agent_activity`): what the speed
    * budget judges. */
   firstActivityAfterRunCreatedMs: number | null;
+  /** Full accepted-input to first visible activity, including queue wait. */
+  submitToFirstActivityMs: number | null;
+  /** Full accepted-input to first text. Tool-first turns may be null. */
+  submitToFirstTextMs: number | null;
+  /** Turn submission to first visible activity, when both spans are present. */
+  providerFirstActivityMs: number | null;
 }
 
 /** Spans that wrap others (or the whole run); ranking them would double count. */
@@ -112,7 +120,6 @@ export function runMetrics(run: BaselineRun): RunMetrics {
   }
   const ingress = FIRST_SPAN(spans, "comment.to_run_created") ?? FIRST_SPAN(spans, "question_response.to_run_created");
   // Only an ingress that starts the TTFT span waited for its run to exist.
-  const anchor = ttft ?? activity;
   // From run creation, as the runtime budget judges it: the start of
   // heartbeat.queue, else the end of the ingress span. Independent of the
   // span's own anchor (an earlier wake request or comment is not counted).
@@ -120,11 +127,18 @@ export function runMetrics(run: BaselineRun): RunMetrics {
   const afterRunCreated = (span: RunSpan) => runCreatedAt === null
     ? Math.max(0, span.durationMs - (inputWaitMs ?? 0))
     : Math.max(0, span.startOffsetMs + span.durationMs - runCreatedAt);
-  const inputWaitMs = ingress && anchor && ingress.startOffsetMs <= anchor.startOffsetMs ? ingress.durationMs : null;
+  const acceptedInputAnchor = (span: RunSpan | null) => typeof span?.attributes.anchor === "string"
+    && ["comment", "question_response"].includes(span.attributes.anchor);
+  const inputWaitMs = ingress && (acceptedInputAnchor(ttft) || acceptedInputAnchor(activity)) ? ingress.durationMs : null;
   return {
     inputWaitMs,
     firstActivityAfterRunCreatedMs: activity ? afterRunCreated(activity) : null,
     ttftAfterRunCreatedMs: ttft ? afterRunCreated(ttft) : null,
+    submitToFirstActivityMs: acceptedInputAnchor(activity) ? activity.durationMs : null,
+    submitToFirstTextMs: acceptedInputAnchor(ttft) ? ttft.durationMs : null,
+    providerFirstActivityMs: activity && turnStartAt !== null
+      ? Math.max(0, activity.startOffsetMs + activity.durationMs - turnStartAt)
+      : null,
     ttftMs: ttft ? ttft.durationMs : null,
     ttftAnchor: ttft && typeof ttft.attributes.anchor === "string" ? ttft.attributes.anchor : null,
     bootMs: claimedAt !== null && turnStartAt !== null ? Math.max(0, turnStartAt - claimedAt) : null,
@@ -210,35 +224,49 @@ export function recoverySamples(runs: readonly BaselineRun[], faults: readonly B
   return samples;
 }
 
-export interface BaselineRow { adapter: string; environment: string; warmth: "cold" | "warm"; ttft: Distribution; boot: Distribution;
+export interface BaselineRow { adapter: string; environment: string; warmth: "cold" | "warm"; attempts: number; failedOrTimedOut: number; noVisibleActivity: number; ttft: Distribution; boot: Distribution;
   /** The wait behind a live turn (input accepted to run created), its own measured step. */
   inputWait: Distribution;
   /** TTFT (first text) from run creation: reported. */
   ttftAfterRunCreated: Distribution;
   /** First visible agent activity from run creation: the value the speed budget judges. */
   firstActivityAfterRunCreated: Distribution;
+  /** Full accepted-input to first visible activity. */
+  submitToFirstActivity: Distribution;
+  /** Full accepted-input to first text. */
+  submitToFirstText: Distribution;
+  /** Provider turn submission to first visible activity. */
+  providerFirstActivity: Distribution;
   anchors: Record<string, number> }
 
 export function baselineRows(runs: readonly BaselineRun[]): BaselineRow[] {
-  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; metrics: RunMetrics[] }>();
+  const groups = new Map<string, { adapter: string; environment: string; warmth: "cold" | "warm"; records: Array<{ run: BaselineRun; metrics: RunMetrics }> }>();
   for (const run of runs) {
     // Restart, post-restart and new-agent verification samples are reported on their own.
     if (run.phase === "restart" || run.phase === "verify" || run.phase === "postfault") continue;
     const warmth = runWarmth(run);
     const key = `${run.adapter}|${run.environment}|${warmth}`;
-    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, metrics: [] };
-    group.metrics.push(runMetrics(run));
+    const group = groups.get(key) ?? { adapter: run.adapter, environment: run.environment, warmth, records: [] };
+    group.records.push({ run, metrics: runMetrics(run) });
     groups.set(key, group);
   }
   return [...groups.values()].sort((a, b) => `${a.adapter}${a.warmth}`.localeCompare(`${b.adapter}${b.warmth}`)).map(group => {
     const anchors: Record<string, number> = {};
-    for (const metric of group.metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
-    return { adapter: group.adapter, environment: group.environment, warmth: group.warmth, anchors,
-      ttft: distribution(group.metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),
-      boot: distribution(group.metrics.flatMap(metric => metric.bootMs === null ? [] : [metric.bootMs])),
-      inputWait: distribution(group.metrics.flatMap(metric => metric.inputWaitMs === null ? [] : [metric.inputWaitMs])),
-      ttftAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.ttftAfterRunCreatedMs === null ? [] : [metric.ttftAfterRunCreatedMs])),
-      firstActivityAfterRunCreated: distribution(group.metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])) };
+    const metrics = group.records.map(record => record.metrics);
+    for (const metric of metrics) if (metric.ttftAnchor) anchors[metric.ttftAnchor] = (anchors[metric.ttftAnchor] ?? 0) + 1;
+    return { adapter: group.adapter, environment: group.environment, warmth: group.warmth,
+      attempts: group.records.length,
+      failedOrTimedOut: group.records.filter(({ run }) => run.status === "failed" || run.status === "timed_out" || run.status === "interrupted").length,
+      noVisibleActivity: metrics.filter(metric => metric.firstActivityAfterRunCreatedMs === null).length,
+      anchors,
+      ttft: distribution(metrics.flatMap(metric => metric.ttftMs === null ? [] : [metric.ttftMs])),
+      boot: distribution(metrics.flatMap(metric => metric.bootMs === null ? [] : [metric.bootMs])),
+      inputWait: distribution(metrics.flatMap(metric => metric.inputWaitMs === null ? [] : [metric.inputWaitMs])),
+      ttftAfterRunCreated: distribution(metrics.flatMap(metric => metric.ttftAfterRunCreatedMs === null ? [] : [metric.ttftAfterRunCreatedMs])),
+      firstActivityAfterRunCreated: distribution(metrics.flatMap(metric => metric.firstActivityAfterRunCreatedMs === null ? [] : [metric.firstActivityAfterRunCreatedMs])),
+      submitToFirstActivity: distribution(metrics.flatMap(metric => metric.submitToFirstActivityMs === null ? [] : [metric.submitToFirstActivityMs])),
+      submitToFirstText: distribution(metrics.flatMap(metric => metric.submitToFirstTextMs === null ? [] : [metric.submitToFirstTextMs])),
+      providerFirstActivity: distribution(metrics.flatMap(metric => metric.providerFirstActivityMs === null ? [] : [metric.providerFirstActivityMs])) };
   });
 }
 
