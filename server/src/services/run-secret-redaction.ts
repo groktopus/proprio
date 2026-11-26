@@ -8,10 +8,26 @@ import type { StoredSecretVersionMaterial } from "../secrets/types.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
 import { readRunFailureCause, withoutSqlStatementText } from "@groktopus/shared";
 
-/** The run's saved accounting ancestry can include tasks outside the viewer's access. */
+/** Accounting ancestry and task-tree Stop receipts can identify private ancestors. */
 export function omitHeartbeatRunAccountingFields<T>(value: T): T {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "taskLineageJson")) return value;
-  const { taskLineageJson: _privateAncestry, ...publicFields } = value as Record<string, unknown>;
+  const record = asRecord(value);
+  if (!record) return value;
+  const result = asRecord(record.resultJson);
+  const startupCancellation = asRecord(result?.startupCancellation);
+  const privateStop = asRecord(startupCancellation?.budgetEnforcement)?.scopeType === "task_tree";
+  const privateAdmission = asRecord(result?.budgetAdmissionStop)?.scopeType === "task_tree";
+  if (!Object.hasOwn(record, "taskLineageJson") && !privateStop && !privateAdmission) return value;
+
+  const { taskLineageJson: _privateAncestry, ...publicFields } = record;
+  if (result && (privateStop || privateAdmission)) {
+    const publicResult = { ...result };
+    if (privateAdmission) delete publicResult.budgetAdmissionStop;
+    if (privateStop && startupCancellation) {
+      const { budgetEnforcement: _privateBudgetStop, ...publicCancellation } = startupCancellation;
+      publicResult.startupCancellation = publicCancellation;
+    }
+    publicFields.resultJson = publicResult;
+  }
   return publicFields as T;
 }
 

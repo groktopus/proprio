@@ -56,7 +56,7 @@ export type BudgetResumeDelivery = {
 };
 
 const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.nativeIssueId}::text,
-  ${heartbeatRuns.contextSnapshot}->>'issueId')`;
+  ${heartbeatRuns.taskLineageJson}->'pathIssueIds'->>0, ${heartbeatRuns.contextSnapshot}->>'issueId')`;
 
 /**
  * Stamp every task run this scope's budget stop cancelled since the incident
@@ -68,7 +68,7 @@ const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, $
  * still being delivered.
  */
 export async function markBudgetCancelledWorkForResume(db: Db, input: {
-  companyId: string; scopeType: "company" | "agent" | "project"; scopeId: string;
+  companyId: string; scopeType: "company" | "agent" | "project" | "task_tree"; scopeId: string;
   incidentId: string; incidentOpenedAt: Date; actorUserId: string; actorSource?: string | null;
 }): Promise<string[]> {
   return db.transaction(async tx => {
@@ -83,22 +83,23 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
     // the lifecycle operation's pauseCause, saved when the pause started, so a
     // resume that removed the holds before the Stop ran still leaves them here.
     const pauseStop = sql`${heartbeatRuns.resultJson}->'pauseStop'`;
-    const lifecycleStop = input.scopeType === "project" ? sql`false` : and(
+    const ownsLifecycleHold = input.scopeType === "company" || input.scopeType === "agent";
+    const lifecycleStop = ownsLifecycleHold ? and(
       sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${AGENT_LIFECYCLE_STOP_REASON}`,
       sql`${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type' = 'system'`,
       input.scopeType === "agent"
         ? and(eq(heartbeatRuns.agentId, input.scopeId), sql`(${pauseStop}->'holds') ? 'budget'`)
-        : sql`(${pauseStop}->'holds') ? 'company_paused' and ${pauseStop}->>'companyPauseReason' = 'budget'`)!;
+        : sql`(${pauseStop}->'holds') ? 'company_paused' and ${pauseStop}->>'companyPauseReason' = 'budget'`)! : sql`false`;
     // A run still active on an agent whose pause this budget caused: the
     // pause's Stop may land after the incident closes. The lifecycle operation
     // recorded the cause when the pause started (pauseCause).
     const pauseCause = sql`a.lifecycle_operation->'pauseCause'`;
-    const pendingPauseStop = input.scopeType === "project" ? sql`false` : sql`exists (select 1 from agents a
+    const pendingPauseStop = ownsLifecycleHold ? sql`exists (select 1 from agents a
       where a.id = ${heartbeatRuns.agentId} and a.company_id = ${heartbeatRuns.companyId}
         and a.lifecycle_state = 'pausing'
         and ${input.scopeType === "agent"
           ? sql`a.id = ${input.scopeId} and (${pauseCause}->'holds') ? 'budget'`
-          : sql`(${pauseCause}->'holds') ? 'company_paused' and ${pauseCause}->>'companyPauseReason' = 'budget'`})`;
+          : sql`(${pauseCause}->'holds') ? 'company_paused' and ${pauseCause}->>'companyPauseReason' = 'budget'`})` : sql`false`;
     // A queued run that admission cancelled for this budget's board-owned block.
     // Admission saves the stamp before it cancels; the recorded cancellation
     // must carry the stamp's reason, so a stamped run that later ran, or was
@@ -123,6 +124,9 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
       eq(heartbeatRuns.companyId, input.companyId),
       sql`not ${stoppedByPerson}`,
       sql`${runIssueId} is not null`,
+      input.scopeType === "task_tree"
+        ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`
+        : undefined,
     );
     const stoppedSinceIncident = and(stoppedByThisScope,
       sql`coalesce((${heartbeatRuns.resultJson}->'startupCancellation'->>'requestedAt')::timestamptz,

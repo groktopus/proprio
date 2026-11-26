@@ -1,5 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
-import { agents, budgetReservations, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { agents, budgetPolicies, budgetReservations, heartbeatRuns, nativeRunFinalizations, type Db } from "@groktopus/db";
 import { centsToUnits, isUuidLike, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
@@ -58,7 +58,7 @@ export async function recheckRunBudgetReservationInTransaction(
   if (stopRecovery) return keepRecoveryClaim();
   const { block, policies, observations } = await budgetServiceInTransaction(tx, publications)
     .evaluateAdmission(run.companyId, run.agentId, { projectId: reservation.projectId, runId: run.id,
-      admittedRecovery: Boolean(recoveryLeaseOwner) });
+      taskLineageIssueIds: run.taskLineageJson?.pathIssueIds, admittedRecovery: Boolean(recoveryLeaseOwner) });
   if (block) return block.reason;
   const [agent] = await tx.select({ status: agents.status, lifecycleState: agents.lifecycleState }).from(agents)
     .where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId)));
@@ -130,7 +130,8 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
         // Recovery has already made this run queued/running, so its own pending
         // accounting is excluded. Current overruns, other unfinished runs and
         // scope pauses still apply before any more paid work starts.
-        const block = await budgetServiceInTransaction(tx, publications).getInvocationBlock(companyId, run.agentId, { projectId, runId, admittedRecovery: true });
+        const block = await budgetServiceInTransaction(tx, publications).getInvocationBlock(companyId, run.agentId,
+          { projectId, runId, taskLineageIssueIds: run.taskLineageJson?.pathIssueIds, admittedRecovery: true });
         if (block) return { admissionBlockReason: block.reason };
         const [agent] = await tx.select({ status: agents.status, lifecycleState: agents.lifecycleState }).from(agents)
           .where(and(eq(agents.companyId, companyId), eq(agents.id, run.agentId)));
@@ -142,7 +143,24 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
       throw conflict("Provider dispatch has already reserved this run");
     }
     if (stopRecovery) throw conflict("Native Stop recovery requires the original held reservation");
-    const { block, policies, observations } = await budgetServiceInTransaction(tx, publications).evaluateAdmission(companyId, run.agentId, { projectId, runId });
+    const taskReference = run.taskLineageJson ? null : runBoundIssueReference(run);
+    const taskId = taskReference && !isUuidLike(taskReference)
+      ? (await loadRunBoundIssue(tx, run))?.id : taskReference;
+    const pathIssueIds = run.taskLineageJson?.pathIssueIds ?? await loadAncestorIssueIds(tx, companyId, taskId);
+    if (pathIssueIds.length > 0) {
+      const treePolicies = await tx.select({ scopeId: budgetPolicies.scopeId }).from(budgetPolicies).where(and(
+        eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, "task_tree"),
+        eq(budgetPolicies.isActive, true), eq(budgetPolicies.hardStopEnabled, true),
+        inArray(budgetPolicies.scopeId, pathIssueIds),
+      ));
+      const roots = [...new Set(treePolicies.map(policy => policy.scopeId))].sort();
+      // Acquire every applicable root in the same order across sibling runs.
+      for (const rootId of roots) {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`task-tree-budget:${companyId}:${rootId}`}, 0))`);
+      }
+    }
+    const { block, policies, observations } = await budgetServiceInTransaction(tx, publications).evaluateAdmission(companyId, run.agentId,
+      { projectId, runId, taskLineageIssueIds: pathIssueIds });
     if (block) return { admissionBlockReason: block.reason };
     // A budget release can start asynchronous resume hooks. Capacity alone
     // does not authorize dispatch before that lifecycle operation is ready.
@@ -162,12 +180,8 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     // A zero-valued row also fences duplicate dispatch when estimates are off.
     const [reservation] = await tx.insert(budgetReservations).values({ companyId, runId, agentId: run.agentId, projectId,
       amountCents: unitsToCents(amount), providerStartedAt: new Date() }).returning();
-    const taskReference = run.taskLineageJson ? null : runBoundIssueReference(run);
-    const taskId = taskReference && !isUuidLike(taskReference)
-      ? (await loadRunBoundIssue(tx, run))?.id : taskReference;
-    const pathIssueIds = await loadAncestorIssueIds(tx, companyId, taskId);
     await tx.update(heartbeatRuns).set({ costAccountingPending: true,
-      ...(pathIssueIds.length ? { taskLineageJson: { version: 1, pathIssueIds } } : {}),
+      ...(!run.taskLineageJson && pathIssueIds.length ? { taskLineageJson: { version: 1, pathIssueIds } } : {}),
       usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ accountingReceiptReady: false, ledgerScope: { ...(run.usageJson?.ledgerScope as object ?? {}), ...ledgerScope, projectId } })}::jsonb`,
     }).where(eq(heartbeatRuns.id, runId));
     await queueBudgetEvaluation(tx, { companyId, agentId: run.agentId, projectId });
