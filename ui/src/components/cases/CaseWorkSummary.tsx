@@ -25,6 +25,7 @@ export function CaseWorkSummary({ caseData, pendingHandoff, agents }: {
   const destination = pending?.toAgentId ? agents?.get(pending.toAgentId) : null;
   const waiting = pending?.destinationKind === "done" ? "Case will close when the task is complete." : pending?.lastError
     ?? (pending?.state === "awaiting_release" ? `Waiting for ${from} to finish.`
+      : pending?.state === "offered" ? `Waiting for ${to} to decide on the offer.`
       : destination?.status === "paused" ? `${to} is paused.` : `Waiting for ${to} to start.`);
 
   return <section className="space-y-3" aria-label="Case work">

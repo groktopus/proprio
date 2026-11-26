@@ -9,6 +9,7 @@ import type {
 } from "@groktopus/shared";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { DocumentDiffModal } from "@/components/DocumentDiffModal";
 import { ExecutionWorkspaceCloseDialog } from "@/components/ExecutionWorkspaceCloseDialog";
 import { ImageGalleryModal } from "@/components/ImageGalleryModal";
@@ -729,6 +730,23 @@ export const NewIssueEmpty: Story = {
       <IssueDialogOpener variant="empty" />
     </DialogStory>
   ),
+};
+
+function IssueDialogKeyboardTrigger() {
+  const { openNewIssue } = useDialog();
+  return <>
+    <Button type="button" onClick={() => openNewIssue({})}>New task</Button>
+    <NewIssueDialog />
+  </>;
+}
+
+export const NewIssueKeyboard: Story = {
+  render: () => <DialogStory
+    eyebrow="New task"
+    title="Task creation with a keyboard"
+    description="Open the task dialog, enter a draft and dismiss it."
+    badges={[]}
+  ><IssueDialogKeyboardTrigger /></DialogStory>,
 };
 
 export const NewIssuePrefilled: Story = {
