@@ -9,8 +9,12 @@ import { launchTestDrive } from "../fixtures/test-drive-process";
 import { makeDirectoryTreeRemovable } from "../../runner-e2e/directory-cleanup";
 import { createProcessTreeOwner, stopOwnedProcessTree } from "../../runner-e2e/process-tree-owner";
 
-for (const restart of [false, true]) test(
-  `a legacy lead hands the same Case to a native builder and legacy verifier${restart ? " after controller restart" : ""}`, async ({ page, request }, info) => {
+for (const scenario of [
+  { restart: false, revokeBuilder: false },
+  { restart: true, revokeBuilder: false },
+  { restart: false, revokeBuilder: true },
+]) test(`a legacy lead hands the same Case to a native builder and legacy verifier${scenario.restart ? " after controller restart" : ""}${scenario.revokeBuilder ? " after builder authority is restored" : ""}`, async ({ page, request }, info) => {
+  const { restart, revokeBuilder } = scenario;
   const repo = resolve(import.meta.dirname, "../../..");
   const fixtureDir = resolve(import.meta.dirname, "../fixtures");
   const scratch = info.outputPath("mixed-handoff-fixture");
@@ -107,6 +111,16 @@ for (const restart of [false, true]) test(
     expect(outgoing.staleWriteCode).toBe("case_handoff_run_yielded");
     expect((await api(runsPath)).map((run: { agentId: string }) => run.agentId)).toEqual([lead.id]);
     expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ title, assigneeAgentId: lead.id });
+    if (revokeBuilder) {
+      const builderState = await api(`/agents/${builder.id}`);
+      await api(`/agents/${builder.id}/permissions`, "PATCH", {
+        canCreateAgents: builderState.permissions?.canCreateAgents ?? false,
+        canAssignTasks: builderState.permissions?.canAssignTasks ?? false,
+        canCreateSkills: builderState.permissions?.canCreateSkills ?? true,
+        trustPreset: builderState.permissions?.trustPreset ?? "standard",
+        authorizationPolicy: { protectedAgent: { blockAssignment: true } },
+      });
+    }
     await writeFile(releaseFile, "release", { flag: "wx" });
 
     const handoffPath = `/cases/${caseId}/handoffs?limit=20`;
@@ -183,6 +197,47 @@ for (const restart of [false, true]) test(
       restartEvidence = { stoppedAt, readyAt, wakeupRequestId: pending.wakeupRequestId, beforeController, afterController,
         attemptsBefore: pending.attemptCount, attemptsAfterStartup: rediscovered.attemptCount };
     }
+    let revokedAuthorityEvidence: { state: string; reason: string; wakeupRequestId: string; attempts: number[];
+      boardHoldVisible: true; restoredAt: string } | undefined;
+    if (revokeBuilder) {
+      let held: Awaited<ReturnType<typeof outgoingState>>;
+      await expect.poll(async () => (held = await outgoingState()), { timeout: 45_000 })
+        .toMatchObject({ id: outgoing.handoffId, version: outgoing.handoffVersion, sourceRunId: outgoing.runId,
+          state: "awaiting_release", lastErrorCode: "access_or_admission_blocked", wakeupRequestId: expect.any(String),
+          leaseExpiresAt: null });
+      expect(held.lastError).toMatch(/protected-agent policy/);
+      const firstDenial = held;
+      await expect.poll(async () => {
+        held = await outgoingState();
+        return held?.attemptCount > firstDenial.attemptCount && held.leaseExpiresAt === null;
+      }, { timeout: 45_000 }).toBe(true);
+      expect(held).toMatchObject({ id: firstDenial.id, version: firstDenial.version, sourceRunId: firstDenial.sourceRunId,
+        state: firstDenial.state, lastErrorCode: firstDenial.lastErrorCode, wakeupRequestId: firstDenial.wakeupRequestId });
+      expect(held.lastError).toMatch(/protected-agent policy/);
+      expect(await api(runsPath)).toEqual([expect.objectContaining({ id: outgoing.runId, agentId: lead.id, status: "succeeded" })]);
+      expect(await api(`/issues/${taskId}?view=core`)).toMatchObject({ status: "in_progress", assigneeAgentId: lead.id });
+      const missingResult = await request.get(`${base}/api/issues/${taskId}/documents/result`);
+      expect(missingResult.status()).toBe(404);
+      expect(await missingResult.json()).toEqual({ error: "Document not found" });
+      const heldCase = await api(`/cases/${caseId}`);
+      await page.goto(`${base}/${company.issuePrefix}/cases/${heldCase.identifier}`, { waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("region", { name: "Case work", exact: true }).getByText(/protected-agent policy/))
+        .toBeVisible({ timeout: 30_000 });
+
+      const builderState = await api(`/agents/${builder.id}`);
+      await api(`/agents/${builder.id}/permissions`, "PATCH", {
+        canCreateAgents: builderState.permissions?.canCreateAgents ?? false,
+        canAssignTasks: builderState.permissions?.canAssignTasks ?? false,
+        canCreateSkills: builderState.permissions?.canCreateSkills ?? true,
+        trustPreset: builderState.permissions?.trustPreset ?? "standard",
+        authorizationPolicy: {},
+      });
+      revokedAuthorityEvidence = { state: held.state, reason: held.lastErrorCode, wakeupRequestId: held.wakeupRequestId,
+        attempts: [firstDenial.attemptCount, held.attemptCount], boardHoldVisible: true, restoredAt: new Date().toISOString() };
+      const dueInMs = Date.parse((await outgoingState()).nextAttemptAt) - Date.now();
+      builderWaitMs += Math.max(0, Number.isFinite(dueInMs) ? dueInMs : 0);
+    }
+
     await expect.poll(() => readFile(builderReceipt, "utf8").catch(() => ""), { timeout: builderWaitMs }).not.toBe("");
     const builderInput = JSON.parse(await readFile(builderReceipt, "utf8"));
     expect(builderInput).toEqual({ caseId, taskId, handoffId: outgoing.handoffId,
@@ -199,6 +254,9 @@ for (const restart of [false, true]) test(
       await recordCheckpoint("delivered", { handoff: handoffCheckpoint(delivered) });
       expect(delivered).toMatchObject({ state: "delivered", wakeupRequestId: restartEvidence.wakeupRequestId });
     }
+    if (revokedAuthorityEvidence) {
+      expect(await outgoingState()).toMatchObject({ state: "delivered", wakeupRequestId: revokedAuthorityEvidence.wakeupRequestId });
+    }
     const artifact = await api(`/issues/${taskId}/documents/result`);
     const expectedArtifact = JSON.stringify({ total: brief.first + brief.second });
     expect(artifact.body).toBe(expectedArtifact);
@@ -209,7 +267,8 @@ for (const restart of [false, true]) test(
       const run = await api(`/heartbeat-runs/${entry.id}`);
       const operations = await api(`/heartbeat-runs/${entry.id}/workspace-operations`);
       return { id: run.id, agentId: run.agentId, issueId: run.nativeIssueId ?? run.issueId ?? run.contextSnapshot?.issueId,
-        runtimeMode: run.runtimeMode, status: run.status, incomingHandoffId: run.contextSnapshot?.caseHandoffId,
+        runtimeMode: run.runtimeMode, status: run.status, wakeupRequestId: run.wakeupRequestId,
+        incomingHandoffId: run.contextSnapshot?.caseHandoffId,
         handoffVersion: run.contextSnapshot?.proprioCase?.handoffVersion,
         admittedAt: run.createdAt, release: run.resultJson?.caseHandoffExecutionReleased ?? null,
         workspaceFinalizations: operations.filter((operation: { heartbeatRunId: string | null; phase: string }) =>
@@ -217,6 +276,11 @@ for (const restart of [false, true]) test(
           ({ status, finishedAt }: { status: string; finishedAt: string | null }) => ({ status, finishedAt })),
       };
     }));
+    if (revokedAuthorityEvidence) {
+      expect(runs.filter(run => run.agentId === builder.id)).toEqual([
+        expect.objectContaining({ wakeupRequestId: revokedAuthorityEvidence.wakeupRequestId, incomingHandoffId: outgoing.handoffId }),
+      ]);
+    }
     const observed: MixedHandoffObservation = { task: { id: task.id, status: task.status, assigneeAgentId: task.assigneeAgentId },
       caseRecord: { workIssueId: caseRecord.workIssueId, handoffVersion: caseRecord.handoffVersion },
       agents: { lead: lead.id, builder: builder.id, verifier: verifier.id },
@@ -248,7 +312,7 @@ for (const restart of [false, true]) test(
     await writeFile(evidence, JSON.stringify({
       revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
       profiles: ["legacy/process", "native/codex-app-server fixture", "legacy/process"],
-      outgoing, builderInput, restartEvidence, observed, verdict, boardStatus: "done",
+      outgoing, builderInput, restartEvidence, revokedAuthorityEvidence, observed, verdict, boardStatus: "done",
     }, null, 2));
     await info.attach("mixed-handoff-evidence", { contentType: "application/json", path: evidence });
   } catch (error) {
