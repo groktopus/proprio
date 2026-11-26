@@ -61,6 +61,7 @@ import { deferredWakeJoinsFirstTurn, firstTurnTakesAllQueuedComments, runAccepts
 import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
+import { withAuthorizationReadSnapshot } from "../services/authorization-read-scope.js";
 import { captureRequiredQualityReviewDecisionBinding, readRequiredQualityReview, readSubmittedSignoffIsStale, recordExecutionStageDecision } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
@@ -5329,8 +5330,9 @@ export function issueRoutes(
       status: string;
     },
     action: "issue:comment" | "issue:read" | "issue:mutate",
+    issueAccess = access,
   ) {
-    return access.decide({
+    return issueAccess.decide({
       actor: req.actor,
       action,
       resource: {
@@ -5353,9 +5355,9 @@ export function issueRoutes(
     });
   }
 
-  async function canUseIssueBreakGlass(req: Request, issue: { companyId: string }) {
+  async function canUseIssueBreakGlass(req: Request, issue: { companyId: string }, readDb = db) {
     if (req.actor.type !== "board" || !req.actor.userId) return false;
-    return db
+    return readDb
       .select({ role: companyMemberships.membershipRole })
       .from(companyMemberships)
       .where(and(
@@ -5416,15 +5418,15 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: Parameters<typeof decideIssueAccess>[1] & { identifier?: string | null },
-    options: { allowBreakGlass?: boolean; finalForAgents?: boolean } = {},
+    options: { allowBreakGlass?: boolean; finalForAgents?: boolean; readDb?: Db } = {},
   ) {
-    const decision = await decideIssueAccess(req, issue, "issue:read");
+    const decision = await decideIssueAccess(req, issue, "issue:read", options.readDb ? accessService(options.readDb) : access);
     if (decision.allowed) return true;
     if (
       options.allowBreakGlass === true
       && req.query.breakGlass === "true"
       && decision.reason === "deny_issue_private"
-      && await canUseIssueBreakGlass(req, issue)
+      && await canUseIssueBreakGlass(req, issue, options.readDb)
     ) {
       await recordIssueBreakGlassRead(req, issue);
       return true;
@@ -9814,29 +9816,32 @@ export function issueRoutes(
   });
 
   router.get("/issues/:id/execution-review-evidence", executionReviewEvidenceRateLimit, async (req, res) => {
-    const issue = await getAccessibleResource(
-      req, res, getIssueById(req, req.params.id as string), "Issue not found", issueNotFoundBody(req),
-    );
-    if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true, finalForAgents: true }))) return;
-
-    const [executionDecisions, requiredQualityReviewState, submittedSignoffStale] = await Promise.all([
-      db.select({
-        id: issueExecutionDecisions.id,
-        stageType: issueExecutionDecisions.stageType,
-        outcome: issueExecutionDecisions.outcome,
-        reviewTargetBinding: issueExecutionDecisions.reviewTargetBinding,
-        createdAt: issueExecutionDecisions.createdAt,
-      }).from(issueExecutionDecisions).where(and(
-        eq(issueExecutionDecisions.companyId, issue.companyId),
-        eq(issueExecutionDecisions.issueId, issue.id),
-      )).orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id)).limit(100),
-      readRequiredQualityReview(db, issue),
-      readSubmittedSignoffIsStale(db, issue),
-    ]);
-    await recordAgentChildTaskRead(db, req, issue);
     res.setHeader("Cache-Control", "private, no-store");
-    res.json({ executionDecisions, requiredQualityReviewState, submittedSignoffStale });
+    const result = await db.transaction(transaction => withAuthorizationReadSnapshot(async () => {
+      const readDb = transaction as unknown as Db;
+      const issue = await getAccessibleResource(req, res, issueService(readDb).getById(req.params.id as string),
+        "Issue not found", issueNotFoundBody(req));
+      if (!issue || !await assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true, finalForAgents: true, readDb })) return null;
+
+      const [executionDecisions, requiredQualityReviewState, submittedSignoffStale] = await Promise.all([
+        readDb.select({
+          id: issueExecutionDecisions.id,
+          stageType: issueExecutionDecisions.stageType,
+          outcome: issueExecutionDecisions.outcome,
+          reviewTargetBinding: issueExecutionDecisions.reviewTargetBinding,
+          createdAt: issueExecutionDecisions.createdAt,
+        }).from(issueExecutionDecisions).where(and(
+          eq(issueExecutionDecisions.companyId, issue.companyId),
+          eq(issueExecutionDecisions.issueId, issue.id),
+        )).orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id)).limit(100),
+        readRequiredQualityReview(readDb, issue),
+        readSubmittedSignoffIsStale(readDb, issue),
+      ]);
+      return { issue, evidence: { executionDecisions, requiredQualityReviewState, submittedSignoffStale } };
+    }), { isolationLevel: "repeatable read", accessMode: "read only" });
+    if (!result) return;
+    await recordAgentChildTaskRead(db, req, result.issue);
+    res.json(result.evidence);
   });
 
   router.get("/issues/:id", async (req, res) => {

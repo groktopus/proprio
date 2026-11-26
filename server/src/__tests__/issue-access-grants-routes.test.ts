@@ -240,6 +240,28 @@ describeEmbeddedPostgres("issue access grant and locked edge routes", { concurre
     expect(await db.select().from(activityLog).where(eq(activityLog.action, "issue.break_glass_read"))).toEqual([]);
   });
 
+  it("reads signoff evidence only with task access or audited break-glass", async () => {
+    const fixture = await seedFixture();
+    const ownerApp = await createApp(db, boardActor(fixture.companyId, fixture.ownerId));
+    const adminApp = await createApp(db, boardActor(fixture.companyId, fixture.adminId));
+    const memberApp = await createApp(db, boardActor(fixture.companyId, fixture.memberId));
+    const path = `/api/issues/${fixture.privateIssueId}/execution-review-evidence`;
+
+    await request(ownerApp).get(path).expect(200);
+    const missing = await request(memberApp).get(`/api/issues/${randomUUID()}/execution-review-evidence`).expect(404);
+    const denied = await request(memberApp).get(`${path}?breakGlass=true`).expect(404);
+    expect(denied.body).toEqual(missing.body);
+    await request(adminApp).get(path).expect(404);
+    await request(adminApp).get(`${path}?breakGlass=true`).expect(200);
+
+    expect(await db.select().from(activityLog).where(eq(activityLog.action, "issue.break_glass_read"))).toMatchObject([
+      { actorId: fixture.adminId, entityId: fixture.privateIssueId },
+    ]);
+    expect(await db.select().from(issueComments)).toMatchObject([
+      { issueId: fixture.privateIssueId, authorType: "system" },
+    ]);
+  });
+
   it("requires explicit owner/admin break-glass and records both audit evidence and an owner-visible notice", async () => {
     const fixture = await seedFixture();
     const adminApp = await createApp(db, boardActor(fixture.companyId, fixture.adminId));
