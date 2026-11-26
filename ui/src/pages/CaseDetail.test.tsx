@@ -414,8 +414,8 @@ describe("read-only CaseDetail", () => {
     const accepted = handoff({ state: "delivered", recipientDecision: { outcome: "accepted", actorType: "agent", actorId: "agent-2", handoffVersion: 1,
       requirementRevisionId: "requirement-1", requirementsDigest: "digest", decidedAt: "2026-10-19T10:00:00Z" },
       offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Private requirement", prerequisites: [],
-        requirementRevision: { id: "requirement-1", revision: 4, canonicalSha256: "hash" }, requirementsDigest: "digest", workflowTransition: null,
-        decisionOwner: { type: "agent", id: "agent-2" }, accountableOwner: { type: "agent", id: "agent-2" } } });
+        requirementRevision: { id: "requirement-1", revision: 4, canonicalSha256: "hash" }, requirementsDigest: "digest",
+        taskBrief: { title: "Verify", description: null } } });
     cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", workIssue: { id: "task-1", identifier: "PAP-123", title: "Verify", status: "done", statusVersion: 2, assigneeAgentId: "agent-2", assigneeAgentName: "Verifier" } });
     cases.listHandoffs.mockResolvedValue({ items: [accepted], nextCursor: null });
     const history = { entries: [{ id: "recovery-1", status: "cancelled", ownerType: "agent", ownerAgentId: "agent-2", ownerUserId: null,

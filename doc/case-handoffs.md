@@ -192,5 +192,6 @@ earlier assessment remains under its original offer.
 retained completion-recovery records for that accepted revision. The caller
 needs both Case access and read access to the original task. Decision,
 assessment, and run references identify the saved evidence. The response
-includes criterion and evidence outcomes without exposing raw evidence bodies
-or provider references.
+includes criterion and evidence outcomes. Stored evidence bodies and provider
+references stay private. The board requests recovery history when the disclosure
+opens and removes the details when it closes.

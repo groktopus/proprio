@@ -1629,6 +1629,10 @@ function invalidateActivityQueries(
       queryKey: ["issues", "activity"],
       predicate: query => query.queryKey[3] === "completion-history",
     });
+    void queryClient.resetQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history",
+    });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
