@@ -66,7 +66,6 @@ import { withoutSqlStatementText } from "@groktopus/shared";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { listAttentionExhaustedRuns } from "./attention-exhausted-runs.js";
 import { budgetService } from "./budgets.js";
-import { visibleBudgetTaskTreeScopeIds } from "./budget-scope-visibility.js";
 import {
   BLOCKER_ATTENTION_MAX_DEPTH,
   BLOCKER_ATTENTION_MAX_NODES,
@@ -2527,11 +2526,10 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
 
       // A count reads the open incidents of the budget overview without the
       // spend of every policy, which the overview also sums.
-      const visibleBudgetRoots = options.actor
-        ? await visibleBudgetTaskTreeScopeIds(db, companyId, options.actor) : undefined;
+      const budgetRead = { actor: options.actor };
       const openBudgetIncidents = summaryOnly
-        ? await budgetService(db).openIncidents(companyId, { visibleTaskTreeScopeIds: visibleBudgetRoots })
-        : (await budgetService(db).overview(companyId, { visibleTaskTreeScopeIds: visibleBudgetRoots })).activeIncidents;
+        ? await budgetService(db).openIncidents(companyId, budgetRead)
+        : (await budgetService(db).overview(companyId, budgetRead)).activeIncidents;
       for (const incident of openBudgetIncidents) {
         const observedPercent = budgetObservedPercent(incident.amountObserved, incident.amountLimit);
         if (incident.thresholdType !== "hard" && observedPercent < ATTENTION_BUDGET_WARNING_PERCENT) continue;

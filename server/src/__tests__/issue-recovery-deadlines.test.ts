@@ -263,6 +263,23 @@ describeIssueRecovery("issue recovery production producers and deadlines", () =>
     expect(await resolveIssueGraph(state.db, { companyId: f.companyId, runId: randomUUID() })).toEqual([]);
     expect(await resolveIssueGraph(state.db, { companyId: f.companyId, issueId: randomUUID() })).toBeNull();
   });
+  it("includes transitive required dependents for assigned-work graph checks", async () => {
+    const f = await fixture();
+    const [leaf, middle, parent] = await state.db.insert(issues).values([
+      { companyId: f.companyId, title: "Leaf", status: "blocked" },
+      { companyId: f.companyId, title: "Middle", status: "blocked" },
+      { companyId: f.companyId, title: "Parent", status: "in_progress", assigneeAgentId: f.agentId },
+    ]).returning({ id: issues.id });
+    await state.db.insert(issueRelations).values([
+      { companyId: f.companyId, issueId: leaf!.id, relatedIssueId: middle!.id, type: "blocks" },
+      { companyId: f.companyId, issueId: middle!.id, relatedIssueId: parent!.id, type: "blocks" },
+    ]);
+    const scope = { companyId: f.companyId, issueId: leaf!.id };
+    expect(await resolveIssueGraph(state.db, scope)).toEqual([leaf!.id, middle!.id].sort());
+    expect(await resolveIssueGraph(state.db, { ...scope, transitiveDependents: true }))
+      .toEqual([leaf!.id, middle!.id, parent!.id].sort());
+  });
+
   it("resolves a run's task graph through index lookups, not the backlog", async () => {
     const f = await fixture();
     const graph = await runGraph(f.companyId, f.agentId);

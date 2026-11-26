@@ -38,7 +38,6 @@ export interface ActivityFilters {
   entityId?: string;
   limit?: number;
   readCondition?: SQL<boolean>;
-  visibleBudgetTaskTreeScopeIds?: readonly string[];
   caseReadCondition?: SQL<boolean>;
   dashboardUserId?: string | null;
 }
@@ -449,8 +448,7 @@ export function activityService(db: Db) {
         .where(
           and(
             ...conditions,
-            filters.visibleBudgetTaskTreeScopeIds === undefined ? undefined
-              : readableTaskTreeBudgetActivityCondition(filters.visibleBudgetTaskTreeScopeIds),
+            filters.readCondition ? readableTaskTreeBudgetActivityCondition(filters.readCondition) : undefined,
             or(
               sql`${activityLog.entityType} != 'issue'`,
               and(visibleIssueCondition(), filters.readCondition ?? sql<boolean>`true`),

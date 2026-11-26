@@ -3,7 +3,6 @@ import type { Db } from "@groktopus/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@groktopus/db";
 import { notFound } from "../errors.js";
 import { budgetServiceInTransaction } from "./budgets.js";
-import { visibleBudgetTaskTreeScopeIds } from "./budget-scope-visibility.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { approvalReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -61,9 +60,8 @@ export function dashboardService(db: Db) {
           .from(approvals)
           .where(and(eq(approvals.companyId, companyId), inArray(approvals.status, resolvableApprovalStatuses), approvalRead))
           .then((rows) => Number(rows[0]?.count ?? 0));
-        const visibleTaskTreeScopeIds = options.actor ? await visibleBudgetTaskTreeScopeIds(snapshotDb, companyId, actor) : undefined;
         const budgetOverview = await budgetServiceInTransaction(snapshotDb).overview(companyId, {
-          approvalReadCondition: approvalRead, visibleTaskTreeScopeIds,
+          approvalReadCondition: approvalRead, actor: options.actor,
         });
         return { pendingApprovals, budgetOverview };
       };
