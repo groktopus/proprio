@@ -151,8 +151,9 @@ for this workload; everything else from
   on. The Runner then records closed OpenCode phase timings through a local,
   authenticated sink. No operator OTLP endpoint or ingestion credential is
   passed to OpenCode.
-- **Browser page-load tracing** on hosted instances needs
-  `PROPRIO_BROWSER_TRACES_ENDPOINT`. See
+- **Browser page-load tracing** on managed instances needs
+  `PROPRIO_BROWSER_TRACES_ENDPOINT`; self-hosted instances additionally need
+  `PROPRIO_BROWSER_TRACES_SELF_HOSTED_ENABLED=1`. See
   [browser performance tracing](browser-performance-tracing.md).
 - **Browser product analytics** (PostHog) on Proprio Cloud needs
   `PROPRIO_POSTHOG_PROJECT_TOKEN` and `PROPRIO_POSTHOG_BROWSER_ENABLED=1`.

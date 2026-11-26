@@ -87,6 +87,23 @@ describe("buildExecutionPolicy", () => {
     });
   });
 
+  it("keeps the required quality review and immutable target when removing the last reviewer", () => {
+    const existingPolicy: IssueExecutionPolicy = {
+      mode: "normal",
+      commentRequired: true,
+      requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Copy" }] },
+      reviewTargetBinding: { source: "required_quality_review" },
+      stages: [{ id: STAGE_ID, type: "review", approvalsNeeded: 1, participants: [
+        { id: PARTICIPANT_ID, type: "agent", agentId: AGENT_ID, userId: null },
+      ] }],
+    };
+    expect(buildExecutionPolicy({ existingPolicy, reviewerValues: [], approverValues: [] })).toMatchObject({
+      stages: [],
+      requiredQualityReview: existingPolicy.requiredQualityReview,
+      reviewTargetBinding: existingPolicy.reviewTargetBinding,
+    });
+  });
+
   it("generates schema-valid UUIDs when crypto.randomUUID is unavailable", () => {
     vi.stubGlobal("crypto", {
       getRandomValues: (bytes: Uint8Array) => {

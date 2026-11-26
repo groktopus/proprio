@@ -423,17 +423,20 @@ describe.skipIf(!runControlPostgresSupport.supported)("scoped budget cancellatio
   it("cancels only runs and queued tasks with the historical task-tree lineage", async () => {
     const { company, agent } = await fixture();
     const [root, child, moved, unrelated] = await db.insert(issues).values([
-      { companyId: company.id, title: "Tree root" }, { companyId: company.id, title: "Child" },
+      { companyId: company.id, title: "Tree root" }, { companyId: company.id, title: "Child", identifier: "TREE-42" },
       { companyId: company.id, title: "Moved task" }, { companyId: company.id, title: "Unrelated" },
     ]).returning();
     await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
     const [inside, historical, outside] = await db.insert(heartbeatRuns).values([
-      { companyId: company.id, agentId: agent.id, issueId: child.id, taskLineageJson: { version: 1, issueId: child.id, pathIssueIds: [child.id, root.id] }, status: "queued", runtimeMode: "legacy" },
-      { companyId: company.id, agentId: agent.id, issueId: moved.id, taskLineageJson: { version: 1, issueId: moved.id, pathIssueIds: [moved.id, root.id] }, status: "queued", runtimeMode: "legacy" },
-      { companyId: company.id, agentId: agent.id, issueId: unrelated.id, taskLineageJson: { version: 1, issueId: unrelated.id, pathIssueIds: [unrelated.id] }, status: "queued", runtimeMode: "legacy" },
+      { companyId: company.id, agentId: agent.id, issueId: child.id, taskLineageJson: { version: 1, pathIssueIds: [child.id, root.id] }, status: "queued", runtimeMode: "legacy" },
+      { companyId: company.id, agentId: agent.id, issueId: moved.id, taskLineageJson: { version: 1, pathIssueIds: [moved.id, root.id] }, status: "queued", runtimeMode: "legacy" },
+      { companyId: company.id, agentId: agent.id, issueId: unrelated.id, taskLineageJson: { version: 1, pathIssueIds: [unrelated.id] }, status: "queued", runtimeMode: "legacy" },
     ]).returning();
-    const wakes = await db.insert(agentWakeupRequests).values([child, unrelated].map(issue => ({
-      companyId: company.id, agentId: agent.id, source: "assignment", status: "queued", payload: { issueId: issue.id },
+    const wakes = await db.insert(agentWakeupRequests).values([
+      { issueId: child.id }, { taskId: child.id }, { _proprioWakeContext: { issueId: child.id } },
+      { taskKey: "tree-42" }, { issueId: unrelated.id },
+    ].map(payload => ({
+      companyId: company.id, agentId: agent.id, source: "assignment", status: "queued", payload,
     }))).returning();
 
     await createHeartbeatRunControl(db, callbacks(db)).cancelBudgetScopeWork({
@@ -446,7 +449,8 @@ describe.skipIf(!runControlPostgresSupport.supported)("scoped budget cancellatio
     });
     const persistedWakes = await db.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakes.map(wake => wake.id)));
     expect(Object.fromEntries(persistedWakes.map(wake => [wake.id, wake.status]))).toEqual({
-      [wakes[0]!.id]: "cancelled", [wakes[1]!.id]: "queued",
+      [wakes[0]!.id]: "cancelled", [wakes[1]!.id]: "cancelled", [wakes[2]!.id]: "cancelled",
+      [wakes[3]!.id]: "cancelled", [wakes[4]!.id]: "queued",
     });
   });
 

@@ -112,7 +112,6 @@ const mockAccessService = vi.hoisted(() => ({
 }));
 const mockBudgetScopeVisibility = vi.hoisted(() => ({
   canReadBudgetTaskTreeRoot: vi.fn().mockResolvedValue(true),
-  visibleBudgetTaskTreeScopeIds: vi.fn().mockResolvedValue([]),
 }));
 
 function registerModuleMocks() {
@@ -216,7 +215,6 @@ describe("cost routes", () => {
     mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
     mockBudgetService.getIncidentScope.mockResolvedValue(null);
     mockBudgetScopeVisibility.canReadBudgetTaskTreeRoot.mockResolvedValue(true);
-    mockBudgetScopeVisibility.visibleBudgetTaskTreeScopeIds.mockResolvedValue([]);
   });
 
   it("accepts valid ISO date strings", async () => {
@@ -319,10 +317,10 @@ describe("cost routes", () => {
   });
 
   it("limits company budget overview to task-tree roots the actor can read", async () => {
-    const visibleRootId = "22222222-2222-4222-8222-222222222222";
-    mockBudgetScopeVisibility.visibleBudgetTaskTreeScopeIds.mockResolvedValue([visibleRootId]);
     await request(createApp()).get("/api/companies/company-1/budgets/overview").expect(200);
-    expect(mockBudgetService.overview).toHaveBeenCalledExactlyOnceWith("company-1", { visibleTaskTreeScopeIds: [visibleRootId] });
+    expect(mockBudgetService.overview).toHaveBeenCalledExactlyOnceWith("company-1", {
+      actor: expect.objectContaining({ type: "board", userId: "board-user" }),
+    });
   });
 
   it("rejects company budget updates for board users outside the company", async () => {

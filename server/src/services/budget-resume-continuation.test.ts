@@ -118,9 +118,11 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     const [company] = await db.insert(companies).values({ name: "Tree resume",
       issuePrefix: `B${randomUUID().slice(0, 4).toUpperCase()}` }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Worker" }).returning();
-    const [root, child, unrelated] = await db.insert(issues).values([
+    const [root, child, unrelated, stoppedByCompany, legacyTask] = await db.insert(issues).values([
       { companyId: company.id, title: "Root" }, { companyId: company.id, title: "Child", parentId: null },
       { companyId: company.id, title: "Unrelated" },
+      { companyId: company.id, title: "Stopped by company" },
+      { companyId: company.id, title: "Legacy child", identifier: "LEGACY-64" },
     ]).returning();
     const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree",
       scopeId: root.id, windowKind: "lifetime", amount: 1, hardStopEnabled: true }).returning();
@@ -128,13 +130,25 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
       scopeType: "task_tree", scopeId: root.id, metric: "billed_cents", windowKind: "lifetime",
       windowStart: new Date(0), windowEnd: new Date("9999-01-01T00:00:00Z"), thresholdType: "hard",
       amountLimit: 1, amountObserved: 1, createdAt: new Date(Date.now() - 60_000) }).returning();
-    const [inside, outside] = await db.insert(heartbeatRuns).values([
+    const [inside, outside, companyStop, legacy] = await db.insert(heartbeatRuns).values([
       { companyId: company.id, agentId: agent.id, issueId: child.id, status: "cancelled", runtimeMode: "legacy",
-        taskLineageJson: { version: 1, issueId: child.id, pathIssueIds: [child.id, root.id] },
+        taskLineageJson: { version: 1, pathIssueIds: [child.id, root.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
       { companyId: company.id, agentId: agent.id, issueId: unrelated.id, status: "cancelled", runtimeMode: "legacy",
-        taskLineageJson: { version: 1, issueId: unrelated.id, pathIssueIds: [unrelated.id] },
+        taskLineageJson: { version: 1, pathIssueIds: [unrelated.id] },
+        resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
+          companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
+      { companyId: company.id, agentId: agent.id, issueId: stoppedByCompany.id, status: "cancelled", runtimeMode: "legacy",
+        taskLineageJson: { version: 1, pathIssueIds: [stoppedByCompany.id, root.id] },
+        resultJson: {
+          cancellation: { reason: "Agent lifecycle stop requested", source: "control_plane", initiator: { type: "system" } },
+          pauseStop: { holds: ["company_paused"], companyPauseReason: "budget" },
+          startupCancellation: { requestedAt: new Date().toISOString() },
+        } },
+      { companyId: company.id, agentId: agent.id, status: "cancelled", runtimeMode: "legacy",
+        contextSnapshot: { taskKey: legacyTask.identifier },
+        taskLineageJson: { version: 1, pathIssueIds: [legacyTask.id, root.id] },
         resultJson: { startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement: {
           companyId: company.id, scopeType: "task_tree", scopeId: root.id, policyId: policy.id, version: 1 } } } },
     ]).returning();
@@ -142,8 +156,17 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
 
     const claimed = await markBudgetCancelledWorkForResume(db, { companyId: company.id, scopeType: "task_tree",
       scopeId: root.id, incidentId: incident.id, incidentOpenedAt: incident.createdAt, actorUserId: "local-board" });
-    expect(claimed).toEqual([inside.id]);
+    expect(claimed.sort()).toEqual([inside.id, legacy.id].sort());
     expect(await claimOf(outside.id)).toBeUndefined();
+    expect(await claimOf(companyStop.id)).toBeUndefined();
+    const requestRetry = vi.fn(async () => ({ accepted: true, requestId: null }));
+    await deliverBudgetResumeContinuations(db, { requestRetry: requestRetry as never });
+    expect(requestRetry).toHaveBeenCalledWith(expect.objectContaining({ issueId: legacyTask.id, observedRunId: legacy.id }));
+    expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered" });
+    const receipt = mockLogActivity.mock.calls.find(([, activity]) =>
+      activity.action === "budget.cancelled_work_continued" && activity.entityId === legacyTask.id)?.[1];
+    expect(receipt?.details).toMatchObject({ interruptedRunId: legacy.id });
+    expect(receipt?.details).not.toHaveProperty("budgetIncidentId");
   });
 
   it("continues a run whose stop was still being delivered when the board resumed", async () => {

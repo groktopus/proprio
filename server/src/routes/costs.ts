@@ -34,7 +34,7 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchCompanyQuotaWindows } from "../services/quota-windows.js";
 import { attentionHandledDetails, attentionHandledFor } from "../services/attention-receipts.js";
-import { canReadBudgetTaskTreeRoot, visibleBudgetTaskTreeScopeIds } from "../services/budget-scope-visibility.js";
+import { canReadBudgetTaskTreeRoot } from "../services/budget-scope-visibility.js";
 import { badRequest, forbidden, notFound } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -349,8 +349,7 @@ export function costRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
-    const visibleTaskTreeScopeIds = await visibleBudgetTaskTreeScopeIds(db, companyId, req.actor);
-    const overview = await budgets.overview(companyId, { visibleTaskTreeScopeIds });
+    const overview = await budgets.overview(companyId, { actor: req.actor });
     res.json(overview);
   });
 

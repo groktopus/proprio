@@ -65,7 +65,7 @@ export const heartbeatRuns = pgTable(
     // Immutable parent-task ancestry captured when budget admission first
     // reserves this run. Kept separate from provider usage so retry eligibility
     // and usage receipt readers retain their existing exact-shape contracts.
-    taskLineageJson: jsonb("task_lineage_json").$type<{ version: 1; issueId: string; pathIssueIds: string[] }>(),
+    taskLineageJson: jsonb("task_lineage_json").$type<{ version: 1; pathIssueIds: string[] }>(),
     resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
     runtimeMode: text("runtime_mode").notNull().default("legacy"),
     runtimeModeResolverVersion: text("runtime_mode_resolver_version"),

@@ -20,7 +20,7 @@ import { issues } from "./issues.js";
 import { labels } from "./labels.js";
 import { projects } from "./projects.js";
 import { workflows } from "./workflows.js";
-import type { CaseHandoffOfferContract, CaseHandoffRecipientDecision, CaseWorkflowTransition } from "@groktopus/shared";
+import type { CaseHandoffOfferContract, CaseHandoffRecipientDecision, CaseHandoffState, CaseWorkflowTransition } from "@groktopus/shared";
 
 export const cases = pgTable(
   "cases",
@@ -222,7 +222,7 @@ export const caseHandoffs = pgTable("case_handoffs", {
   inputFingerprint: text("input_fingerprint").notNull(),
   offerContract: jsonb("offer_contract").$type<CaseHandoffOfferContract | null>(),
   recipientDecision: jsonb("recipient_decision").$type<CaseHandoffRecipientDecision | null>(),
-  state: text("state").$type<"offered" | "awaiting_release" | "pending_dispatch" | "delivered" | "awaiting_completion" | "completed" | "cancelled">().notNull(),
+  state: text("state").$type<CaseHandoffState>().notNull(),
   attemptCount: integer("attempt_count").notNull().default(0),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
   leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),

@@ -102,6 +102,18 @@ function renderMarkdown(
 }
 
 describe("MarkdownBody", () => {
+  it("keeps linked images as one navigation action when the image gallery is enabled", () => {
+    const html = renderMarkdown(
+      "[![Linked preview](/linked.png)](/docs)\n\n![Standalone image](/standalone.png)",
+      [],
+      { onImageClick: vi.fn() },
+    );
+    expect(html).toMatch(/<a[^>]*href="\/docs"[^>]*><img[^>]*alt="Linked preview"[^>]*\/><\/a>/);
+    expect(html).not.toContain('aria-label="Open image: Linked preview"');
+    expect(html).toContain('aria-label="Open image: Standalone image"');
+    expect(html.match(/role="button"/g)).toHaveLength(1);
+  });
+
   it("renders a company link written as //PREFIX/... as that company path", () => {
     mockUseOptionalCompany.mockReturnValue({ companies: [{ issuePrefix: "RUN" }] });
     const html = renderMarkdown("[Failed run](//RUN/agents/agent-1/runs/run-1)");
@@ -673,7 +685,7 @@ describe("MarkdownBody", () => {
     expect(html).toContain('data-github-link="pull_request"');
     expect(html).toContain("lucide-git-pull-request");
     expect(html).toContain("GitHub pull request:");
-    expect(html).toMatch(/<span style="white-space:nowrap">.*lucide-git-pull-request.*?<\/svg>p<\/span>/);
+    expect(html).toMatch(/<span style="white-space:nowrap">.*lucide-git-pull-request.*?<\/svg>g<\/span>/);
     expect(html.replace(/<[^>]*>/g, "")).toContain("groktopus/proprio#4099");
     expect(html).not.toContain("lucide-external-link");
   });
