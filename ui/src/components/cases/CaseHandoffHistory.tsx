@@ -12,6 +12,7 @@ import { cn, formatCodeLabel, formatDateTime, relativeTime } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import type { CaseAgentMap } from "./CaseWorkSummary";
+import { AcceptedRecoveryHistory } from "./AcceptedRecoveryHistory";
 
 function HandoffActor({ id, name, fallback, agents }: {
   id: string | null;
@@ -83,6 +84,14 @@ function HandoffRow({ handoff, task, agents }: { handoff: CaseHandoffView; task?
         {open && <HandoffOffer handoff={handoff} agents={agents} />}
         {handoff.lastError && !settled && handoff.state !== "cancelled" ? <p className="text-xs text-muted-foreground">{handoff.lastError}</p> : null}
         <MarkdownBody linkIssueReferences linkCaseReferences>{handoff.instructions}</MarkdownBody>
+        {open && handoff.recipientDecision?.outcome === "accepted" && handoff.offerContract ? <AcceptedRecoveryHistory
+          caseId={handoff.caseId}
+          handoffId={handoff.id}
+          issueId={handoff.issueId}
+          recipientId={handoff.recipientDecision.actorId}
+          acceptedRevision={handoff.offerContract.requirementRevision.revision}
+          agents={agents}
+        /> : null}
       </div>
     </details>
   </li>;

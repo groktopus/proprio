@@ -179,3 +179,19 @@ case-handoffs Product E2E workflow for provider/browser qualification; fixture
 and service tests do not establish that a live model followed the workflow.
 See [implementation and acceptance](plans/2026-10-19-persistent-case-handoffs.md)
 and the [agent case reference](../skills/proprio/references/cases.md).
+
+## Completion recovery history
+
+In Case handoff history, open an accepted handoff and expand **Recovery history**
+to see who owns the next action, which criteria or evidence need work, and the
+recorded attempts. The view distinguishes the accepted requirements revision
+from the revision actually assessed. When scope moves to a later handoff, the
+earlier assessment remains under its original offer.
+
+`GET /api/cases/:caseId/handoffs/:handoffId/recovery-history` reads at most three
+retained completion-recovery records for that accepted revision. The caller
+needs company activity read permission, Case access, and read access to the
+original task. Run and decision references identify the saved attempts. The response
+includes criterion and evidence outcomes. Stored evidence bodies and provider
+references stay private. The board requests recovery history when the disclosure
+opens and removes the details when it closes.

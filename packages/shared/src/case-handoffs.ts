@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { issueDocumentKeySchema, upsertIssueDocumentSchema } from "./validators/issue.js";
+import { issueDocumentKeySchema, issueRecoveryActionReadModelSchema, upsertIssueDocumentSchema } from "./validators/issue.js";
 
 /** Preserve the author's workflow text; blank text cannot define a workflow. */
 export const caseWorkflowDocumentTextSchema = z.string().min(1).max(200_000).regex(/\S/, "Workflow document text must not be blank")
@@ -58,6 +58,28 @@ export interface CaseHandoffRecipientDecision {
   reasonCode?: string;
   message?: string;
 }
+
+export const caseHandoffRecoveryHistorySchema = z.object({
+  entries: z.array(issueRecoveryActionReadModelSchema.pick({
+    id: true, status: true, ownerType: true, ownerAgentId: true, ownerUserId: true, nextAction: true,
+    attemptCount: true, maxAttempts: true, outcome: true, resolutionNote: true,
+  }).extend({
+    assessedRevision: z.number().int().positive(),
+    criteria: z.array(z.object({
+      criterionId: z.string(),
+      requirement: z.string().nullable(),
+      outcome: z.string().nullable(),
+      reasonCode: z.string().nullable(),
+      evidence: z.array(z.object({ outcome: z.string().nullable(), reasonCode: z.string().nullable() })),
+    })),
+    attempts: z.array(z.object({
+      runId: z.string().uuid(),
+      decisionId: z.string().uuid(),
+      reasonCode: z.string(),
+    })),
+  })),
+});
+export type CaseHandoffRecoveryHistory = z.infer<typeof caseHandoffRecoveryHistorySchema>;
 
 export const agentCaseHandoffSchema = z.object({
   to: z.never().optional(),

@@ -131,6 +131,24 @@ export type CaseCompletionRecoveryAttempt = {
   receipt: CaseCompletionReceipt | null;
 };
 
+/** Read saved attempts, including a single attempt from older receipt layouts. */
+export function readCaseCompletionRecoveryAttempts(evidence: Record<string, unknown> | undefined) {
+  const receipt = record(evidence?.caseHandoffCompletion);
+  if (Array.isArray(receipt.attempts)) return receipt.attempts.map(record);
+  const assessment = record(receipt.assessment);
+  const decision = record(receipt.decision);
+  const decisionId = evidence?.decisionId ?? decision.id;
+  if (typeof evidence?.runId !== "string" || typeof decisionId !== "string") return [];
+  return [{
+    runId: evidence.runId,
+    decisionId,
+    resultId: assessment.resultId,
+    assessmentId: assessment.id,
+    assessedContractId: record(assessment.assessedContractRevision).id ?? assessment.assessedContractId,
+    reasonCode: decision.statusDecisionReasonCode,
+  }];
+}
+
 export function foldCaseCompletionRecoveryAttempt(
   incoming: CaseCompletionRecoveryAttempt,
   existingEvidence: Record<string, unknown> | undefined,
@@ -145,17 +163,7 @@ export function foldCaseCompletionRecoveryAttempt(
   const priorHandoff = record(priorReceipt.caseHandoff);
   const sameRevision = priorReceipt.schema === incoming.receipt.schema && priorHandoff.id === accepted.id
     && priorHandoff.version === accepted.version && priorHandoff.requirementsDigest === accepted.requirementsDigest;
-  const priorAssessment = record(priorReceipt.assessment);
-  const priorAttempts = sameRevision && Array.isArray(priorReceipt.attempts)
-    ? priorReceipt.attempts.map(record)
-    : sameRevision && typeof existingEvidence?.runId === "string" && typeof existingEvidence.decisionId === "string" ? [{
-      runId: existingEvidence.runId,
-      decisionId: existingEvidence.decisionId,
-      resultId: priorAssessment.resultId,
-      assessmentId: priorAssessment.id,
-      assessedContractId: record(priorAssessment.assessedContractRevision).id ?? priorAssessment.assessedContractId,
-      reasonCode: record(priorReceipt.decision).statusDecisionReasonCode,
-    }] : [];
+  const priorAttempts = sameRevision ? readCaseCompletionRecoveryAttempts(existingEvidence) : [];
   if (priorAttempts.some(attempt => attempt.decisionId === incoming.decisionId)) return { kind: "keep" as const };
 
   // A saved native result can be reassessed after another task decision.

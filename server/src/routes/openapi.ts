@@ -4,7 +4,7 @@ import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestat
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { LINK_PREVIEW_BATCH_LIMIT, ATTENTION_SOURCE_KINDS } from "@groktopus/shared";
-import { agentCaseHandoffSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
+import { agentCaseHandoffSchema, caseHandoffRecoveryHistorySchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
 import {
   experimentalApiDocs,
   experimentalApiPaths,
@@ -14053,6 +14053,12 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
   summary: "Read a standalone case's handoff history", description: "Requires enableCases and access to all retained case permission sources.",
   request: { params: z.object({ caseId: z.string().uuid() }), query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(),
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history", tags: ["Cases"],
+  summary: "Read completion recovery for an accepted Case handoff revision",
+  description: "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: { ...r.ok(caseHandoffRecoveryHistorySchema), headers: { "Cache-Control": { schema: { enum: ["private, no-store"] } } } },
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests } });
 registry.registerPath({ method: "get", path: "/api/companies/{companyId}/case-handoff-offers", tags: ["Cases"],
   summary: "List your pending case handoff offers",
   description: "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",

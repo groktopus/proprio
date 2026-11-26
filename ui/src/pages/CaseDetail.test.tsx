@@ -12,7 +12,7 @@ import { replayLeaks } from "@/lib/analytics/replay-recording.test-utils";
 import { CaseDetail } from "./CaseDetail";
 
 const cases = vi.hoisted(() => ({
-  get: vi.fn(), listChildren: vi.fn(), listEvents: vi.fn(), listHandoffs: vi.fn(),
+  get: vi.fn(), listChildren: vi.fn(), listEvents: vi.fn(), listHandoffs: vi.fn(), getHandoffRecoveryHistory: vi.fn(),
   getDocument: vi.fn(), listRevisions: vi.fn(), patch: vi.fn(), upsertDocument: vi.fn(),
   deleteDocument: vi.fn(), restoreDocumentRevision: vi.fn(), retryHandoff: vi.fn(), cancelHandoff: vi.fn(),
 }));
@@ -93,16 +93,18 @@ describe("read-only CaseDetail", () => {
   let container: HTMLDivElement;
   let root: Root;
   const clients: QueryClient[] = [];
-  function render() {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  function render(gcTime = 0) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime } } });
     clients.push(client);
     flushSync(() => root.render(<QueryClientProvider client={client}><CaseDetail /></QueryClientProvider>));
+    return client;
   }
   beforeEach(() => {
     vi.clearAllMocks();
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
     cases.get.mockResolvedValue(detail()); cases.listChildren.mockResolvedValue([]); cases.listEvents.mockResolvedValue([]);
     cases.listHandoffs.mockResolvedValue({ items: [], nextCursor: null });
+    cases.getHandoffRecoveryHistory.mockResolvedValue({ entries: [] });
     cases.getDocument.mockResolvedValue({ ...detail().documents[0]!.document, key: "body", body: "Current authorized draft" });
     cases.listRevisions.mockResolvedValue({ key: "body", document: { id: "doc-1", title: "Launch draft", format: "markdown", latestRevisionId: "rev-2", latestRevisionNumber: 2 }, revisions: [{ id: "rev-1", revisionNumber: 1, title: "Launch draft", format: "markdown", body: "Earlier draft", changeSummary: "First version", createdAt: "2026-10-19T09:00:00Z", createdByAgentId: "agent-1", createdByUserId: null, createdByRunId: null, actorAgentName: "Writer", issue: null }] });
     agents.list.mockResolvedValue([{ id: "agent-1", name: "Writer", status: "idle" }, { id: "agent-2", name: "Verifier", status: "paused" }]);
@@ -407,5 +409,62 @@ describe("read-only CaseDetail", () => {
     expect(container.textContent).not.toContain("Hermes agent launch post");
     expect(container.querySelector('a[href="/PAP/cases?q=hermes&type=blog_post"]')).not.toBeNull();
     expect(cases.listChildren).not.toHaveBeenCalled();
+  });
+
+  it("loads accepted handoff recovery history only when its disclosure opens", async () => {
+    const accepted = handoff({ state: "delivered", recipientDecision: { outcome: "accepted", actorType: "agent", actorId: "agent-2", handoffVersion: 1,
+      requirementRevisionId: "requirement-1", requirementsDigest: "digest", decidedAt: "2026-10-19T10:00:00Z" },
+      offerContract: { schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Private requirement", prerequisites: [],
+        requirementRevision: { id: "requirement-1", revision: 4, canonicalSha256: "hash" }, requirementsDigest: "digest",
+        taskBrief: { title: "Verify", description: null } } });
+    cases.get.mockResolvedValue({ ...detail(), workIssueId: "task-1", workIssue: { id: "task-1", identifier: "PAP-123", title: "Verify", status: "done", statusVersion: 2, assigneeAgentId: "agent-2", assigneeAgentName: "Verifier" } });
+    cases.listHandoffs.mockResolvedValue({ items: [accepted], nextCursor: null });
+    const history = { entries: [{ id: "recovery-1", status: "cancelled", ownerType: "agent", ownerAgentId: "agent-2", ownerUserId: null,
+      cause: "completion_evidence_incomplete", nextAction: "Supply the report", attemptCount: 1, maxAttempts: 2, outcome: "cancelled",
+      resolutionNote: "Superseded by a later acceptance.", decisionId: "decision-1", assessmentId: "assessment-1",
+      assessedRevision: 5, criteria: [{ criterionId: "report", requirement: "Attach the report", outcome: "missing", reasonCode: "criterion_evidence_missing",
+        evidence: [{ outcome: "missing", reasonCode: "event_missing" }] }], attempts: [
+        { runId: "run-1", decisionId: "decision-1", assessmentId: "assessment-1", assessedContractId: "contract-1", reasonCode: "completion_evidence_incomplete" },
+      ] }] };
+    cases.getHandoffRecoveryHistory.mockResolvedValue(history);
+    const client = render(Infinity); await waitFor(() => expect(container.textContent).toContain("verification"));
+    expect(cases.getHandoffRecoveryHistory).not.toHaveBeenCalled();
+    flushSync(() => { const disclosure = container.querySelector<HTMLDetailsElement>('[aria-label="Case handoffs"] li details')!; disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(Array.from(document.body.querySelectorAll("summary")).some(item => item.textContent?.includes("Recovery history"))).toBe(true));
+    expect(cases.getHandoffRecoveryHistory).not.toHaveBeenCalled();
+    const recoverySummary = Array.from(document.body.querySelectorAll("summary")).find(item => item.textContent?.includes("Recovery history"))!;
+    flushSync(() => { const disclosure = recoverySummary.parentElement as HTMLDetailsElement; disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(container.textContent).toContain("Incomplete completion evidence"));
+    expect(cases.getHandoffRecoveryHistory).toHaveBeenCalledWith("case-1", "handoff-1", expect.any(AbortSignal));
+    expect(container.textContent).toContain("Accepted requirements · revision 4");
+    expect(container.textContent).toContain("Assessed revision 5");
+    expect(container.textContent).toContain("Superseded by a later acceptance.");
+    expect(container.textContent).toContain("Required evidence missing");
+    expect(container.querySelector('a[href$="/agents/agent-2/runs/run-1"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("Supply the report");
+
+    let deny!: (error: unknown) => void;
+    cases.getHandoffRecoveryHistory.mockImplementation(() => new Promise((_, reject) => { deny = reject; }));
+    const cacheKey = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", accepted.issueId);
+    const disclosure = recoverySummary.parentElement as HTMLDetailsElement;
+    flushSync(() => { disclosure.open = false; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(container.textContent).not.toContain("Attach the report"));
+    flushSync(() => { disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(container.textContent).toContain("Loading recovery history"));
+    expect(client.getQueryData(cacheKey)).toEqual(history);
+    expect(container.textContent).not.toContain("Attach the report");
+    deny(new ApiError("Access changed", 403, {}));
+    await waitFor(() => expect(container.querySelector('[data-query-view="error"]')).not.toBeNull());
+    expect(client.getQueryData(cacheKey)).toEqual({ entries: [] });
+    expect(container.textContent).not.toContain("Attach the report");
+    expect(container.textContent).not.toContain("Retry");
+
+    cases.getHandoffRecoveryHistory.mockRejectedValue(new ApiError("Temporary failure", 500, {}));
+    flushSync(() => { disclosure.open = false; disclosure.dispatchEvent(new Event("toggle")); });
+    flushSync(() => { disclosure.open = true; disclosure.dispatchEvent(new Event("toggle")); });
+    await waitFor(() => expect(container.querySelector('[data-query-view="error"] button')).not.toBeNull());
+    cases.getHandoffRecoveryHistory.mockResolvedValue(history);
+    click(button("Retry"));
+    await waitFor(() => expect(container.textContent).toContain("Attach the report"));
   });
 });

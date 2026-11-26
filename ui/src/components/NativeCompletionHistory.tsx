@@ -1,11 +1,9 @@
 import type { NativeCompletionCriterionAssessment, NativeCompletionHistoryEntry, NativeCompletionEvidenceReference } from "@groktopus/shared";
 import { useRef, useState, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { activityApi } from "@/api/activity";
-import { classifyError } from "@/api/errors";
-import { useQueryView } from "@/components/QueryView";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { queryKeys } from "@/lib/queryKeys";
+import { useAuthorizedHistory } from "@/lib/use-authorized-history";
 import { cn, formatDateTime } from "@/lib/utils";
 
 function label(value: string | null | undefined): string {
@@ -229,31 +227,9 @@ export function NativeCompletionHistory({ entries, isLoading, error, onRetry, sh
 
 
 export function useTaskCompletionHistory(issueId: string) {
-  const queryClient = useQueryClient();
-  const queryKey = queryKeys.issues.completionHistory(issueId);
-  const history = useQuery({
-    queryKey,
-    refetchOnMount: "always",
-    queryFn: async ({ signal }) => {
-      try {
-        return await activityApi.completionHistoryForIssue(issueId, { signal });
-      } catch (error) {
-        const errorKind = classifyError(error);
-        if (!signal.aborted && (errorKind === "auth" || errorKind === "forbidden" || errorKind === "not_found")) {
-          queryClient.setQueryData(queryKey, []);
-        }
-        throw error;
-      }
-    },
-  });
-  const view = useQueryView(history);
-  const waiting = history.fetchStatus !== "idle" || view.kind === "loading" || view.kind === "reconnecting";
-  return {
-    entries: history.isSuccess && !waiting ? view.data : undefined,
-    isLoading: waiting,
-    error: !waiting && history.isError,
-    onRetry: view.retry,
-  };
+  const history = useAuthorizedHistory(queryKeys.issues.completionHistory(issueId),
+    signal => activityApi.completionHistoryForIssue(issueId, { signal }), []);
+  return { entries: history.data, isLoading: history.isLoading, error: history.error !== null, onRetry: history.onRetry };
 }
 
 function TaskCompletionHistory({ issueId }: { issueId: string }) {

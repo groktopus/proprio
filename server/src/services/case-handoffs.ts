@@ -21,6 +21,8 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { issueService } from "./issues.js";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { documentService } from "./documents.js";
+import { withAuthorizationReadSnapshot } from "./authorization-read-scope.js";
+import { readCaseHandoffRecoveryHistory } from "./case-handoff-recovery-history.js";
 import { applyCaseWorkflow, captureCaseWorkflow } from "./case-workflows.js";
 import type { CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
@@ -701,6 +703,27 @@ export function caseHandoffService(db: Db) {
       }
       return { items: page.map(row => ({ ...publicHandoff(row), toAgentName: row.toAgentId ? names.get(row.toAgentId) ?? null : null, fromAgentName: row.fromAgentId ? names.get(row.fromAgentId) ?? null : null, canControl })),
         nextCursor: handoffNextCursor(rows.length > limit ? page.at(-1) : undefined), canControl };
+    },
+
+    async recoveryHistory(actor: AuthorizationActor, caseId: string, handoffId: string) {
+      return db.transaction(transaction => withAuthorizationReadSnapshot(async () => {
+        const tx = transaction as unknown as Db;
+        await assertEnabled(tx);
+        const caseRow = await visible(actor, caseId, tx);
+        if (!isUuidLike(handoffId)) throw notFound("Handoff not found");
+        const [handoff] = await tx.select().from(caseHandoffs).where(and(
+          eq(caseHandoffs.companyId, caseRow.companyId), eq(caseHandoffs.caseId, caseId),
+          eq(caseHandoffs.id, handoffId),
+        )).limit(1);
+        if (!handoff) throw notFound("Handoff not found");
+        const access = authorizationService(tx);
+        const [taskRead, completionRead] = await access.decideReads(actor, [{
+          type: "issue", companyId: caseRow.companyId, issueId: handoff.issueId,
+        }, { type: "company", companyId: caseRow.companyId }]);
+        if (!taskRead?.allowed) throw notFound("Handoff not found");
+        if (!completionRead?.allowed) throw forbidden("Completion history is outside this actor's authorization boundary");
+        return readCaseHandoffRecoveryHistory(tx, handoff);
+      }), { isolationLevel: "repeatable read", accessMode: "read only" });
     },
 
     async recordRecipientDecision(actor: AuthorizationActor, caseId: string, handoffId: string, input: CaseHandoffRecipientDecisionInput) {

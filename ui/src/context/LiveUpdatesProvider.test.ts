@@ -139,8 +139,10 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const questionKey = ["issues", "pending-questions", "chat-1", "user-1"];
     const taskRecordKey = queryKeys.decisions.taskRecord("company-1", "task-1", "user-1", "decision-1");
     const completionHistoryKey = queryKeys.issues.completionHistory("another-task");
+    const caseRecoveryKey = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
     const diagnosisKey = queryKeys.issues.dependencyInvestigation("parent-issue");
     client.setQueryData(completionHistoryKey, [{ id: "revoked-history" }]);
+    client.setQueryData(caseRecoveryKey, { entries: [{ purpose: "Private recovery history" }] });
     client.setQueryData(diagnosisKey, { dependencyPath: [{ title: "Private dependency" }] });
     client.setQueryData(taskRecordKey, { title: "Private decision" });
     client.setQueryData(questionKey, [{ title: "Private question" }]);
@@ -153,8 +155,34 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(historyKey)).toBeUndefined();
     expect(client.getQueryData(questionKey)).toBeUndefined();
     expect(client.getQueryData(taskRecordKey)).toBeUndefined();
+    expect(client.getQueryData(caseRecoveryKey)).toBeUndefined();
     expect(client.getQueryData(diagnosisKey)).toBeUndefined();
     expect(client.getQueryData(completionHistoryKey)).toBeUndefined();
+    client.clear();
+  });
+  it.each(["issue.status_decision_recorded", "issue.recovery_action_resolved"])(
+    "refreshes only the Case recovery history for the source task on %s", action => {
+      const client = new QueryClient();
+      const current = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+      const unrelated = queryKeys.cases.handoffRecoveryHistory("case-2", "handoff-2", "task-2");
+      client.setQueryData(current, { entries: [] });
+      client.setQueryData(unrelated, { entries: [] });
+      __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+        entityType: "issue", entityId: "task-1", action,
+      }, { userId: "user-1", agentId: null });
+      expect(client.getQueryState(current)?.isInvalidated).toBe(true);
+      expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
+      client.clear();
+    },
+  );
+  it("clears Case recovery history on a content-free audience change", () => {
+    const client = new QueryClient();
+    const key = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+    client.setQueryData(key, { entries: [{ requirement: "Private recovery history" }] });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+      action: "resource_membership.changed",
+    }, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
     client.clear();
   });
   it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {

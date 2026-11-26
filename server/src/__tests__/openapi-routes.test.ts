@@ -592,6 +592,7 @@ describe("openapi routes", () => {
       "/api/cases/{caseId}/handoffs",
       "/api/cases/{caseId}/handoffs/{handoffId}/cancel",
       "/api/cases/{caseId}/handoffs/{handoffId}/decision",
+      "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history",
       "/api/cases/{caseId}/handoffs/{handoffId}/retry",
       "/api/cases/{caseId}/handoffs/{handoffId}/withdraw",
     ]);
