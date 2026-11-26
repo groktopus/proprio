@@ -150,6 +150,12 @@ export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome"
 ]);
 export type CaseHandoffRecipientDecisionInput = z.infer<typeof caseHandoffRecipientDecisionSchema>;
 
+export const caseHandoffWithdrawalSchema = z.object({
+  expectedHandoffVersion: decisionTarget.expectedHandoffVersion,
+  stoppedRunId: z.string().guid(),
+}).strict();
+export type CaseHandoffWithdrawalInput = z.infer<typeof caseHandoffWithdrawalSchema>;
+
 export type HandoffCaseResult = {
   handoffId: string;
   caseId: string;

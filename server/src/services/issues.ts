@@ -8,6 +8,7 @@ import { notifyStrandedAgentStatus, notifyActiveRunSilence } from "./live-run-re
 import { finishedIdleWake } from "./idle-work-proof.js";
 import { notifyDeferredExecutionEligibility } from "./deferred-execution-notifications.js";
 import { notifyIssueGraphRecovery } from "./issue-recovery-notifications.js";
+import { assertCaseHandoffWithdrawalHoldReleased } from "./case-handoff-states.js";
 import { notifyRunDispatch } from "./run-dispatch-notifications.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
 import { notifyIssueAttentionRetentionWork } from "./retention-work-notifications.js";
@@ -12074,6 +12075,13 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if ((actorAgentId || !actorUserId) && (
+          (patch.status !== undefined && patch.status !== receiptExisting.status) ||
+          (patch.assigneeAgentId !== undefined && patch.assigneeAgentId !== receiptExisting.assigneeAgentId) ||
+          (patch.assigneeUserId !== undefined && patch.assigneeUserId !== receiptExisting.assigneeUserId)
+        )) {
+          await assertCaseHandoffWithdrawalHoldReleased(tx, receiptExisting.companyId, id);
+        }
         if (Object.keys(issueData).length || nextLabelIds !== undefined || blockedByIssueIds !== undefined) await assertAgentInteraction(tx as unknown as Db, {
           companyId: receiptExisting.companyId, actorAgentId, operation: "edit", issueId: id,
           texts: [
@@ -12969,6 +12977,7 @@ export function issueService(db: Db) {
           companyId: issueCompany.companyId, actorAgentId: agentId, operation: "assign",
           issueId: id, targetAgentId: agentId, lock: true,
         });
+        await assertCaseHandoffWithdrawalHoldReleased(tx, issueCompany.companyId, id);
         await notifyStatusCardIssueChange(tx, issueCompany.companyId);
         await notifyIssueAttentionRetentionWork(tx, { companyId: issueCompany.companyId, issueId: id });
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);

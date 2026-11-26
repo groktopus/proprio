@@ -1,5 +1,5 @@
 export type { InboxMineSnapshot, InboxSourceError } from "./types/inbox-mine.js";
-export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffRecipientDecisionSchema, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
+export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
 export * from "./slack-app-manifest.js";
 export * from "./analytics-consent.js";
 export * from "./routine-suggestions.js";
@@ -3036,7 +3036,7 @@ export { ACCOUNT_HANDLE_MAX_LENGTH, toAccountHandle } from "./account-handle.js"
 export type { ExecutionContinuationEnvelope } from "./types/execution-continuation.js";
 export type { ExecutionAgentQueue, ExecutionProjection, ExecutionReconciliation, ExecutionBlocker, TaskInterruptionPresentation } from "./types/execution-projection.js";
 
-export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
+export { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
 export * from "./types/voice-sessions.js";
 export * from "./validators/voice-sessions.js";
 

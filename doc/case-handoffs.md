@@ -123,8 +123,9 @@ profiles before resuming. See the
 and evidence requirements.
 
 If a recipient's native completion still lacks evidence after the automatic
-continuation, or no continuation is available, the recovery action records the accepted requirement revision, the assessed
-contract revision, and the status decision. The receipt belongs to the current
+continuation, or no continuation is available, the recovery action records
+the accepted requirement revision, the assessed contract revision, and the
+status decision. The receipt belongs to the current
 delivered handoff and its recipient. Task recovery shows counts of unmet
 criteria and evidence gaps. It directs readers to the authorized Case view for
 the checklist and keeps the Case receipt in durable storage.
@@ -134,6 +135,18 @@ its completion corrective wake. If the Case is cancelled, the handoff is
 withdrawn or superseded, or the recipient no longer owns the task, the
 result, assessment, and final reply remain in run history. The status decision
 records `case_handoff_superseded` at the task's current status.
+
+A board operator can withdraw the delivered handoff after the current
+recipient run has a recorded Stop and verified termination, or the controller
+confirms cancellation of a parked native retry. Send `expectedHandoffVersion` and
+`stoppedRunId` to `POST /api/cases/{caseId}/handoffs/{handoffId}/withdraw`.
+A newer or active run returns a conflict. Repeating the exact withdrawal
+returns the recorded result. The withdrawal records a board-owned recovery
+hold. The board inspects prior workspace and external effects, resolves the
+hold, and chooses the next assignment. The hold blocks checkout and run
+admission, including dependency wakes. The Case history retains the original
+acceptance and the withdrawal receipt. A queued correction for the withdrawn
+handoff settles as skipped at admission.
 
 ## Board and verification
 

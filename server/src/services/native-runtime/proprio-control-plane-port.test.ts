@@ -56,6 +56,8 @@ import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embed
 import { startRecoveryPostgres } from "../../__tests__/helpers/recovery-postgres.js";
 import { ProprioControlPlanePort } from "./proprio-control-plane-port.js";
 import { secretEnvironmentValues } from "../agent-identity-redaction.js";
+import { caseHandoffService } from "../case-handoffs.js";
+import { requestedRunCancellation } from "../run-cancellation.js";
 import { heartbeatService } from "../heartbeat.js";
 import { issueRecoveryActionReadModel } from "../issue-recovery-actions.js";
 import { readNativeContinuationSource } from "./native-continuation-delivery.js";
@@ -2800,7 +2802,7 @@ describe("ProprioControlPlanePort conformance", () => {
     return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract };
   }
 
-  it.each(["current", "cancelled"] as const)("handles an unpublished task document after a %s Case corrective wake", async caseState => {
+  it.each(["current", "cancelled", "withdrawn", "withdrawn before dispatch"] as const)("handles an unpublished task document after a %s Case corrective wake", async caseState => {
     const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
@@ -2828,6 +2830,30 @@ describe("ProprioControlPlanePort conformance", () => {
       adapterConfig: { provider: "opencode", model: "openrouter/test-model" } }).where(eq(agents.id, agentId));
     // Exercise normal wake admission while leaving execution to the conformance port.
     const heartbeat = heartbeatService(db, { runStartHandover: { isYielding: () => true, refreshIfStale: () => null } });
+    if (caseState === "withdrawn before dispatch") {
+      const userId = source!.responsibleUserId!;
+      const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
+        ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+        nativeCancellation: { schema: "proprio.native-cancellation.v1", runId, companyId, issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+      } }).where(eq(heartbeatRuns.id, runId));
+      const board = { type: "board" as const, source: "local_implicit" as const, userId };
+      await expect(caseHandoffService(db).withdrawDelivered(board, caseId, handoffId,
+        { expectedHandoffVersion: 1, stoppedRunId: runId })).resolves.toMatchObject({ state: "cancelled" });
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ dispatched: 0 });
+      const [intent] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(intent).toMatchObject({ status: "skipped", runId: null });
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "case_handoff_superseded")))).toHaveLength(1);
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ scanned: 0, dispatched: 0 });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+      return;
+    }
     expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
       .toMatchObject({ dispatched: 1 });
     const [dispatchedRun] = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
@@ -2844,6 +2870,29 @@ describe("ProprioControlPlanePort conformance", () => {
     expect(await readNativeContinuationSource(db, binding)).toBe(runId);
     expect(await readNativeContinuationSource(db, { companyId, issueId, runId: followUpId })).toBeNull();
     await db.update(issues).set({ executionRunId: followUpId }).where(eq(issues.id, issueId));
+    if (caseState === "withdrawn") {
+      // The production dispatcher created this run. Persist the provider Stop
+      // receipt as the cancel service would after an acknowledged dispatch.
+      const userId = source!.responsibleUserId!;
+      const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
+        ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+        nativeCancellation: { schema: "proprio.native-cancellation.v1", runId: followUpId, companyId, issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+      } }).where(eq(heartbeatRuns.id, followUpId));
+      await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, dispatchedRun!.wakeupRequestId!));
+      const board = { type: "board" as const, source: "local_implicit" as const, userId };
+      await expect(caseHandoffService(db).withdrawDelivered(board, caseId, handoffId,
+        { expectedHandoffVersion: 1, stoppedRunId: followUpId })).resolves.toMatchObject({
+        state: "cancelled", recipientDecision: { outcome: "accepted", actorId: agentId },
+      });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0])
+        .toMatchObject({ status: "blocked", unblockDescriptor: { owner: "board" } });
+      return;
+    }
     const followUp = new ProprioControlPlanePort(db, { companyId, issueId, agentId, runId: followUpId,
       sessionId: source!.nativeSessionId!, sourceInstanceId: runnerInstanceId,
       completionContractId: source!.completionContractId!, completionContractSha256: source!.completionContractSha256!,

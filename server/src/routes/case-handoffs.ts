@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import type { Db } from "@groktopus/db";
-import { caseHandoffRecipientDecisionSchema, handoffCaseSchema } from "@groktopus/shared";
+import { caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, handoffCaseSchema } from "@groktopus/shared";
 import { validate } from "../middleware/validate.js";
 import { notFound } from "../errors.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
@@ -61,5 +61,9 @@ export function caseHandoffRoutes(db: Db) {
   };
   router.post("/cases/:caseId/handoffs/:handoffId/retry", control("retry"));
   router.post("/cases/:caseId/handoffs/:handoffId/cancel", control("cancel"));
+  router.post("/cases/:caseId/handoffs/:handoffId/withdraw", validate(caseHandoffWithdrawalSchema), async (req, res) => {
+    const caseId = await readableCaseId(req);
+    res.json(await service.withdrawDelivered(req.actor, caseId, req.params.handoffId as string, req.body));
+  });
   return router;
 }

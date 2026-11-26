@@ -1,4 +1,5 @@
-import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
+import { nativeCaseHandoffStatusAuthorityIsCurrent } from "../native-runtime/native-case-handoff.js";
+import { CASE_HANDOFF_OPEN_AGENT_STATES, CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import { assertAcceptedOfferIsCurrent } from "../case-handoff-offer-authority.js";
 import { canAdmitSessionGoalRecovery } from "./session-goal-recovery.js";
 import { runHasUnverifiedProviderStop } from "../../agent-run-cancellation.js";
@@ -3836,6 +3837,35 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
+          // Recheck a saved completion correction under the same issue lock
+          // as withdrawal, including when a deferred dispatch is promoted.
+          if (automaticParentRunId && reason === "issue_status_changed" &&
+              payload?.continuationIdempotencyKey === "native-completion-incomplete") {
+            const [parent] = await tx.select({ contextSnapshot: heartbeatRuns.contextSnapshot,
+              wakeupRequestId: heartbeatRuns.wakeupRequestId }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.id, automaticParentRunId), eq(heartbeatRuns.companyId, agent.companyId),
+              eq(heartbeatRuns.nativeIssueId, issue.id), eq(heartbeatRuns.agentId, agentId),
+              eq(heartbeatRuns.runtimeMode, "native"),
+            )).limit(1);
+            if (parent && await nativeCaseHandoffStatusAuthorityIsCurrent(tx, { companyId: agent.companyId, issue,
+              runId: automaticParentRunId, runAgentId: agentId, runWakeupRequestId: parent.wakeupRequestId,
+              contextSnapshot: parent.contextSnapshot }) === false) {
+              const skipped = { reason: CASE_HANDOFF_SUPERSEDED_REASON, status: "skipped",
+                error: "The accepted Case handoff was superseded.", finishedAt: new Date() };
+              if (executionWaitRequestId) {
+                await tx.update(agentWakeupRequests).set({ ...skipped, updatedAt: skipped.finishedAt }).where(and(
+                  eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
+                  eq(agentWakeupRequests.agentId, agentId), isNull(agentWakeupRequests.runId),
+                ));
+              } else {
+                await tx.insert(agentWakeupRequests).values({ ...skipped, companyId: agent.companyId, agentId,
+                  source, triggerDetail, payload, requestedByActorType: opts.requestedByActorType ?? null,
+                  requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null });
+              }
+              return { kind: "skipped" as const };
+            }
+          }
+
           if (opts.sessionGoalRecovery && (
             issue.assigneeAgentId !== agentId || issue.assigneeUserId || issue.status !== "in_progress"
             || !await canAdmitSessionGoalRecovery(tx as unknown as Db, {
@@ -5649,7 +5679,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             .where(eq(agentWakeupRequests.id, candidate.id));
         });
 
-        if (scopeKey) {
+        if (scopeKey && delivered?.reason !== CASE_HANDOFF_SUPERSEDED_REASON) {
           deliveredByIssueScope.set(scopeKey, {
             runId: wakeRun?.id ?? delivered?.runId ?? null,
             status: wakeRun ? "coalesced" : (delivered?.status ?? "queued"),

@@ -593,7 +593,12 @@ describe("openapi routes", () => {
       "/api/cases/{caseId}/handoffs/{handoffId}/cancel",
       "/api/cases/{caseId}/handoffs/{handoffId}/decision",
       "/api/cases/{caseId}/handoffs/{handoffId}/retry",
+      "/api/cases/{caseId}/handoffs/{handoffId}/withdraw",
     ]);
+    const withdrawal = spec.paths["/api/cases/{caseId}/handoffs/{handoffId}/withdraw"].post;
+    expect(withdrawal.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+    expect(withdrawal["x-proprio-authorization"]).toEqual({ actor: "board" });
+    expect(withdrawal.responses[409]).toBeDefined();
     const decision = spec.paths["/api/cases/{caseId}/handoffs/{handoffId}/decision"].post;
     expect(decision.security).toEqual([{ AgentBearerAuth: [] }]);
     expect(decision["x-proprio-authorization"]).toEqual({ actor: "agent" });

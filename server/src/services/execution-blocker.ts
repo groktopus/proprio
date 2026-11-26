@@ -8,9 +8,10 @@ import { z } from "zod";
 import { agentWakeupRequests, chatConversations, chatEndpoints, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueComments, issues, issueRecoveryActions, nativeRunFinalizations, nativeRunResults, toolConnections, workspaceOperations, type Db } from "@groktopus/db";
 import { canContinueCancelledRun, readRunCancellation } from "./run-cancellation.js";
 import { canRetryStoppedRun } from "./cancelled-native-startup.js";
+import { getCaseHandoffWithdrawalHold } from "./case-handoff-states.js";
 import { heldRetryOffersRetry, heldTaskRetryRefusals } from "./task-retry-eligibility.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
-import { EXECUTION_RECONCILIATION_CAUSES, readRunFailureCause, withoutSqlStatementText, type ExecutionBlocker } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, readRunFailureCause, withoutSqlStatementText, type ExecutionBlocker } from "@groktopus/shared";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA, nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
 import { unreconciledNativeExportPredicate } from "./native-runtime/native-workspace-reconstruction.js";
 import { hasRecoveredCleanupStopReceipt, hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -363,7 +364,8 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
       eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
       eq(issueComments.id, options.conversationResetCommentId),
     )).limit(1);
-    if (command?.authorUserId && !command.deletedAt && command.body.trim() === "/new") return null;
+    if (command?.authorUserId && !command.deletedAt && command.body.trim() === "/new"
+      && !await getCaseHandoffWithdrawalHold(db, companyId, issueId)) return null;
   }
   const [boundary] = conversation?.conversationAgentId && conversation.conversationBoundaryCommentId
     ? await db.select({ createdAt: issueComments.createdAt }).from(issueComments).where(and(
@@ -378,7 +380,8 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     eq(issueRecoveryActions.sourceIssueId, issueId),
     executionBlockerPredicate(),
     not(restoreHoldReleasedForCurrentOwnerPredicate()),
-    boundary ? or(gt(issueRecoveryActions.createdAt, boundary.createdAt), nativeExecutionRecoveryActionPredicate()) : undefined,
+    boundary ? or(eq(issueRecoveryActions.cause, CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE),
+      gt(issueRecoveryActions.createdAt, boundary.createdAt), nativeExecutionRecoveryActionPredicate()) : undefined,
     options?.resumingNativeRunId ? not(ownNativeResumePredicate(options.resumingNativeRunId)) : undefined,
   )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(1);
   if (!action) return null;
@@ -425,14 +428,15 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
       or consumed.comment_ids @> jsonb_build_array(${issueComments.id}::text))`,
   )) : [];
   const cancellation = run ? readRunCancellation(run.resultJson) : null;
-  const eligibleContinuation = Boolean(!restoreHold && run && conversation?.assigneeAgentId === run.agentId &&
+  const withdrawalHold = action.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE;
+  const eligibleContinuation = Boolean(!restoreHold && !withdrawalHold && run && conversation?.assigneeAgentId === run.agentId &&
     !["done", "cancelled"].includes(conversation.status) && canContinueCancelledRun(run));
   // A failed run whose saved work is verifiably recovered no longer needs the
   // hold to protect its files. Offer the same Retry that admission accepts, so
   // an infrastructure failure (such as a restart) is not left to a new message.
   // An intentional Stop keeps "send a new message" as its only continuation.
   const recoveredFailure = Boolean(restoreHold && savedWorkOffersRetry(workspaceRecoveryState, run?.status, workspaceRepairRequired, action.evidence));
-  const canRetry = Boolean((!restoreHold || recoveredFailure) && run && conversation?.assigneeAgentId === run.agentId &&
+  const canRetry = Boolean(!withdrawalHold && (!restoreHold || recoveredFailure) && run && conversation?.assigneeAgentId === run.agentId &&
     !["done", "cancelled"].includes(conversation.status) && await canRetryStoppedRun(db, run));
   const runError = run && canRetry && isPreDispatchReviewWait(run)
     ? "Waiting for review; this continuation never started."
