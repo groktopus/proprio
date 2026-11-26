@@ -1,24 +1,4 @@
-// The installed Codex dependency takes precedence over PATH. The disposable
-// test controller must use the protocol fixture, even during source startup.
-import { accessSync, constants } from "node:fs";
-import { registerHooks } from "node:module";
-import { fileURLToPath } from "node:url";
+// Pin the command before test-drive starts the isolated controller.
+import { installCodexFixtureResolver } from "./codex-fixture-resolver.mjs";
 
-const command = fileURLToPath(new URL("./codex", import.meta.url));
-accessSync(command, constants.X_OK);
-
-export function resolveCodexCommand() {
-  return command;
-}
-
-export const resolvePinnedCodexCommand = resolveCodexCommand;
-
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    const result = nextResolve(specifier, context);
-    if (/\/packages\/proprio-runner\/(src|dist)\/drivers\/codex\/codex-command\.(js|ts)$/.test(result.url)) {
-      return { url: import.meta.url, shortCircuit: true };
-    }
-    return result;
-  },
-});
+installCodexFixtureResolver(process.env.MIXED_HANDOFF_CODEX_COMMAND, "Mixed Case handoff");
