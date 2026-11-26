@@ -66,7 +66,7 @@ import {
 import { runnerApiToolsEnabled } from "./runner-api-rollout.js";
 import { openRunnerApiWorkspaceFile } from "./runner-api-files.js";
 import { basename } from "node:path";
-import { createLocalAgentJwt } from "../../agent-auth-jwt.js";
+import { canSignLocalAgentJwt, createLocalAgentJwt } from "../../agent-auth-jwt.js";
 import { getStorageService } from "../../storage/index.js";
 import type { StorageService } from "../../storage/types.js";
 import { assetService } from "../assets.js";
@@ -107,7 +107,7 @@ import {
   projects,
   issueThreadInteractions,
 } from "@groktopus/db";
-import { CAPABILITY_CANONICAL_OPERATIONS, CAPABILITY_SEMANTIC_TOOL_CATALOG, parseNativeExecutionInput, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError, toolInputVariantError } from "../../vendor/proprio-runner/index.js";
+import { CAPABILITY_CANONICAL_OPERATIONS, CAPABILITY_SEMANTIC_TOOL_CATALOG, HANDOFF_CASE_ORDINARY_DESCRIPTION, parseNativeExecutionInput, runnerCodexDynamicToolsFit, SemanticToolOutcomeUnknownError, toolInputVariantError } from "../../vendor/proprio-runner/index.js";
 import { agentService } from "../agents.js";
 import { approvalService } from "../approvals.js";
 import { documentService } from "../documents.js";
@@ -391,6 +391,11 @@ export class ProprioRunnerToolAuthority {
   }
   constructor(readonly db: Db, readonly binding: Binding) {}
 
+  #caseOffersEnabled() {
+    return !this.binding.museRuntime && canSignLocalAgentJwt() && Boolean(this.binding.apiUrl ?? process.env.PROPRIO_API_URL)
+      && runnerApiToolsEnabled(this.binding.companyId, this.binding.apiToolsEnabled);
+  }
+
   definitions(): Array<Record<string, unknown>> {
     if (this.binding.nativeReview) {
       // Scope Proprio control-plane actions. Provider file and shell access
@@ -430,38 +435,45 @@ export class ProprioRunnerToolAuthority {
           (descriptor.operationId !== "register_deliverable" ||
             (Boolean(this.binding.workspaceRoot) &&
               ((this.binding.executionTargetKind ?? "local") === "local" || Boolean(this.binding.readRemoteWorkspaceFile || this.binding.readRemoteTaskFile)))),
-      ).map((descriptor) => ({
-        name: descriptor.operationId,
-        description:
-          descriptor.operationId === "register_deliverable"
-            ? "Prepare one verified workspace file for Proprio's final task or external-chat response. This records the attachment, work product, and explicit same-run selection; it does not confirm provider delivery."
-            : descriptor.description,
-        inputSchema:
-          descriptor.operationId === "register_deliverable"
-            ? {
-                ...descriptor.inputSchema,
-                properties: {
-                  ...descriptor.inputSchema.properties,
-                  filename: {
-                    ...(descriptor.inputSchema.properties?.filename ?? {}),
-                    description:
-                      "Basename for the prepared attachment. Directory components are rejected.",
+      ).map((descriptor) => {
+        if (descriptor.operationId === "handoff_case" && !this.#caseOffersEnabled()) {
+          const { offer: _offer, ...properties } = descriptor.inputSchema.properties ?? {};
+          return { name: descriptor.operationId, description: HANDOFF_CASE_ORDINARY_DESCRIPTION,
+            inputSchema: { ...descriptor.inputSchema, properties } };
+        }
+        return {
+          name: descriptor.operationId,
+          description:
+            descriptor.operationId === "register_deliverable"
+              ? "Prepare one verified workspace file for Proprio's final task or external-chat response. This records the attachment, work product, and explicit same-run selection; it does not confirm provider delivery."
+              : descriptor.description,
+          inputSchema:
+            descriptor.operationId === "register_deliverable"
+              ? {
+                  ...descriptor.inputSchema,
+                  properties: {
+                    ...descriptor.inputSchema.properties,
+                    filename: {
+                      ...(descriptor.inputSchema.properties?.filename ?? {}),
+                      description:
+                        "Basename for the prepared attachment. Directory components are rejected.",
+                    },
+                    byteSize: {
+                      ...(descriptor.inputSchema.properties?.byteSize ?? {}),
+                      minimum: 1,
+                      maximum: MAX_ATTACHMENT_BYTES,
+                    },
+                    contentRef: {
+                      ...(descriptor.inputSchema.properties?.contentRef ?? {}),
+                      description: this.binding.readRemoteTaskFile
+                        ? "Path to the file on the execution host: workspace-relative or absolute within a location granted to this task, including its agent home."
+                        : "Workspace-relative source path under get_workspace.cwd. Create or copy the file there before registering; AGENT_HOME is for personal instructions and memory. Absolute paths, URLs, traversal, and symlinks are rejected.",
+                    },
                   },
-                  byteSize: {
-                    ...(descriptor.inputSchema.properties?.byteSize ?? {}),
-                    minimum: 1,
-                    maximum: MAX_ATTACHMENT_BYTES,
-                  },
-                  contentRef: {
-                    ...(descriptor.inputSchema.properties?.contentRef ?? {}),
-                    description: this.binding.readRemoteTaskFile
-                      ? "Path to the file on the execution host: workspace-relative or absolute within a location granted to this task, including its agent home."
-                      : "Workspace-relative source path under get_workspace.cwd. Create or copy the file there before registering; AGENT_HOME is for personal instructions and memory. Absolute paths, URLs, traversal, and symlinks are rejected.",
-                  },
-                },
-              }
-            : descriptor.inputSchema,
-      }));
+                }
+              : descriptor.inputSchema,
+        };
+      });
     // Keep the provider session's direct tool catalog stable across ordinary
     // and truncated external-chat turns: Codex thread/resume cannot add tools,
     // so a reader missing at thread/start stays missing. Execution still fails
@@ -701,6 +713,7 @@ export class ProprioRunnerToolAuthority {
         ...(create.initialDocuments !== undefined ? { initialDocuments: create.initialDocuments } : {}),
       } : call.arguments;
       return caseHandoffService(this.db).handoff(this.binding.companyId, this.#privacyActor(run), handoffCaseSchema.parse(request), {
+        enableVersionedOffers: this.#caseOffersEnabled(),
         beforeAccept: async tx => { await this.#lockAuthorizedMutationContext(tx); },
       });
     }

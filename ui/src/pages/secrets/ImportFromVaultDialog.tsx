@@ -949,6 +949,7 @@ function SelectStep(props: SelectStepProps) {
               const conflictNote =
                 candidate.status === "conflict" ? candidate.conflicts[0]?.message : undefined;
               return (
+                // oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The checkbox is the keyboard control. Row clicks delegate to the same handler.
                 <li
                   key={candidate.externalRef}
                   className={cn(

@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
+import { installFixtureApi } from "../../support/capability-gaps/api";
+import { completionHistoryFixture } from "../../support/native-completion-history";
 import { creationVisibilityStories } from "../../support/issue-creation-visibility";
 import type { Issue, IssueLabel, Project } from "@groktopus/shared";
 import type { RunForIssue } from "@/api/activity";
@@ -924,6 +927,27 @@ export const IssuePropertiesLongValuesDesktop: Story = {
 export const IssuePropertiesLongValuesMobile: Story = {
   name: "IssueProperties - long values mobile inline",
   render: () => <IssuePropertiesLongValuePane inline />,
+};
+
+export const IssuePropertiesCompletionHistory: Story = {
+  name: "IssueProperties - completion history expanded",
+  beforeEach: () => installFixtureApi([
+    { path: `/api/issues/${primaryIssue.id}/completion-history`, read: () => completionHistoryFixture },
+  ]).cleanup,
+  render: () => (
+    <StorybookData>
+      <div className="proprio-story w-80 max-w-full border border-border p-4">
+        <IssueProperties issue={primaryIssue} onUpdate={() => undefined} inline />
+      </div>
+    </StorybookData>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const disclosure = await canvas.findByText("Completion history", { exact: true });
+    await userEvent.click(disclosure);
+    const history = await canvas.findByRole("region", { name: "Native completion history" });
+    await expect(await within(history).findByText("Evidence not verified")).toBeVisible();
+  },
 };
 
 export const IssuePropertiesModelOverride: Story = {

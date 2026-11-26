@@ -2,26 +2,24 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { issueRecoveryActions, type Db } from "@groktopus/db";
 import { caseHandoffRecoveryHistorySchema, type CaseHandoffRecoveryHistory } from "@groktopus/shared";
 import { z } from "zod";
+import { readAcceptedCaseHandoffOffer } from "./case-handoff-offer-authority.js";
 import type { CaseHandoffRow } from "./case-handoffs.js";
 
 const entrySchema = caseHandoffRecoveryHistorySchema.shape.entries.element;
 const receiptSchema = z.object({
-  decision: z.object({ id: entrySchema.shape.decisionId, statusDecisionReasonCode: z.string() }),
+  decision: z.object({ id: entrySchema.shape.decisionId.optional(), statusDecisionReasonCode: z.string() }),
   assessment: z.object({
     id: entrySchema.shape.assessmentId,
-    assessedContractId: z.string().uuid(),
-    assessedContractRevision: z.object({ revision: entrySchema.shape.assessedRevision }),
+    assessedContractId: z.string().uuid().optional(),
+    assessedContractRevision: z.object({ id: z.string().uuid().optional(), revision: entrySchema.shape.assessedRevision }),
     criteriaNeedingWork: entrySchema.shape.criteria,
   }),
-  attempts: entrySchema.shape.attempts.optional(),
+  attempts: z.array(z.unknown()).optional(),
 });
 
 export async function readCaseHandoffRecoveryHistory(db: Db, handoff: CaseHandoffRow): Promise<CaseHandoffRecoveryHistory> {
-  const offer = handoff.offerContract;
-  const accepted = handoff.recipientDecision;
-  if (!offer || accepted?.outcome !== "accepted" || accepted.handoffVersion !== handoff.version ||
-      accepted.requirementRevisionId !== offer.requirementRevision.id || accepted.requirementsDigest !== offer.requirementsDigest ||
-      accepted.actorId !== handoff.toAgentId) return { entries: [] };
+  const offer = readAcceptedCaseHandoffOffer(handoff);
+  if (!offer) return { entries: [] };
 
   const receipt = sql`${issueRecoveryActions.evidence}->'caseHandoffCompletion'`;
   const rows = await db.select({
@@ -32,6 +30,7 @@ export async function readCaseHandoffRecoveryHistory(db: Db, handoff: CaseHandof
     maxAttempts: issueRecoveryActions.maxAttempts, outcome: issueRecoveryActions.outcome,
     resolutionNote: issueRecoveryActions.resolutionNote,
     runId: sql<string | null>`${issueRecoveryActions.evidence}->>'runId'`,
+    decisionId: sql<string | null>`${issueRecoveryActions.evidence}->>'decisionId'`,
     receipt,
   }).from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, handoff.companyId),
@@ -45,18 +44,25 @@ export async function readCaseHandoffRecoveryHistory(db: Db, handoff: CaseHandof
   )).orderBy(desc(issueRecoveryActions.createdAt), desc(issueRecoveryActions.id)).limit(3);
 
   const entries: CaseHandoffRecoveryHistory["entries"] = [];
-  for (const { receipt: persisted, runId, ...row } of rows) {
+  for (const { receipt: persisted, runId, decisionId: storedDecisionId, ...row } of rows) {
     const parsed = receiptSchema.safeParse(persisted);
     if (!parsed.success) continue;
     const { decision, assessment, attempts } = parsed.data;
-    const legacyAttempt = entrySchema.shape.attempts.element.safeParse({
-      runId, decisionId: decision.id, assessmentId: assessment.id,
-      assessedContractId: assessment.assessedContractId, reasonCode: decision.statusDecisionReasonCode,
-    });
+    // Current recovery actions save the decision at the top level. Earlier receipts embedded it.
+    const decisionId = entrySchema.shape.decisionId.safeParse(storedDecisionId ?? decision.id);
+    if (!decisionId.success) continue;
+    const savedAttempts = attempts?.slice(-3) ?? [{
+      runId, decisionId: decisionId.data, assessmentId: assessment.id,
+      assessedContractId: assessment.assessedContractRevision.id ?? assessment.assessedContractId,
+      reasonCode: decision.statusDecisionReasonCode,
+    }];
     entries.push({
-      ...row, decisionId: decision.id, assessmentId: assessment.id, assessedRevision: assessment.assessedContractRevision.revision,
+      ...row, decisionId: decisionId.data, assessmentId: assessment.id, assessedRevision: assessment.assessedContractRevision.revision,
       criteria: assessment.criteriaNeedingWork,
-      attempts: attempts?.slice(-3) ?? (legacyAttempt.success ? [legacyAttempt.data] : []),
+      attempts: savedAttempts.flatMap(attempt => {
+        const decoded = entrySchema.shape.attempts.element.safeParse(attempt);
+        return decoded.success ? [decoded.data] : [];
+      }),
     });
   }
   return { entries };

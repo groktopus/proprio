@@ -1,6 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { casesApi } from "@/api/cases";
+import { classifyError } from "@/api/errors";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { Button } from "@/components/ui/button";
 import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
@@ -37,23 +39,46 @@ export function AcceptedRecoveryHistory({ caseId, handoffId, recipientId, accept
   acceptedRevision: number;
   agents?: CaseAgentMap;
 }) {
-  const query = useQuery({
-    queryKey: queryKeys.cases.handoffRecoveryHistory(caseId, handoffId),
-    queryFn: () => casesApi.getHandoffRecoveryHistory(caseId, handoffId),
-    enabled: false,
-    retry: false,
-  });
-  const entries = query.isError || query.isFetching ? undefined : query.data?.entries;
-  return <details className="group/recovery" onToggle={event => {
-    if (event.currentTarget.open && !query.isFetching) void query.refetch();
-  }}>
+  const [open, setOpen] = useState(false);
+  return <details className="group/recovery" onToggle={event => setOpen(event.currentTarget.open)}>
     <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 text-sm font-medium marker:content-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       <ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground transition-transform duration-(--motion-duration-fast) group-open/recovery:rotate-90 motion-reduce:transition-none" />
       Recovery history <span className="text-xs font-normal text-muted-foreground">Accepted requirements · revision {acceptedRevision}</span>
     </summary>
+    {open && <RecoveryHistory caseId={caseId} handoffId={handoffId} recipientId={recipientId} agents={agents} />}
+  </details>;
+}
+
+function RecoveryHistory({ caseId, handoffId, recipientId, agents }: {
+  caseId: string;
+  handoffId: string;
+  recipientId: string;
+  agents?: CaseAgentMap;
+}) {
+  const queryClient = useQueryClient();
+  const queryKey = queryKeys.cases.handoffRecoveryHistory(caseId, handoffId);
+  const query = useQuery({
+    queryKey,
+    refetchOnMount: "always",
+    retry: false,
+    queryFn: async ({ signal }) => {
+      try {
+        return await casesApi.getHandoffRecoveryHistory(caseId, handoffId, signal);
+      } catch (error) {
+        const kind = classifyError(error);
+        if (!signal.aborted && (kind === "auth" || kind === "forbidden" || kind === "not_found")) {
+          queryClient.setQueryData(queryKey, { entries: [] });
+        }
+        throw error;
+      }
+    },
+  });
+  const waiting = query.isPending || query.fetchStatus !== "idle";
+  const entries = query.isSuccess && !waiting ? query.data.entries : undefined;
+  return (
     <div className="space-y-2 py-2 pl-6">
-      {query.isFetching ? <p role="status" className="text-sm text-muted-foreground">Loading recovery history…</p> : null}
-      {query.isError ? <div className="space-y-2" role="alert">
+      {waiting ? <p role="status" className="text-sm text-muted-foreground">Loading recovery history…</p> : null}
+      {!waiting && query.isError ? <div className="space-y-2" role="alert">
         <p className="text-sm text-destructive">Recovery history couldn’t be loaded.</p>
         <Button size="sm" variant="ghost" onClick={() => void query.refetch()}>Retry</Button>
       </div> : null}
@@ -83,14 +108,14 @@ export function AcceptedRecoveryHistory({ caseId, handoffId, recipientId, accept
         </div>)}
         {entry.attempts.length > 0 ? <ol className="space-y-1 pl-3 text-xs text-muted-foreground">
           {entry.attempts.map(attempt => <li key={attempt.decisionId} className="flex flex-wrap items-center gap-2">
-            <Link to={`/agents/${recipientId}/runs/${attempt.runId}`} className="font-mono text-foreground underline underline-offset-2">
+            <Link to={`/agents/${recipientId}/runs/${attempt.runId}`} className={`font-mono text-foreground underline underline-offset-2 ${ANALYTICS_MASK_CLASS}`}>
               Run {attempt.runId.slice(0, 8)}
             </Link>
-            <span title={attempt.decisionId}>Decision <code>{attempt.decisionId.slice(0, 8)}</code></span>
+            <span title={attempt.decisionId}>Decision <code className={ANALYTICS_MASK_CLASS}>{attempt.decisionId.slice(0, 8)}</code></span>
             <span>{recoveryLabel(attempt.reasonCode)}</span>
           </li>)}
         </ol> : null}
       </div>)}
     </div>
-  </details>;
+  );
 }
