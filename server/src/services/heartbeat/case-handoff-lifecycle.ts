@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_CANCELLABLE_STATES, caseHandoffSourceFenceCondition } from "../case-handoff-states.js";
 import { lstat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
@@ -120,7 +121,7 @@ export async function pendingCaseHandoffForRun(db: Db, runId: string, companyId?
   if (!scope) return null;
   return db.select().from(caseHandoffs).where(and(eq(caseHandoffs.companyId, scope), eq(caseHandoffs.sourceRunId, runId),
     eq(caseHandoffs.destinationKind, "agent"),
-    inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch", "delivered"])))
+    caseHandoffSourceFenceCondition()))
     .orderBy(caseHandoffs.createdAt).limit(1).then(rows => rows[0] ?? null);
 }
 
@@ -140,6 +141,8 @@ export async function cancelCaseHandoffsForIssue(db: Db, input: {
   includeUnboundTerminalIntent?: boolean;
   /** Accepted completion settles its terminal intent instead of superseding it. */
   agentTransfersOnly?: boolean;
+  /** A changed brief only invalidates offers still awaiting a decision. */
+  unansweredOffersOnly?: boolean;
 }) {
   const rows = await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date(), updatedAt: new Date(),
     leaseExpiresAt: null, lastErrorCode: "superseded", lastError: input.reason }).where(and(
@@ -147,7 +150,7 @@ export async function cancelCaseHandoffsForIssue(db: Db, input: {
     input.sourceRunId !== undefined ? or(eq(caseHandoffs.sourceRunId, input.sourceRunId),
       input.includeUnboundTerminalIntent ? and(isNull(caseHandoffs.sourceRunId), eq(caseHandoffs.destinationKind, "done"),
         eq(caseHandoffs.state, "awaiting_completion")) : undefined) : undefined,
-    inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch", "awaiting_completion"]),
+    input.unansweredOffersOnly ? eq(caseHandoffs.state, "offered") : inArray(caseHandoffs.state, CASE_HANDOFF_CANCELLABLE_STATES),
     input.agentTransfersOnly ? eq(caseHandoffs.destinationKind, "agent") : undefined,
     input.exceptId ? sql`${caseHandoffs.id} <> ${input.exceptId}` : undefined,
   )).returning();

@@ -1,14 +1,19 @@
-type Role = "lead" | "builder" | "verifier";
+import type { NativeRuntimeMode } from "@groktopus/shared";
 
-export interface MixedHandoffRun {
+const roles = ["lead", "builder", "verifier"] as const;
+type Role = typeof roles[number];
+
+interface MixedHandoffRun {
   id: string;
   agentId: string;
   issueId: string;
-  runtimeMode: "legacy" | "native";
+  runtimeMode: NativeRuntimeMode;
   status: string;
   incomingHandoffId: string;
   handoffVersion: number;
-  releasedIssueId: string | null;
+  admittedAt: string;
+  release: { schema: string; runId: string; issueId: string; settledAt: string } | null;
+  workspaceFinalizations: Array<{ status: string; finishedAt: string | null }>;
 }
 
 export interface MixedHandoffObservation {
@@ -24,14 +29,13 @@ export interface MixedHandoffObservation {
     toAgentId: string;
   }>;
   runs: MixedHandoffRun[];
-  artifact: { issueId: string; revisionId: string; body: string } | null;
-  verification: { runId: string; artifactRevisionId: string } | null;
+  artifact: { issueId: string; revisionId: string; body: string; createdByRunId: string | null } | null;
+  verification: { runId: string; artifactRevisionId: string; artifactAuthorRunId: string } | null;
 }
 
 /** Score the observed effects of the fixed lead → builder → verifier journey. */
 export function gradeMixedHandoff(observed: MixedHandoffObservation, expectedArtifact: string) {
   const { task, caseRecord, agents, artifact, verification } = observed;
-  const roles = ["lead", "builder", "verifier"] as const;
   const handoffs = [...observed.handoffs].sort((left, right) => left.version - right.version);
   const runsByRole = roles.map(role => observed.runs.filter(run => run.agentId === agents[role]));
   const [lead, builder, verifier] = runsByRole.map(([run]) => run);
@@ -43,6 +47,14 @@ export function gradeMixedHandoff(observed: MixedHandoffObservation, expectedArt
       && handoff.toAgentId === agents[role] && handoff.sourceRunId === (previousRun?.id ?? null)
       && run?.incomingHandoffId === handoff.id && run.handoffVersion === handoff.version;
   });
+  const precedes = (earlier: string | null, later: string) => !!earlier && Date.parse(earlier) <= Date.parse(later);
+  const releasedBeforeSuccessor = (run: MixedHandoffRun | undefined, successor: MixedHandoffRun | undefined) =>
+    run?.release?.schema === "proprio.case-handoff-release.v1" && !!successor
+      && run.release.runId === run.id && run.release.issueId === task.id
+      && precedes(run.release.settledAt, successor.admittedAt)
+      && run.workspaceFinalizations.length > 0
+      && run.workspaceFinalizations.every(operation => operation.status === "succeeded"
+        && precedes(operation.finishedAt, run.release!.settledAt));
   return {
     originalTaskCompleted: Boolean(task.id) && caseRecord.workIssueId === task.id && task.status === "done"
       && task.assigneeAgentId === agents.verifier,
@@ -50,10 +62,12 @@ export function gradeMixedHandoff(observed: MixedHandoffObservation, expectedArt
       && runsByRole.every(runs => runs.length === 1 && runs[0]!.issueId === task.id && runs[0]!.status === "succeeded")
       && new Set(observed.runs.map(run => run.id)).size === roles.length,
     mixedRuntime: lead?.runtimeMode === "legacy" && builder?.runtimeMode === "native" && verifier?.runtimeMode === "legacy",
-    outgoingRelease: lead?.releasedIssueId === task.id && builder?.releasedIssueId === task.id,
+    outgoingRelease: releasedBeforeSuccessor(lead, builder) && releasedBeforeSuccessor(builder, verifier),
     contextRevisions: handoffs.length === roles.length && caseRecord.handoffVersion === roles.length && delivered,
     independentlyVerifiedArtifact: artifact?.issueId === task.id && Boolean(artifact.revisionId)
       && artifact.body === expectedArtifact && Boolean(verifier?.id) && verification?.runId === verifier?.id
-      && verification?.artifactRevisionId === artifact.revisionId,
+      && verification?.artifactRevisionId === artifact.revisionId
+      && Boolean(builder?.id) && artifact.createdByRunId === builder?.id
+      && verification.artifactAuthorRunId === artifact.createdByRunId,
   };
 }
