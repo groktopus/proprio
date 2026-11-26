@@ -23,6 +23,8 @@ for (const journey of [
     let processHandle: ChildProcess | undefined;
     let logs = "";
     let diagnosticState = async () => ({});
+    let uncertainRestart: { beforeBoot: string; afterBoot: string; runIds: string[];
+      effectCount: number; observationMs: number } | undefined;
     async function stopDrive() {
       if (processHandle?.pid) {
         const child = processHandle;
@@ -473,8 +475,9 @@ for (const journey of [
         await page.screenshot({ path: info.outputPath("uncertain-automatic-no-replay.png"), fullPage: true });
         const issueBeforeRestart = await api(`/issues/${task.id}`);
         const recoveryBeforeRestart = issueBeforeRestart.activeRecoveryAction;
+        const beforeBoot = (await api("/health")).serverInfo.processStartedAt;
         const runsBeforeRestart = await api(`/companies/${company.id}/heartbeat-runs`);
-        const beforeRestartRunIds = runsBeforeRestart.map((run: { id: string }) => run.id);
+        const beforeRestartRunIds = runsBeforeRestart.map((run: { id: string }) => run.id).sort();
         const uncertainRunId = runsBeforeRestart.find((run: { errorCode?: string }) => run.errorCode === "adapter_failed")?.id;
         expect(uncertainRunId).toBeTruthy();
         expect(recoveryBeforeRestart).toMatchObject({
@@ -494,18 +497,32 @@ for (const journey of [
         });
         processHandle = restarted.child;
         base = await restarted.ready;
+        const afterBoot = (await api("/health")).serverInfo.processStartedAt;
+        expect(beforeBoot).toEqual(expect.any(String));
+        expect(afterBoot).toEqual(expect.any(String));
+        expect(afterBoot).not.toBe(beforeBoot);
         expect((await api("/companies"))[0].id).toBe(company.id);
-        await page.goto(base + prefix + `/issues/${task.id}`);
+        await page.goto(base + prefix + `/issues/${task.id}`, { waitUntil: "domcontentloaded" });
         await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 30_000 }).toBe("blocked");
-        const issueAfterRestart = await api(`/issues/${task.id}`);
-        expect(issueAfterRestart.activeRecoveryAction).toMatchObject(recoveryBeforeRestart);
-        expect(await api(`/companies/${company.id}/heartbeat-runs`)).toHaveLength(beforeRestartRunIds.length);
-        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
+        await expect(page.getByRole("button", { name: "Change status (current: Blocked)", exact: true }))
+          .toBeVisible({ timeout: 30_000 });
+        async function verifyRetainedHold() {
+          const issue = await api(`/issues/${task.id}`);
+          expect(issue).toMatchObject({ status: "blocked", activeRecoveryAction: recoveryBeforeRestart });
+          const runs = await api(`/companies/${company.id}/heartbeat-runs`);
+          expect(runs.map((run: { id: string }) => run.id).sort()).toEqual(beforeRestartRunIds);
+          const independent = await fixtureEffects();
+          expect(independent).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
+          return independent.effects.length;
+        }
+        await verifyRetainedHold();
         // Past the retry delay and a process restart, the uncertain effect is
         // still held and was neither replayed nor duplicated.
-        await page.waitForTimeout(35_000);
+        const observationMs = 35_000;
+        await page.waitForTimeout(observationMs);
+        const effectCount = await verifyRetainedHold();
         expect(gmailReadCount).toBe(1);
-        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
+        uncertainRestart = { beforeBoot, afterBoot, runIds: beforeRestartRunIds, effectCount, observationMs };
       }
       await expect(composer).toHaveText(
         "An unsent draft stays available during recovery.",
@@ -596,6 +613,7 @@ for (const journey of [
           dependency: "fixture",
           provider: "codex",
           fixtureModel: agent.adapterConfig?.model ?? "in-feed-fixture",
+          uncertainRestart,
           calls,
         },
         null,
