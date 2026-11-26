@@ -330,6 +330,16 @@ export function setupLiveEventsWebSocketServer(
         }
         return event;
       }
+      const { sessionId, actorId } = context!;
+      if (sessionId && !(await sharedDeliveryRead(reads, "session", async () => {
+        const [activeSession] = await db.select({ id: authSessions.id }).from(authSessions)
+          .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, actorId),
+            gt(authSessions.expiresAt, new Date()))).limit(1);
+        return Boolean(activeSession);
+      }))) {
+        socket.close(1008, "session inactive");
+        return null;
+      }
       const payload = event.payload;
       const details = payload.details && typeof payload.details === "object" && !Array.isArray(payload.details)
         ? payload.details as Record<string, unknown> : {};
@@ -346,7 +356,7 @@ export function setupLiveEventsWebSocketServer(
               eq(companyMemberships.principalType, "user"))).limit(1);
           return row;
         });
-        if (member?.userId === context!.actorId) return { ...event, payload: { action: "company_membership.changed" } };
+        if (member?.userId === actorId) return { ...event, payload: { action: "company_membership.changed" } };
       }
 
       const principalActive = await sharedDeliveryRead(reads, "principal", async () => {
@@ -354,16 +364,6 @@ export function setupLiveEventsWebSocketServer(
           const active = await db.select({ id: agentApiKeys.id }).from(agentApiKeys)
             .where(and(eq(agentApiKeys.id, context!.apiKeyId), isNull(agentApiKeys.revokedAt))).limit(1);
           return active.length > 0;
-        }
-        const { sessionId, actorId } = context!;
-        if (sessionId) {
-          const [activeSession] = await db.select({ id: authSessions.id }).from(authSessions)
-            .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, actorId),
-              gt(authSessions.expiresAt, new Date()))).limit(1);
-          if (!activeSession) {
-            socket.close(1008, "session inactive");
-            return false;
-          }
         }
         const membership = await db.select({ id: companyMemberships.id }).from(companyMemberships)
           .where(and(eq(companyMemberships.companyId, context!.companyId), eq(companyMemberships.principalType, "user"),

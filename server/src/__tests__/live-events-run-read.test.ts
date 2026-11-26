@@ -70,18 +70,24 @@ describe("live-event run read boundaries", () => {
     expect(await readTaskPanelActivations(db, companyId, run.id)).toEqual([]);
   });
 
-  it.each(["revoked", "expired"] as const)("stops company events when the browser session is %s", async (state) => {
+  it.each([
+    ["revoked", "ordinary activity"],
+    ["expired", "ordinary activity"],
+    ["revoked", "membership reset"],
+    ["expired", "membership reset"],
+  ] as const)("closes the %s browser session before sending %s", async (state, eventKind) => {
     const companyId = randomUUID();
     const userId = randomUUID();
     const sessionId = randomUUID();
     const now = new Date();
-    await db.insert(companies).values({ id: companyId, name: "Session fixture", issuePrefix: state.toUpperCase() });
+    const issuePrefix = `${eventKind === "membership reset" ? "M" : ""}${state.toUpperCase()}`;
+    await db.insert(companies).values({ id: companyId, name: "Session fixture", issuePrefix });
     await db.insert(authUsers).values({
       id: userId, email: `${userId}@example.test`, name: "Session fixture", createdAt: now, updatedAt: now,
     });
-    await db.insert(companyMemberships).values({
+    const [membership] = await db.insert(companyMemberships).values({
       companyId, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
+    }).returning({ id: companyMemberships.id });
     await db.insert(authSessions).values({
       id: sessionId, token: randomUUID(), userId, createdAt: now, updatedAt: now,
       expiresAt: new Date(now.getTime() + 60_000),
@@ -104,9 +110,13 @@ describe("live-event run read boundaries", () => {
       await expect.poll(() => received.length).toBe(1);
       if (state === "revoked") await db.delete(authSessions).where(eq(authSessions.id, sessionId));
       else await db.update(authSessions).set({ expiresAt: new Date(0) }).where(eq(authSessions.id, sessionId));
-      publishLiveEvent(activity);
-      await expect.poll(() => socket.readyState).toBe(WebSocket.CLOSED);
-      expect(received).toHaveLength(1);
+      publishLiveEvent(eventKind === "ordinary activity" ? activity : {
+        companyId,
+        type: "activity.logged",
+        payload: { entityType: "company_membership", entityId: membership!.id, action: "company_member.updated" },
+      });
+      await expect.poll(() => ({ readyState: socket.readyState, messages: received.length }))
+        .toEqual({ readyState: WebSocket.CLOSED, messages: 1 });
     } finally {
       socket.terminate();
       wss.close();
