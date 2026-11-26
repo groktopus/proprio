@@ -8,11 +8,11 @@ import { notifyExternalObjectRefresh } from "./external-object-refresh-notificat
 import { notifyApprovalWork } from "./approval-work-notifications.js";
 import { notifyAttentionRetentionWork, notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@groktopus/shared";
-import { and, desc, eq, inArray, sql, or, isNull, lte, exists, ne, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, or, isNull, lte, exists, type SQL } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import type { AuthorizationActor } from "./authorization.js";
 import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
-import { canReadBudgetTaskTreeRoot, visibleBudgetTaskTreeScopeIds } from "./budget-scope-visibility.js";
+import { budgetTaskTreeRootReadCondition, canReadBudgetTaskTreeRoot, readableTaskTreeBudgetCondition } from "./budget-scope-visibility.js";
 
 import {
   agents,
@@ -507,13 +507,14 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     return policy;
   }
 
-  async function listPolicyRows(companyId: string, visibleTaskTreeScopeIds?: readonly string[]) {
+  async function listPolicyRows(companyId: string, readableTaskRoot?: SQL<boolean>) {
     return db
       .select()
       .from(budgetPolicies)
-      .where(and(eq(budgetPolicies.companyId, companyId), visibleTaskTreeScopeIds === undefined ? undefined
-        : or(ne(budgetPolicies.scopeType, "task_tree"), visibleTaskTreeScopeIds.length
-          ? inArray(budgetPolicies.scopeId, [...visibleTaskTreeScopeIds]) : sql`false`)))
+      .where(and(eq(budgetPolicies.companyId, companyId), readableTaskRoot
+        ? readableTaskTreeBudgetCondition(readableTaskRoot, budgetPolicies.scopeType,
+          sql`${issues.id} = ${budgetPolicies.scopeId} and ${issues.companyId} = ${budgetPolicies.companyId}`)
+        : undefined))
       .orderBy(desc(budgetPolicies.updatedAt));
   }
 
@@ -713,9 +714,9 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
   }
 
   async function listOpenIncidents(companyId: string, options: BudgetOverviewReadOptions = {},
-    visibleScopeIds?: readonly string[]): Promise<BudgetIncident[]> {
-    const visibleTaskTreeScopeIds = visibleScopeIds ?? (options.actor
-      ? await visibleBudgetTaskTreeScopeIds(db, companyId, options.actor) : undefined);
+    taskRootReadCondition?: SQL<boolean>): Promise<BudgetIncident[]> {
+    const readableTaskRoot = taskRootReadCondition ?? (options.actor
+      ? await budgetTaskTreeRootReadCondition(db, options.actor) : undefined);
     const readableApproval = options.approvalReadCondition
       ? exists(db.select({ id: approvals.id }).from(approvals).where(and(
         eq(approvals.id, budgetIncidents.approvalId),
@@ -729,8 +730,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         eq(budgetIncidents.companyId, companyId),
         eq(budgetIncidents.status, "open"),
         readableApproval ? or(isNull(budgetIncidents.approvalId), readableApproval) : undefined,
-        visibleTaskTreeScopeIds === undefined ? undefined : or(ne(budgetIncidents.scopeType, "task_tree"),
-          visibleTaskTreeScopeIds.length ? inArray(budgetIncidents.scopeId, [...visibleTaskTreeScopeIds]) : sql`false`),
+        readableTaskRoot ? readableTaskTreeBudgetCondition(readableTaskRoot, budgetIncidents.scopeType,
+          sql`${issues.id} = ${budgetIncidents.scopeId} and ${issues.companyId} = ${budgetIncidents.companyId}`) : undefined,
       ))
       .orderBy(desc(budgetIncidents.createdAt)));
   }
@@ -1084,10 +1085,10 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     openIncidents: listOpenIncidents,
 
     overview: async (companyId: string, options: BudgetOverviewReadOptions = {}): Promise<BudgetOverview> => {
-      const visibleTaskTreeScopeIds = options.actor ? await visibleBudgetTaskTreeScopeIds(db, companyId, options.actor) : undefined;
-      const rows = await listPolicyRows(companyId, visibleTaskTreeScopeIds);
+      const readableTaskRoot = options.actor ? await budgetTaskTreeRootReadCondition(db, options.actor) : undefined;
+      const rows = await listPolicyRows(companyId, readableTaskRoot);
       const policies = await mapBudgetReads(rows, buildPolicySummary);
-      const activeIncidents = await listOpenIncidents(companyId, options, visibleTaskTreeScopeIds);
+      const activeIncidents = await listOpenIncidents(companyId, options, readableTaskRoot);
       return {
         companyId,
         policies,
