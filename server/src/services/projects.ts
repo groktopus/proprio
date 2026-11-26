@@ -1,3 +1,4 @@
+import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
 import { notifyChatInboundWakeNotices } from "./chat-inbound-wake-notice-notifications.js";
 import { withDefaultProjectStorage, type ProjectCreationEnvironment } from "./project-environments.js";
@@ -1001,10 +1002,18 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
       const db = tx as unknown as Db;
       const { goalIds: inputGoalIds, ...projectData } = data;
       const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
+      let visibilityCompanyId: string | undefined;
+      if (projectData.visibility !== undefined) {
+        const [scope] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
+        if (!scope) return null;
+        visibilityCompanyId = scope.companyId;
+        // Admission follows the same order before acquiring the project row.
+        await lockIssuePrivacyTree(tx, visibilityCompanyId);
+      }
       const existingProject = await db
         .select({ id: projects.id, companyId: projects.companyId, name: projects.name, archivedAt: projects.archivedAt, executionWorkspacePolicy: projects.executionWorkspacePolicy })
         .from(projects)
-        .where(eq(projects.id, id)).for("update")
+        .where(and(eq(projects.id, id), visibilityCompanyId ? eq(projects.companyId, visibilityCompanyId) : undefined)).for("update")
         .then((rows) => rows[0] ?? null);
       if (!existingProject) return null;
       projectData.executionWorkspacePolicy = withoutLegacyProjectEnvironment(projectData.executionWorkspacePolicy);
@@ -1049,7 +1058,6 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
         if (updates.visibility !== undefined) {
           await notifyStatusCardIssueChange(tx, existingProject.companyId);
           await notifyChatInboundWakeNotices(tx, { companyId: existingProject.companyId });
-          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existingProject.companyId}`}, 0))`);
         }
         const [updated] = await tx.update(projects).set(updates).where(eq(projects.id, id)).returning();
         if (updated?.visibility === "private" && updates.visibility === "private") {

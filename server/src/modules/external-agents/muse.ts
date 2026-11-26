@@ -18,6 +18,7 @@ import { updateAgentConfigurationInTransaction } from "../../services/agent-conf
 import { canConfigureAgentConnection, requestAgentLifecycleRecheckInTransaction } from "../agent-lifecycle/index.js";
 import { authorizationService, issueReadSqlCondition, type AuthorizationActor } from "../../services/authorization.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../../services/activity-log.js";
+import { lockIssuePrivacyTree } from "../../services/issue-hierarchy.js";
 import { issueService } from "../../services/issues.js";
 import { resolveCoreTrustPreset } from "../../services/trust-preset-resolver.js";
 import { normalizeIssueExecutionPolicy } from "../../services/issue-execution-policy.js";
@@ -514,7 +515,7 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
     return db.transaction(async tx=>{
       // Task lock precedes admission and binding. Parent creation locks its
       // existing parent first; new issue rows cannot be owned by another tx.
-      if(c.command==="task.create")await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${s.companyId}`},0))`);
+      if(c.command==="task.create")await lockIssuePrivacyTree(tx,s.companyId);
       const issueId=c.command==="task.comment"?c.issueId:c.parentId;
       if(issueId)await tx.select({id:issues.id}).from(issues).where(and(eq(issues.id,issueId),eq(issues.companyId,s.companyId))).for("update");
       return withExternalAdmissionGuard(tx,s.companyId,s.agentId,async()=>{

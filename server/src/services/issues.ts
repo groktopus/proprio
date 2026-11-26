@@ -64,6 +64,8 @@ import type { ExecutionProjection } from "@groktopus/shared";
 import type { IssueParentAdjustment } from "@groktopus/shared";
 import {
   confirmPlacement,
+  loadAncestorIssueIds,
+  lockIssuePrivacyTree,
   planIssueParentChange,
   resolveNewTaskParent,
   withParentAdjustment,
@@ -200,7 +202,6 @@ import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import {
   buildIndependentTaskWorkspaceSettings,
   isAncestorExecutionWorkspace,
-  loadAncestorIssueIds,
   mergeExplicitWorkspaceSettings,
 } from "./task-workspace-lineage.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
@@ -10698,7 +10699,7 @@ export function issueService(db: Db) {
           resolvedTitle = `Chat with ${conversationAgent.name}`;
           issueData.title = resolvedTitle;
         }
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+        await lockIssuePrivacyTree(tx, companyId);
         await assertAgentInteraction(tx as unknown as Db, {
           companyId, actorAgentId: issueData.createdByAgentId,
           operation: "assign", targetAgentId: issueData.assigneeAgentId,
@@ -12054,7 +12055,7 @@ export function issueService(db: Db) {
 
       const runUpdate = async (tx: any) => {
         const changesPrivacy = issueData.visibility !== undefined || issueData.parentId !== undefined || issueData.projectId !== undefined;
-        if (changesPrivacy) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
+        if (changesPrivacy) await lockIssuePrivacyTree(tx, existing.companyId);
         if (issueData.parentId) await assertParentInCompany(tx, existing.companyId, issueData.parentId);
         if (lockedParentPlan && issueData.parentId !== undefined) {
           const relocked = await planIssueParentChange(tx, existing, lockedParentPlan.requestedParentId, lockedParentPlan.policy);
