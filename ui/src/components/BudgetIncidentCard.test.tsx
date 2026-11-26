@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import { act } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import type { BudgetIncident } from "@groktopus/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BudgetIncidentCard } from "./BudgetIncidentCard";
 import { MemoryRouter } from "react-router-dom";
+
+vi.mock("@/context/CompanyContext", () => ({ useCompany: () => ({ selectedCompany: null }) }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -33,14 +36,19 @@ function incident(overrides: Partial<BudgetIncident> = {}): BudgetIncident {
   };
 }
 
-async function renderCard(value: BudgetIncident) {
+async function renderCard(value: BudgetIncident, canResolve = true) {
   const div = document.createElement("div");
   document.body.append(div);
   const root = createRoot(div);
   const onKeepPaused = vi.fn();
   const onRaiseAndResume = vi.fn();
+  const queryClient = new QueryClient();
   await act(async () => root.render(
-    <MemoryRouter><BudgetIncidentCard incident={value} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} /></MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/PRO/activity/budgets"]}>
+        <BudgetIncidentCard incident={value} canResolve={canResolve} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} />
+      </MemoryRouter>
+    </QueryClientProvider>,
   ));
   const buttons = () => Array.from(div.querySelectorAll("button"), (button) => button.textContent?.trim());
   return {
@@ -49,6 +57,7 @@ async function renderCard(value: BudgetIncident) {
     onKeepPaused,
     cleanup: async () => {
       await act(async () => root.unmount());
+      queryClient.clear();
       div.remove();
     },
   };
@@ -68,16 +77,12 @@ describe("BudgetIncidentCard", () => {
 
   it("links task-tree stops to their root and disables resolution without board authority", async () => {
     const { div, buttons, cleanup } = await renderCard(incident({ scopeType: "task_tree", scopeId: "root-task" }));
-    expect(div.querySelector('a[href="/issues/root-task"]')?.textContent).toBe("Budget Demo");
-    expect(div.textContent).toContain("board operator who can view this root task can resolve");
-    const { div: viewerDiv, cleanup: cleanupViewer } = await (async () => {
-      const viewer = document.createElement("div");
-      document.body.append(viewer);
-      const viewerRoot = createRoot(viewer);
-      await act(async () => viewerRoot.render(<MemoryRouter><BudgetIncidentCard incident={incident({ scopeType: "task_tree" })} canResolve={false} onKeepPaused={vi.fn()} onRaiseAndResume={vi.fn()} /></MemoryRouter>));
-      return { div: viewer, cleanup: async () => { await act(async () => viewerRoot.unmount()); viewer.remove(); } };
-    })();
+    expect(div.querySelector('a[href="/PRO/issues/root-task"]')?.textContent).toBe("Budget Demo");
+    expect(div.textContent).toContain("Task budget hard stop");
+    expect(div.textContent).toContain("New runs for this task and its descendants will wait");
+    const { div: viewerDiv, cleanup: cleanupViewer } = await renderCard(incident({ scopeType: "task_tree" }), false);
     expect(Array.from(viewerDiv.querySelectorAll("button")).every(button => button.disabled)).toBe(true);
+    expect(viewerDiv.querySelector("input")?.disabled).toBe(true);
     expect(buttons()).toContain("Raise budget & resume");
     await cleanup();
     await cleanupViewer();

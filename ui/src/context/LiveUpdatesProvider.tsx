@@ -1638,6 +1638,10 @@ function invalidateActivityQueries(
     });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     void queryClient.resetQueries({ queryKey: queryKeys.budgets.overview(companyId) });
+    void queryClient.resetQueries({ queryKey: queryKeys.budgets.rootSearch(companyId) });
+    if (action?.startsWith("company_membership.") || action?.startsWith("membership.")) {
+      void queryClient.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
+    }
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
     for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"], dependencyDiagnosisQueryFamily]) {

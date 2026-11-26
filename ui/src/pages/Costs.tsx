@@ -2,8 +2,7 @@ import { FastResponseHistory } from "../components/fast-responses/FastResponseHi
 import { DecisionHistory } from "../components/decision-models/DecisionHistory";
 import { SubscriptionCostCard, SubscriptionTokenUsage } from "../components/SubscriptionCostCard";
 import { subscriptionsApi } from "../api/subscriptions";
-import { useSearchParams } from "@/lib/router";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "@/lib/router";
 import { CostEstimateLabel } from "../components/CostEstimateLabel";
 import { CostAmount } from "../components/CostAmount";
 import { CostByUserTable } from "../components/CostByUserTable";
@@ -277,38 +276,39 @@ export function Costs({
   });
   const canManageTaskTreeBudgets = canBoardManageRuntime(selectedCompanyId, boardAccess);
 
-  const invalidateBudgetViews = () => {
-    if (!selectedCompanyId) return;
-    queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.projects.all(selectedCompanyId) });
+  const invalidateBudgetViews = (budgetCompanyId: string) => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.projects.all(budgetCompanyId) });
   };
 
   const policyMutation = useMutation({
     mutationFn: ({ summary, changes }: {
       summary: BudgetPolicySummary;
       changes: Partial<Pick<BudgetPolicySummary, "amount" | "reservationCents" | "unpricedUsagePolicy">>;
-    }) => budgetsApi.upsertPolicy(companyId, {
+    }) => budgetsApi.upsertPolicy(summary.companyId, {
       scopeType: summary.scopeType,
       scopeId: summary.scopeId,
       metric: summary.metric,
       windowKind: summary.windowKind,
       ...changes,
     }),
-    onSuccess: invalidateBudgetViews,
+    onSuccess: (_result, { summary }) => invalidateBudgetViews(summary.companyId),
   });
   const createTaskTreeBudgetMutation = useMutation({
-    mutationFn: ({ rootTaskId, amount }: { rootTaskId: string; amount: number }) => budgetsApi.upsertPolicy(companyId, {
-      scopeType: "task_tree", scopeId: rootTaskId, metric: "billed_cents", windowKind: "lifetime", amount,
-    }),
-    onSuccess: invalidateBudgetViews,
+    mutationFn: ({ companyId: budgetCompanyId, rootTaskId, amount }: { companyId: string; rootTaskId: string; amount: number }) =>
+      budgetsApi.upsertPolicy(budgetCompanyId, {
+        scopeType: "task_tree", scopeId: rootTaskId, metric: "billed_cents", windowKind: "lifetime", amount,
+      }),
+    onSuccess: (_result, variables) => invalidateBudgetViews(variables.companyId),
   });
+  const currentTaskTreeBudgetMutation = createTaskTreeBudgetMutation.variables?.companyId === companyId;
 
   const incidentMutation = useMutation({
     mutationFn: (input: { incidentId: string; action: "keep_paused" | "raise_budget_and_resume"; amount?: number }) =>
       budgetsApi.resolveIncident(companyId, input.incidentId, input),
-    onSuccess: invalidateBudgetViews,
+    onSuccess: () => invalidateBudgetViews(companyId),
   });
 
   const { data: spendData, isLoading: spendLoading, error: spendError } = useQuery({
@@ -942,7 +942,9 @@ export function Costs({
         </TabsContent>
 
         <TabsContent value="budgets" className="mt-4 space-y-4">
-                {(policyMutation.error || createTaskTreeBudgetMutation.error) && <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>}
+          {(policyMutation.error || (currentTaskTreeBudgetMutation && createTaskTreeBudgetMutation.error)) && (
+            <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>
+          )}
           {budgetLoading ? (
             <PageSkeleton variant="costs" />
           ) : budgetError && !budgetData ? null : (
@@ -1044,18 +1046,19 @@ export function Costs({
                 })}
 
                 <section className="space-y-3">
-                    <div>
-                      <h2 className="text-lg font-semibold">Task budgets</h2>
-                      <p className="text-sm text-muted-foreground">Each lifetime limit is shared by the root task and its descendants. Board operators who can view the root task can set or update its limit and resolve its budget stop.</p>
-                    </div>
-                    <TaskTreeBudgetCreate
-                      companyId={companyId}
-                      existingRootIds={budgetPoliciesByScope.task_tree.map(policy => policy.scopeId)}
-                      disabled={!canManageTaskTreeBudgets}
-                      isSaving={createTaskTreeBudgetMutation.isPending}
-                      onCreate={(rootTask, amount) => createTaskTreeBudgetMutation.mutate({ rootTaskId: rootTask.id, amount })}
-                    />
-                    {budgetPoliciesByScope.task_tree.length > 0 ? (
+                  <div>
+                    <h2 className="text-lg font-semibold">Task budgets</h2>
+                    <p className="text-sm text-muted-foreground">Each lifetime limit is shared by the root task and its descendants. Board operators who can view the root task can set or update its limit and resolve its budget stop.</p>
+                  </div>
+                  <TaskTreeBudgetCreate
+                    key={companyId}
+                    companyId={companyId}
+                    existingRootIds={budgetPoliciesByScope.task_tree.map(policy => policy.scopeId)}
+                    disabled={!canManageTaskTreeBudgets}
+                    isSaving={currentTaskTreeBudgetMutation && createTaskTreeBudgetMutation.isPending}
+                    onCreate={(rootTaskId, amount) => createTaskTreeBudgetMutation.mutateAsync({ companyId, rootTaskId, amount })}
+                  />
+                  {budgetPoliciesByScope.task_tree.length > 0 ? (
                     <div className="grid gap-4 xl:grid-cols-2">
                       {budgetPoliciesByScope.task_tree.map((summary) => (
                         <div key={summary.policyId}>
@@ -1072,7 +1075,7 @@ export function Costs({
                         </div>
                       ))}
                     </div>
-                    ) : null}
+                  ) : null}
                 </section>
 
                 {budgetPolicies.length === 0 ? (

@@ -652,6 +652,8 @@ export const queryKeys = {
   budgets: {
     overview: (companyId: string) =>
       ["budgets", "overview", companyId] as const,
+    rootSearch: (companyId: string, query?: string) =>
+      ["budgets", "root-search", companyId, ...(query === undefined ? [] : [query])] as const,
   },
   approvals: {
     list: (companyId: string, status?: string) =>

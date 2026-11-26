@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Costs } from "./Costs";
 import { CostByUserTable } from "../components/CostByUserTable";
+import { queryKeys } from "@/lib/queryKeys";
 import { MemoryRouter } from "react-router-dom";
 
 const scopedAgentMock = vi.hoisted(() => vi.fn());
@@ -103,10 +104,10 @@ describe("Shared Costs surfaces", () => {
     budgetOverviewMock.mockResolvedValue({ policies: [summary], activeIncidents: [], pendingApprovalCount: 0, pausedAgentCount: 0, pausedProjectCount: 0 });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);
-    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/PRO/activity/budgets"]}><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
     await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
     expect(container.textContent).toContain("shared by the root task and its descendants");
-    expect(container.querySelector('a[href="/issues/root-task"]')?.textContent).toContain("Root task");
+    expect(container.querySelector('a[href="/PRO/issues/root-task"]')?.textContent).toContain("Root task");
     expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent?.trim() === "Update budget")).toBe(true);
     queryClient.clear();
     await act(async () => root.unmount());
@@ -129,15 +130,20 @@ describe("Shared Costs surfaces", () => {
     root = createRoot(container);
     await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
     await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
-    const search = container.querySelector<HTMLInputElement>('[aria-label="Root task"]')
-      ?? container.querySelector<HTMLInputElement>("#task-tree-budget-root-search")!;
+    const search = container.querySelector<HTMLInputElement>('[placeholder="Search tasks by title or ID"]')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Prepare");
       search.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("PRO-10 · Prepare release")); });
-    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("PRO-10 · Prepare release"))!.click());
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Prepare release")); });
+    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("Prepare release"))!.click());
     const amount = container.querySelector<HTMLInputElement>('[aria-label="Lifetime limit (USD)"]')!;
+    const create = [...container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Set task budget")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(amount, "0.001");
+      amount.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(create.disabled).toBe(true);
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(amount, "25.50");
       amount.dispatchEvent(new Event("input", { bubbles: true }));
@@ -146,6 +152,30 @@ describe("Shared Costs surfaces", () => {
     await act(async () => { await vi.waitFor(() => expect(upsertPolicyMock).toHaveBeenCalledWith("company-1", {
       scopeType: "task_tree", scopeId: "root-id", metric: "billed_cents", windowKind: "lifetime", amount: 2550,
     })); });
+    expect(amount.value).toBe("");
+    expect(create.disabled).toBe(true);
+    queryClient.clear();
+  });
+
+  it("clears a selected root when a fresh search denies its access", async () => {
+    issueListMock.mockResolvedValueOnce([{ id: "root-id", identifier: "PRO-10", title: "Private release plan" }]).mockResolvedValue([]);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Task budgets")); });
+    const search = container.querySelector<HTMLInputElement>('[placeholder="Search tasks by title or ID"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Private");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("Private release plan")); });
+    await act(async () => [...container.querySelectorAll("button")].find(button => button.textContent?.includes("Private release plan"))!.click());
+    expect(document.activeElement).toBe(container.querySelector('[aria-label="Lifetime limit (USD)"]'));
+    const searchKey = queryKeys.budgets.rootSearch("company-1", "Private");
+    await act(async () => queryClient.resetQueries({ queryKey: searchKey }));
+    expect(queryClient.getQueryData(searchKey)).toEqual([]);
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).not.toContain("Private release plan")); });
+    expect([...container.querySelectorAll("button")].find(button => button.textContent?.trim() === "Set task budget")?.disabled).toBe(true);
     queryClient.clear();
   });
 

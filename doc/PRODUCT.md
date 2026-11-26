@@ -625,8 +625,9 @@ Manual Stop and authorization remain independently enforced. Unknown charges
 remain visible, and stale unevaluated accounting blocks new limited-budget work
 until reconciliation catches up.
 
-A board operator with access to the root task can set a shared spend limit for
-its task tree. Each admitted run records the task and its ancestors. The limit
+A board operator with access to the root task can set a shared lifetime spend
+limit for its task tree. In Activity → Budgets, use **Set task budget** to
+select the root and enter the limit. Each admitted run records the task and its ancestors. The limit
 covers billed provider usage linked to those runs, including attributable
 retries, continuations, and reviews. Pending reservations and linked usage
 without a reliable price affect admission. Charges without a run or a saved
