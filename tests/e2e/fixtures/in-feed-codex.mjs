@@ -196,7 +196,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   else if (method === 'thread/read') send({ id, result: { thread: { id: threadId, turns: [] } } });
   else if (method === 'turn/start') {
-    helloProbe = recoveryFixture
+    helloProbe = (recoveryFixture || process.argv.includes('--completion-stream-fixture'))
       && JSON.stringify(message.params?.input).includes('Respond only with hello. Do not use tools or inspect files.');
     emitCeoLineage = JSON.stringify(message.params).includes('CEO descendant fixture');
     declined = /connection_intent/.test(JSON.stringify(message.params)) && /rejected/.test(JSON.stringify(message.params));
