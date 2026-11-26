@@ -9,7 +9,10 @@ on:
       - tests/e2e/execution-recovery/mixed-handoff-evidence.ts
       - tests/e2e/execution-recovery/playwright.config.ts
       - tests/e2e/execution-recovery/recovery.spec.ts
+      - server/src/modules/wake-queue/adapters/postgres.ts
+      - packages/proprio-runner/runner/crates/runner-core/src/provider_events.rs
       - tests/e2e/fixtures/mixed-handoff-*.mjs
+      - tests/e2e/fixtures/codex-fixture-helpers.mjs
       - tests/e2e/fixtures/codex-fixture-resolver.mjs
       - tests/e2e/fixtures/recovery-codex-loader.mjs
       - tests/e2e/fixtures/recovery-bin/codex
@@ -17,8 +20,10 @@ on:
       - tests/e2e/fetch-allowed-port.ts
       - tests/e2e/fixtures/test-drive-process.ts
       - tests/runner-e2e/directory-cleanup.ts
+      - tests/runner-e2e/native-event-envelope.ts
       - tests/runner-e2e/process-tree-owner.ts
       - tests/runner-e2e/process-tree.ts
+      - tests/runner-e2e/run-observations.ts
       - cli/src/commands/test-drive.ts
       - cli/src/index.ts
 
@@ -71,7 +76,7 @@ jobs:
         run: |
           fixture_tmp=$(mktemp -d "$RUNNER_TEMP/mixed-case-handoff-fixture.XXXXXX")
           cleanup() {
-            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'proprio-mixed-handoff-*' -o -name 'proprio-test-drive-*' \) -print -quit)" ]]; then
+            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'proprio-mixed-handoff-*' -o -name 'proprio-recovery-*' \) -print -quit)" ]]; then
               echo "Instance data is retained for the disposable hosted job to clean up."
               return
             fi
