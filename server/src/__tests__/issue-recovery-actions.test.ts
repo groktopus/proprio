@@ -604,6 +604,37 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(replay).toEqual(exhausted);
   });
 
+  it("keeps the board disposition and task-safe guidance after Case recovery exhausts its attempt budget", async () => {
+    const { companyId, managerId, sourceIssueId } = await seedCompany();
+    const svc = issueRecoveryActionService(db);
+    const caseHandoffCompletion = {
+      schema: "proprio.case-handoff-completion-recovery.v1",
+      caseHandoff: { prerequisiteCount: 1 },
+      assessment: { criteriaNeedingWork: [{ reasonCode: "criterion_evidence_missing", requirement: "Private criterion" }] },
+    };
+    const input = {
+      companyId, sourceIssueId, kind: "active_run_watchdog" as const, ownerType: "agent" as const,
+      ownerAgentId: managerId, cause: "completion_evidence_incomplete", fingerprint: "case-recovery-budget",
+      nextAction: "Review the private Case details.", evidence: { caseHandoffCompletion }, maxAttempts: 2,
+      wakePolicy: { type: "bounded_recovery_owner" },
+    };
+
+    const initial = await svc.upsertSourceScoped(input);
+    expect(initial.nextAction).toContain("then retry completion");
+    const exhausted = await svc.upsertSourceScoped(input);
+    expect(exhausted).toMatchObject({ status: "escalated", ownerType: "board", attemptCount: 2, wakePolicy: null });
+    expect(exhausted.nextAction).toContain("Completion recovery stopped after 2 attempts.");
+    expect(exhausted.nextAction).toContain("Review the assessment before assigning further work.");
+    expect(exhausted.nextAction).toContain("Review the prerequisite checklist in the authorized Case view.");
+    expect(exhausted.nextAction).toContain("Add or correct evidence for 1 task criterion.");
+    expect(exhausted.nextAction).not.toContain("then retry completion");
+    expect(JSON.stringify(exhausted)).not.toContain("Private criterion");
+    expect(exhausted.evidence).not.toHaveProperty("caseHandoffCompletion");
+    expect(await svc.getActiveForIssue(companyId, sourceIssueId)).toEqual(exhausted);
+    const [saved] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, exhausted.id));
+    expect(saved?.evidence.caseHandoffCompletion).toEqual(caseHandoffCompletion);
+  });
+
   it("preserves legacy recovery ownership when new evidence is folded into an active action", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     const svc = issueRecoveryActionService(db);

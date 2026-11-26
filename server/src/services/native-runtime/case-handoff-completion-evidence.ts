@@ -124,12 +124,14 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
 /** Case offer details have a stricter visibility boundary than the task card.
  * Keep the full receipt in durable storage, but only project generic task-local
  * gap counts into the task recovery read model. */
-export function projectTaskCompletionRecovery(savedEvidence: Record<string, unknown>) {
+export function projectTaskCompletionRecovery(savedEvidence: Record<string, unknown>, exhaustedAttempts?: number) {
   const evidence = { ...savedEvidence };
   if (!Object.hasOwn(evidence, "caseHandoffCompletion")) return null;
   const receipt = record(evidence.caseHandoffCompletion);
   delete evidence.caseHandoffCompletion;
-  const fallback = "Review the task completion assessment.";
+  const fallback = exhaustedAttempts === undefined
+    ? "Review the task completion assessment."
+    : `Completion recovery stopped after ${exhaustedAttempts} attempt${exhaustedAttempts === 1 ? "" : "s"}. Review the assessment before assigning further work.`;
   if (receipt.schema !== "proprio.case-handoff-completion-recovery.v1") return { evidence, nextAction: fallback };
   const caseHandoff = record(receipt.caseHandoff);
   const assessment = record(receipt.assessment);
@@ -145,7 +147,9 @@ export function projectTaskCompletionRecovery(savedEvidence: Record<string, unkn
     receipt.taskRemedy === "publish_task_document" ? "Publish the requested task document with write_document, or attach verified output with register_deliverable." : null,
     prerequisiteCount > 0 ? "Review the prerequisite checklist in the authorized Case view." : null,
     unmetCriterionCount > 0 ? `Complete ${unmetCriterionCount} unmet task criterion${unmetCriterionCount === 1 ? "" : "a"}.` : null,
-    evidenceIssueCount > 0 ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}, then retry completion.` : null,
+    evidenceIssueCount > 0
+      ? `Add or correct evidence for ${evidenceIssueCount} task criterion${evidenceIssueCount === 1 ? "" : "a"}${exhaustedAttempts === undefined ? ", then retry completion" : ""}.`
+      : null,
   ].filter((item): item is string => Boolean(item));
   return { evidence, nextAction: guidance.length ? `${fallback} ${guidance.join(" ")}` : fallback };
 }

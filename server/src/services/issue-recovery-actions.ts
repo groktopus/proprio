@@ -98,8 +98,23 @@ function readModelNextAction(row: IssueRecoveryActionRow): string {
     ? exhaustedSystemRecoveryAction(system, row.evidence) : row.nextAction;
 }
 
+export const caseCompletionRecoveryReadFields = {
+  attemptCount: issueRecoveryActions.attemptCount,
+  evidence: sql<Record<string, unknown>>`case when ${issueRecoveryActions.evidence} ? 'caseHandoffCompletion'
+    then jsonb_build_object(
+      'caseHandoffCompletion', ${issueRecoveryActions.evidence}->'caseHandoffCompletion',
+      'recoveryBudget', ${issueRecoveryActions.evidence}->'recoveryBudget')
+    else '{}'::jsonb end`,
+};
+
+export function projectCaseCompletionRecoveryAction(row: Pick<IssueRecoveryActionRow, "evidence" | "attemptCount">) {
+  const exhaustedAttempts = isRecoveryBudgetExhausted(row.evidence) ? row.attemptCount : undefined;
+  return projectTaskCompletionRecovery(row.evidence, exhaustedAttempts);
+}
+
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
-  const recovery = projectTaskCompletionRecovery(row.evidence) ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
+  const recovery = projectCaseCompletionRecoveryAction(row)
+    ?? { evidence: row.evidence, nextAction: readModelNextAction(row) };
   return {
     id: row.id,
     companyId: row.companyId,

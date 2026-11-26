@@ -22,6 +22,7 @@ import { logActivity, publishActivity, type ActivityPublication } from "../activ
 import { CHAT_CONTROL_RECOVERY_STOP_CODE, CHAT_CONTROL_RECOVERY_UNRESOLVED_CODE } from "../chat-control-recovery-stop.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import type { WakeupOptions } from "../heartbeat/run-preparation.js";
+import { caseCompletionRecoveryReadFields, projectCaseCompletionRecoveryAction } from "../issue-recovery-actions.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
 import { listPendingFinalizeBlockerIssueIds } from "../issues.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
@@ -264,7 +265,7 @@ async function readPathFacts(db: Db, companyId: string, issueIds: string[], now:
     db.select({ issueId: issueRecoveryActions.sourceIssueId, id: issueRecoveryActions.id, kind: issueRecoveryActions.kind,
       cause: issueRecoveryActions.cause, ownerType: issueRecoveryActions.ownerType, ownerAgentId: issueRecoveryActions.ownerAgentId,
       ownerUserId: issueRecoveryActions.ownerUserId, nextAction: issueRecoveryActions.nextAction, status: issueRecoveryActions.status,
-      outcome: issueRecoveryActions.outcome, updatedAt: issueRecoveryActions.updatedAt })
+      outcome: issueRecoveryActions.outcome, updatedAt: issueRecoveryActions.updatedAt, ...caseCompletionRecoveryReadFields })
       .from(issueRecoveryActions).where(and(eq(issueRecoveryActions.companyId, companyId), inArray(issueRecoveryActions.sourceIssueId, issueIds),
         or(inArray(issueRecoveryActions.status, OPEN_RECOVERY_STATUSES),
           and(eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.outcome, "blocked"), eq(issueRecoveryActions.ownerType, "board")))))
@@ -288,8 +289,9 @@ async function readPathFacts(db: Db, companyId: string, issueIds: string[], now:
       : action.ownerType === "agent" && action.ownerAgentId
         ? { type: "agent" as const, id: action.ownerAgentId }
         : { type: "board" as const };
-    waits.set(action.issueId, { kind: action.cause, action: action.nextAction || "Review the recovery action and decide the next step.",
-      actionId: action.id, owner });
+    const nextAction = projectCaseCompletionRecoveryAction(action)?.nextAction
+      ?? (action.nextAction || "Review the recovery action and decide the next step.");
+    waits.set(action.issueId, { kind: action.cause, action: nextAction, actionId: action.id, owner });
   }
   for (const row of [...interactions, ...approvalRows]) if (!waits.has(row.issueId)) {
     waits.set(row.issueId, { kind: "human_action", action: "Respond to the open question or approval before this dependency can continue.", owner: { type: "board" } });
