@@ -63,6 +63,8 @@ import { issueRecoveryActionReadModel } from "../issue-recovery-actions.js";
 import { readNativeContinuationSource } from "./native-continuation-delivery.js";
 import { nativeSha256 } from "./canonical.js";
 import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
+import { assertAcceptedOfferIsCurrent, computeCaseHandoffRequirementsDigest, readAcceptedCaseHandoffOffer } from "../case-handoff-offer-authority.js";
+import { captureCaseWorkflow } from "../case-workflows.js";
 import { NativeRunCoordinatorStore } from "./native-run-coordinator-store.js";
 import { finalizeNativeRun, repairCommittedNativeChatResponse } from "./native-run-finalizer.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
@@ -2785,22 +2787,32 @@ describe("ProprioControlPlanePort conformance", () => {
     const caseId = randomUUID(), handoffId = randomUUID();
     recoveryEvidenceCaseId = caseId;
     recoveryEvidenceHandoffId = handoffId;
-    const requirementsDigest = "d".repeat(64);
-    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: "Complete task", prerequisites: [],
+    const phase = "delivery";
+    const instructions = "Deliver the result";
+    const workflow = await captureCaseWorkflow(db, input.companyId, { workflowId: null, phase }, input.issueId, phase);
+    const requirements = {
+      taskTitle: task!.title, taskDescription: task!.description, phase, instructions,
+      expectedDeliverable: "Complete task", prerequisites: [],
       requirementRevision: { id: acceptedContract!.id, revision: acceptedContract!.revision,
-        canonicalSha256: acceptedContract!.canonicalSha256 }, requirementsDigest, taskBrief: task! };
+        canonicalSha256: acceptedContract!.canonicalSha256 },
+      workflowTransition: workflow.workflowTransition, workflowPromptDigest: null,
+    };
+    const requirementsDigest = computeCaseHandoffRequirementsDigest(requirements);
+    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: requirements.expectedDeliverable,
+      prerequisites: requirements.prerequisites, requirementRevision: requirements.requirementRevision, requirementsDigest, taskBrief: task! };
     await db.insert(cases).values({ id: caseId, companyId: input.companyId, caseNumber: 700000 + Math.floor(Math.random() * 100000),
-      identifier: "C-" + caseId, caseType: "native-completion", title: "Native completion handoff", workIssueId: input.issueId, handoffVersion: 1 });
+      identifier: "C-" + caseId, caseType: "native-completion", title: "Native completion handoff", workIssueId: input.issueId,
+      phase, handoffVersion: 1 });
     await db.update(heartbeatRuns).set({ contextSnapshot: { ...sourceRun!.contextSnapshot, caseHandoffId: handoffId } })
       .where(eq(heartbeatRuns.id, input.runId));
     await db.insert(caseHandoffs).values({ id: handoffId, companyId: input.companyId, caseId, issueId: input.issueId, version: 1,
-      fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: input.agentId, phase: "delivery", instructions: "Deliver the result",
+      fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: input.agentId, phase, instructions, ...workflow,
       actorType: "agent", actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: "native-completion-" + handoffId,
       inputFingerprint: "native-completion-" + handoffId, offerContract: versioned ? offerContract : null,
       recipientDecision: versioned ? { outcome: "accepted", actorType: "agent", actorId: input.agentId, handoffVersion: 1,
         requirementRevisionId: acceptedContract!.id, requirementsDigest, decidedAt: new Date().toISOString() } : null,
       state: "delivered" });
-    return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract };
+    return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract, sourceAgentId, requirements };
   }
 
   it.each(["current", "historical recovery", "different recovery", "cancelled", "withdrawn", "withdrawn before dispatch"] as const)(
@@ -2995,7 +3007,7 @@ describe("ProprioControlPlanePort conformance", () => {
 
   it.each(["same-recipient newer handoff", "withdrawal", "Case cancellation"] as const)("preserves a late accepted result after %s", async authorityChange => {
     const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
-    const { caseId, handoffId, acceptedContract, offerContract } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
+    const { caseId, handoffId, acceptedContract, offerContract, sourceAgentId, requirements } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
     const initialIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const turnId = "late-case-result";
@@ -3006,17 +3018,35 @@ describe("ProprioControlPlanePort conformance", () => {
       payload: { kind: "agentMessage", channel: "final", text: "The previous handoff requirements are complete." } });
     await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
 
-    if (authorityChange === "same-recipient newer handoff") {
-      const newerHandoffId = randomUUID();
-      recoveryEvidenceSuccessorHandoffId = newerHandoffId;
+    const correctedDeliverable = "Corrected scope with verified publication";
+    const correctedInstructions = "Publish the corrected deliverable and include verified evidence.";
+    const successorId = authorityChange === "same-recipient newer handoff" ? randomUUID() : null;
+    let correctedDigest: string | undefined;
+    if (successorId) {
+      recoveryEvidenceSuccessorHandoffId = successorId;
+      const [currentCase] = await db.select().from(cases).where(eq(cases.id, caseId));
+      const workflow = await captureCaseWorkflow(db, companyId, currentCase!, issueId, requirements.phase);
+      expect(workflow.workflowTransition).toEqual(requirements.workflowTransition);
+      correctedDigest = computeCaseHandoffRequirementsDigest({
+        ...requirements, instructions: correctedInstructions, expectedDeliverable: correctedDeliverable,
+        workflowTransition: workflow.workflowTransition,
+      });
+      expect(correctedDigest).not.toBe(offerContract.requirementsDigest);
+      const correctedOfferContract = { ...offerContract, expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest };
+      const [correctionSource] = await db.insert(heartbeatRuns).values({ companyId, issueId, nativeIssueId: issueId,
+        agentId: sourceAgentId, runtimeMode: "native", status: "succeeded", invocationSource: "assignment", triggerDetail: "system",
+        completionContractId: acceptedContract.id, completionContractSha256: acceptedContract.canonicalSha256,
+        contextSnapshot: { issueId }, finishedAt: new Date() }).returning();
       await db.update(cases).set({ handoffVersion: 2 }).where(eq(cases.id, caseId));
-      await db.insert(caseHandoffs).values({ id: newerHandoffId, companyId, caseId, issueId, version: 2,
-        fromAgentId: agentId, destinationKind: "agent", toAgentId: agentId, phase: "delivery", instructions: "Updated delivery",
-        actorType: "agent", actorId: agentId, wakeupRequestId: randomUUID(), idempotencyKey: `newer-handoff-${newerHandoffId}`,
-        inputFingerprint: `newer-handoff-${newerHandoffId}`, offerContract,
+      const [successor] = await db.insert(caseHandoffs).values({ id: successorId, companyId, caseId, issueId, version: 2,
+        sourceRunId: correctionSource!.id, fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: agentId,
+        phase: requirements.phase, instructions: correctedInstructions, ...workflow,
+        actorType: "agent", actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: `newer-handoff-${successorId}`,
+        inputFingerprint: `newer-handoff-${successorId}`, offerContract: correctedOfferContract,
         recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 2,
-          requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest, decidedAt: new Date().toISOString() },
-        state: "delivered" });
+          requirementRevisionId: acceptedContract.id, requirementsDigest: correctedDigest, decidedAt: new Date().toISOString() },
+        state: "delivered", assignmentAppliedAt: new Date() }).returning();
+      await db.transaction(tx => assertAcceptedOfferIsCurrent(tx as unknown as typeof db, successor!, initialIssue));
     } else if (authorityChange === "withdrawal") {
       await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date() }).where(eq(caseHandoffs.id, handoffId));
     } else {
@@ -3031,6 +3061,15 @@ describe("ProprioControlPlanePort conformance", () => {
       eq(statusDecisions.issueId, issueId), eq(statusDecisions.runId, runId)));
     expect(decision).toMatchObject({ reasonCode: "case_handoff_superseded", applicationState: "applied",
       decisionJson: { statusAction: "preserve", toStatus: initialIssue.status, effects: [] } });
+    if (successorId) {
+      const [successor] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, successorId));
+      const [currentCase] = await db.select({ handoffVersion: cases.handoffVersion }).from(cases).where(eq(cases.id, caseId));
+      expect(currentCase?.handoffVersion).toBe(2);
+      expect(successor).toMatchObject({ state: "delivered", version: 2, instructions: correctedInstructions });
+      expect(readAcceptedCaseHandoffOffer(successor!)).toMatchObject({
+        expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest,
+      });
+    }
     expect(await db.select().from(nativeRunResults).where(and(eq(nativeRunResults.companyId, companyId),
       eq(nativeRunResults.issueId, issueId), eq(nativeRunResults.runId, runId)))).toHaveLength(1);
     expect(await db.select().from(workAssessments).where(and(eq(workAssessments.companyId, companyId),
