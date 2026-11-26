@@ -38,7 +38,7 @@ import {
 } from "@groktopus/db";
 import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON, isUuidLike } from "@groktopus/shared";
 import { withOperationAccountingTransaction } from "../../../services/accounting-transaction.js";
-import { lockBudgetAdmissionControls } from "../../../services/budget-admission-controls.js";
+import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "../../../services/budget-admission-controls.js";
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
@@ -290,6 +290,7 @@ export function createPostgresRunDispatchAdapter(
 
       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
         if (mode === "accounting") {
+          await lockTaskTreeBudgetConfiguration(typedTx, input.companyId, "shared");
           await lockBudgetAdmissionControls(typedTx, input.companyId, hint.projectId);
           await typedTx.select({ id: agents.id }).from(agents)
             .where(and(eq(agents.id, hint.agentId), eq(agents.companyId, input.companyId))).for("share");

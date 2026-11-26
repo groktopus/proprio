@@ -10,6 +10,8 @@ import {
   agents,
   approvals,
   assets,
+  budgetIncidents,
+  budgetPolicies,
   companies,
   companyMemberships,
   costEvents,
@@ -45,6 +47,7 @@ function createEventBusStub() {
       return {
         emit: async () => {},
         subscribe: () => {},
+        clear: () => {},
       };
     },
   } as any;
@@ -114,6 +117,8 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     await db.delete(issueThreadInteractions);
     await db.delete(issueAttachments);
     await db.delete(assets);
+    await db.delete(budgetIncidents);
+    await db.delete(budgetPolicies);
     await db.delete(approvals);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
@@ -1313,6 +1318,35 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       ]);
       return { companyId, agentId, openIssueId, privateIssueId };
     }
+
+    it("omits private tree budget incidents and legacy override approvals from plugin reads", async () => {
+      const { companyId, openIssueId, privateIssueId } = await seedOpenAndPrivate();
+      const policyRows = await db.insert(budgetPolicies).values([openIssueId, privateIssueId].map(scopeId => ({
+        companyId, scopeType: "task_tree", scopeId, metric: "billed_cents", windowKind: "lifetime", amount: 100,
+      }))).returning();
+      const approvalRows = await db.insert(approvals).values(policyRows.map(policy => ({
+        companyId, type: "budget_override_required", status: "pending",
+        payload: { scopeType: "task_tree", scopeId: policy.scopeId, policyId: policy.id },
+      }))).returning();
+      await db.insert(budgetIncidents).values(policyRows.map(policy => ({
+        companyId, policyId: policy.id, scopeId: policy.scopeId, scopeType: "task_tree",
+        metric: "billed_cents", windowKind: "lifetime", windowStart: new Date(0), windowEnd: new Date("9999-01-01"),
+        thresholdType: "hard", amountLimit: 100, amountObserved: 100,
+        approvalId: approvalRows.find(approval => approval.payload.scopeId === policy.scopeId)!.id,
+      })));
+      const publicApproval = approvalRows.find(approval => approval.payload.scopeId === openIssueId)!;
+      const privateApproval = approvalRows.find(approval => approval.payload.scopeId === privateIssueId)!;
+      const services = buildHostServices(db, "plugin-record-id", "proprio.slack-digest", createEventBusStub());
+      try {
+        const listed = await services.approvals.list({ companyId });
+        expect(listed.map(row => row.id)).toEqual([publicApproval.id]);
+        await expect(services.approvals.get({ companyId, approvalId: privateApproval.id })).resolves.toBeNull();
+        const summary = await services.issues.getOrchestrationSummary({ companyId, issueId: openIssueId });
+        expect(summary.openBudgetIncidents.map(row => row.scopeId)).toEqual([openIssueId]);
+      } finally {
+        services.dispose();
+      }
+    });
 
     it("omits private issues from issues.list", async () => {
       const { companyId, openIssueId, privateIssueId } = await seedOpenAndPrivate();

@@ -1637,6 +1637,7 @@ function invalidateActivityQueries(
       queryKey: queryKeys.issues.executionReviewEvidenceFamily,
     });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
+    void queryClient.resetQueries({ queryKey: queryKeys.budgets.overview(companyId) });
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
     for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"], dependencyDiagnosisQueryFamily]) {

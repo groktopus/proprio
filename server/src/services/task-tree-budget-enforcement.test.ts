@@ -7,6 +7,12 @@ import { reserveRunBudget } from "./budget-reservations.js";
 import { computeObservedSpend } from "./budget-exposure.js";
 import { budgetService, flushBudgetEvaluationWork } from "./budgets.js";
 import { activityService } from "./activity.js";
+import { agentActionAuditService } from "./agent-action-audit.js";
+import { attentionService } from "./attention.js";
+import { attentionHandledDetails, attentionHandledFor, attentionReceiptService } from "./attention-receipts.js";
+import { canReadDecisionSource } from "./decision-queues.js";
+import { dashboardService } from "./dashboard.js";
+import { lockTaskTreeBudgetConfiguration } from "./budget-admission-controls.js";
 import { canActorReadApproval, issueReadSqlCondition } from "./authorization.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -142,7 +148,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     expect(updatedPolicy!.enforcementVersion).toBeGreaterThan(0);
     expect(company!.status).toBe("active");
     const [approval] = await db.select().from(approvals).where(eq(approvals.companyId, f.companyId));
-    expect(approval?.payload).toMatchObject({ issueId: root.id, scopeId: root.id, scopeType: "task_tree" });
+    expect(approval?.payload).toMatchObject({ scopeId: root.id, scopeType: "task_tree" });
     vi.stubEnv("PROPRIO_ISSUE_PRIVACY_MODE", "enforce");
     try {
       const owner = { type: "agent" as const, companyId: f.companyId, agentId: agent.id };
@@ -155,7 +161,7 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
 
   });
 
-  it("rechecks revoked root access after waiting for a budget policy writer", async () => {
+  it.each(["root access", "board write access"] as const)("rechecks %s after waiting for a budget policy writer", async (revocation) => {
     const f = await fixture();
     const root = await f.makeIssue("Restricted outcome");
     await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, root.id));
@@ -192,16 +198,145 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
           where application_name = ${applicationName} and ${lockPid} = any(pg_blocking_pids(pid))`);
         return waiting?.query;
       }).toMatch(/from "budget_policies".*for update/);
-      await db.update(issueAccessGrants).set({ revokedAt: new Date() }).where(eq(issueAccessGrants.id, grant!.id));
+      if (revocation === "root access") {
+        await db.update(issueAccessGrants).set({ revokedAt: new Date() }).where(eq(issueAccessGrants.id, grant!.id));
+      } else {
+        await db.update(companyMemberships).set({ membershipRole: "viewer" }).where(and(eq(companyMemberships.companyId, f.companyId),
+          eq(companyMemberships.principalId, userId)));
+      }
     } finally {
       releasePolicy();
       await Promise.allSettled([policyLock, mutation]);
       await writingDb.$client.end();
       vi.unstubAllEnvs();
     }
-    await expect(mutation).rejects.toMatchObject({ status: 404 });
+    await expect(mutation).rejects.toMatchObject({ status: revocation === "root access" ? 404 : 403 });
     const [saved] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id));
     expect(saved?.amount).toBe(100);
+  });
+
+
+  it("puts first-time policy activation ahead of waiting sibling admissions and serializes first saves", async () => {
+    const f = await fixture();
+    const root = await f.makeIssue("Shared outcome");
+    const child = await f.makeIssue("Build", root.id);
+    const sibling = await f.makeIssue("Review", root.id);
+    const first = await f.makeRun((await f.makeAgent("Builder")).id, child.id);
+    const second = await f.makeRun((await f.makeAgent("Reviewer")).id, sibling.id);
+    const policy = { scopeType: "task_tree" as const, scopeId: root.id, windowKind: "lifetime" as const,
+      amount: 100, reservationCents: "80", hardStopEnabled: true };
+    const writerConnection = `tree-activate-${randomUUID()}`;
+    const admissionsConnection = `tree-reserve-${randomUUID()}`;
+    const writer = createDb(database.connectionString, { applicationName: writerConnection, maxConnections: 2 });
+    const admissions = createDb(database.connectionString, { applicationName: admissionsConnection, maxConnections: 2 });
+    let unlock!: () => void;
+    let signalLocked!: () => void;
+    const held = new Promise<void>(resolve => { unlock = resolve; });
+    const locked = new Promise<void>(resolve => { signalLocked = resolve; });
+    const fence = db.transaction(async tx => {
+      await lockTaskTreeBudgetConfiguration(tx as unknown as Db, f.companyId, "exclusive");
+      signalLocked();
+      await held;
+    });
+    const waitingWrites = async () => {
+      const [state] = await db.execute(sql`select count(*)::int as count from pg_stat_activity
+        where application_name = ${writerConnection} and wait_event = 'advisory'`);
+      return state?.count;
+    };
+    const attempts: Promise<unknown>[] = [];
+    try {
+      await Promise.race([locked, fence]);
+      attempts.push(budgetService(writer).upsertPolicy(f.companyId, policy, null));
+      attempts.push(budgetService(writer).upsertPolicy(f.companyId, policy, null));
+      for (const attempt of attempts) void attempt.catch(() => undefined);
+      await expect.poll(waitingWrites).toBe(2);
+      const reservations = [first, second].map(run => reserveRunBudget(admissions, f.companyId, run.id, null));
+      for (const reservation of reservations) void reservation.catch(() => undefined);
+      attempts.push(...reservations);
+      await expect.poll(async () => {
+        const [state] = await db.execute(sql`select count(*)::int as count from pg_stat_activity
+          where application_name = ${admissionsConnection} and wait_event = 'advisory'`);
+        return state?.count;
+      }).toBe(2);
+    } finally {
+      unlock();
+      await Promise.allSettled([fence, ...attempts]);
+      await Promise.all([writer.$client.end(), admissions.$client.end()]);
+    }
+    const [save1, save2, ...reservations] = await Promise.allSettled(attempts);
+    expect([save1?.status, save2?.status]).toEqual(["fulfilled", "fulfilled"]);
+    expect(reservations.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(reservations.find(result => result.status === "rejected")).toMatchObject({
+      reason: { status: 409, message: "Available budget is reserved by unfinished runs" },
+    });
+    expect(await db.select({ id: budgetPolicies.id }).from(budgetPolicies)
+      .where(and(eq(budgetPolicies.companyId, f.companyId), eq(budgetPolicies.scopeId, root.id)))).toHaveLength(1);
+  });
+
+  it("keeps a hidden root's active budget manageable and rejects stale incident decisions", async () => {
+    const f = await fixture();
+    const root = await f.makeIssue("Archived outcome");
+    await db.update(issues).set({ hiddenAt: new Date() }).where(eq(issues.id, root.id));
+    const policy = await f.makePolicy(root.id, { amount: 100, reservationCents: "0" });
+    const [incident] = await db.insert(budgetIncidents).values({
+      companyId: f.companyId, policyId: policy.id, scopeType: "task_tree", scopeId: root.id,
+      metric: "billed_cents", windowKind: "lifetime", windowStart: new Date(0), windowEnd: new Date("9999-01-01"),
+      thresholdType: "hard", amountLimit: 100, amountObserved: 100,
+    }).returning();
+    const actor = { type: "board" as const, source: "local_implicit" as const, userId: "local-board" };
+    const service = budgetService(db);
+    const overview = await service.overview(f.companyId, { actor });
+    expect(overview.policies.map(row => row.scopeId)).toEqual([root.id]);
+    expect(overview.activeIncidents.map(row => row.id)).toEqual([incident!.id]);
+    await expect(service.resolveIncident(f.companyId, incident!.id,
+      { action: "raise_budget_and_resume", amount: 550 }, actor.userId, actor.source, { actor })).resolves.toMatchObject({ status: "resolved" });
+    await expect(service.resolveIncident(f.companyId, incident!.id,
+      { action: "keep_paused" }, actor.userId, actor.source, { actor })).rejects.toMatchObject({ status: 409 });
+    expect((await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))[0]?.amount).toBe(550);
+  });
+
+  it("filters legacy override approvals, queue sources and receipts using current root access", async () => {
+    const f = await fixture();
+    const root = await f.makeIssue("Confidential budget");
+    await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, root.id));
+    const policy = await f.makePolicy(root.id, { amount: 100, reservationCents: "0" });
+    const recipient = `budget-owner-${randomUUID()}`;
+    await db.insert(authUsers).values({ id: recipient, name: "Budget owner", email: `${recipient}@example.test`,
+      emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: recipient,
+      membershipRole: "operator", status: "active" });
+    await db.update(companies).set({ budgetOwnerUserId: recipient }).where(eq(companies.id, f.companyId));
+    const [approval] = await db.insert(approvals).values({ companyId: f.companyId, type: "budget_override_required", status: "pending",
+      payload: { scopeType: "task_tree", scopeId: root.id, policyId: policy.id } }).returning();
+    const [incident] = await db.insert(budgetIncidents).values({
+      companyId: f.companyId, policyId: policy.id, scopeType: "task_tree", scopeId: root.id, approvalId: approval!.id,
+      metric: "billed_cents", windowKind: "lifetime", windowStart: new Date(0), windowEnd: new Date("9999-01-01"),
+      thresholdType: "hard", amountLimit: 100, amountObserved: 100,
+    }).returning();
+    const actor = { type: "board" as const, source: "session" as const, userId: recipient, companyIds: [f.companyId] };
+    const source = { sourceKind: "budget_alert" as const, sourceId: incident!.id };
+    const forRecipient = await attentionHandledFor(db, f.companyId, source, "different-operator");
+    expect(forRecipient?.issueId).toBe(root.id);
+    await db.insert(activityLog).values({ companyId: f.companyId, actorType: "user", actorId: "different-operator",
+      action: "budget.incident_resolved", entityType: "budget_incident", entityId: incident!.id,
+      details: { scopeType: "task_tree", scopeId: root.id,
+        ...attentionHandledDetails({ ...forRecipient!, issueId: null }, "limit_raised") } });
+    vi.stubEnv("PROPRIO_ISSUE_PRIVACY_MODE", "enforce");
+    try {
+      const summary = await attentionService(db).summary(f.companyId, { actor, userId: recipient });
+      expect(summary.countsBySourceKind.approval ?? 0).toBe(0);
+      expect(summary.countsBySourceKind.budget_alert ?? 0).toBe(0);
+      await expect(canReadDecisionSource(db, actor, f.companyId, "approval", approval!.id)).resolves.toBe(false);
+      await expect(canReadDecisionSource(db, actor, f.companyId, "budget_alert", incident!.id)).resolves.toBe(false);
+      await expect(attentionReceiptService(db).list(f.companyId, { actor, userId: recipient })).resolves.toEqual([]);
+
+      await db.insert(issueAccessGrants).values({ issueId: root.id, subjectType: "user", subjectId: recipient, source: "explicit" });
+      await expect(canReadDecisionSource(db, actor, f.companyId, "approval", approval!.id)).resolves.toBe(true);
+      await expect(canReadDecisionSource(db, actor, f.companyId, "budget_alert", incident!.id)).resolves.toBe(true);
+      await expect(attentionReceiptService(db).list(f.companyId, { actor, userId: recipient })).resolves.toMatchObject([{ sourceId: incident!.id }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("filters company-wide budget listings and incidents by readable task roots", async () => {
@@ -231,12 +366,26 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
 
       expect(overview.policies.map(policy => policy.scopeId)).toEqual([visibleRoot.id]);
       expect(overview.activeIncidents.map(incident => incident.scopeId)).toEqual([visibleRoot.id]);
+      const scoped = await dashboardService(db).summary(f.companyId, { actor: {
+        ...actor, source: "agent_key", keyScope: { kind: "skill_test", issueId: visibleRoot.id },
+      } });
+      expect(scoped.budgets.activeIncidents).toBe(0);
       expect(activity.map(row => row.details?.scopeId)).toEqual([visibleRoot.id]);
+      const audit = await agentActionAuditService(db).list({ companyId: f.companyId, actorScope: "all", limit: 1, issueReadCondition: readCondition });
+      expect(audit.items.map(row => row.entityId)).toEqual([visiblePolicy.id]);
+      expect(audit.nextCursor).toBeNull();
+
+      await db.insert(activityLog).values({ companyId: f.companyId, actorType: "system", actorId: "budget-service",
+        action: "budget.cancelled_work_continued", entityType: "issue", entityId: visibleRoot.id,
+        details: { budgetIncidentId: randomUUID(), interruptedRunId: randomUUID() } });
+      const [receipt] = await activityService(db).forIssue(visibleRoot.id);
+      expect(receipt?.details).toHaveProperty("interruptedRunId");
+      expect(receipt?.details).not.toHaveProperty("budgetIncidentId");
 
       await db.delete(budgetIncidents).where(eq(budgetIncidents.policyId, visiblePolicy.id));
       await db.delete(budgetPolicies).where(eq(budgetPolicies.id, visiblePolicy.id));
       const retained = await activityService(db).list({ companyId: f.companyId, readCondition });
-      expect(retained.map(row => row.details?.scopeId)).toEqual([visibleRoot.id]);
+      expect(retained.filter(row => row.entityType === "budget_policy").map(row => row.details?.scopeId)).toEqual([visibleRoot.id]);
     } finally {
       vi.unstubAllEnvs();
     }

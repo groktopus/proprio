@@ -4,7 +4,7 @@ import { centsToUnits, isUuidLike, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
-import { lockBudgetAdmissionControls } from "./budget-admission-controls.js";
+import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "./budget-admission-controls.js";
 import { budgetServiceInTransaction } from "./budgets.js";
 import { withBudgetSpan } from "./budget-tracing.js";
 import type { ActivityPublication } from "./activity-log.js";
@@ -99,6 +99,7 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     if (!hint) throw notFound("Run not found");
     // Match the tree-before-project order used by project visibility changes.
     if (runBoundIssueReference(hint)) await lockIssuePrivacyTree(tx, companyId, "shared");
+    await lockTaskTreeBudgetConfiguration(tx, companyId, "shared");
     await lockBudgetAdmissionControls(tx, companyId, projectId);
     await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, hint.agentId))).for("share");
     await lockRunBudgetRecoveryOwnerInTransaction(tx, companyId, runId, recoveryLeaseOwner);

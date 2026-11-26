@@ -1,5 +1,5 @@
 import { and, asc, eq, gt, inArray, isNull, lte, notInArray, or, sql } from "drizzle-orm";
-import { agents, budgetIncidents, budgetResumeClaims, heartbeatRuns, type Db } from "@groktopus/db";
+import { agents, budgetResumeClaims, heartbeatRuns, type Db } from "@groktopus/db";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -41,7 +41,7 @@ const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const WAITING_AGENT_STATUSES = ["paused", "pending_approval"] as const;
 
 type BudgetResumeClaim = {
-  incidentId: string; incidentScopeType: string; actorUserId: string; actorSource: string | null; claimedAt: Date | null;
+  actorUserId: string; actorSource: string | null; claimedAt: Date | null;
 };
 
 type PrepareChatRetry = NonNullable<Parameters<typeof import("./task-retry.js").requestTaskRetry>[0]["prepareChatRetry"]>;
@@ -222,7 +222,7 @@ export async function deliverBudgetResumeContinuations(db: Db, delivery: BudgetR
     const page = await db.select({
       id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
       agentStatus: agents.status, status: heartbeatRuns.status, createdAt: heartbeatRuns.createdAt, issueId: runIssueId,
-      incidentId: budgetResumeClaims.incidentId, incidentScopeType: budgetIncidents.scopeType, actorUserId: budgetResumeClaims.actorUserId,
+      actorUserId: budgetResumeClaims.actorUserId,
       actorSource: budgetResumeClaims.actorSource, claimedAt: budgetResumeClaims.claimedAt,
       stoppedByPerson: sql<boolean>`(coalesce(${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type', '') = 'user'
         or coalesce(${heartbeatRuns.resultJson}->'cancellation'->>'source', '') = 'operator'
@@ -234,15 +234,13 @@ export async function deliverBudgetResumeContinuations(db: Db, delivery: BudgetR
         and not coalesce(${heartbeatRuns.resultJson}->'startupCancellation' ? 'budgetEnforcement', false)
         and not ${heartbeatRuns.resultJson} ? 'pauseStop')`,
     }).from(budgetResumeClaims).innerJoin(heartbeatRuns, eq(heartbeatRuns.id, budgetResumeClaims.runId))
-      .innerJoin(budgetIncidents, and(eq(budgetIncidents.id, budgetResumeClaims.incidentId),
-        eq(budgetIncidents.companyId, heartbeatRuns.companyId)))
       .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
       .where(and(eq(budgetResumeClaims.state, "pending"), after ? gt(budgetResumeClaims.runId, after) : undefined))
       .orderBy(asc(budgetResumeClaims.runId)).limit(PAGE_SIZE);
     if (!page.length) return;
     after = page[page.length - 1]!.id;
-    const rows: PendingRow[] = page.map(({ incidentId, incidentScopeType, actorUserId, actorSource, claimedAt, ...run }) =>
-      ({ ...run, claim: { incidentId, incidentScopeType, actorUserId, actorSource, claimedAt } }));
+    const rows: PendingRow[] = page.map(({ actorUserId, actorSource, claimedAt, ...run }) =>
+      ({ ...run, claim: { actorUserId, actorSource, claimedAt } }));
     for (const run of rows) {
       // One task's failure must not stop the others. Its claim goes stale and
       // a later pass retries it.
@@ -271,7 +269,7 @@ async function settle(db: Db, run: PendingRow, expectedClaimedAt: Date | null, o
     await logActivity(tx as unknown as Db, { companyId: run.companyId, actorType: "user", actorId: claim.actorUserId,
       action: outcome.state === "delivered" ? "budget.cancelled_work_continued" : "budget.cancelled_work_not_continued",
       entityType: "issue", entityId: run.issueId!,
-      details: { ...(claim.incidentScopeType === "task_tree" ? {} : { budgetIncidentId: claim.incidentId }),
+      details: {
         interruptedRunId: run.id,
         ...(outcome.requestId ? { retryRequestId: outcome.requestId } : {}),
         ...(outcome.reason ? { reason: outcome.reason } : {}) } }, publications);

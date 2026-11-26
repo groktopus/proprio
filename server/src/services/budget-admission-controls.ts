@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { companies, projects, type Db } from "@groktopus/db";
 import { notFound } from "../errors.js";
 
@@ -13,4 +13,12 @@ export async function lockBudgetAdmissionControls(tx: Db, companyId: string, pro
       .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId))).for("share");
     if (!project) throw notFound("Budget project not found");
   }
+}
+
+/** An admission's set of active tree policies stays stable until it commits.
+ * Shared readers keep unrelated admissions concurrent. Capacity is fenced
+ * independently per active root; policy writes take this gate exclusively. */
+export async function lockTaskTreeBudgetConfiguration(tx: Db, companyId: string, mode: "shared" | "exclusive") {
+  const lock = mode === "shared" ? sql`pg_advisory_xact_lock_shared` : sql`pg_advisory_xact_lock`;
+  await tx.execute(sql`select ${lock}(hashtextextended(${`task-tree-budget-configuration:${companyId}`}, 0))`);
 }

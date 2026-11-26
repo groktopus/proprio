@@ -298,6 +298,7 @@ describe("activity routes", () => {
       actorScope: "all",
       limit: 50,
       caseReadCondition,
+      issueReadCondition: expect.anything(),
     });
     expect(res.body.items[0]).toMatchObject({
       actorType: "plugin",
@@ -349,6 +350,7 @@ describe("activity routes", () => {
       actorType: "system",
       limit: 50,
       caseReadCondition,
+      issueReadCondition: expect.anything(),
     });
     expect(res.body.items[0]).toMatchObject({
       agentId: "agent-1",

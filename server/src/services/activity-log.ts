@@ -169,7 +169,7 @@ export function publishActivity(publication: ActivityPublication) {
       companyId: publication.companyId,
       type: "activity.logged",
       payload: taskTreeBudget
-        ? { action: "budgets.changed", entityType: "budget_policy" }
+        ? { entityType: "budget_policy" }
         : publication.payload,
     });
     if (publication.pluginEvent && !taskTreeBudget) publishPluginDomainEvent(publication.pluginEvent);
@@ -214,7 +214,7 @@ export async function persistActivity(db: Db, input: LogActivityInput, receipt?:
     details: redactedDetails,
   };
   const pluginEventType = eventTypeForActivityAction(input.action);
-  const pluginEvent: PluginEvent | null = pluginEventType && redactedDetails?.scopeType !== "task_tree"
+  const pluginEvent: PluginEvent | null = pluginEventType
     ? {
         eventId: randomUUID(),
         eventType: pluginEventType,

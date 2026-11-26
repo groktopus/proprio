@@ -74,7 +74,7 @@ import {
 import { attentionIssueCondition, executionIssueCondition } from "./issue-visibility.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isProspectiveBlockedTransition } from "./routable-blocked.js";
-import { authorizationService, canActorReadApproval, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { approvalReadConditionForIssueRead, authorizationService, canActorReadApproval, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { humanCreatedIssueCondition } from "./issue-participation.js";
 import { attentionAlreadyClosedError } from "./attention-already-closed.js";
 import { inboxDismissalService } from "./inbox-dismissals.js";
@@ -1772,7 +1772,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             updatedAt: approvals.updatedAt,
           })
           .from(approvals)
-          .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending"), approvalExecutionIssueCondition()))
+          .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending"), approvalExecutionIssueCondition(),
+            approvalReadConditionForIssueRead(readCondition)))
           .orderBy(desc(approvals.updatedAt), desc(approvals.id));
 
         const readableApprovalIssues = await loadIssues(pendingApprovals.map((row) => row.linkedIssueId));
