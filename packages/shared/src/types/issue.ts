@@ -635,6 +635,27 @@ export interface IssueUnblockDescriptor {
   action: string;
 }
 
+export interface DependencyDiagnosis {
+  state: "no_execution_path" | "active" | "external_wait" | "restricted";
+  dependencyPath: Array<{
+    issueId: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+  }>;
+  cause: {
+    kind: string;
+    issueId: string | null;
+  };
+  nextOwner: { type: "agent" | "user" | "board"; name?: string };
+  nextAction: string;
+  wake: {
+    idempotencyKey?: string;
+    status: "not_requested" | "queued" | "running" | "deferred" | "refused" | "exhausted" | "completed";
+  };
+  canInvestigate: boolean;
+}
+
 /** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
 export interface IssueBlockerStalledWakeContext {
   stalledIssueId: string;
@@ -804,10 +825,10 @@ export interface IssueExecutionReviewTargetBindingPolicy {
 }
 
 export type IssueExecutionReviewTargetReference =
-  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "issueId" | "key" | "revisionId">
-  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "issueId" | "attachmentId" | "assetId" | "sha256">;
+  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "key" | "revisionId">
+  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "attachmentId" | "assetId" | "sha256">;
 
-/** Immutable requirement and artifact references captured for a future signoff check. */
+/** Immutable requirement and artifact references captured when a stage is submitted for signoff. */
 export interface IssueExecutionReviewTargetBinding {
   version: 1;
   requirementHash: string;
@@ -821,7 +842,7 @@ export interface IssueExecutionReviewTargetBinding {
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   requiredQualityReview?: RequiredQualityReview;
-  /** Opt-in binding source. Admission enforcement is added at the transactional signoff boundary. */
+  /** Opt-in source for transactional signoff validation. */
   reviewTargetBinding?: IssueExecutionReviewTargetBindingPolicy;
   commentRequired: boolean;
   stages: IssueExecutionStage[];
@@ -944,6 +965,7 @@ export type IssueSummary = Pick<
 };
 
 export interface IssueExecutionReviewEvidence {
+  submittedSignoffStale: boolean;
   executionDecisions: Array<Pick<IssueExecutionDecision, "id" | "stageType" | "outcome" | "reviewTargetBinding" | "createdAt">>;
   requiredQualityReviewState: {
     required: boolean;
@@ -1051,6 +1073,8 @@ export interface Issue {
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   executionBlocker?: ExecutionBlocker | null;
   interruption?: TaskInterruptionPresentation | null;
+  /** Whether the current Board viewer may request a Retry from this task detail. */
+  viewerCanRetry?: boolean;
   watchdog?: IssueWatchdogSummary | null;
   scheduledRetry?: IssueScheduledRetry | null;
   liveDescendantCount?: number;

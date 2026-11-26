@@ -1521,27 +1521,50 @@ const ISSUE_RELATION_SUMMARY_ACTIVITY_ACTIONS = new Set([
   "issue.scheduled_retry_retry_now",
 ]);
 
-/**
- * A task detail embeds summaries of its blockers and the tasks it blocks. When
- * one of those changes, refresh every cached detail that embeds it so the
- * dependent page does not keep showing the old blocker status.
- */
+const dependencyDiagnosisQueryFamily = ["issues", "dependency-investigation"] as const;
+
+function blockerSummariesContain(summaries: unknown, refs: ReadonlySet<string>): boolean {
+  return Array.isArray(summaries) && summaries.some((summary) => {
+    const record = readRecord(summary);
+    return !!record && (refs.has(readString(record.id) ?? "") || refs.has(readString(record.identifier) ?? "")
+      || blockerSummariesContain(record.terminalBlockers, refs));
+  });
+}
+
+function invalidateDependencyDiagnoses(queryClient: QueryClient, refs: Iterable<string>, parentIds: string[] = []) {
+  const changed = new Set(refs);
+  const affected = new Set([...changed, ...parentIds]);
+  void queryClient.invalidateQueries({
+    queryKey: dependencyDiagnosisQueryFamily,
+    predicate: ({ queryKey, state }) => {
+      if (affected.has(String(queryKey[2]))) return true;
+      const diagnosis = readRecord(state.data);
+      return Array.isArray(diagnosis?.dependencyPath) && diagnosis.dependencyPath.some((entry) => {
+        const task = readRecord(entry);
+        return !!task && (changed.has(readString(task.issueId) ?? "") || changed.has(readString(task.identifier) ?? ""));
+      });
+    },
+  });
+}
+
+/** Task details embed both direct blockers and the terminal blockers that explain them. */
 function invalidateIssueDetailsEmbeddingRelation(queryClient: QueryClient, refs: Iterable<string>) {
   const changed = new Set(refs);
   if (changed.size === 0) return;
-  const embeds = (summaries: unknown) =>
-    Array.isArray(summaries) &&
-    summaries.some((summary) => {
-      const record = readRecord(summary);
-      return !!record && (changed.has(readString(record.id) ?? "") || changed.has(readString(record.identifier) ?? ""));
-    });
-  queryClient.invalidateQueries({
-    queryKey: ["issues", "detail"],
-    predicate: (query) => {
-      const cached = readRecord(query.state.data);
-      return !!cached && !changed.has(readString(cached.id) ?? "") && (embeds(cached.blockedBy) || embeds(cached.blocks));
-    },
+  const parentIds: string[] = [];
+  const affected = queryClient.getQueryCache().findAll({ queryKey: ["issues", "detail"] }).filter((query) => {
+    const cached = readRecord(query.state.data);
+    const issueId = cached ? readString(cached.id) : null;
+    if (!cached || !issueId || changed.has(issueId)) return false;
+    if (!blockerSummariesContain(cached.blockedBy, changed) && !blockerSummariesContain(cached.blocks, changed)) return false;
+    parentIds.push(issueId);
+    return true;
   });
+  void queryClient.invalidateQueries({
+    queryKey: ["issues", "detail"],
+    predicate: (query) => affected.includes(query),
+  });
+  invalidateDependencyDiagnoses(queryClient, changed, parentIds);
 }
 
 function invalidateActivityQueries(
@@ -1600,12 +1623,24 @@ function invalidateActivityQueries(
   const decisionAudienceChanged = action?.startsWith("issue_access_grant.") ||
     action?.startsWith("resource_membership.") ||
     action?.startsWith("company_membership.") ||
-    action?.startsWith("membership.") || action?.includes("privacy");
+    action?.startsWith("membership.") || action === "project.access_member_removed" || action?.includes("privacy");
   if (decisionAudienceChanged) {
+    void queryClient.resetQueries({
+      queryKey: ["issues", "activity"],
+      predicate: query => query.queryKey[3] === "completion-history",
+    });
+    void queryClient.resetQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history",
+    });
+    void queryClient.resetQueries({
+      queryKey: ["issues", "detail"],
+      predicate: query => query.queryKey[3] === "execution-review-evidence",
+    });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
-    for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"]]) {
+    for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"], dependencyDiagnosisQueryFamily]) {
       void queryClient.resetQueries({ queryKey });
     }
   } else if (decisionProjectionChanged) {
@@ -1618,6 +1653,13 @@ function invalidateActivityQueries(
     queryClient.invalidateQueries({ queryKey: ["issues", "decision-receipts"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "chat-handoffs"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "pending-questions"] });
+  }
+  if (entityType === "issue" && entityId &&
+      (action === "issue.status_decision_recorded" || action === "issue.recovery_action_resolved")) {
+    void queryClient.invalidateQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history" && query.queryKey[5] === entityId,
+    });
   }
   const ownActorActivity =
     (actorType === "user" &&
@@ -1752,6 +1794,7 @@ function invalidateActivityQueries(
             ? { refetchType: "inactive" as const }
             : undefined;
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(ref), ...invalidationOptions });
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(ref), ...invalidationOptions });
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
         if (action === "issue.comment_added" || action === "issue.conversation_session_started" || visibleConversation) {
           queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...(visibleConversation ? undefined : invalidationOptions) });
@@ -2174,6 +2217,8 @@ function handleLiveEvent(
       payload,
     );
     invalidateHeartbeatQueries(queryClient, expectedCompanyId, payload);
+    const changedIssueId = readString(payload.issueId);
+    if (changedIssueId) invalidateDependencyDiagnoses(queryClient, [changedIssueId]);
     if (!liveRunsPatched) {
       // A new run we couldn't reconstruct from the event — refetch once to add it.
       queryClient.invalidateQueries({

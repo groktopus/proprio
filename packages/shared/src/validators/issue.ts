@@ -471,38 +471,60 @@ export const issueExecutionMonitorPolicySchema = z.object({
     .default(null),
 });
 
-export const requiredQualityReviewSchema = z.object({
-  version: z.literal(1),
-  deliverables: z.array(z.object({
-    key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
-    label: z.string().trim().min(1).max(120),
-  }).strict()).min(1).max(10),
-}).strict().superRefine((value, ctx) => {
-  if (new Set(value.deliverables.map(item => item.key)).size !== value.deliverables.length)
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Quality review deliverable keys must be unique", path: ["deliverables"] });
+export const issueDocumentKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(
+    /^[a-z0-9][a-z0-9_-]*$/,
+    "Document key must be lowercase letters, numbers, _ or -",
+  );
+
+const confirmationDocumentIdentity = z.object({
+  type: z.literal("issue_document"),
+  key: issueDocumentKeySchema,
+  revisionId: z.string().guid(),
 });
 
-export const issueExecutionReviewTargetBindingPolicySchema = z.object({
-  source: z.literal("required_quality_review"),
+const confirmationAttachmentIdentity = z.object({
+  type: z.literal("issue_attachment"),
+  attachmentId: z.string().guid(),
+  assetId: z.string().guid(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/, "sha256 must identify the exact attachment bytes"),
+});
+
+const qualityReviewDeliverableSchema = z.object({
+  key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
+  label: z.string().trim().min(1).max(120),
 }).strict();
 
-export const issueExecutionReviewTargetReferenceSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("issue_document"), issueId: z.string().guid().nullable().optional(), key: z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/), revisionId: z.string().guid() }).strict(),
-  z.object({ type: z.literal("issue_attachment"), issueId: z.string().guid().nullable().optional(), attachmentId: z.string().guid(), assetId: z.string().guid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+function qualityReviewDeliverables<T extends { key: string }>(item: z.ZodType<T>) {
+  return z.array(item).min(1).max(10).refine(
+    (deliverables) => new Set(deliverables.map(({ key }) => key)).size === deliverables.length,
+    "Quality review deliverable keys must be unique",
+  );
+}
+
+export const requiredQualityReviewSchema = z.object({
+  version: z.literal(1),
+  deliverables: qualityReviewDeliverables(qualityReviewDeliverableSchema),
+}).strict();
+
+const issueExecutionReviewTargetBindingPolicySchema = z.object({
+  source: z.literal("required_quality_review"),
+}).strict().describe("Requires requiredQualityReview on the same execution policy.");
+
+const issueExecutionReviewTargetReferenceSchema = z.discriminatedUnion("type", [
+  confirmationDocumentIdentity.strict(),
+  confirmationAttachmentIdentity.strict(),
 ]);
 
 export const issueExecutionReviewTargetBindingSchema = z.object({
   version: z.literal(1),
   requirementHash: z.string().regex(/^[a-f0-9]{64}$/),
-  deliverables: z.array(z.object({
-    key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
-    label: z.string().trim().min(1).max(120),
-    target: issueExecutionReviewTargetReferenceSchema,
-  }).strict()).min(1).max(10),
-}).strict().superRefine((binding, ctx) => {
-  if (new Set(binding.deliverables.map(item => item.key)).size !== binding.deliverables.length)
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Review target binding keys must be unique", path: ["deliverables"] });
-});
+  deliverables: qualityReviewDeliverables(qualityReviewDeliverableSchema.extend({ target: issueExecutionReviewTargetReferenceSchema })),
+}).strict();
 
 export const issueExecutionPolicySchema = z.object({
   requiredQualityReview: requiredQualityReviewSchema.optional(),
@@ -671,6 +693,12 @@ export const retryWorkspaceExportSchema = z.object({
   runId: z.string().guid(),
   repairNote: z.string().trim().min(20).max(12000),
 }).strict();
+
+export const dependencyInvestigationSchema = z.object({
+  idempotencyKey: z.string().min(1).max(200),
+}).strict();
+
+export type DependencyInvestigationInput = z.infer<typeof dependencyInvestigationSchema>;
 
 export const taskRetrySchema = z.object({
   idempotencyKey: z.string().guid(),
@@ -1354,16 +1382,6 @@ export const connectionIntentResultSchema = z
     }
   });
 
-export const issueDocumentKeySchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(
-    /^[a-z0-9][a-z0-9_-]*$/,
-    "Document key must be lowercase letters, numbers, _ or -",
-  );
-
 export const issueDocumentBatchQuerySchema = z.object({
   key: z.string().trim().toLowerCase().pipe(issueDocumentKeySchema),
   issueIds: z.string().max(ISSUE_DOCUMENT_BATCH_MAX_IDS * 40)
@@ -1704,11 +1722,11 @@ const requestConfirmationTargetBaseSchema = z.object({
 
 export const requestConfirmationIssueDocumentTargetSchema =
   requestConfirmationTargetBaseSchema.extend({
-    type: z.literal("issue_document"),
+    type: confirmationDocumentIdentity.shape.type,
     issueId: z.string().guid().nullable().optional(),
     documentId: z.string().guid().nullable().optional(),
-    key: issueDocumentKeySchema,
-    revisionId: z.string().guid(),
+    key: confirmationDocumentIdentity.shape.key,
+    revisionId: confirmationDocumentIdentity.shape.revisionId,
     revisionNumber: z.number().int().positive().nullable().optional(),
   });
 
@@ -1722,11 +1740,11 @@ export const requestConfirmationCustomTargetSchema =
 
 export const requestConfirmationIssueAttachmentTargetSchema =
   requestConfirmationTargetBaseSchema.extend({
-    type: z.literal("issue_attachment"),
+    type: confirmationAttachmentIdentity.shape.type,
     issueId: z.string().guid().nullable().optional(),
-    attachmentId: z.string().guid(),
-    assetId: z.string().guid(),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/, "sha256 must identify the exact attachment bytes"),
+    attachmentId: confirmationAttachmentIdentity.shape.attachmentId,
+    assetId: confirmationAttachmentIdentity.shape.assetId,
+    sha256: confirmationAttachmentIdentity.shape.sha256,
   });
 
 export const requestConfirmationTargetSchema = z.discriminatedUnion("type", [

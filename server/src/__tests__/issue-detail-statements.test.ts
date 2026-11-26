@@ -123,13 +123,28 @@ describeEmbeddedPostgres("GET /api/issues/:id statements per request", () => {
       { ...decision, issueId: fixture.parent.id },
     ]);
     const path = `/api/issues/${fixture.issue.id}/execution-review-evidence`;
-    const response = await request(memberApp).get(path).expect(200);
+    const response = await request(memberApp).get(path).expect(200).expect("Cache-Control", "private, no-store");
+    expect(response.body.submittedSignoffStale).toBe(false);
     expect(response.body.executionDecisions).toEqual([{
       id: decisionId, stageType: "review", outcome: "approved", reviewTargetBinding: binding,
       createdAt: expect.any(String),
     }]);
     expect(response.body.requiredQualityReviewState).toEqual({ required: false, satisfied: true, missing: [] });
     await request(outsiderApp).get(path).expect(404);
+    await ctx.db.delete(companyMemberships).where(eq(companyMemberships.principalId, fixture.userId));
+    await request(memberApp).get(path).expect(404);
+  }, 60_000);
+
+  it("rate limits review evidence reads per account", async () => {
+    const fixture = await seed();
+    const other = await seedBoardRouteFixture(ctx.db, "ReviewRateLimitOther");
+    const path = `/api/issues/${randomUUID()}/execution-review-evidence`;
+    const app = boardSessionApp(ctx.db, () => fixture.userId);
+    for (let requestCount = 0; requestCount < 30; requestCount++) {
+      await request(app).get(path).expect(404);
+    }
+    await request(app).get(path).expect(429);
+    await request(boardSessionApp(ctx.db, () => other.userId)).get(path).expect(404);
   }, 60_000);
 
   it("denies the very next request after the membership is removed", async () => {

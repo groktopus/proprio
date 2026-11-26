@@ -123,7 +123,7 @@ import {
 import { PropertyPicker } from "./property-picker";
 import { PropertyChip, PropertyRow, PropertySection } from "./primitives";
 import { IssueContextUsageRow } from "./context-usage-row";
-import { ExecutionReviewEvidence } from "./ExecutionReviewEvidence";
+import { TaskExecutionReviewEvidence } from "./ExecutionReviewEvidence";
 import {
   buildWorkspaceSelectionUpdate,
   currentWorkspaceSelection,
@@ -134,6 +134,7 @@ import {
   reusableWorkspaceOptionMatches,
 } from "../../lib/reusable-execution-workspaces";
 import { issueReviewPolicyBadge } from "../../lib/review-policy";
+import { TaskCompletionHistoryDisclosure } from "../NativeCompletionHistory";
 import { IssueCasesPanel } from "../IssueCasesPanel";
 import { ExpandRelationListButton, RemovableIssueReferencePill } from "./relation-controls";
 import { RoutineOriginRow } from "./routine-origin-row";
@@ -264,11 +265,6 @@ export function IssueProperties({
   sidePanelContentOnly = false,
   contextUsage,
 }: IssuePropertiesProps) {
-  const reviewEvidence = useQuery({
-    queryKey: queryKeys.issues.executionReviewEvidence(issue.id),
-    queryFn: () => issuesApi.executionReviewEvidence(issue.id),
-    enabled: interactions !== undefined,
-  });
   const policyResult = useExecutionPolicy(issue.executionPolicy);
   const policyAvailable = policyResult.success;
   const executionPolicy = policyResult.success ? policyResult.data : null;
@@ -2667,6 +2663,7 @@ export function IssueProperties({
       </PropertySection>
 
       <PropertySection title="Execution" streamlined={streamlinedPropertiesEnabled}>
+        <TaskCompletionHistoryDisclosure key={issue.id} issueId={issue.id} />
         {/* Read-only: agents set the policy, the board does not. */}
         {reviewPolicyBadge ? (
           <PropertyRow label="Approvals">
@@ -2682,8 +2679,7 @@ export function IssueProperties({
             <span role="status" className="text-sm text-muted-foreground">Execution policy unavailable. Refresh to try again.</span>
           </PropertyRow>
         ) : (<>
-        {reviewEvidence.isError && <p role="status" className="text-sm text-destructive">Could not load review evidence.</p>}
-        <ExecutionReviewEvidence issue={issue} evidence={reviewEvidence.data} interactions={interactions} />
+        {interactions !== undefined ? <TaskExecutionReviewEvidence key={issue.id} issue={issue} interactions={interactions} /> : null}
         <PropertyPicker
           inline={inline}
           label="Reviewers"
@@ -3076,7 +3072,7 @@ export function IssueProperties({
       {/* Experimental Cases rail (PAP-12969) — self-gates on the flag and
           renders nothing when no cases are linked. */}
       <div className="pt-3">
-        <IssueCasesPanel issueId={issue.id} />
+        <IssueCasesPanel task={issue} />
       </div>
     </div>
   );

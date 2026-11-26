@@ -297,7 +297,7 @@ function NeedsYouViews({
   );
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
-      <h1 className="text-xl font-bold">Decisions</h1>
+      <h1 className="text-xl font-bold">Needs You</h1>
       <AttentionViewSwitch value={view} counts={counts} onChange={setView} everyone={everyone} />
       {view === "mine" && <AttentionUnassignedBanner count={counts.unassigned} onOpen={() => setView("unassigned")} />}
       <div className="space-y-4">{current.map(row)}</div>

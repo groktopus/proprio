@@ -1,9 +1,10 @@
+import { nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { LINK_PREVIEW_BATCH_LIMIT, ATTENTION_SOURCE_KINDS } from "@groktopus/shared";
-import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
+import { agentCaseHandoffSchema, caseHandoffRecoveryHistorySchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
 import {
   experimentalApiDocs,
   experimentalApiPaths,
@@ -253,6 +254,7 @@ import {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   // Instance settings
@@ -271,6 +273,7 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   retryWorkspaceExportSchema,
   reconstructWorkspaceSchema,
@@ -1361,6 +1364,7 @@ function registerCurrentRoute(input: {
 type OpenApiAuthLevel =
   | "public"
   | "agent_run"
+  | "agent"
   | "agent_heartbeat"
   | "runtime_tools"
   | "authenticated"
@@ -1544,6 +1548,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/members/{memberId}",
   "PATCH /api/companies/{companyId}/members/{memberId}/role-and-grants",
   "POST /api/companies/{companyId}/members/{memberId}/archive",
+  "GET /api/companies/{companyId}/members/{memberId}/archive-preview",
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
   "GET /api/companies/{companyId}/managed-agent-profiles",
@@ -1759,6 +1764,9 @@ function resolveOperationAuthLevel(
   if (path === "/api/companies/{companyId}/grok-invitations"
       || /^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/grok-binding(?:\/(?:routine|verify|retry|stop|recover))?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/withdraw") return "board";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision"
+    || key === "GET /api/companies/{companyId}/case-handoff-offers") return "agent";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/agents/me/chat/messages") return "agent_heartbeat";
   // An approved connected-app skill's file: an agent in an active run only.
@@ -1836,7 +1844,7 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "agent_run") {
         operation.security = [securityRequirement(AGENT_RUN_AUTH_SCHEME)];
-      } else if (authLevel === "agent_heartbeat") {
+      } else if (authLevel === "agent_heartbeat" || authLevel === "agent") {
         operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
       } else if (authLevel === "runtime_tools") {
         operation.security = RUNTIME_TOOLS_SECURITY;
@@ -1855,6 +1863,8 @@ function applyDocumentFixups(document: any): any {
               ? { actor: "agent", heartbeatBound: true, taskBound: true }
             : authLevel === "agent_heartbeat"
               ? { actor: "agent", heartbeatBound: true }
+            : authLevel === "agent"
+              ? { actor: "agent" }
             : authLevel === "runtime_tools"
               ? { actor: "runtime_tools", heartbeatBound: true }
               : authLevel === "authenticated"
@@ -4568,9 +4578,9 @@ registry.registerPath({
   path: "/api/issues/{id}/execution-review-evidence",
   tags: ["issues"],
   summary: "Get execution review evidence for an issue",
-  description: "Returns recent execution decisions and required output review readiness. Decisions can include the immutable requirements digest and artifact revision or byte hash.",
+  description: "Returns recent execution decisions, required output review readiness, and whether the submitted signoff target is stale. Decisions can include exact requirement digests, artifact revisions, and attachment hashes.",
   request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 429: { description: "Review evidence request limit exceeded" } },
 });
 
 registry.registerPath({
@@ -4598,7 +4608,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Update an issue",
   description:
-    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422.",
+    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422. An executionPolicy.reviewTargetBinding requires requiredQualityReview on the same policy. A stale or incomplete signoff returns 422.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(updateIssueSchema.partial()),
@@ -4618,6 +4628,7 @@ registry.registerPath({
   path: "/api/issues/{id}/stalled-review-decision",
   tags: ["issues"],
   summary: "Resolve a stalled issue review",
+  description: "An immutable signoff requires resubmission to an available reviewer before approval. The approve action returns 422 for those tasks.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(stalledReviewDecisionSchema),
@@ -4629,6 +4640,7 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
+    422: r.unprocessable,
   },
 });
 
@@ -6538,6 +6550,17 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/issues/{id}/completion-history",
+  tags: ["activity"],
+  summary: "Read native completion criteria, evidence and status decisions for a task",
+  description: "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(nativeCompletionHistorySchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/issues/{id}/runs",
   tags: ["activity"],
   summary: "List runs for an issue",
@@ -7811,6 +7834,21 @@ registry.registerPath({
   },
   responses: {
     200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/members/{memberId}/archive-preview",
+  tags: ["access"],
+  summary: "Preview task reassignment before archiving a company member",
+  description: "Board-only. Requires permission to manage company membership and authority to archive the selected member. Returns the number of open tasks assigned to that member.",
+  request: { params: archiveCompanyMemberPreviewParamsSchema },
+  responses: {
+    200: r.ok(z.object({ reassignmentIssueCount: z.number().int().nonnegative() })),
     400: r.badRequest,
     401: r.unauthorized,
     404: r.notFound,
@@ -11694,6 +11732,29 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Get required dependency diagnosis and parent wake state",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Ask the current assignee to investigate a stalled dependency",
+  body: dependencyInvestigationSchema,
+  responses: {
+    200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: {
+      ...r.tooManyRequests,
+      headers: { "Retry-After": { description: "Seconds before the request may be retried", schema: { type: "integer", minimum: 1 } } },
+    },
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/issues/{id}/retry",
   tags: ["issues"],
@@ -13987,10 +14048,12 @@ registerCurrentRoute({
 // OpenAPI 3.0 cannot represent the shared validator's conditional refinement.
 // Derive separate creation/existing branches so discovery marks workflow text
 // required for case.create without requiring it for ordinary phase transfers.
+const { offer: _offer, ...caseHandoffTransferShape } = agentCaseHandoffSchema.shape;
+const caseHandoffTransferSchema = z.strictObject(caseHandoffTransferShape);
 const caseHandoffApiBodySchema = z.union([
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
   doneCaseHandoffSchema,
 ]);
 registry.registerPath({ method: "post", path: "/api/companies/{companyId}/case-handoffs", tags: ["Cases"],
@@ -14003,10 +14066,37 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
   summary: "Read a standalone case's handoff history", description: "Requires enableCases and access to all retained case permission sources.",
   request: { params: z.object({ caseId: z.string().uuid() }), query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(),
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history", tags: ["Cases"],
+  summary: "Read completion recovery for an accepted Case handoff revision",
+  description: "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: { ...r.ok(caseHandoffRecoveryHistorySchema), headers: { "Cache-Control": { schema: { enum: ["private, no-store"] } } } },
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests } });
+registry.registerPath({ method: "get", path: "/api/companies/{companyId}/case-handoff-offers", tags: ["Cases"],
+  summary: "List your pending case handoff offers",
+  description: "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",
+  request: { params: z.object({ companyId: z.string().uuid() }), query: z.object({
+    limit: z.coerce.number().int().min(1).max(100).optional(), cursor: z.string().max(400).optional(),
+  }) },
+  responses: { 200: r.ok(z.object({ items: z.array(z.object({
+    caseId: z.string().uuid(), handoffId: z.string().uuid(), handoffVersion: z.number().int(), createdAt: z.iso.datetime(),
+  })), nextCursor: z.string().nullable() })), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable,
+    429: r.tooManyRequests } });
+registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/decision", tags: ["Cases"],
+  summary: "Record a recipient decision on a versioned handoff offer",
+  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The receipt contains decision metadata. Read the Case handoff history to see submitted messages. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffRecipientDecisionSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } } });
 for (const action of ["retry", "cancel"] as const) registry.registerPath({ method: "post", path: `/api/cases/{caseId}/handoffs/{handoffId}/${action}`,
   tags: ["Cases"], summary: `${action === "retry" ? "Retry" : "Cancel"} pending case handoff`,
   description: "Requires case access and ordinary task-control authority. Retry preserves the existing handoff/task identity. Cancellation remains available when enableCases is disabled; it prevents delivery and does not undo an applied assignment.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/withdraw", tags: ["Cases"],
+  summary: "Withdraw an accepted delivered handoff after a confirmed Stop",
+  description: "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffWithdrawalSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 
 for (const [method, path, body, summary] of [
