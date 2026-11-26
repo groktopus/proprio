@@ -6380,7 +6380,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budgets/policies",
   tags: ["costs"],
   summary: "Create or update a budget policy",
-  description: "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read.",
+  description: "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read. Set createOnly to reject an existing policy with the same scope, metric, and window.",
   request: {
     params: z.object({ companyId: z.string() }),
     body: jsonBody(upsertBudgetPolicySchema),
@@ -6391,6 +6391,7 @@ registry.registerPath({
     401: r.unauthorized,
     403: r.forbidden,
     404: r.notFound,
+    409: r.conflict,
   },
 });
 

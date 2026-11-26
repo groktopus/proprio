@@ -568,6 +568,7 @@ export function projectRoutes(db: Db) {
       entityId: project.id,
       details: {
         changedKeys: Object.keys(req.body).sort(),
+        becamePrivate: existing.visibility !== "private" && project.visibility === "private",
         envKeys:
           body.env && typeof body.env === "object" && !Array.isArray(body.env)
             ? Object.keys(body.env as Record<string, unknown>).sort()

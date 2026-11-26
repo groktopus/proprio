@@ -62202,7 +62202,7 @@
           "costs"
         ],
         "summary": "Create or update a budget policy",
-        "description": "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read.",
+        "description": "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read. Set createOnly to reject an existing policy with the same scope, metric, and window.",
         "responses": {
           "200": {
             "description": "Success",
@@ -62254,6 +62254,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -62280,6 +62290,9 @@
                       "project",
                       "task_tree"
                     ]
+                  },
+                  "createOnly": {
+                    "type": "boolean"
                   },
                   "scopeId": {
                     "type": "string",

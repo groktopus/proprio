@@ -350,6 +350,7 @@ export function costRoutes(
     assertCompanyAccess(req, companyId);
     if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
     const overview = await budgets.overview(companyId, { actor: req.actor });
+    res.setHeader("Cache-Control", "private, no-store");
     res.json(overview);
   });
 

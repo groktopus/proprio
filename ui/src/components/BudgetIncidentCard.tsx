@@ -1,7 +1,9 @@
 import { useId, useState } from "react";
 import type { BudgetIncident } from "@groktopus/shared";
 import { AlertOctagon, AlertTriangle, ArrowUpRight, PauseCircle } from "lucide-react";
-import { formatCents } from "../lib/utils";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
+import { cn, formatCents } from "../lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -67,7 +69,7 @@ export function BudgetIncidentCard({
               </Badge>
             </div>
             <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>
-              {isTaskTree ? <Link to={`/issues/${incident.scopeId}`} className="hover:underline">{incident.scopeName}</Link> : incident.scopeName}
+              {isTaskTree ? <Link to={createIssueDetailPath(incident.scopeId)} className={cn("hover:underline", ANALYTICS_MASK_CLASS)}>{incident.scopeName}</Link> : incident.scopeName}
             </CardTitle>
             <CardDescription className={isWarning ? "mt-1" : "mt-1 text-red-900/75 dark:text-red-100/70"}>
               {incident.thresholdType === "hard" && incident.amountObserved < incident.amountLimit
@@ -99,7 +101,7 @@ export function BudgetIncidentCard({
             <PauseCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               {isTaskTree
-                ? "New runs for this task and its descendants will wait until a board operator with root task access resolves the budget stop."
+                ? "New runs for this task and its descendants cannot start while the budget stop is active."
                 : incident.scopeType === "project"
                   ? "Project execution is paused. New work in this project will not start until you resolve the budget incident."
                   : "This scope is paused. New heartbeats will not start until you resolve the budget incident."}

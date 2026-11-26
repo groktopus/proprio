@@ -1605,6 +1605,9 @@ function invalidateActivityQueries(
   }
   queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
+  if (entityType === "issue" && activityChangesTaskIdentity(payload, action, details)) {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.issues.searches(companyId) });
+  }
   const decisionProjectionChanged = entityType === "decision" ||
     // Approvals are cards too: a decision by another person must leave every open list.
     entityType === "approval" ||
@@ -1620,10 +1623,10 @@ function invalidateActivityQueries(
     action === "issue.status_decision_recorded" ||
     action === "issue.conversation_session_started" ||
     (entityType === "issue" && ["issue.created", "issue.updated", "issue.deleted"].includes(action ?? ""));
-  const decisionAudienceChanged = action?.startsWith("issue_access_grant.") ||
-    action?.startsWith("resource_membership.") ||
-    action?.startsWith("company_membership.") ||
-    action?.startsWith("membership.") || action === "project.access_member_removed" || action?.includes("privacy");
+  const companyMembershipChanged = entityType === "company_membership" ||
+    action === "company_membership.changed" || action?.startsWith("membership.");
+  const decisionAudienceChanged = companyMembershipChanged || action?.startsWith("issue_access_grant.") ||
+    action?.startsWith("resource_membership.") || action === "project.access_member_removed" || action?.includes("privacy");
   if (decisionAudienceChanged) {
     void queryClient.resetQueries({
       queryKey: ["issues", "activity"],
@@ -1638,8 +1641,8 @@ function invalidateActivityQueries(
     });
     void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
     void queryClient.resetQueries({ queryKey: queryKeys.budgets.overview(companyId) });
-    void queryClient.resetQueries({ queryKey: queryKeys.budgets.rootSearch(companyId) });
-    if (action?.startsWith("company_membership.") || action?.startsWith("membership.")) {
+    void queryClient.resetQueries({ queryKey: queryKeys.issues.searches(companyId) });
+    if (companyMembershipChanged) {
       void queryClient.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
     }
     // Drop old permission-filtered payloads immediately while the API resolves

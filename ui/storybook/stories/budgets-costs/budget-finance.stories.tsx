@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type {
   BudgetIncident,
@@ -14,6 +15,7 @@ import { AlertTriangle, CheckCircle2, CreditCard, Landmark, ReceiptText, WalletC
 import { AccountingModelCard } from "@/components/AccountingModelCard";
 import { BillerSpendCard } from "@/components/BillerSpendCard";
 import { BudgetIncidentCard } from "@/components/BudgetIncidentCard";
+import { TaskTreeBudgetCreate } from "@/components/TaskTreeBudgetCreate";
 import { BudgetSidebarMarker, type BudgetSidebarMarkerLevel } from "@/components/BudgetSidebarMarker";
 import { ClaudeSubscriptionPanel } from "@/components/ClaudeSubscriptionPanel";
 import { CodexSubscriptionPanel } from "@/components/CodexSubscriptionPanel";
@@ -793,3 +795,57 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const FullMatrix: Story = {};
+
+
+function TaskBudgetFormFixture() {
+  const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+  const companyId = "task-budget-fixture";
+
+  useEffect(() => {
+    const original = window.fetch;
+    const fixture: typeof fetch = async (input, init) => {
+      const address = input instanceof Request ? input.url : input;
+      const url = new URL(address, window.location.origin);
+      if (url.pathname === `/api/companies/${companyId}/issues`) {
+        const rows = [
+          { id: "release", identifier: "PRO-40", title: "Prepare the release checklist" },
+          { id: "budgeted", identifier: "PRO-41", title: "Write release notes" },
+        ];
+        const query = url.searchParams.get("q")?.toLowerCase() ?? "";
+        return Response.json(rows.filter(row => `${row.identifier} ${row.title}`.toLowerCase().includes(query)));
+      }
+      return original(input, init);
+    };
+    window.fetch = fixture;
+    return () => {
+      if (window.fetch === fixture) window.fetch = original;
+      client.clear();
+    };
+  }, [client]);
+
+  return (
+    <QueryClientProvider client={client}>
+      <main className="mx-auto grid max-w-3xl gap-6 p-4">
+        <section aria-label="Operator view" className="space-y-2">
+          <h2 className="text-lg font-semibold">Set a task budget</h2>
+          <p className="text-sm text-muted-foreground">Search for release, then enter a lifetime limit.</p>
+          <TaskTreeBudgetCreate companyId={companyId} existingRootIds={["budgeted"]} onCreate={async () => undefined} />
+        </section>
+        <section aria-label="Read-only view" className="space-y-2">
+          <h2 className="text-lg font-semibold">Read-only access</h2>
+          <TaskTreeBudgetCreate companyId={companyId} existingRootIds={[]} disabled onCreate={async () => undefined} />
+        </section>
+      </main>
+    </QueryClientProvider>
+  );
+}
+
+export const TaskBudgetForm: Story = {
+  render: () => <TaskBudgetFormFixture />,
+  parameters: {
+    proprio: {
+      ...meta.parameters.proprio,
+      notes: "The production form uses fixture task search results. Use the operator view to select a root and check invalid amounts. The read-only view has disabled controls.",
+    },
+  },
+};

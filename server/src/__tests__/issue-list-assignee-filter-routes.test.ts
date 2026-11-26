@@ -609,6 +609,40 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     expect(responses.some((res) => res.headers["x-proprio-request-cache"] === "coalesced")).toBe(true);
   });
 
+  it("does not join or store an authorization-sensitive list read", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Fresh list fixture", issuePrefix: uniqueIssuePrefix() });
+    await seedCloudTenantMember(companyId);
+    let computations = 0;
+    let release!: () => void;
+    let start!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { start = resolve; });
+    const app = createApp(companyId, { issueListDiagnostics: { async onComputeStart() {
+      if (++computations === 1) {
+        start();
+        await held;
+      }
+    } } });
+    const path = `/api/companies/${companyId}/issues?view=compact&limit=20`;
+    const prior = request(app).get(path).then(response => response);
+    try {
+      await started;
+      const replacement = await request(app).get(path).set("Cache-Control", "no-cache").timeout({ deadline: 2000 });
+      expect(replacement.status).toBe(200);
+      expect(replacement.headers["x-proprio-request-cache"]).toBe("miss");
+      expect(replacement.headers["cache-control"]).toBe("private, no-store");
+      expect(computations).toBe(2);
+    } finally {
+      release();
+      await prior;
+    }
+    const fresh = await request(app).get(path).set("Cache-Control", "no-store");
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers["x-proprio-request-cache"]).toBe("miss");
+    expect(computations).toBe(3);
+  });
+
   it("keeps compact issue-list cache keys separated by board user identity", async () => {
     const companyId = randomUUID();
     const issueId = randomUUID();
@@ -1059,14 +1093,16 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
       {
         id: crossCompanyChildIssueId,
         companyId: otherCompanyId,
-        title: "Cross-company live child",
+        title: "Other company's live task",
         status: "todo",
         priority: "medium",
-        parentId: rootIssueId,
         executionRunId: crossCompanyRunId,
         assigneeAgentId: otherAgentId,
       },
     ]);
+    // The composite foreign key now prevents persisted cross-company ancestry.
+    await expect(db.update(issues).set({ parentId: rootIssueId }).where(eq(issues.id, crossCompanyChildIssueId)))
+      .rejects.toMatchObject({ cause: { code: "23503", constraint_name: "issues_parent_company_fk" } });
 
     const app = createApp(companyId);
     const withoutSummary = await request(app)

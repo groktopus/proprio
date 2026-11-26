@@ -192,8 +192,8 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     const client = new QueryClient();
     const key = queryKeys.budgets.overview("company-1");
     const otherCompany = queryKeys.budgets.overview("company-2");
-    const rootSearch = queryKeys.budgets.rootSearch("company-1", "Private");
-    const otherRootSearch = queryKeys.budgets.rootSearch("company-2", "Public");
+    const rootSearch = queryKeys.issues.search("company-1", "Private", undefined, 20, "task-budget-roots");
+    const otherRootSearch = queryKeys.issues.search("company-2", "Public", undefined, 20, "task-budget-roots");
     const policies = [{ scopeId: "private-root", amount: 150 }];
     client.setQueryData(key, { policies });
     client.setQueryData(otherCompany, { policies: [] });
@@ -208,13 +208,15 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(otherRootSearch)).toEqual([{ id: "other-root" }]);
     client.clear();
   });
-  it("clears cached board authority on company membership changes", () => {
+  it.each([
+    { action: "company_member.updated", entityType: "company_membership" },
+    { action: "company_member.access_updated", entityType: "company_membership" },
+    { action: "company_membership.changed" },
+  ])("clears cached board authority on $action", (event) => {
     const client = new QueryClient();
     const key = queryKeys.access.currentBoardAccess;
     client.setQueryData(key, { userId: "user-1", companyIds: ["company-1"] });
-    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
-      action: "company_membership.changed",
-    }, { userId: "user-1", agentId: null });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", event, { userId: "user-1", agentId: null });
     expect(client.getQueryData(key)).toBeUndefined();
     client.clear();
   });

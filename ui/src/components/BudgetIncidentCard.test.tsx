@@ -79,9 +79,14 @@ describe("BudgetIncidentCard", () => {
     const { div, buttons, cleanup } = await renderCard(incident({ scopeType: "task_tree", scopeId: "root-task" }));
     expect(div.querySelector('a[href="/PRO/issues/root-task"]')?.textContent).toBe("Budget Demo");
     expect(div.textContent).toContain("Task budget hard stop");
-    expect(div.textContent).toContain("New runs for this task and its descendants will wait");
+    expect(div.textContent).toContain("New runs for this task and its descendants cannot start");
     const { div: viewerDiv, cleanup: cleanupViewer } = await renderCard(incident({ scopeType: "task_tree" }), false);
-    expect(Array.from(viewerDiv.querySelectorAll("button")).every(button => button.disabled)).toBe(true);
+    expect(Array.from(viewerDiv.querySelectorAll("button"), button => ({
+      label: button.textContent?.trim(), disabled: button.disabled,
+    }))).toEqual([
+      { label: "Raise budget & resume", disabled: true },
+      { label: "Keep paused", disabled: true },
+    ]);
     expect(viewerDiv.querySelector("input")?.disabled).toBe(true);
     expect(buttons()).toContain("Raise budget & resume");
     await cleanup();

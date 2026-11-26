@@ -175,14 +175,43 @@ describe("live-event run read boundaries", () => {
       expect(activity(0)[1]!.payload).toEqual({ action: "resource_membership.changed" });
       expect(received[0]!.join("")).not.toContain(task!.id);
 
-      const [membership] = await db.update(companyMemberships).set({ status: "archived" })
+      const [newlyPrivate] = await db.insert(projects).values({ companyId, name: "Changed audience project" }).returning();
+      await db.update(projects).set({ visibility: "private" }).where(eq(projects.id, newlyPrivate!.id));
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "project.updated",
+        entityType: "project", entityId: newlyPrivate!.id, details: { changedKeys: ["visibility"], becamePrivate: true },
+      });
+      await expect.poll(() => activity(0).length).toBe(3);
+      expect(activity(0)[2]!.payload).toEqual({ action: "resource_membership.changed" });
+      expect(received[0]!.join("")).not.toContain(newlyPrivate!.id);
+
+      const [membership] = await db.update(companyMemberships).set({ membershipRole: "viewer" })
         .where(eq(companyMemberships.principalId, userId)).returning();
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.updated",
+        entityType: "company_membership", entityId: membership!.id,
+        details: { principalId: userId, principalType: "user", membershipRole: "viewer" },
+      });
+      await expect.poll(() => activity(0).length).toBe(4);
+      expect(activity(0)[3]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await db.update(companyMemberships).set({ status: "suspended" }).where(eq(companyMemberships.id, membership!.id));
+      await logActivity(db, {
+        companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.access_updated",
+        entityType: "company_membership", entityId: membership!.id,
+        details: { principalId: userId, principalType: "user", status: "suspended" },
+      });
+      await expect.poll(() => activity(0).length).toBe(5);
+      expect(activity(0)[4]!.payload).toEqual({ action: "company_membership.changed" });
+
+      await db.update(companyMemberships).set({ status: "archived" })
+        .where(eq(companyMemberships.id, membership!.id));
       await logActivity(db, {
         companyId, actorType: "user", actorId: unrelatedUserId, action: "company_member.archived",
         entityType: "company_membership", entityId: membership!.id, details: { principalId: userId },
       });
-      await expect.poll(() => activity(0).length).toBe(3);
-      expect(activity(0)[2]!.payload).toEqual({ action: "resource_membership.changed" });
+      await expect.poll(() => activity(0).length).toBe(6);
+      expect(activity(0)[5]!.payload).toEqual({ action: "company_membership.changed" });
       expect(received[0]!.join("")).not.toContain(membership!.id);
     } finally {
       sockets.forEach(socket => socket.terminate());

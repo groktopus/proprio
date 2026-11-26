@@ -89,6 +89,7 @@ export interface BudgetOverview {
 
 export interface BudgetPolicyUpsertInput {
   scopeType: BudgetScopeType;
+  createOnly?: boolean;
   scopeId: string;
   metric?: BudgetMetric;
   windowKind?: BudgetWindowKind;

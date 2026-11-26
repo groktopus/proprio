@@ -337,11 +337,13 @@ export const queryKeys = {
       ["issues", companyId, "star-prompt-done"] as const,
     mentionPool: (companyId: string) =>
       ["issues", companyId, "mention-pool"] as const,
+    searches: (companyId: string) => ["issues", companyId, "search"] as const,
     search: (
       companyId: string,
       q: string,
       projectId?: string,
       limit?: number,
+      mode?: "task-budget-roots",
     ) =>
       [
         "issues",
@@ -350,6 +352,7 @@ export const queryKeys = {
         q,
         projectId ?? "__all-projects__",
         limit ?? "__no-limit__",
+        ...(mode ? [mode] : []),
       ] as const,
     listAssignedToMe: (companyId: string) =>
       ["issues", companyId, "assigned-to-me"] as const,
@@ -652,8 +655,6 @@ export const queryKeys = {
   budgets: {
     overview: (companyId: string) =>
       ["budgets", "overview", companyId] as const,
-    rootSearch: (companyId: string, query?: string) =>
-      ["budgets", "root-search", companyId, ...(query === undefined ? [] : [query])] as const,
   },
   approvals: {
     list: (companyId: string, status?: string) =>

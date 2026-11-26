@@ -335,9 +335,13 @@ export function setupLiveEventsWebSocketServer(
         ? payload.details as Record<string, unknown> : {};
       const boardActivity = event.type === "activity.logged" && context!.actorType === "board";
       const audienceChanged = () => ({ ...event, payload: { action: "resource_membership.changed" } });
-      // An archived principal may receive a content-free invalidation on its already authenticated socket.
-      if (boardActivity && payload.entityType === "company_membership" && payload.action === "company_member.archived" &&
-          details.principalId === context!.actorId) return audienceChanged();
+      // An access update can make the target ineligible for ordinary delivery.
+      // An already authenticated socket gets only a reset, without role or identity details.
+      if (boardActivity && payload.entityType === "company_membership" &&
+          (payload.action === "company_member.updated" || payload.action === "company_member.access_updated" || payload.action === "company_member.archived") &&
+          details.principalType !== "agent" && details.principalId === context!.actorId) {
+        return { ...event, payload: { action: "company_membership.changed" } };
+      }
 
       const principalActive = await sharedDeliveryRead(reads, "principal", async () => {
         if (context!.apiKeyId) {
@@ -415,7 +419,9 @@ export function setupLiveEventsWebSocketServer(
         const [project] = await db.select({ id: projects.id }).from(projects)
           .where(and(eq(projects.id, payload.entityId), eq(projects.companyId, event.companyId))).limit(1);
         if (!project || !(await access.decide({ actor: context!.actor, action: "project:read",
-          resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) return null;
+          resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) {
+          return boardActivity && payload.action === "project.updated" && details.becamePrivate === true ? audienceChanged() : null;
+        }
       }
       if (event.type.startsWith("heartbeat.run.")) {
         if (!runId) return null;

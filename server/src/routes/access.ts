@@ -4428,6 +4428,8 @@ export function accessRoutes(
         entityType: "company_membership",
         entityId: memberId,
         details: {
+          principalId: updated.principalId,
+          principalType: updated.principalType,
           membershipRole: updated.membershipRole,
           status: updated.status,
         },
@@ -4472,6 +4474,8 @@ export function accessRoutes(
         entityType: "company_membership",
         entityId: memberId,
         details: {
+          principalId: updated.principalId,
+          principalType: updated.principalType,
           membershipRole: updated.membershipRole,
           status: updated.status,
           grantCount: req.body.grants?.length ?? 0,

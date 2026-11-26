@@ -154,9 +154,14 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     ]).returning();
     await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
 
-    const claimed = await markBudgetCancelledWorkForResume(db, { companyId: company.id, scopeType: "task_tree",
-      scopeId: root.id, incidentId: incident.id, incidentOpenedAt: incident.createdAt, actorUserId: "local-board" });
-    expect(claimed.sort()).toEqual([inside.id, legacy.id].sort());
+    const actor = { type: "board" as const, source: "local_implicit" as const };
+    await budgetService(db).upsertPolicy(company.id, {
+      scopeType: "task_tree", scopeId: root.id, amount: 100, windowKind: "lifetime",
+    }, "local-board", actor);
+    expect(await claimOf(inside.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
+    expect(await claimOf(legacy.id)).toMatchObject({ incidentId: incident.id, state: "pending" });
+    const [closed] = await db.select({ status: budgetIncidents.status }).from(budgetIncidents).where(eq(budgetIncidents.id, incident.id));
+    expect(closed?.status).toBe("resolved");
     expect(await claimOf(outside.id)).toBeUndefined();
     expect(await claimOf(companyStop.id)).toBeUndefined();
     const requestRetry = vi.fn(async () => ({ accepted: true, requestId: null }));
