@@ -150,18 +150,34 @@ describe.skipIf(!support.supported)("run accounting writers under concurrent run
       // Hold the same fence used by issue parent updates. Admission must wait
       // until the move commits, then snapshot the complete new chain.
       let releaseMove!: () => void;
-      let acquired!: () => void;
+      let acquired!: (pid: number) => void;
       const held = new Promise<void>(resolve => { releaseMove = resolve; });
-      const locked = new Promise<void>(resolve => { acquired = resolve; });
+      const locked = new Promise<number>(resolve => { acquired = resolve; });
       const move = db.transaction(async tx => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${f.companyId}`}, 0))`);
-        acquired();
+        const [backend] = await tx.execute(sql`select pg_backend_pid() as pid`);
+        acquired(Number(backend.pid));
         await held;
         await tx.update(issues).set({ parentId: newRoot!.id }).where(eq(issues.id, task!.id));
       });
-      await locked;
-      const reservation = reserveRunBudget(db, f.companyId, run!.id, null);
-      releaseMove();
+      const movePid = await Promise.race([locked, move.then(() => 0)]);
+      expect(movePid).toBeGreaterThan(0);
+      const applicationName = `budget-ancestry-${randomUUID()}`;
+      const admissionDb = createDb(database.connectionString, { applicationName, maxConnections: 1 });
+      const reservation = reserveRunBudget(admissionDb, f.companyId, run!.id, null);
+      void reservation.catch(() => undefined);
+      try {
+        await expect.poll(async () => {
+          const [waiting] = await db.execute(sql`select query from pg_stat_activity
+            where application_name = ${applicationName} and wait_event_type = 'Lock'
+            and ${movePid} = any(pg_blocking_pids(pid))`);
+          return waiting?.query;
+        }).toMatch(/pg_advisory_xact_lock_shared/);
+      } finally {
+        releaseMove();
+        await Promise.allSettled([move, reservation]);
+        await admissionDb.$client.end();
+      }
       await move;
       await expect(reservation).resolves.toMatchObject({ reused: false });
       const [reservedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
@@ -178,6 +194,30 @@ describe.skipIf(!support.supported)("run accounting writers under concurrent run
       await reserveRunBudget(db, f.companyId, nextRun!.id, null);
       const [newRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRun!.id));
       expect(newRun!.taskLineageJson).toEqual({ version: 1, issueId: task!.id, pathIssueIds: [task!.id, oldRoot!.id] });
+    });
+
+    it("captures persisted native and legacy task bindings within the admitted company", async () => {
+      const f = await fixture();
+      const foreign = await fixture();
+      const [src] = await db.insert(issues).values({ companyId: f.companyId, title: "Source", identifier: "LINEAGE-17" }).returning();
+      const [other] = await db.insert(issues).values({ companyId: f.companyId, title: "Other task" }).returning();
+      const [foreignTask] = await db.insert(issues).values({ companyId: foreign.companyId, title: "Foreign task" }).returning();
+      const runs = await db.insert(heartbeatRuns).values([
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", nativeIssueId: src!.id, issueId: other!.id },
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", contextSnapshot: { issueId: src!.id } },
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", contextSnapshot: { taskId: src!.identifier } },
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", contextSnapshot: { issueId: foreignTask!.id } },
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", contextSnapshot: { issueId: "not a reference" } },
+        { companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment" },
+      ]).returning();
+      for (const run of runs) {
+        await expect(reserveRunBudget(db, f.companyId, run.id, null)).resolves.toMatchObject({ reused: false });
+      }
+      const expected = { version: 1, issueId: src!.id, pathIssueIds: [src!.id] };
+      const saved = await db.select({ id: heartbeatRuns.id, lineage: heartbeatRuns.taskLineageJson })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+      const byId = new Map(saved.map(row => [row.id, row.lineage]));
+      expect(runs.map(run => byId.get(run.id))).toEqual([expected, expected, expected, null, null, null]);
     });
 
     it("never creates a second reservation for one run when two dispatches race", async () => {

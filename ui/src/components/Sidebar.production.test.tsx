@@ -105,4 +105,10 @@ describe("production Sidebar ordering", () => {
     // This shell has no Chat row; none is invented.
     expect(container.querySelector('a[href="/chats"]')).toBeNull();
   });
+
+  it("names the classic decision destination Needs You", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableDecisions: true });
+    await renderSidebar();
+    expect(container.querySelector('a[href="/decisions"]')?.textContent).toContain("Needs You");
+  });
 });

@@ -26,3 +26,20 @@ reviewers. An optional reviewer job that fails solely because its service is
 unavailable is missing review evidence, not a code-check failure or approval.
 Record that failure and the current-head maintainer review in the PR. Required
 platform rules and applicable CI typecheck, build, and test gates still apply.
+
+## UI accessibility
+
+Run `pnpm lint` for changed board JSX. Prefer native controls for actions and
+use valid ARIA roles and properties for custom controls. If an existing handler
+needs a lint exception, scope the exception to that element and explain the
+keyboard behavior or why the handler does not activate an action. The shared
+`EntityRow` also rejects pointer-only activation on generic containers.
+Other board JSX reports generic static element interaction warnings. The
+browser checks cover interaction behavior that markup rules cannot determine.
+
+For changed navigation, dialogs, forms, and custom controls, describe how to
+reach and activate the controls with a keyboard. Record where focus moves when
+the interaction opens, closes, fails, or recovers. When names, roles, states,
+or announcements change, record the screen reader and browser used and what
+they announced. Include the applicable [browser accessibility checks](https://github.com/groktopus/proprio/issues/202)
+and identify any manual checks that remain.

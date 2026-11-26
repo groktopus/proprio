@@ -84,6 +84,7 @@ const mockRequiredQualityReview = vi.hoisted(() => ({
     { key: "copy", label: "Copy", target: { type: "issue_document", key: "copy", revisionId: "99999999-9999-4999-8999-999999999999" } },
   ] })),
   captureRequiredQualityReviewDecisionBinding: vi.fn(),
+  recordExecutionStageDecision: vi.fn(),
 }));
 
 function registerModuleMocks() {
@@ -239,7 +240,7 @@ describe("issue execution policy routes", () => {
     mockRequiredQualityReview.captureRequiredQualityReviewDecisionBinding.mockImplementation(async (_db: unknown, input: any) => {
       const { unprocessable } = await import("../errors.js");
       const optedIn = (policy: any) => policy?.reviewTargetBinding?.source === "required_quality_review";
-      if (!optedIn(input.previousPolicy) && !optedIn(input.nextPolicy) && !optedIn(input.issue.executionPolicy)) return null;
+      if (![input.previousPolicy, input.nextPolicy, input.issue.executionPolicy, input.expectedPolicy].some(optedIn)) return null;
       const requested = mockRequiredQualityReview.requiredQualityReview(input.nextPolicy);
       const current = mockRequiredQualityReview.requiredQualityReview(input.issue.executionPolicy);
       if (!optedIn(input.nextPolicy) || !optedIn(input.issue.executionPolicy) || !requested || !current ||
@@ -255,6 +256,16 @@ describe("issue execution policy routes", () => {
         throw unprocessable("Required quality review target changed before the decision was recorded", { code: "required_quality_review_stale" });
       }
       return binding;
+    });
+    mockRequiredQualityReview.recordExecutionStageDecision.mockImplementation(async (db: any, input: any) => {
+      const binding = input.decision.outcome === "approved"
+        ? await mockRequiredQualityReview.captureRequiredQualityReviewDecisionBinding(db, input) : null;
+      await db.insert().values({
+        id: input.decisionId, ...input.decision,
+        companyId: input.issue.companyId, issueId: input.issue.id,
+        actorAgentId: input.actorAgentId ?? null, actorUserId: input.actorUserId ?? null,
+        createdByRunId: input.actorRunId ?? null, ...(binding ? { reviewTargetBinding: binding } : {}),
+      });
     });
     mockRequiredQualityReview.captureRequiredQualityReviewBinding.mockResolvedValue({ version: 1, requirementHash: JSON.stringify([{ key: "copy", label: "Copy" }]), deliverables: [
       { key: "copy", label: "Copy", target: { type: "issue_document", key: "copy", revisionId: "99999999-9999-4999-8999-999999999999" } },

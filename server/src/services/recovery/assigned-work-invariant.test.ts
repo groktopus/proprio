@@ -165,15 +165,14 @@ describe("assigned-work invariant", () => {
       ["question", { pendingInteractions: 1 }],
       ["approval", { pendingApprovals: 1 }],
       ["dependency", { openBlockers: 1 }],
-      ["dependency", { openChildren: 2 }],
       ["review", { reviewPending: true }],
       ["budget", { budgetStop: true }],
       ["company_paused", { companyPaused: true }],
       ["agent_paused", { agent: { status: "paused", invokable: false } }],
       ["agent_paused", { pauseHold: true }],
-      ["user_stop", { latestRun: { id: "r", status: "cancelled", errorCode: "operator_interrupted", finishedAt: ago(60 * 60_000),
+      ["user_stop", { openBlockers: 1, latestRun: { id: "r", status: "cancelled", errorCode: "operator_interrupted", finishedAt: ago(60 * 60_000),
         settlingUntil: null, operatorStopped: true } }],
-      ["user_stop", { sessionGoal: "paused" }],
+      ["user_stop", { openBlockers: 1, sessionGoal: "paused" }],
       ["credential", { activeRecoveryAction: { cause: "configuration_incomplete", ownerType: "board", resumeAt: null } }],
       ["provider_limit", { activeRecoveryAction: { cause: "native_provider_usage_limit", ownerType: "board",
         resumeAt: new Date(now.getTime() + 30 * 60_000) } }],
@@ -192,6 +191,11 @@ describe("assigned-work invariant", () => {
         expect(evaluateAssignedWork(facts(overrides), now)).toEqual({ kind: "ok", clause: "waiting", reason });
       });
     }
+
+    it("does not treat ordinary open children as a required dependency wait", () => {
+      expect(evaluateAssignedWork(facts({ openChildren: 2 }), now))
+        .toEqual({ kind: "violation", reason: "no_pending_path", stale: false });
+    });
 
     it("does not accept a provider limit with no resume time", () => {
       expect(evaluateAssignedWork(facts({ activeRecoveryAction: { cause: "provider_quota", ownerType: "board", resumeAt: null } }), now))

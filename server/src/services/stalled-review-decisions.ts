@@ -1,13 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { issues, type Db } from "@groktopus/db";
 import type { StalledReviewDecisionAction } from "@groktopus/shared";
-import { conflict, notFound } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import {
   logActivity,
   publishActivity,
   type ActivityPublication,
 } from "./activity-log.js";
 import { executionIssueCondition } from "./issue-visibility.js";
+import { requiresImmutableReviewTarget } from "./required-quality-review.js";
 import {
   executeIssuePostCommitActions,
   issueService,
@@ -64,6 +65,15 @@ export function stalledReviewDecisionService(db: Db) {
           });
         }
 
+        const immutableSignoff = requiresImmutableReviewTarget(lockedIssue.executionPolicy)
+          && Boolean((Array.isArray(lockedIssue.executionPolicy?.stages) && lockedIssue.executionPolicy.stages.length)
+            || lockedIssue.executionState?.reviewTargetBinding);
+        if (input.action === "approve" && immutableSignoff) {
+          throw unprocessable("Request changes and submit the current outputs to an available reviewer for signoff.", {
+            code: "required_quality_review_stale",
+          });
+        }
+
         const comment = input.note
           ? await svc.addComment(
               lockedIssue.id,
@@ -78,6 +88,7 @@ export function stalledReviewDecisionService(db: Db) {
           lockedIssue.id,
           {
             status,
+            ...(immutableSignoff && input.action === "request_changes" ? { executionState: null } : {}),
             actorUserId: input.actor.userId,
           },
           tx,

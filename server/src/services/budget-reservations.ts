@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { agents, budgetReservations, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@groktopus/db";
-import { centsToUnits, unitsToCents } from "@groktopus/shared";
+import { centsToUnits, isUuidLike, normalizeIssueIdentifier, unitsToCents } from "@groktopus/shared";
 import { conflict, notFound } from "../errors.js";
 import { withOperationAccountingTransaction } from "./accounting-transaction.js";
 import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
@@ -10,7 +10,8 @@ import { withBudgetSpan } from "./budget-tracing.js";
 import type { ActivityPublication } from "./activity-log.js";
 import { readClaimedNativeStopRecovery } from "./native-runtime/native-cancellation-request.js";
 import { extendOwnNativeRecoveryClaimInTransaction, readOwnNativeRecoveryClaimLease } from "./native-runtime/native-execution-lease.js";
-import { loadAncestorIssueIds } from "./task-workspace-lineage.js";
+import { loadParentChain } from "./issue-hierarchy.js";
+import { boundRunIssueId, boundRunIssueIdSql } from "./run-task-binding.js";
 
 /** Native finalization takes its coordinator before issue/run locks. Recovery
  * admission uses the same order after the company accounting lock, so its
@@ -92,14 +93,14 @@ export async function recheckRunBudgetReservationInTransaction(
 export async function reserveRunBudget(db: Db, companyId: string, runId: string, projectId: string | null, ledgerScope: Record<string, unknown> = {}, recoveryLeaseOwner?: string) {
   const result = await withBudgetSpan("budget.admission.reserve", () => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
     await lockBudgetAdmissionControls(tx, companyId, projectId);
-    const [hint] = await tx.select({ agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId }).from(heartbeatRuns)
+    const [hint] = await tx.select({ agentId: heartbeatRuns.agentId, taskReference: boundRunIssueIdSql() }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)));
     if (!hint) throw notFound("Run not found");
     await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, hint.agentId))).for("share");
     await lockRunBudgetRecoveryOwnerInTransaction(tx, companyId, runId, recoveryLeaseOwner);
     // Parent edits use this same company-scoped fence. Take it before reading
     // the task path so the persisted ancestry is wholly before or after a move.
-    if (hint.issueId ?? hint.nativeIssueId) {
+    if (hint.taskReference) {
       await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
     }
     const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId))).for("update");
@@ -162,15 +163,17 @@ export async function reserveRunBudget(db: Db, companyId: string, runId: string,
     // A zero-valued row also fences duplicate dispatch when estimates are off.
     const [reservation] = await tx.insert(budgetReservations).values({ companyId, runId, agentId: run.agentId, projectId,
       amountCents: unitsToCents(amount), providerStartedAt: new Date() }).returning();
-    let taskLineageJson = run.taskLineageJson;
-    if (!taskLineageJson) {
-      const taskId = run.issueId ?? run.nativeIssueId;
+    let taskLineageJson: typeof run.taskLineageJson = null;
+    const taskReference = run.taskLineageJson ? null : boundRunIssueId(run);
+    if (taskReference) {
+      const identifier = normalizeIssueIdentifier(taskReference);
+      const [legacyTask] = identifier ? await tx.select({ id: issues.id }).from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier))).limit(1) : [];
+      const taskId = legacyTask?.id ?? (isUuidLike(taskReference) ? taskReference : null);
       if (taskId) {
-        const [task] = await tx.select({ id: issues.id, parentId: issues.parentId }).from(issues)
-          .where(and(eq(issues.companyId, companyId), eq(issues.id, taskId)));
-        if (task) {
-          taskLineageJson = { version: 1, issueId: task.id,
-            pathIssueIds: [task.id, ...await loadAncestorIssueIds(tx, companyId, task.parentId)] };
+        const chain = await loadParentChain(tx, companyId, taskId);
+        if (chain.length > 0) {
+          taskLineageJson = { version: 1, issueId: taskId, pathIssueIds: chain.map(task => task.id) };
         }
       }
     }
