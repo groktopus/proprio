@@ -163,6 +163,10 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     await deliverBudgetResumeContinuations(db, { requestRetry: requestRetry as never });
     expect(requestRetry).toHaveBeenCalledWith(expect.objectContaining({ issueId: legacyTask.id, observedRunId: legacy.id }));
     expect(await claimOf(legacy.id)).toMatchObject({ state: "delivered" });
+    const receipt = mockLogActivity.mock.calls.find(([, activity]) =>
+      activity.action === "budget.cancelled_work_continued" && activity.entityId === legacyTask.id)?.[1];
+    expect(receipt?.details).toMatchObject({ interruptedRunId: legacy.id });
+    expect(receipt?.details).not.toHaveProperty("budgetIncidentId");
   });
 
   it("continues a run whose stop was still being delivered when the board resumed", async () => {

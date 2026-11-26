@@ -188,6 +188,20 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(key)).toBeUndefined();
     client.clear();
   });
+  it("clears cached task tree budgets on an audience change", () => {
+    const client = new QueryClient();
+    const key = queryKeys.budgets.overview("company-1");
+    const otherCompany = queryKeys.budgets.overview("company-2");
+    const policies = [{ scopeId: "private-root", amount: 150 }];
+    client.setQueryData(key, { policies });
+    client.setQueryData(otherCompany, { policies: [] });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+      action: "resource_membership.changed",
+    }, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
+    expect(client.getQueryData(otherCompany)).toEqual({ policies: [] });
+    client.clear();
+  });
   it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {
     const client = new QueryClient();
     const parent = queryKeys.issues.dependencyInvestigation("parent");

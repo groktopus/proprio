@@ -6380,6 +6380,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budgets/policies",
   tags: ["costs"],
   summary: "Create or update a budget policy",
+  description: "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read.",
   request: {
     params: z.object({ companyId: z.string() }),
     body: jsonBody(upsertBudgetPolicySchema),
@@ -6388,6 +6389,7 @@ registry.registerPath({
     200: r.ok(),
     400: r.badRequest,
     401: r.unauthorized,
+    403: r.forbidden,
     404: r.notFound,
   },
 });
@@ -6397,7 +6399,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budget-incidents/{incidentId}/resolve",
   tags: ["costs"],
   summary: "Resolve a budget incident",
-  description: "Board only: agent credentials get 403, so an agent cannot raise a limit or resume a budget-stopped agent. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
+  description: "Board only: agent credentials get 403, so an agent cannot raise a limit or resume budget-stopped work. Task-tree incidents can be resolved only by a board user who can read the root task. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
   request: {
     params: z.object({ companyId: z.string(), incidentId: z.string() }),
     body: jsonBody(resolveBudgetIncidentSchema),
@@ -6406,7 +6408,9 @@ registry.registerPath({
     200: r.ok(),
     400: r.badRequest,
     401: r.unauthorized,
+    403: r.forbidden,
     404: r.notFound,
+    409: r.conflict,
   },
 });
 
@@ -6415,6 +6419,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budgets/overview",
   tags: ["costs"],
   summary: "Get budget overview",
+  description: "Company-level budgets remain company-wide. Task-tree policies and incidents are included only when the caller can read their root task.",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });

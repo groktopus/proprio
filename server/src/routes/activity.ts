@@ -272,7 +272,8 @@ export function activityRoutes(db: Db) {
     if (parsedQuery.data.actorScope === "agents") {
       const result = await agentAudit.list({ companyId, ...parsedQuery.data,
         dashboardUserId: req.actor.type === "board" ? req.actor.userId : null,
-        caseReadCondition: await caseActivityReadSqlCondition(db, req.actor) });
+        caseReadCondition: await caseActivityReadSqlCondition(db, req.actor),
+        issueReadCondition: await issueReadSqlCondition(db, req.actor) });
       res.json({ ...result, accessTier: "full" });
       return;
     }
@@ -283,7 +284,8 @@ export function activityRoutes(db: Db) {
     }
     const result = await agentAudit.list({ companyId, ...parsedQuery.data,
       dashboardUserId: req.actor.type === "board" ? req.actor.userId : null,
-      caseReadCondition: await caseActivityReadSqlCondition(db, req.actor) });
+      caseReadCondition: await caseActivityReadSqlCondition(db, req.actor),
+      issueReadCondition: await issueReadSqlCondition(db, req.actor) });
     res.json({
       ...(canViewAttribution ? result : stripAuditAttribution(result)),
       accessTier: canViewAttribution ? "full" : "basic",
@@ -301,10 +303,11 @@ export function activityRoutes(db: Db) {
     // would silently truncate the export, so ignore them.
     const { cursor: _cursor, limit: _limit, ...filters } = parsedQuery.data;
     const caseReadCondition = await caseActivityReadSqlCondition(db, req.actor);
+    const issueReadCondition = await issueReadSqlCondition(db, req.actor);
     const rows: Awaited<ReturnType<typeof agentAudit.list>>["items"] = [];
     let cursor: string | undefined;
     do {
-      const page = await agentAudit.list({ companyId, ...filters, cursor, limit: AUDIT_CSV_PAGE_SIZE, dashboardUserId: req.actor.userId, caseReadCondition });
+      const page = await agentAudit.list({ companyId, ...filters, cursor, limit: AUDIT_CSV_PAGE_SIZE, dashboardUserId: req.actor.userId, caseReadCondition, issueReadCondition });
       for (const item of page.items) {
         if (rows.length >= AUDIT_CSV_EXPORT_MAX_ROWS) break;
         rows.push(item);
