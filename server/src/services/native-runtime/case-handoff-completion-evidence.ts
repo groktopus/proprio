@@ -121,6 +121,65 @@ export async function readAcceptedCaseHandoffCompletionEvidence(input: {
   };
 }
 
+type CaseCompletionReceipt = NonNullable<Awaited<ReturnType<typeof readAcceptedCaseHandoffCompletionEvidence>>> & {
+  taskRemedy?: string;
+};
+
+export type CaseCompletionRecoveryAttempt = {
+  runId: string;
+  decisionId: string;
+  receipt: CaseCompletionReceipt | null;
+};
+
+export function foldCaseCompletionRecoveryAttempt(
+  incoming: CaseCompletionRecoveryAttempt,
+  existingEvidence: Record<string, unknown> | undefined,
+  attemptLimit: number,
+) {
+  const priorReceipt = record(existingEvidence?.caseHandoffCompletion);
+  if (!incoming.receipt) {
+    return existingEvidence && Object.hasOwn(existingEvidence, "caseHandoffCompletion") ? { kind: "keep" as const } : null;
+  }
+
+  const accepted = incoming.receipt.caseHandoff;
+  const priorHandoff = record(priorReceipt.caseHandoff);
+  const sameRevision = priorReceipt.schema === incoming.receipt.schema && priorHandoff.id === accepted.id
+    && priorHandoff.version === accepted.version && priorHandoff.requirementsDigest === accepted.requirementsDigest;
+  const priorAssessment = record(priorReceipt.assessment);
+  const priorAttempts = sameRevision && Array.isArray(priorReceipt.attempts)
+    ? priorReceipt.attempts.map(record)
+    : sameRevision && typeof existingEvidence?.runId === "string" && typeof existingEvidence.decisionId === "string" ? [{
+      runId: existingEvidence.runId,
+      decisionId: existingEvidence.decisionId,
+      resultId: priorAssessment.resultId,
+      assessmentId: priorAssessment.id,
+      assessedContractId: record(priorAssessment.assessedContractRevision).id ?? priorAssessment.assessedContractId,
+      reasonCode: record(priorReceipt.decision).statusDecisionReasonCode,
+    }] : [];
+  if (priorAttempts.some(attempt => attempt.decisionId === incoming.decisionId)) return { kind: "keep" as const };
+
+  // A saved native result can be reassessed after another task decision.
+  // The decision ledger keeps the audit history and the same run still uses one attempt.
+  const index = priorAttempts.findIndex(attempt => attempt.runId === incoming.runId);
+  const attempt = {
+    runId: incoming.runId,
+    decisionId: incoming.decisionId,
+    resultId: incoming.receipt.assessment.resultId,
+    assessmentId: incoming.receipt.assessment.id,
+    assessedContractId: incoming.receipt.assessment.assessedContractRevision.id,
+    reasonCode: incoming.receipt.decision.statusDecisionReasonCode,
+  };
+  const attempts = index < 0 ? [...priorAttempts, attempt].slice(-attemptLimit)
+    : priorAttempts.map((prior, position) => position === index ? attempt : prior);
+  const retainLatest = index >= 0 && existingEvidence?.runId !== incoming.runId;
+  const evidence = retainLatest ? {
+    ...existingEvidence, caseHandoffCompletion: { ...priorReceipt, attempts },
+  } : {
+    runId: incoming.runId, decisionId: incoming.decisionId, caseHandoffCompletion: { ...incoming.receipt, attempts },
+  };
+  return { kind: "record" as const, evidence, sameRevision, charged: index < 0 };
+}
+
 /** Case offer details have a stricter visibility boundary than the task card.
  * Keep the full receipt in durable storage, but only project generic task-local
  * gap counts into the task recovery read model. */

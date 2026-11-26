@@ -10088,7 +10088,9 @@ export function issueRoutes(
       const { inspectSourceRunId: runId, inspectSourceActionId: actionId } = selected.data;
       const rows = await db.select().from(issueRecoveryActions).where(and(
         eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
-        sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+        or(sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+          sql`${issueRecoveryActions.evidence}#>'{caseHandoffCompletion,attempts}'
+            @> jsonb_build_array(jsonb_build_object('runId', ${runId}::text))`),
         actionId ? eq(issueRecoveryActions.id, actionId) : undefined,
       )).orderBy(desc(issueRecoveryActions.createdAt)).limit(actionId ? 1 : 20);
       if (actionId && !rows[0]) throw notFound("Recovery source not found.");

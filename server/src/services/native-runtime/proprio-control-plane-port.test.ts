@@ -62,6 +62,7 @@ import { heartbeatService } from "../heartbeat.js";
 import { issueRecoveryActionReadModel } from "../issue-recovery-actions.js";
 import { readNativeContinuationSource } from "./native-continuation-delivery.js";
 import { nativeSha256 } from "./canonical.js";
+import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
 import { NativeRunCoordinatorStore } from "./native-run-coordinator-store.js";
 import { finalizeNativeRun, repairCommittedNativeChatResponse } from "./native-run-finalizer.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
@@ -2904,19 +2905,38 @@ describe("ProprioControlPlanePort conformance", () => {
     if (caseState === "cancelled") {
       await db.update(cases).set({ status: "cancelled" }).where(eq(cases.id, caseId));
     }
-    const [previousDecision] = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, runId));
-    const previousRecovery = caseState === "historical recovery" || caseState === "different recovery"
-      ? (await db.insert(issueRecoveryActions).values({
+    const seedPreviousRecovery = async () => {
+      const [decision] = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, runId));
+      const [assessment] = await db.select().from(workAssessments).where(eq(workAssessments.id, decision!.assessmentId));
+      const prior = { ...assessment!, id: randomUUID(), inputDigest: nativeSha256({ priorAssessmentId: assessment!.id }) };
+      await db.insert(workAssessments).values(prior);
+      const effect = { kind: "record_finalization_error", cause: "completion_evidence_incomplete", agentId,
+        nextAction: "Review the prior assessment.", taskRemedy: "publish_task_document" };
+      const [previousDecision] = await db.insert(statusDecisions).values({ ...decision!, id: randomUUID(),
+        decisionVersion: decision!.decisionVersion + 1, assessmentId: prior.id, reasonCode: "prior_status_preserved_no_live_path",
+        decisionJson: { ...decision!.decisionJson, effects: [effect] },
+        decisionDigest: nativeSha256({ priorDecisionId: decision!.id, effect }),
+      }).returning();
+      const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, companyId, issueId, runId, decisionId: previousDecision!.id });
+      const previousReceipt = { ...receipt!, caseHandoff: {
+        ...receipt!.caseHandoff, id: caseState === "historical recovery" ? handoffId : randomUUID(),
+      }, taskRemedy: effect.taskRemedy };
+      const fingerprint = nativeSha256({ runId, decisionId: previousDecision!.id, cause: effect.cause });
+      const [action] = await db.insert(issueRecoveryActions).values({
         companyId, sourceIssueId: issueId, kind: "active_run_watchdog", status: "active",
-        ownerType: "agent", ownerAgentId: agentId, cause: "completion_evidence_incomplete",
-        fingerprint: "previous-run-bound-fingerprint", nextAction: "Review the prior assessment.", attemptCount: 1,
-        evidence: { runId, decisionId: previousDecision!.id, caseHandoffCompletion: {
-          schema: "proprio.case-handoff-completion-recovery.v1",
-          caseHandoff: { id: caseState === "historical recovery" ? handoffId : randomUUID(), version: 1, requirementsDigest: "d".repeat(64) },
-          decision: { statusDecisionReasonCode: previousDecision!.reasonCode },
-          assessment: { id: previousDecision!.assessmentId, assessedContractRevision: { id: acceptedContract.id } },
-        } },
-      }).returning())[0] : undefined;
+        ownerType: "agent", ownerAgentId: agentId, cause: effect.cause, attemptCount: 1, maxAttempts: 3,
+        fingerprint, nextAction: effect.nextAction,
+        evidence: { runId, decisionId: previousDecision!.id, caseHandoffCompletion: previousReceipt },
+      }).returning();
+      await db.insert(statusDecisionEffects).values({ companyId, issueId, decisionId: previousDecision!.id, ordinal: 0,
+        effectKind: effect.kind, targetType: "issue_recovery_action", targetId: action!.id, deliveryState: "delivered",
+        deliveredAt: new Date(), payload: { cause: effect.cause, nextAction: effect.nextAction },
+        idempotencyKey: `tested-previous-recovery:${previousDecision!.id}`,
+      });
+      return { decision: previousDecision!, action: action!, resultId: previousReceipt.assessment.resultId };
+    };
+    const previousRecovery = caseState === "historical recovery" || caseState === "different recovery"
+      ? await seedPreviousRecovery() : null;
     const [before] = await db.select().from(issues).where(eq(issues.id, issueId));
     await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
     if (caseState === "cancelled") {
@@ -2949,19 +2969,19 @@ describe("ProprioControlPlanePort conformance", () => {
     });
     const retainedPriorAttempt = caseState === "historical recovery";
     const expectedAttemptCount = retainedPriorAttempt ? 2 : 1;
-    const expectedAttempts = retainedPriorAttempt ? [{ runId, decisionId: previousDecision!.id,
-      assessmentId: previousDecision!.assessmentId, assessedContractId: acceptedContract.id,
-      reasonCode: previousDecision!.reasonCode }] : [];
+    const expectedAttempts = retainedPriorAttempt ? [{ runId, decisionId: previousRecovery!.decision.id, resultId: previousRecovery!.resultId,
+      assessmentId: previousRecovery!.decision.assessmentId, assessedContractId: acceptedContract.id,
+      reasonCode: previousRecovery!.decision.reasonCode }] : [];
     expect(completionRecovery).toMatchObject({ attemptCount: expectedAttemptCount,
       evidence: { caseHandoffCompletion: { attempts: [...expectedAttempts, {
         runId: followUpId, decisionId: completionRecovery!.evidence.decisionId,
         assessmentId: expect.any(String), assessedContractId: acceptedContract.id, reasonCode: "prior_status_preserved_no_live_path",
       }] } } });
-    if (retainedPriorAttempt) expect(completionRecovery?.id).toBe(previousRecovery?.id);
+    if (retainedPriorAttempt) expect(completionRecovery?.id).toBe(previousRecovery?.action.id);
     if (caseState === "different recovery") {
-      expect(completionRecovery?.id).not.toBe(previousRecovery?.id);
-      expect(recoveryActions.find(action => action.id === previousRecovery?.id)).toMatchObject({
-        status: "cancelled", attemptCount: 1, evidence: previousRecovery?.evidence,
+      expect(completionRecovery?.id).not.toBe(previousRecovery?.action.id);
+      expect(recoveryActions.find(action => action.id === previousRecovery?.action.id)).toMatchObject({
+        status: "cancelled", attemptCount: 1, evidence: previousRecovery?.action.evidence,
       });
     }
     await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });

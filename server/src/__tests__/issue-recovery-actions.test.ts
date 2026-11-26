@@ -2098,6 +2098,29 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(list.body.actions).toHaveLength(1);
   });
 
+  it("looks up an earlier Case recovery attempt by source run without exposing the Case receipt", async () => {
+    const { companyId, sourceIssueId, coderId } = await seedCompany();
+    const earlierRunId = randomUUID(), latestRunId = randomUUID(), hiddenHandoffId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: earlierRunId, issueId: sourceIssueId });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "active_run_watchdog", cause: "completion_evidence_incomplete",
+      ownerType: "board", fingerprint: "shared-case-recovery", nextAction: "Inspect the assessment.",
+      evidence: { runId: latestRunId, caseHandoffCompletion: {
+        schema: "proprio.case-handoff-completion-recovery.v1", caseHandoff: { id: hiddenHandoffId },
+        attempts: [{ runId: earlierRunId }, { runId: latestRunId }],
+      } },
+    });
+    const app = createApp();
+    const url = `/api/issues/${sourceIssueId}/recovery-actions`;
+    for (const runId of [earlierRunId, latestRunId]) {
+      const inspected = await request(app).get(url).query({ inspectSourceRunId: runId, inspectSourceActionId: action.id }).expect(200);
+      expect(inspected.body.active).toMatchObject({ id: action.id, evidence: { runId: latestRunId } });
+      expect(inspected.text).not.toContain(hiddenHandoffId);
+      expect(inspected.text).not.toContain("caseHandoffCompletion");
+    }
+    await request(app).get(url).query({ inspectSourceRunId: randomUUID(), inspectSourceActionId: action.id }).expect(404);
+  });
+
   it("inspects the source-scoped board recovery action for a stopped legacy run", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();

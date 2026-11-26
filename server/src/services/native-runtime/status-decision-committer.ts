@@ -966,48 +966,11 @@ async function materializeDecisionEffect(input: {
       })
       : null;
     const acceptedHandoff = handoffCompletionEvidence?.caseHandoff;
-    const maxAttempts = 3;
     const fingerprint = acceptedHandoff
       ? nativeSha256({ cause: effect.cause, handoffId: acceptedHandoff.id, version: acceptedHandoff.version,
         requirementsDigest: acceptedHandoff.requirementsDigest })
       : nativeSha256({ runId: input.runId, decisionId: input.decisionId, cause: effect.cause });
-    const [priorRecovery] = acceptedHandoff ? await input.tx.select({
-      id: issueRecoveryActions.id,
-      evidence: issueRecoveryActions.evidence,
-    }).from(issueRecoveryActions).where(and(
-      eq(issueRecoveryActions.companyId, input.companyId),
-      eq(issueRecoveryActions.sourceIssueId, input.issue.id),
-      eq(issueRecoveryActions.cause, effect.cause),
-      inArray(issueRecoveryActions.status, ["active", "escalated"]),
-    )).limit(1) : [];
-    const priorReceipt = record(priorRecovery?.evidence.caseHandoffCompletion);
-    const priorHandoff = record(priorReceipt.caseHandoff);
-    const sameRevision = Boolean(acceptedHandoff && priorReceipt.schema === "proprio.case-handoff-completion-recovery.v1"
-      && priorHandoff.id === acceptedHandoff.id && priorHandoff.version === acceptedHandoff.version
-      && priorHandoff.requirementsDigest === acceptedHandoff.requirementsDigest);
-    const priorAssessment = record(priorReceipt.assessment);
-    const priorAttempts = sameRevision && Array.isArray(priorReceipt.attempts)
-      ? priorReceipt.attempts.map(record)
-      : sameRevision && priorRecovery && typeof priorRecovery.evidence.decisionId === "string" ? [{
-        runId: priorRecovery.evidence.runId, decisionId: priorRecovery.evidence.decisionId,
-        assessmentId: priorAssessment.id,
-        assessedContractId: record(priorAssessment.assessedContractRevision).id ?? priorAssessment.assessedContractId,
-        reasonCode: record(priorReceipt.decision).statusDecisionReasonCode,
-      }] : [];
-    const payload = { cause: effect.cause, nextAction: effect.nextAction };
-    if (priorRecovery && priorAttempts.some(attempt => attempt.decisionId === input.decisionId)) {
-      return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: priorRecovery.id, payload };
-    }
-    const attempts = handoffCompletionEvidence ? [...priorAttempts, {
-      runId: input.runId,
-      decisionId: input.decisionId,
-      assessmentId: handoffCompletionEvidence.assessment.id,
-      assessedContractId: handoffCompletionEvidence.assessment.assessedContractRevision.id,
-      reasonCode: handoffCompletionEvidence.decision.statusDecisionReasonCode,
-    }].slice(-maxAttempts) : [];
-    const recovery = await issueRecoveryActionService(
-      input.tx,
-    ).upsertSourceScoped({
+    const recovery = await issueRecoveryActionService(input.tx).upsertSourceScoped({
       companyId: input.companyId,
       sourceIssueId: input.issue.id,
       kind: "active_run_watchdog",
@@ -1015,19 +978,20 @@ async function materializeDecisionEffect(input: {
       ownerAgentId: effect.agentId,
       cause: effect.cause,
       fingerprint,
-      supersedeOnIdentityChange: Boolean(handoffCompletionEvidence && !sameRevision),
-      evidence: {
-        runId: input.runId,
-        decisionId: input.decisionId,
-        ...(handoffCompletionEvidence ? {
-          caseHandoffCompletion: { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy, attempts },
-        } : {}),
-      },
+      evidence: { runId: input.runId, decisionId: input.decisionId },
+      ...(effect.cause === "completion_evidence_incomplete" ? {
+        caseCompletionAttempt: {
+          runId: input.runId,
+          decisionId: input.decisionId,
+          receipt: handoffCompletionEvidence && { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        },
+      } : {}),
       nextAction: effect.nextAction,
       wakePolicy: null,
-      maxAttempts,
+      maxAttempts: 3,
     });
-    return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: recovery.id, payload };
+    return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: recovery.id,
+      payload: { cause: effect.cause, nextAction: effect.nextAction } };
   }
   if (effect.kind === "release_run_resources") {
     failAt("recovery_materialization", input.failpoint);
