@@ -816,6 +816,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const agent = await createAgent(db, company.id);
     const issue = await createIssue(db, company.id);
     const run = await createRun(db, company.id, agent.id, { issueId: issue.id });
+    await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId: issue.id }).where(eq(heartbeatRuns.id, run.id));
     const { connection } = await createTool(db, company.id);
     const policy = await db.insert(toolPolicies).values({
       companyId: company.id,
@@ -873,6 +874,8 @@ describeEmbeddedPostgres("tool access policy service", () => {
       phase: "policy_decision",
       occurredAt: recorded.invocation.createdAt,
       runId: run.id,
+      runScopeKind: "issue",
+      runIssueId: issue.id,
       taskId: issue.id,
       invocationId: recorded.invocation.id,
       requestId: recorded.actionRequest!.id,
@@ -1161,6 +1164,8 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const initial = await svc.decide(input);
     expect(initial.allowed).toBe(true);
     const { invocation } = await svc.recordInvocation(input, initial);
+    const [managedEvent] = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, invocation.id));
+    expect(managedEvent).toMatchObject({ runId: run.id, runScopeKind: "company", runIssueId: null });
     expect(invocation.gatewayId).toBe(gateway.id);
     await db.update(toolInvocations).set({ status: "executing" }).where(eq(toolInvocations.id, invocation.id));
     return { company, agent, input: { ...input, consumeRateLimit: false }, invocation, ratePolicy, svc };
