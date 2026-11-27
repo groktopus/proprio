@@ -26,12 +26,30 @@ it was first collected.
    `eventCount`, and the watermark equals the SHA-256 of the compact JSON
    array of archived event IDs in lexicographic order.
 
+The receipt sets `completenessScope` to `authorized_scope`. `complete` means
+that every member in this frozen, currently authorized scope was delivered. It
+does not prove global source completeness. A lost run binding is reported only
+when stored provenance proves that the current operator may read its source.
+Private, deleted, historical, or unknown bindings are not identified or counted
+as authorized loss. A null run scope never means company scope. Keep capture
+boundaries and independent checkpoints so operators can reconcile these gaps.
+
+An invocation's `occurredAt` can predate the commit that makes its event
+visible. A transaction that commits after a window snapshot is frozen can be
+absent from that export even when its timestamp is inside the window. Rescan
+previously exported windows during reconciliation and deduplicate by stable
+event ID; a completed snapshot is final only for its frozen membership, not
+for all events that may later commit into the interval.
+
 An export belongs to the creating operator and company. Company, audit and task
 access are checked for eligible events. A page with unavailable evidence returns
 `snapshot_incomplete` and sends no partial page. Preserve the checkpoint and
 reconcile before opening a new export. A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.
+
+Exported event objects contain only the public event fields in the API contract.
+Internal run-scope provenance is never returned in a page.
 
 Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
