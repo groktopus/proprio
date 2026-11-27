@@ -1477,6 +1477,10 @@ const mcpSkillsBoardOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/github-native-git",
+  "GET /api/companies/{companyId}/github-native-git/eligible-agents",
+  "POST /api/companies/{companyId}/github-native-git",
+  "DELETE /api/companies/{companyId}/github-native-git/{grantId}",
   // Workload identity status and key rotation are board-only (assertBoard in routes/workload-identity.ts).
   "GET /api/companies/{companyId}/workload-identity",
   "POST /api/companies/{companyId}/workload-identity/rotation",
@@ -11998,13 +12002,21 @@ for (const route of [
   });
 }
 
-for (const operation of [
-  { method: "get", path: "/api/companies/{companyId}/github-native-git", summary: "List terminal GitHub App grants" },
-  { method: "post", path: "/api/companies/{companyId}/github-native-git", summary: "Verify and save a terminal GitHub App grant", body: githubNativeSetupSchema },
-  { method: "delete", path: "/api/companies/{companyId}/github-native-git/{grantId}", summary: "Revoke a terminal GitHub App grant" },
+const githubNativeGrantSummarySchema = z.object({
+  id: z.string().guid(), agentId: z.string().guid(), repository: z.string(), appSlug: z.string(),
+  push: z.boolean(), pullRequests: z.boolean(), verifiedAt: z.iso.datetime(), revokedAt: z.iso.datetime().nullable(),
+});
+for (const { response, ...operation } of [
+  { method: "get", path: "/api/companies/{companyId}/github-native-git", summary: "List terminal GitHub App grants", response: z.array(githubNativeGrantSummarySchema) },
+  { method: "get", path: "/api/companies/{companyId}/github-native-git/eligible-agents", summary: "List agent IDs eligible for a terminal GitHub App grant", response: z.array(z.string().guid()) },
+  { method: "post", path: "/api/companies/{companyId}/github-native-git", summary: "Verify and save a terminal GitHub App grant", body: githubNativeSetupSchema, response: githubNativeGrantSummarySchema },
+  { method: "delete", path: "/api/companies/{companyId}/github-native-git/{grantId}", summary: "Revoke a terminal GitHub App grant", response: githubNativeGrantSummarySchema },
 ] as const) {
   registerCurrentRoute({ ...operation, tags: ["connection-intents"],
-    responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+    responses: { 200: r.ok(response), 401: r.unauthorized, 403: r.forbidden,
+      ...(operation.method === "delete" ? { 404: r.notFound } : {}),
+      ...(operation.method === "post" ? { 400: r.badRequest, 409: r.conflict, 422: r.unprocessable } : {}),
+    } });
 }
 
 // --- Connection intents ------------------------------------------------------

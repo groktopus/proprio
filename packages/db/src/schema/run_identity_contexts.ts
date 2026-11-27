@@ -36,6 +36,7 @@ export const runIdentityContexts = pgTable(
       reason?: string;
       connectionId?: string;
       grantId?: string;
+      nativeGitGrantId?: string;
       repository?: string;
       authenticationMode?: "managed" | "host" | "anonymous";
     }>(),

@@ -31,6 +31,12 @@ export function githubNativeGitRoutes(db: Db) {
     res.json(await service.list(companyId));
   });
 
+  router.get(`${path}/eligible-agents`, async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await authorize(req, companyId);
+    res.json(await service.eligibleAgentIds(companyId));
+  });
+
   router.post(path, async (req, res) => {
     const companyId = req.params.companyId as string;
     const input = githubNativeSetupSchema.parse(req.body);
@@ -44,10 +50,12 @@ export function githubNativeGitRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     const id = req.params.grantId as string;
     await authorize(req, companyId);
-    const grant = isUuidLike(id) && (await service.list(companyId)).find(candidate => candidate.id === id);
+    const grant = isUuidLike(id) && await service.get(companyId, id);
     if (!grant) throw notFound("GitHub App grant not found.");
     const userId = await authorize(req, companyId, grant.agentId);
-    res.json(await service.revoke(companyId, id, userId));
+    res.json(await service.revoke(companyId, id, userId, async () => {
+      await authorize(req, companyId, grant.agentId);
+    }));
   });
 
   return router;
