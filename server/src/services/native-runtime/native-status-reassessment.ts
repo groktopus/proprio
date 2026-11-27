@@ -276,7 +276,7 @@ export async function reassessNativeStatusFromSource(
         });
         decision = { ...incomplete, effects: incomplete.effects.map(effect => effect.kind === "enqueue_continuation"
           ? { ...effect, summary: error.message } : effect.kind === "record_finalization_error"
-            ? { ...effect, nextAction: error.message } : effect) };
+            ? { ...effect, nextAction: error.message, taskRemedy: error.taskRemedy } : effect) };
       }
     }
     let committed: Awaited<ReturnType<typeof commitNativeStatusDecision>>;

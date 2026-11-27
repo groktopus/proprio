@@ -1,6 +1,6 @@
 {
-  "id": "789ff1b9-fa8c-418c-8c23-e5708d718611",
-  "prevId": "db74b5e5-a103-41cd-95f2-e4675088b4c3",
+  "id": "a1f22e7b-f557-459b-9dff-432920f5e98a",
+  "prevId": "15f6ccae-7361-45bd-bb8d-f46c421aa84a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3599,6 +3599,25 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": false
+        },
+        "goal_observation_source_id": {
+          "name": "goal_observation_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_observation_cursor": {
+          "name": "goal_observation_cursor",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_authority_revision": {
+          "name": "goal_authority_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "goal_revision": {
           "name": "goal_revision",
@@ -8970,7 +8989,7 @@
       "checkConstraints": {
         "case_events_kind_check": {
           "name": "case_events_kind_check",
-          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
+          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_decision_recorded',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
         },
         "case_events_actor_type_check": {
           "name": "case_events_actor_type_check",
@@ -9129,6 +9148,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "offer_contract": {
+          "name": "offer_contract",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recipient_decision": {
+          "name": "recipient_decision",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state": {
           "name": "state",
           "type": "text",
@@ -9278,7 +9309,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9294,7 +9325,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9447,7 +9478,7 @@
       "checkConstraints": {
         "case_handoffs_state_check": {
           "name": "case_handoffs_state_check",
-          "value": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
+          "value": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
         },
         "case_handoffs_destination_check": {
           "name": "case_handoffs_destination_check",
@@ -9455,7 +9486,7 @@
         },
         "case_handoffs_destination_state_check": {
           "name": "case_handoffs_destination_state_check",
-          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
+          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
         },
         "case_handoffs_actor_type_check": {
           "name": "case_handoffs_actor_type_check",
@@ -35460,6 +35491,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "task_lineage_json": {
+          "name": "task_lineage_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "result_json": {
           "name": "result_json",
           "type": "jsonb",
@@ -39447,6 +39484,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "review_target_binding": {
+          "name": "review_target_binding",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_by_run_id": {
           "name": "created_by_run_id",
@@ -44701,19 +44744,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_project_id_projects_id_fk": {
-          "name": "issues_project_id_projects_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_project_workspace_id_project_workspaces_id_fk": {
           "name": "issues_project_workspace_id_project_workspaces_id_fk",
           "tableFrom": "issues",
@@ -44740,19 +44770,6 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "issues_parent_id_issues_id_fk": {
-          "name": "issues_parent_id_issues_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "issues",
-          "columnsFrom": [
-            "parent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "issues_privacy_root_issue_id_issues_id_fk": {
           "name": "issues_privacy_root_issue_id_issues_id_fk",
           "tableFrom": "issues",
@@ -44772,45 +44789,6 @@
           "tableTo": "issues",
           "columnsFrom": [
             "privacy_parent_issue_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_assignee_agent_id_agents_id_fk": {
-          "name": "issues_assignee_agent_id_agents_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "assignee_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "issues_checkout_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_checkout_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "checkout_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "issues_execution_run_id_heartbeat_runs_id_fk": {
-          "name": "issues_execution_run_id_heartbeat_runs_id_fk",
-          "tableFrom": "issues",
-          "tableTo": "heartbeat_runs",
-          "columnsFrom": [
-            "execution_run_id"
           ],
           "columnsTo": [
             "id"
@@ -44852,6 +44830,81 @@
             "execution_workspace_id"
           ],
           "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "issues_project_company_fk": {
+          "name": "issues_project_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "company_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_parent_company_fk": {
+          "name": "issues_parent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "company_id",
+            "parent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_assignee_agent_company_fk": {
+          "name": "issues_assignee_agent_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "company_id",
+            "assignee_agent_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "issues_checkout_run_company_fk": {
+          "name": "issues_checkout_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "checkout_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "issues_execution_run_company_fk": {
+          "name": "issues_execution_run_company_fk",
+          "tableFrom": "issues",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "company_id",
+            "execution_run_id"
+          ],
+          "columnsTo": [
+            "company_id",
             "id"
           ],
           "onDelete": "set null",
@@ -45659,6 +45712,198 @@
           "value": "(\"managed_agent_profiles\".\"qualified_at\" IS NULL AND \"managed_agent_profiles\".\"qualified_revision\" IS NULL) OR (\"managed_agent_profiles\".\"qualified_at\" IS NOT NULL AND \"managed_agent_profiles\".\"qualification\" <> '{}'::jsonb AND \"managed_agent_profiles\".\"qualified_revision\" ~ '^sha256:[0-9a-f]{64}$')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.managed_audit_events": {
+      "name": "managed_audit_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "schema_version": {
+          "name": "schema_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "event_type": {
+          "name": "event_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "invocation_id": {
+          "name": "invocation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_id": {
+          "name": "request_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actor_type": {
+          "name": "actor_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason_code": {
+          "name": "reason_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "managed_audit_events_company_occurred_idx": {
+          "name": "managed_audit_events_company_occurred_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "managed_audit_events_invocation_phase_uq": {
+          "name": "managed_audit_events_invocation_phase_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "phase",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "invocation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "managed_audit_events_company_id_companies_id_fk": {
+          "name": "managed_audit_events_company_id_companies_id_fk",
+          "tableFrom": "managed_audit_events",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.native_harness_backups": {
