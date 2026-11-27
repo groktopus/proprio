@@ -575,22 +575,24 @@ describe("native Claude selected profile inference", () => {
   it("probes only the saved Claude credential, exact model, and pinned read-only ACP runtime", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "ambient-account-must-not-be-used");
     vi.stubEnv("OPENAI_API_KEY", "ambient-codex-account-must-not-be-used");
+    vi.stubEnv("HTTPS_PROXY", "http://ambient-proxy.invalid");
     nativeProbe.mockImplementation(async input => {
       await input.onCleanupConfirmed();
       return { provider: "acpx", providerDriver: "acpx_runtime", effectiveModel: "claude-sonnet-5", helloProbePassed: true };
     });
     const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner",
-      config: { env: { ANTHROPIC_API_KEY: "saved-claude-key", ANTHROPIC_BASE_URL: "https://claude.example.test" }, modelReasoningEffort: "high" } }, "claude-sonnet-5");
+      config: { env: { ANTHROPIC_API_KEY: "saved-claude-key" }, modelReasoningEffort: "high" } }, "claude-sonnet-5");
 
     expect(result.status).toBe("pass");
     expect(result.checks).toMatchObject([{ code: "claude_hello_probe_passed", level: "info", message: expect.stringContaining("claude-sonnet-5") }]);
     const input = nativeProbe.mock.calls.at(-1)![0];
     expect(input).toMatchObject({ provider: "acpx", model: "claude-sonnet-5", timeoutMs: 45_000,
-      environment: { ANTHROPIC_API_KEY: "saved-claude-key", ANTHROPIC_BASE_URL: "https://claude.example.test" },
+      environment: { ANTHROPIC_API_KEY: "saved-claude-key" },
       transportOptions: { acpxAgent: "claude", acpxPermissionMode: "deny-all", acpxPermissionModePinned: true, sourceCodexHome: "", externallySandboxed: false } });
     expect(input.environment.ANTHROPIC_API_KEY).not.toBe("ambient-account-must-not-be-used");
     expect(input.environment.CODEX_API_KEY).toBeUndefined();
     expect(input.environment.OPENAI_API_KEY).toBeUndefined();
+    expect(input.environment.HTTPS_PROXY).toBeUndefined();
     expect(input.runtimeDirectory).toContain("proprio-native-claude-setup-");
     expect(result.checks.map(check => check.message).join(" ")).not.toContain("saved-claude-key");
   });
@@ -605,5 +607,32 @@ describe("native Claude selected profile inference", () => {
     expect(result.status).toBe("fail");
     expect(result.checks[0]).toMatchObject({ code: "claude_hello_probe_auth_required", message: expect.not.stringContaining("private assistant response") });
     expect(JSON.stringify(result)).not.toContain("saved-secret");
+  });
+
+  it.each([
+    [{ env: { ANTHROPIC_BASE_URL: "https://attacker.example" } }, "claude_hello_probe_custom_route_unsupported"],
+    [{ env: { HTTPS_PROXY: "http://attacker.example" } }, "claude_hello_probe_custom_route_unsupported"],
+    [{ homeMode: "preconfigured" }, "claude_hello_probe_preconfigured_home_unsupported"],
+  ] as const)("fails closed before probing unsupported Claude setup %j", async (config, code) => {
+    const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner", config }, "selected-model");
+    expect(result).toMatchObject({ status: "fail", checks: [{ code }] });
+    expect(nativeProbe).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["403 model access denied", "claude_hello_probe_failed"],
+    ["request timed out", "claude_hello_probe_timed_out"],
+  ])("classifies native Claude probe error %s without guessing authentication", async (message, code) => {
+    nativeProbe.mockImplementation(async input => { await input.onCleanupConfirmed(); throw new Error(message); });
+    const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner", config: {} }, "selected-model");
+    expect(result.checks[0]).toMatchObject({ code });
+  });
+  it("uses Runner's structured authentication category instead of the status code", async () => {
+    nativeProbe.mockImplementation(async input => {
+      await input.onCleanupConfirmed();
+      throw Object.assign(new Error("provider request rejected (403)"), { providerFailure: { category: "authentication" } });
+    });
+    const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner", config: {} }, "selected-model");
+    expect(result.checks[0].code).toBe("claude_hello_probe_auth_required");
   });
 });

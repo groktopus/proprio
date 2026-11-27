@@ -116,6 +116,22 @@ describe("managed Runner connection test status", () => {
     expect(verifyKey).toHaveBeenCalledExactlyOnceWith("anthropic", "fixture-key");
     expect(claudeProbe).not.toHaveBeenCalled();
   });
+  it("accepts a verified native Claude API-key hello without a second catalog request", async () => {
+    vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "managed-fixture");
+    runtimeProbe.mockResolvedValue({ adapterType: "proprio_runner", status: "pass", testedAt: checkedAt,
+      checks: [{ code: "claude_hello_probe_passed", level: "info", message: "The selected model completed the native hello." }] });
+    const result = await testConnection({ config: { ...context.config, env: { ANTHROPIC_API_KEY: "fixture-key" }, managedAiConnection: { method: "api_key" } } });
+    expect(result.status).toBe("pass");
+    expect(verifyKey).not.toHaveBeenCalled();
+    expect(claudeProbe).not.toHaveBeenCalled();
+  });
+  it("does not revoke a managed Claude grant for model access denial", async () => {
+    runtimeProbe.mockResolvedValue({ adapterType: "proprio_runner", status: "fail", testedAt: checkedAt,
+      checks: [{ code: "claude_hello_probe_failed", level: "error", message: "The selected model is unavailable." }] });
+    const result = await testConnection();
+    expect(result.status).toBe("fail");
+    expect(markAuthFailed).not.toHaveBeenCalled();
+  });
   it("keeps a rejected API key failed", async () => {
     vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "managed-fixture"); verifiedClaude();
     verifyKey.mockRejectedValueOnce(new Error("Rejected key"));

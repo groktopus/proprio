@@ -9817,8 +9817,12 @@ export async function probeNativeRunnerEnvironment(options: {
         return;
       }
       if (event.eventType === "turn.failed" || event.eventType === "turn.interrupted" || event.eventType === "turn.cancelled") {
-        const detail = record(event.payload.error).message;
-        throw new Error(typeof detail === "string" ? detail : "The native provider hello probe failed.");
+        const errorPayload = record(event.payload.error);
+        const detail = errorPayload.message;
+        const failure = new Error(typeof detail === "string" ? detail : "The native provider hello probe failed.");
+        const providerFailure = record(errorPayload.providerFailure);
+        if (typeof providerFailure.category === "string") Object.defineProperty(failure, "providerFailure", { value: { category: providerFailure.category } });
+        throw failure;
       }
     }
     throw new Error("The native provider hello probe ended without a successful turn.");

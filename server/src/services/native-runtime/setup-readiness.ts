@@ -279,16 +279,24 @@ export async function testNativeRunnerAuthentication(context: AdapterEnvironment
 /** Run the selected native Claude profile through its actual ACP runtime. */
 export async function testNativeAcpxClaudeAuthentication(context: AdapterEnvironmentTestContext, model: string | null): Promise<AdapterEnvironmentTestResult> {
   const configured = context.config.env;
+  const savedEnvironment = Object.entries(configured && typeof configured === "object" && !Array.isArray(configured) ? configured : {})
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  const customRoute = savedEnvironment.some(([key]) => /^(?:ANTHROPIC_(?:BASE_URL|VERTEX_BASE_URL)|AWS_ENDPOINT_URL(?:_BEDROCK)?|CLAUDE_CODE_USE_(?:BEDROCK|VERTEX|FOUNDRY)|.*_PROXY)$/i.test(key));
+  const failed = (code: string, message: string, hint: string): AdapterEnvironmentTestResult => ({ adapterType: "proprio_runner", status: "fail", testedAt: new Date().toISOString(), checks: [{ code, level: "error", message, hint }] });
+  if (context.config.homeMode === "preconfigured") return failed("claude_hello_probe_preconfigured_home_unsupported",
+    "Native Claude verification cannot safely test a preconfigured home.", "Use an isolated Claude home or verify the native account manually.");
+  if (customRoute) return failed("claude_hello_probe_custom_route_unsupported",
+    "Native Claude verification cannot safely probe a custom provider route.", "Use the standard Anthropic endpoint without custom proxy settings, then retry.");
+  // This request-time probe has no connection-pinned routing or egress authority.
   const environment: Record<string, string> = Object.fromEntries([
-    ...PROBE_TRANSPORT_ENV_KEYS.flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!]] : []),
-    ...Object.entries(configured && typeof configured === "object" && !Array.isArray(configured) ? configured : {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    ...PROBE_TRANSPORT_ENV_KEYS.filter(key => !/proxy/i.test(key)).flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!] as [string, string]] : []),
+    ...savedEnvironment,
   ]);
   // Never let the probe borrow the controller's Claude or Codex account.
   const runtimeDirectory = await realpath(await mkdtemp(join(tmpdir(), "proprio-native-claude-setup-")));
   try {
     const effort = context.config.modelReasoningEffort ?? context.config.reasoningEffort ?? context.config.effort;
-    const receipt = await probePreparedNativeRuntime(runtimeDirectory, async () => ({
+    await probePreparedNativeRuntime(runtimeDirectory, async () => ({
       runtimeDirectory,
       provider: "acpx",
       model,
@@ -305,22 +313,19 @@ export async function testNativeAcpxClaudeAuthentication(context: AdapterEnviron
         claudeEffort: resolveClaudeEffort("claude", effort),
       },
     }));
-    if (receipt.helloProbePassed !== true || receipt.provider !== "acpx" || receipt.providerDriver !== "acpx_runtime"
-      || typeof receipt.effectiveModel !== "string" || !receipt.effectiveModel.trim() || receipt.effectiveModel === "unknown"
-      || (model !== null && receipt.effectiveModel !== model)) {
-      throw new Error("The selected native Claude runtime returned an incompatible account or model verification receipt.");
-    }
     return { adapterType: "proprio_runner", status: "pass", testedAt: new Date().toISOString(), checks: [{
       code: "claude_hello_probe_passed", level: "info",
-      message: `The native Claude runtime completed a read-only hello turn with the selected model ${receipt.effectiveModel}.`,
+      message: `The native Claude runtime completed a read-only hello turn with the selected model ${model ?? "reported by the runtime"}.`,
     }] };
   } catch (error) {
     if (error instanceof NativeEnvironmentProbeCleanupError) throw error;
     const raw = error instanceof Error ? error.message : "";
-    const authentication = /(?:invalid (?:api[- ]?key|auth(?:entication)? token)|authentication (?:failed|required)|unauthenticated|unauthorized|not authenticated|please (?:log|sign) in|not logged in|\b(?:401|403)\b)/i.test(raw);
+    const authentication = (error && typeof error === "object" && "providerFailure" in error
+      && (error as { providerFailure?: { category?: unknown } }).providerFailure?.category === "authentication")
+      || /(?:invalid (?:api[- ]?key|auth(?:entication)? token)|authentication (?:failed|required)|unauthenticated|unauthorized|not authenticated|please (?:log|sign) in|not logged in)/i.test(raw);
     const timeout = /timed out|timeout/i.test(raw);
     return { adapterType: "proprio_runner", status: "fail", testedAt: new Date().toISOString(), checks: [{
-      code: `claude_hello_probe_${authentication ? "auth_required" : timeout ? "timeout" : "failed"}`,
+      code: `claude_hello_probe_${authentication ? "auth_required" : timeout ? "timed_out" : "failed"}`,
       level: "error",
       message: authentication ? "The selected Claude account could not authenticate the native hello probe."
         : timeout ? "The native Claude hello probe timed out before verification completed."
