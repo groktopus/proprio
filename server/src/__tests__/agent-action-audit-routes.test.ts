@@ -20,10 +20,15 @@ import {
   managedAuditEvents,
   managedAuditExports,
   principalPermissionGrants,
+  toolApplications,
+  toolCatalogEntries,
+  toolConnections,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { readManagedAuditExportPage } from "../services/managed-audit-export.js";
+import { toolAccessPolicyService } from "../services/tool-access-policy.js";
+import { deleteAgentDependencies } from "../services/agent-deletion.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -163,6 +168,69 @@ describePostgres("agent action audit routes", () => {
       expect(creates.map(response => response.status)).toEqual([201, 201, 201, 201]);
       expect(creates.map(response => response.body.eventCount)).toEqual([0, 0, 0, 0]);
       expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports a missing issue-scoped run only to an actor who can read the persisted issue scope", async () => {
+    const { company, agent, issue, run } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const epoch = randomUUID();
+    const occurredAt = Date.now();
+    const from = new Date(Math.floor(occurredAt / 1_000) * 1_000 - 10_000).toISOString();
+    const to = new Date(Date.parse(from) + 2_000).toISOString();
+    const window = { from, to };
+    await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId: issue.id }).where(eq(heartbeatRuns.id, run.id));
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    try {
+      const [application] = await db.insert(toolApplications).values({
+        companyId: company.id, applicationKey: `audit-${randomUUID()}`, name: "Audit fixture", type: "mcp_http", status: "active",
+      }).returning();
+      const [connection] = await db.insert(toolConnections).values({
+        companyId: company.id, applicationId: application!.id, name: "Audit connection", uid: `audit/${randomUUID()}`,
+        transport: "mcp_remote", status: "active", enabled: true, config: { url: "https://example.invalid/mcp" },
+      }).returning();
+      const [catalogEntry] = await db.insert(toolCatalogEntries).values({
+        companyId: company.id, applicationId: application!.id, connectionId: connection!.id,
+        name: "audit_fixture", toolName: "audit_fixture", riskLevel: "read", versionHash: randomUUID(), schemaHash: randomUUID(),
+      }).returning();
+      const input = {
+        companyId: company.id,
+        actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+        runContext: { heartbeatRunId: run.id, issueId: issue.id },
+        request: { connectionId: connection!.id, catalogEntryId: catalogEntry!.id, toolName: "audit_fixture", arguments: {} },
+      };
+      const policy = toolAccessPolicyService(db);
+      const decision = await policy.decide(input);
+      await policy.recordInvocation(input, decision);
+      const [capturedEvent] = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.runId, run.id));
+      expect(capturedEvent).toMatchObject({ runScopeKind: "issue", runIssueId: issue.id, taskId: issue.id });
+      await db.update(managedAuditEvents).set({ occurredAt: new Date(Date.parse(from) + 1_000) })
+        .where(eq(managedAuditEvents.id, capturedEvent!.id));
+
+      // Exercise the production lifecycle path that removes the run while
+      // retaining its managed audit event and canonical privacy provenance.
+      await db.transaction(tx => deleteAgentDependencies(tx, company.id, agent.id));
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id))).toHaveLength(0);
+      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.id, capturedEvent!.id))).toHaveLength(1);
+
+      const response = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
+
+      expect(response.status, response.text).toBe(409);
+      expect(response.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+      expect(response.text).not.toContain(capturedEvent!.id);
+      expect(response.text).not.toContain(run.id);
+      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
+      expect((await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created")).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
