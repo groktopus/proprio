@@ -57,7 +57,20 @@ async function onlyEntry(directory: string, name: string): Promise<boolean> {
   return found;
 }
 
-export async function readWorkspaceGitSourceRoots(cwd: string, options: { ancestors?: boolean } = {}): Promise<WorkspaceGitSourceRoots | null> {
+async function isStableEmptyDirectory(
+  directory: string, before: NonNullable<Awaited<ReturnType<typeof entry>>>, device: bigint,
+): Promise<boolean> {
+  if (!before.isDirectory() || before.isSymbolicLink() || before.dev !== device) return false;
+  for await (const _child of await fs.opendir(directory)) return false;
+  const after = await entry(directory);
+  return Boolean(after?.isDirectory() && !after.isSymbolicLink()
+    && after.dev === before.dev && after.ino === before.ino
+    && after.mtimeNs === before.mtimeNs && after.ctimeNs === before.ctimeNs);
+}
+
+export async function readWorkspaceGitSourceRoots(cwd: string, options: {
+  ancestors?: boolean; ignoreEmptyGitMarkerAt?: string;
+} = {}): Promise<WorkspaceGitSourceRoots | null> {
   let root = path.resolve(cwd), marker = "", markerEntry: Awaited<ReturnType<typeof entry>>;
   for (let depth = 0; ; depth++) {
     if (depth > 32) throw invalid();
@@ -66,6 +79,13 @@ export async function readWorkspaceGitSourceRoots(cwd: string, options: { ancest
     if (!source.isDirectory() || source.isSymbolicLink()) throw invalid();
     root = await fs.realpath(root);
     marker = path.join(root, ".git"); markerEntry = await entry(marker);
+    // Linux sandbox mount setup can leave its empty metadata target behind. It
+    // is not Git provenance: ignore it only at the caller-proven exact task
+    // root, then keep searching ancestors for an actual repository.
+    if (markerEntry && marker === options.ignoreEmptyGitMarkerAt
+      && await isStableEmptyDirectory(marker, markerEntry, source.dev)) {
+      markerEntry = null;
+    }
     if (markerEntry) break;
     if (await entry(path.join(root, "objects")) && await entry(path.join(root, "HEAD"))) throw invalid();
     if (!options.ancestors || path.dirname(root) === root) return null;

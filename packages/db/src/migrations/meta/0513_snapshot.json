@@ -1,6 +1,6 @@
 {
-  "id": "0f23e535-a3c3-4477-b07f-901e4d6645fc",
-  "prevId": "2389911e-14a1-4032-8489-16accbcaa614",
+  "id": "263cdb46-287a-40bc-8333-1c2536201df1",
+  "prevId": "7a3d121e-ba74-41c6-9562-0eaa9b675d6b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8989,7 +8989,7 @@
       "checkConstraints": {
         "case_events_kind_check": {
           "name": "case_events_kind_check",
-          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
+          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_decision_recorded',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
         },
         "case_events_actor_type_check": {
           "name": "case_events_actor_type_check",
@@ -9148,6 +9148,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "offer_contract": {
+          "name": "offer_contract",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recipient_decision": {
+          "name": "recipient_decision",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state": {
           "name": "state",
           "type": "text",
@@ -9297,7 +9309,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9313,7 +9325,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9466,7 +9478,7 @@
       "checkConstraints": {
         "case_handoffs_state_check": {
           "name": "case_handoffs_state_check",
-          "value": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
+          "value": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
         },
         "case_handoffs_destination_check": {
           "name": "case_handoffs_destination_check",
@@ -9474,7 +9486,7 @@
         },
         "case_handoffs_destination_state_check": {
           "name": "case_handoffs_destination_state_check",
-          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
+          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
         },
         "case_handoffs_actor_type_check": {
           "name": "case_handoffs_actor_type_check",
@@ -35479,6 +35491,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "task_lineage_json": {
+          "name": "task_lineage_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "result_json": {
           "name": "result_json",
           "type": "jsonb",
@@ -39466,6 +39484,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "review_target_binding": {
+          "name": "review_target_binding",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_by_run_id": {
           "name": "created_by_run_id",
@@ -46047,13 +46071,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "gen_random_uuid()"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         },
         "expires_at": {
           "name": "expires_at",

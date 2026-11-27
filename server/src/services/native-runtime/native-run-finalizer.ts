@@ -14,7 +14,7 @@ import { notifyUnsafeWorkspaceExportRunChange } from "../unsafe-workspace-export
 import { notifyUnsafeWorkspaceExportRecovery } from "../unsafe-workspace-export-notifications.js";
 import { notifyCancelledWorkspacePreservation } from "../cancelled-workspace-preservation-notifications.js";
 import { notifyInstructionCollection } from "../instruction-collection-notifications.js";
-import { readRequiredQualityReview } from "../required-quality-review.js";
+import { isDeferredSignoffTargetFailure, readDeferredSignoffTargetCurrent, readRequiredQualityReview } from "../required-quality-review.js";
 import { NativeDeliverableEvidenceError, validateNativeDeliverableEvidence } from "./native-deliverable-feedback.js";
 import { OWN_QUESTION_UNANSWERED_REASON, pendingOwnQuestionId, reportsOnlyProviderMessage } from "./own-question-wait.js";
 import { conversationTurnPresentsAnswer, pendingNativeGovernance } from "./native-governance.js";
@@ -22,6 +22,7 @@ import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js"
 import { onboardingFirstTaskCompletionAllowed } from "../onboarding-first-task-admission.js";
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { reconcileMuseNativeTerminalRun } from "./muse-terminal-reconciliation.js";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import { assertNativeCaseHandoffResult } from "./native-case-handoff.js";
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
 import { hasPublishedGitHubReview, readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
@@ -1163,6 +1164,7 @@ async function recoverCommittedNativeChatResponseInScope(
       if (
         !accepted ||
         !decision ||
+        decision.reasonCode === CASE_HANDOFF_SUPERSEDED_REASON ||
         result.schema !== "proprio.run_result.v1" ||
         !(await acceptedResponseDigestMatches(tx, run, accepted))
       )
@@ -1766,11 +1768,16 @@ export async function finalizeNativeRun(input: {
     const reviewStage = isConversation(authoritativeIssue) || reviewContext
       ? { kind: "none" as const } : completionReviewStageEntry(authoritativeIssue, run.agentId);
     await cancelStoppedRunContinuation(input.db, { companyId: run.companyId, resultJson: savedStop }, toolCallLoopContinuationKey(run.id));
+    const caseHandoff = await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result);
+    const deferredSignoffTargetCurrent = result.reportedWorkDisposition !== "done" ||
+      await readDeferredSignoffTargetCurrent(input.db, authoritativeIssue);
     const statusInput: Parameters<typeof resolveNativeFinalizerStatus>[0] = {
+      deferredSignoffTargetCurrent,
       requiredQualityReviewSatisfied: qualityReview.satisfied,
       executionStageApprovedByRun: await executionStageApprovedByRun(input.db, run, authoritativeIssue),
       executionReviewStageStarts: reviewStage.kind === "starts",
-      caseHandoffAuthorized: Boolean(await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result)),
+      caseHandoffAuthorized: Boolean(caseHandoff),
+      caseHandoffAwaitingDecision: caseHandoff?.state === "offered",
       monitorWaitDispatched: monitorDelivery !== null,
       monitorWaitPreserved: preservedMonitorWait !== null,
       monitorWaitSuperseded: supersededMonitorWait !== null,
@@ -1865,7 +1872,7 @@ export async function finalizeNativeRun(input: {
           assessment: { ...assessment, hasBlockingRemainingWork: true, continuation: null } });
         proposedDecision = { ...incomplete, effects: incomplete.effects.map(effect =>
           effect.kind === "enqueue_continuation" ? { ...effect, summary: error.message }
-            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message } : effect) };
+            : effect.kind === "record_finalization_error" ? { ...effect, nextAction: error.message, taskRemedy: error.taskRemedy } : effect) };
       }
     }
     proposedDecision = gateDoneOnConfiguredReview(proposedDecision, reviewStage, run.agentId);
@@ -1985,19 +1992,14 @@ export async function finalizeNativeRun(input: {
       });
       crashPoint("native.finalize.after_decision_before_projection");
       const now = new Date();
-      const finalizationFailed = decision.effects.some(
-        (effect) => effect.kind === "record_finalization_error",
-      );
-      const finalizationPhase = finalizationFailed
+      const savedDecision = record(committed.decision.decisionJson);
+      const effects = Array.isArray(savedDecision.effects) ? savedDecision.effects.map(record) : [];
+      const finalizationPhase = effects.some(effect => effect.kind === "record_finalization_error")
         ? "retryable_failure"
         : "committed";
-      // commitNativeStatusDecision() already committed its own transaction above.
-      // Its "cancel_continuations" effect (status-decision-committer.ts) writes a
-      // terminal status to this same run and emits for it. Skip the emit here in
-      // that case so one run reaching a terminal state emits exactly one event.
-      const alreadyEmittedByCommittedDecision = decision.effects.some(
-        (effect) => effect.kind === "cancel_continuations",
-      );
+      // The status transaction already emits a terminal event when it cancels
+      // a continuation. The run projection emits only when that effect is absent.
+      const alreadyEmittedByCommittedDecision = effects.some(effect => effect.kind === "cancel_continuations");
       const clearExecutionFailure = input.projectRunStatus && finalizationPhase === "committed" && terminalState === "succeeded";
       const finalizationMetadata = {
         ...(providerExplanation ? { providerFailure: providerExplanation } : {}),
@@ -2007,9 +2009,9 @@ export async function finalizeNativeRun(input: {
         ...(finalizationPhase === "committed" ? { failureCode: null, originalFailureCode: null, nextAttemptAt: null } : {}),
         assessmentId: assessmentRow.id,
         decisionId: committed.decision.id,
-        authoritativeDecision: decision.toStatus,
-        finalizationPolicyVersion: decision.policyVersion,
-        finalizationReasonCode: decision.reasonCode,
+        authoritativeDecision: committed.decision.toStatus,
+        finalizationPolicyVersion: committed.decision.policyVersion,
+        finalizationReasonCode: committed.decision.reasonCode,
         // Only the locked status transaction can mint this presentation
         // proof. Never carry a runner-provided marker forward.
         externalChatReviewPresentation: record(
@@ -2151,7 +2153,8 @@ export async function finalizeNativeRun(input: {
         decisionId: committed.decision.id,
       };
     } catch (error) {
-      if (error instanceof NativeStatusRaceError && attempt < 2) {
+      if ((error instanceof NativeStatusRaceError ||
+          (decision.statusAction === "done" && isDeferredSignoffTargetFailure(error))) && attempt < 2) {
         supersedesAssessmentId = assessmentRow.id;
         await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
         continue;
