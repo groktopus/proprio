@@ -15,7 +15,12 @@ export const RUNTIME_CONNECTION_TOOL_DEFINITIONS = [
     description: CONNECTION_REQUEST_TOOL_DESCRIPTION,
     inputSchema: {
       type: "object",
-      properties: { service: { type: "string" }, connectionId: { type: "string", description: "Reuse this saved connection" }, toolNames: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 20, uniqueItems: true, description: "Exact indexed tools needed by this agent" }, targetService: { type: "string", description: "App slug returned by search only when the user explicitly named this external provider" }, selectionInteractionId: { type: "string", description: "Saved answered provider-choice interaction ID for aggregator routes" } },
+      properties: { service: { type: "string" }, githubGit: {
+        type: "object", description: "Use only with service github for terminal Git or gh, with the task workspace repository",
+        properties: { repository: { type: "string", description: "GitHub owner/repo" },
+          operation: { type: "string", enum: ["read", "push", "create_pull_request"] } },
+        required: ["repository", "operation"], additionalProperties: false,
+      }, connectionId: { type: "string", description: "Reuse this saved connection" }, toolNames: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 20, uniqueItems: true, description: "Exact indexed tools needed by this agent" }, targetService: { type: "string", description: "App slug returned by search only when the user explicitly named this external provider" }, selectionInteractionId: { type: "string", description: "Saved answered provider-choice interaction ID for aggregator routes" } },
       required: ["service"],
       additionalProperties: false,
     },

@@ -68,7 +68,7 @@ async function findAvailableToolConnection(db: Db, task: Task, intent: Intent, p
   }
   // Additional permissions, provider authentication and inbox setup still need
   // their governed completion paths. Aggregator cards also name an upstream app.
-  if (payload.purpose || payload.accessRequest || payload.upstreamService
+  if (payload.githubGit || payload.purpose || payload.accessRequest || payload.upstreamService
     || payload.requestingAgentId !== task.assigneeAgentId || !intent.addresseeUserId) return null;
   if (intent.addresseeUserId !== "local-board") {
     const [membership] = await db.select().from(companyMemberships).where(and(

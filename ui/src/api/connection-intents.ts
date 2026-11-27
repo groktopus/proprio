@@ -18,10 +18,10 @@ export const connectionIntentsApi = {
       `/connection-intents/${interactionId}/phase`,
       { phase, ...(setupAccess ? { setupAccess } : {}) },
     ),
-  complete: (interactionId: string, connectionId: string) =>
+  complete: (interactionId: string, connectionId: string, nativeGitVerifiedAt?: string) =>
     api.post<ConnectionIntentInteraction>(
       `/connection-intents/${interactionId}/complete`,
-      { connectionId },
+      { connectionId, ...(nativeGitVerifiedAt ? { nativeGitVerifiedAt } : {}) },
     ),
   decline: (interactionId: string, reason?: string) =>
     api.post<ConnectionIntentInteraction>(

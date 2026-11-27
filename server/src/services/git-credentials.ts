@@ -394,6 +394,7 @@ export async function resolveManagedGitHubIdentitySelection(
   grant?: typeof connectionGrants.$inferSelect;
   error?: string;
   mcpOnly?: true;
+  ambiguous?: true;
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
@@ -473,6 +474,7 @@ export async function resolveManagedGitHubIdentitySelection(
   ))) {
     return {
       configured: true, identitySource,
+      ...(candidates.length > 1 ? { ambiguous: true as const } : {}),
       error: candidates.length === 0
         ? "No managed GitHub identity is available for this run"
         : "More than one managed GitHub identity matches this run",

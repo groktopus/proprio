@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { agents, executionWorkspaces, githubNativeGrants, issues, projectWorkspaces, type Db } from "@groktopus/db";
 import {
   githubNativeRepositorySchema, isAgentStatusInvokable, isUuidLike,
-  type GitHubNativeGrantSummary, type GitHubNativeOperation, type GitHubNativeSetupInput,
+  type GitHubNativeEligibility, type GitHubNativeGrantSummary, type GitHubNativeOperation, type GitHubNativeSetupInput,
 } from "@groktopus/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -107,9 +107,10 @@ export function githubNativeGitService(db: Db, fetchImpl = fetch) {
     return Boolean(row);
   }
 
-  async function find(companyId: string, agentId: string, repository: string | null) {
+  async function find(companyId: string, agentId: string, repository: string | null, lock = false) {
     if (!repository) return undefined;
-    const [grant] = await db.select().from(githubNativeGrants).where(byRepository(companyId, agentId, repository));
+    const query = db.select().from(githubNativeGrants).where(byRepository(companyId, agentId, repository));
+    const [grant] = await (lock ? query.for("share") : query);
     return grant;
   }
 
@@ -207,14 +208,20 @@ export function githubNativeGitService(db: Db, fetchImpl = fetch) {
         return revoked!;
       });
     },
-    async eligibility(companyId: string, agentId: string, repository: string | null, operation: GitHubNativeOperation) {
-      const grant = await find(companyId, agentId, repository);
-      if (!grant || grant.revokedAt) return { status: "unavailable" as const,
-        reason: grant ? "The GitHub App grant for this repository was revoked." : "No eligible GitHub App grant for this agent and repository." };
-      if ((operation === "push" && !grant.push) || (operation === "create_pull_request" && !grant.pullRequests)) {
-        return { status: "unavailable" as const, reason: "The GitHub App grant does not allow this action." };
+    async eligibility(companyId: string, agentId: string, repository: string | null, operation: GitHubNativeOperation,
+      lock = false): Promise<GitHubNativeEligibility> {
+      const grant = await find(companyId, agentId, repository, lock);
+      if (!grant) {
+        const bound = await hasBinding(companyId, agentId);
+        return bound
+          ? { status: "unavailable", code: "repository_denied", reason: "No GitHub App grant covers this repository for this agent." }
+          : { status: "unavailable", code: "no_identity", reason: "No eligible GitHub App identity is configured for this agent." };
       }
-      return { status: "available" as const, grant: summarize(grant) };
+      if (grant.revokedAt) return { status: "unavailable", code: "revoked", reason: "The GitHub App grant for this repository was revoked." };
+      if ((operation === "push" && !grant.push) || (operation === "create_pull_request" && !grant.pullRequests)) {
+        return { status: "unavailable", code: "action_denied", reason: "The GitHub App grant does not allow this action." };
+      }
+      return { status: "available", grant: summarize(grant) };
     },
     async issueToken(companyId: string, agentId: string, repository: string | null) {
       const grant = await find(companyId, agentId, repository);

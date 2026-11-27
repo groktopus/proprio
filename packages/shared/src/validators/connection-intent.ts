@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { githubNativeRequestSchema } from "../github-native-git.js";
 
 export const connectionsSearchInputSchema = z.object({
   query: z.string().trim().max(4000).default(""),
@@ -10,11 +11,15 @@ export const connectionRequestInputSchema = z.object({
   connectionId: z.string().guid().optional().describe("Reuse this saved connection; never create a replacement gateway"),
   toolNames: z.array(z.string().trim().min(1).max(160)).min(1).max(20).refine(names => new Set(names).size === names.length, "Requested tools must be unique").optional().describe("Exact indexed tool names needed by this agent; writes require approval"),
   selectionInteractionId: z.string().guid().optional(),
+  githubGit: githubNativeRequestSchema.optional(),
   targetService: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/).optional().describe("App slug returned by search only when the user explicitly named this external provider"),
-}).strict();
+}).strict().refine(input => !input.githubGit || (
+  input.service === "github" && !input.toolNames && !input.connectionId && !input.targetService && !input.selectionInteractionId
+), "Terminal Git requests require GitHub, a repository, and an operation.");
 
 export const completeConnectionIntentSchema = z.object({
   connectionId: z.string().guid(),
+  nativeGitVerifiedAt: z.iso.datetime().optional(),
 }).strict();
 
 export const declineConnectionIntentSchema = z.object({

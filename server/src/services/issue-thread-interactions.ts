@@ -3207,7 +3207,8 @@ export function issueThreadInteractionService(
     ) => {
       const payload = connectionIntentPayloadSchema.parse(input.payload);
       const sameSavedSetup = (candidate: typeof payload) =>
-        candidate.agentSetup === payload.agentSetup
+        isDeepStrictEqual(candidate.githubGit, payload.githubGit)
+        && candidate.agentSetup === payload.agentSetup
         && candidate.agentSetupOperationId === payload.agentSetupOperationId
         && candidate.savedSetup?.endpointId === payload.savedSetup?.endpointId
         && candidate.savedSetup?.connectionId === payload.savedSetup?.connectionId
@@ -3343,6 +3344,7 @@ export function issueThreadInteractionService(
             return (
               candidatePayload.success &&
               candidatePayload.data.serviceSlug === payload.serviceSlug && candidatePayload.data.purpose === payload.purpose
+              && isDeepStrictEqual(candidatePayload.data.githubGit, payload.githubGit)
             );
           })
           .map((candidate) => candidate.id);

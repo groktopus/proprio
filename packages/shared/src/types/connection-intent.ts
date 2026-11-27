@@ -75,6 +75,7 @@ export interface ConnectionRequestResult {
   state: "ready" | "needs_user_action";
   connectionId: string | null;
   interactionId: string | null;
+  nativeGitGrantId?: string;
   instruction: string;
 }
 
@@ -82,6 +83,7 @@ export interface ConnectionRequestResult {
 export type ConnectionIntentSetupConnection = Pick<ToolConnection, "id" | "applicationId" | "name" | "status" | "enabled">;
 
 export interface ConnectionIntentSetupOptions {
+  githubGit?: import("../github-native-git.js").GitHubNativeEligibility;
   chatSetup?: { path: string; endpointId: string; connectionId: string };
   /** Resume this request's saved AgentMail account after a partial setup. */
   emailSetup?: { credentialConnectionId: string | null; readyConnectionId: string | null };
@@ -103,6 +105,7 @@ export interface ConnectionIntentSetupOptions {
 
 export interface CompleteConnectionIntentInput {
   connectionId: string;
+  nativeGitVerifiedAt?: string;
 }
 
 export interface DeclineConnectionIntentInput {

@@ -110,7 +110,7 @@ export function runtimeConnectionIntentRoutes(db: Db) {
       }
       if (name === "connection_request") {
         const input = connectionRequestInputSchema.parse(params.arguments ?? {});
-        const result = await service.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames });
+        const result = await service.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames, ...(input.githubGit ? { githubGit: input.githubGit } : {}) });
         res.json({ jsonrpc: "2.0", id, result: resultContent(result) });
         return;
       }
@@ -134,7 +134,7 @@ export function runtimeConnectionIntentRoutes(db: Db) {
   });
   router.post("/runtime-tools/connections/request", async (req, res) => {
     const input = connectionRequestInputSchema.parse(req.body ?? {});
-    res.json(await service.request(runtimeClaims(req), input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames }));
+    res.json(await service.request(runtimeClaims(req), input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames, ...(input.githubGit ? { githubGit: input.githubGit } : {}) }));
   });
   return router;
 }
@@ -205,6 +205,7 @@ export function connectionIntentBoardRoutes(db: Db, heartbeat: Heartbeat) {
     const { loaded, userId } = await addressedIntent(req);
     const input = completeConnectionIntentSchema.parse(req.body);
     const interaction = await service.complete(loaded.interaction.id, input.connectionId, userId, {
+      ...(input.nativeGitVerifiedAt ? { nativeGitVerifiedAt: input.nativeGitVerifiedAt } : {}),
       canManageOrganizationGrant: await canManageCompanyConnections(req, loaded.issue.companyId),
       bypassCurrentMembershipCheck: bypassCurrentMembershipCheck(req),
     });
@@ -218,6 +219,7 @@ export function connectionIntentBoardRoutes(db: Db, heartbeat: Heartbeat) {
       details: {
         interactionId: interaction.id,
         connectionId: interaction.result?.connectionId ?? null,
+        nativeGitGrantId: interaction.result?.nativeGitGrantId ?? null,
         requestingAgentId: interaction.payload.requestingAgentId,
       },
     });

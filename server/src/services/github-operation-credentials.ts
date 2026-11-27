@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, eq } from "drizzle-orm";
-import { isUuidLike } from "@groktopus/shared";
+import { isUuidLike, type GitHubNativeEligibility, type GitHubNativeRequest } from "@groktopus/shared";
 import {
   agents,
   heartbeatRuns,
@@ -14,6 +14,7 @@ import { captureRunCompletionIdentity, captureRunIdentity, type RunIdentityConte
 import {
   buildGitAuthInvocation,
   resolveManagedGitHubCredential,
+  resolveManagedGitHubIdentitySelection,
 } from "./git-credentials.js";
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
@@ -121,7 +122,60 @@ async function saveGitHubSummary(
     .where(eq(runIdentityContexts.id, context.id));
 }
 
-/** No company secrets or ambient credentials are consulted by this path. */
+/** Check an App grant without minting a credential or changing task authority. */
+export async function githubNativeIntentEligibility(db: Db, input: {
+  companyId: string; agentId: string; issueId: string; sourceRunId: string | null;
+  request: GitHubNativeRequest; lockGrant?: boolean;
+}): Promise<GitHubNativeEligibility> {
+  if (!input.sourceRunId) return {
+    status: "unavailable", code: "runtime_denied", reason: "Start a task run in Proprio Runner to request terminal Git.",
+  };
+  const [source] = await db.select({
+    run: { id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+      issueId: heartbeatRuns.issueId, nativeIssueId: heartbeatRuns.nativeIssueId, runtimeMode: heartbeatRuns.runtimeMode,
+      contextSnapshot: heartbeatRuns.contextSnapshot },
+    identity: { status: runIdentityContexts.status, cause: runIdentityContexts.cause, responsibleUserId: runIdentityContexts.responsibleUserId },
+  }).from(heartbeatRuns)
+    .leftJoin(runIdentityContexts, and(eq(runIdentityContexts.id, heartbeatRuns.activeIdentityContextId),
+      eq(runIdentityContexts.companyId, heartbeatRuns.companyId), eq(runIdentityContexts.runId, heartbeatRuns.id)))
+    .where(and(eq(heartbeatRuns.id, input.sourceRunId), eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.agentId, input.agentId)));
+  const sourceTask = source?.run.issueId ?? source?.run.nativeIssueId
+    ?? source?.run.contextSnapshot?.issueId ?? source?.run.contextSnapshot?.taskId;
+  if (sourceTask !== input.issueId || source?.run.runtimeMode !== "native" || !source.identity || source.identity.status !== "accepted"
+    || !await allowsGitHubCredentialExport(db, source.run)) {
+    return { status: "unavailable", code: "runtime_denied",
+      reason: "Terminal Git requires a standard-trust Proprio Runner execution." };
+  }
+
+  const managed = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+    agentId: input.agentId, responsibleUserId: source.identity.cause === "company_default" ? null : source.identity.responsibleUserId,
+    allowStandingDelegation: false,
+  });
+  if (managed.configured && !managed.mcpOnly) {
+    if (managed.ambiguous) return {
+      status: "unavailable", code: "ambiguous", reason: "More than one managed GitHub identity matches this run. Resolve the conflict in Connectors.",
+    };
+    if (!managed.grant) return {
+      status: "unavailable", code: "managed_identity",
+      reason: `${managed.error ?? "No eligible managed GitHub identity is available"}. Review managed GitHub access in Connectors.`,
+    };
+    if (!managed.grant.providerTenant?.github?.repositories?.some(repo => repo.fullName.toLowerCase() === input.request.repository)) {
+      return { status: "unavailable", code: "managed_identity",
+        reason: "The selected managed GitHub identity has no verified access to this repository. Review its repository access in Connectors." };
+    }
+    return { status: "unavailable", code: "managed_identity",
+      reason: "The run selects an existing managed identity. Verify this action for that identity in Connectors before using terminal Git." };
+  }
+
+  const repository = await taskGitHubRepository(db, input.companyId, input.issueId, input.agentId);
+  if (repository !== input.request.repository) return {
+    status: "unavailable", code: "workspace_mismatch", reason: "The requested repository must match the task workspace repository.",
+  };
+  return githubNativeGitService(db).eligibility(input.companyId, input.agentId, repository, input.request.operation, input.lockGrant);
+}
+
+/** Ambient credentials are never consulted by this path. */
 export async function resolveGitHubOperationCredentials(
   db: Db,
   input: {
