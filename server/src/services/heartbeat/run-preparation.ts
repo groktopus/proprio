@@ -1424,6 +1424,9 @@ export async function createManagedMcpRunConfig(input: {
       enabled: toolConnections.enabled,
       status: toolConnections.status,
       healthStatus: toolConnections.healthStatus,
+      authKind: toolConnections.authKind,
+      transport: toolConnections.transport,
+      credentialPolicy: toolConnections.credentialPolicy,
       config: toolConnections.config,
       transportConfig: toolConnections.transportConfig,
     })
@@ -1475,6 +1478,9 @@ export async function createManagedMcpRunConfig(input: {
           )
           .map((install) => ({
             id: install.connectionId,
+            authKind: install.authKind,
+            transport: install.transport,
+            credentialPolicy: install.credentialPolicy,
             config: install.config,
             transportConfig: install.transportConfig,
           })),

@@ -145,6 +145,10 @@ qualification; do not claim that generating Proprio's configuration covers it.
 
 ## Read/write defaults and credential ownership
 
+GitHub's Organization PAT connection supplies hosted MCP tool access. The tool
+gateway checks the connection's audience and the agent's action permissions.
+Terminal Git and `gh` use a separate runtime identity check.
+
 New tool connections request the provider-documented permissions needed for their
 supported read **and write** actions. Prefer an available write/draft capability
 before a managed read-only method. Read-only capability choices and provider

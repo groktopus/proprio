@@ -2685,6 +2685,45 @@ rl.on("line", (line) => {
     }
   });
 
+  it("uses the Organization GitHub PAT for an authorized MCP tool in a captured run", async () => {
+    const { seed } = githubCredentialsFixture(() => db);
+    const { companyId, agentId, runId, issueId } = await seed();
+    const value = "synthetic-organization-pat";
+    const secret = await secretService(db).create(companyId, {
+      name: "Organization GitHub PAT", key: "test_github_org_pat", provider: "local_encrypted", value,
+    });
+    const { connection, catalogEntry } = await createRemoteMcpTool(db, companyId, {
+      applicationKey: "github", toolName: "list_issues", riskLevel: "read",
+      url: "https://github-mcp-fixture.invalid/mcp",
+      connectionConfig: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" },
+      credentialRefs: [{ name: "authorization", secretId: secret.id, version: "latest", placement: "header", key: "Authorization", prefix: "Bearer " }],
+      credentialSecretRefs: [{ secretId: secret.id, versionSelector: "latest", configPath: "credentials.authorization" }],
+    });
+    await db.update(toolCatalogEntries).set({ inputSchema: { type: "object", properties: {} } })
+      .where(eq(toolCatalogEntries.id, catalogEntry.id));
+    await db.update(toolConnections).set({ authKind: "api_key", credentialPolicy: "shared" })
+      .where(eq(toolConnections.id, connection.id));
+    await allowAllToolsForAgent(db, companyId, agentId);
+    const remoteHttpRequest = vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      expect(request.params.name).toBe("list_issues");
+      expect(new Headers(init.headers).get("authorization")).toContain(value);
+      return Response.json({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: "found" }] } });
+    });
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest });
+    const session = await gateway.createSession({ companyId, agentId, runId, issueId });
+    const tool = (await gateway.listToolsForSession(session.token)).find(entry => entry.catalogEntryId === catalogEntry.id);
+    expect(tool).toBeDefined();
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} }))
+      .resolves.toMatchObject({ status: "completed" });
+    expect(remoteHttpRequest).toHaveBeenCalledOnce();
+
+    await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.connectionId, connection.id));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} }))
+      .rejects.toMatchObject({ reasonCode: "organization_authorization_required" });
+    expect(remoteHttpRequest).toHaveBeenCalledOnce();
+  });
+
   it("finds the same GitHub account's tool on a different connection after credential failure", async () => {
     const { seed, grant } = githubCredentialsFixture(() => db);
     const context = await seed();

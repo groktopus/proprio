@@ -99,6 +99,21 @@ function isSupportedGitHubRemoteUrl(remoteUrl: string): boolean {
   }
 }
 
+/** The catalog PAT authenticates the hosted MCP transport only. */
+export function isGitHubMcpPatConnection(connection: {
+  config?: unknown;
+  transportConfig?: unknown;
+  authKind?: string;
+  transport?: string;
+  credentialPolicy?: string;
+}): boolean {
+  if (connection.authKind !== "api_key" || connection.transport !== "mcp_remote" || connection.credentialPolicy !== "shared") return false;
+  const config = connection.config as Record<string, unknown> | null | undefined;
+  const transportConfig = connection.transportConfig as Record<string, unknown> | null | undefined;
+  return (config?.sourceTemplateKey ?? transportConfig?.sourceTemplateKey) === "github"
+    && (config?.connectionMethodKey ?? transportConfig?.connectionMethodKey) === "mcp-key";
+}
+
 /**
  * Mask credential material embedded in URLs so it never reaches warnings, run errors, or
  * persisted payloads: userinfo on any scheme (`https://user:token@host`,
@@ -403,9 +418,14 @@ export async function resolveManagedGitHubIdentitySelection(
   // make unrelated agents fail before their adapter starts and would also
   // suppress their otherwise-eligible legacy credential fallback.
   if (eligibleConnectionIds.size === 0) return { configured: false };
+  // Preserve the native fail-closed state when only an MCP PAT is installed.
+  // In particular, its grant must never become a terminal identity.
+  const nativeConnectionIds = githubConnections.filter((connection) =>
+    eligibleConnectionIds.has(connection.id) && !isGitHubMcpPatConnection(connection),
+  ).map((connection) => connection.id);
   const grants = await db.select().from(connectionGrants).where(and(
     eq(connectionGrants.companyId, companyId),
-    inArray(connectionGrants.connectionId, [...eligibleConnectionIds]),
+    inArray(connectionGrants.connectionId, nativeConnectionIds),
     context.explicitGrantId ? eq(connectionGrants.id, context.explicitGrantId) : undefined,
     or(eq(connectionGrants.kind, "agent"), eq(connectionGrants.kind, "user")),
   ));
@@ -501,6 +521,9 @@ export async function filterResolvedGitHubConnectionsForRun<T extends {
   id: string;
   config?: unknown;
   transportConfig?: unknown;
+  authKind?: string;
+  transport?: string;
+  credentialPolicy?: string;
 }>(input: {
   db: Db;
   companyId: string;
@@ -515,7 +538,8 @@ export async function filterResolvedGitHubConnectionsForRun<T extends {
     const transportConfig = connection.transportConfig && typeof connection.transportConfig === "object"
       ? connection.transportConfig as Record<string, unknown>
       : {};
-    return config.sourceTemplateKey === "github" || transportConfig.sourceTemplateKey === "github";
+    return !isGitHubMcpPatConnection(connection)
+      && (config.sourceTemplateKey === "github" || transportConfig.sourceTemplateKey === "github");
   });
   if (githubConnections.length === 0) return input.connections;
   const selection = await resolveManagedGitHubIdentitySelection(input.db, input.companyId, {
