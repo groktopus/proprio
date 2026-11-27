@@ -5,6 +5,15 @@ on:
     branches: [main]
     paths:
       - .github/workflows/native-skill-filesystem.yml
+      - packages/proprio-runner/src/drivers/acpx/provider-egress.ts
+      - packages/proprio-runner/src/drivers/acpx/provider-egress.test.ts
+      - packages/proprio-runner/src/runner-egress.ts
+      - packages/proprio-runner/src/drivers/acpx/installation-integrity.ts
+      - packages/proprio-runner/src/control-plane/durable-prp-control-plane.ts
+      - packages/proprio-runner/src/control-plane/durable-prp-control-plane.test.ts
+      - packages/proprio-runner/runner/crates/runner-core/src/acpx_sidecar_transport.rs
+      - packages/proprio-runner/runner/crates/runner-core/tests/acpx_sidecar_transport.rs
+      - doc/runner-egress-policy.md
       - scripts/ci/codex-shared-skill-discovery.mjs
       - pnpm-lock.yaml
       - packages/proprio-runner/package.json
@@ -44,12 +53,21 @@ jobs:
       - name: Install the stock Linux sandbox prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends btrfs-progs bubblewrap apparmor-profiles
+          sudo apt-get install -y --no-install-recommends btrfs-progs bubblewrap apparmor-profiles iproute2
           # Load the distro profile for the specific packaged binary. Leave the
           # runner's system-wide restrictions and the app's filesystem policy on.
           sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
           test "$(readlink -f "$(command -v bwrap)")" = /usr/bin/bwrap
           timeout 10s /usr/bin/bwrap --unshare-user --ro-bind / / --cap-drop ALL /bin/true
+      - name: Verify Runner-owned native egress confinement
+        env:
+          PROPRIO_TEST_BWRAP: /usr/bin/bwrap
+          PROPRIO_TEST_EGRESS_PROXY: "1"
+        run: pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 src/drivers/acpx/provider-egress.test.ts
+      - name: Verify Runner-owned setup guardian without credential fences
+        env:
+          PROPRIO_TEST_BWRAP: /usr/bin/bwrap
+        run: pnpm --filter @groktopus/proprio-runner exec vitest run --maxWorkers 1 src/drivers/acpx/installation-integrity.test.ts -t 'launches a setup provider through Runner-owned egress confinement without credential fences|reaps an egress-confined setup provider after guardian owner revocation'
       - name: Verify controller repository cache scope, cleanup, and archive
         run: pnpm --filter @groktopus/server exec vitest run src/services/native-runtime/local-codex-repository-cache.test.ts
       - name: Build the native runner and synthetic Codex provider
@@ -57,6 +75,9 @@ jobs:
           pnpm --filter @groktopus/proprio-runner build:typescript
           cargo build --manifest-path packages/proprio-runner/runner/Cargo.toml --locked \
             -p proprio-runner-core --bin proprio-runnerd --bin fake-codex-app-server
+      - name: Verify trusted Runner egress policy handoff
+        run: cargo test --manifest-path packages/proprio-runner/runner/Cargo.toml --locked \
+          -p proprio-runner-core --test acpx_sidecar_transport managed_claude_broker_transport_reaches_the_sidecar_without_host_credentials
       - name: Verify ext4 copies and Btrfs shared extents
         run: |
           scratch="$(mktemp -d /tmp/pfs.XXXXXX)"
