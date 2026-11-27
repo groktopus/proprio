@@ -104,22 +104,35 @@ Invalidating a snapshot immediately frees both its operator and company quota
 slots. Its thin invalidation marker remains available through the snapshot's
 original expiry and the marker-retention period after expiry.
 
-Successful creation retires snapshot memberships from older epochs or windows
-before the configured cutoff in bounded batches. Those snapshots stop using
-active capacity. Their saved checkpoints return `source_epoch_changed` or
-`retention_window_expired` while the applicable boundary remains in force.
-Drain replicas with older settings before accepting export traffic after a
-source epoch or cutoff change.
+Successful creation retires snapshots from older epochs or windows before the
+configured cutoff by setting their durable invalidation marker. It keeps each
+snapshot's original expiry time, so a replica with a clock behind the writer
+cannot treat a retired receipt as complete after memberships are released.
+Readers check source epoch and retention cutoff first, then preserve the
+existing `snapshot_expired` response for an expired receipt, then check the
+invalidation marker. Before its original expiry, a reader with a clock behind
+the retirement writer still sees the durable marker. Retired checkpoints
+return `source_epoch_changed` or `retention_window_expired` while the boundary
+is in force, and `snapshot_incomplete` if that boundary is rolled back before
+expiry. Drain replicas with older settings before accepting export traffic
+after a source epoch or cutoff change.
 
-Successful creation removes expired membership in bounded batches. It keeps
-an owner-scoped marker for 24 hours after expiry. The marker returns
-`409 snapshot_expired` for the current epoch and retention window, including
-after cleanup. Later cleanup removes the marker and the cursor returns
-`404 snapshot_missing`. Page access records follow separate retention rules.
+A successful create processes at most eight expired or retired snapshots for
+cleanup. This includes deleting markers beyond retention and clearing retained
+memberships of up to 20,000 IDs each. Each clear commits with a terminal
+marker, and later creates continue the cleanup. Retired snapshots do not
+consume active capacity. The protected `company_exports_retired` receipt
+records the company, operator, source and number of retired snapshots.
 
-A source epoch change or an expired
-snapshot also requires a new export after reconciliation. Snapshots expire
-after 24 hours.
+The API keeps an owner-scoped marker for 24 hours after expiry. A reader in the
+current epoch and retention window returns `409 snapshot_expired` after the
+original expiry. A slower reader that still considers a cleared snapshot live
+returns `409 snapshot_incomplete`. Once cleanup removes the marker, the cursor
+returns `404 snapshot_missing`. Page access records follow separate retention
+rules.
+
+A source epoch change, a retired checkpoint, or an expired snapshot requires a
+new export after reconciliation. Snapshots expire after 24 hours.
 
 Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
