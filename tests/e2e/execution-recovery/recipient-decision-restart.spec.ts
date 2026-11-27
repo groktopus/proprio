@@ -35,10 +35,8 @@ test("recipient decisions survive a controller restart with their Case audit his
     return drive.ready;
   }
   async function stopDrive() {
-    const active = drive;
-    if (!active) return;
+    await stopTestDrive(drive?.child);
     drive = undefined;
-    await stopTestDrive(active.child);
   }
 
   let databaseUrl: string | undefined;
