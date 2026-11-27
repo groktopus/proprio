@@ -7,10 +7,31 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function shortenEvidenceId(id: string): string {
+  if (id.length <= 12) return id;
+  return id.slice(0, 8);
+}
+
+export function formatCodeLabel(value: string): string {
+  return value.replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
+}
+
 export function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+/** Read the first finite numeric value from a provider usage record. */
+export function readUsageNumber(
+  usage: Record<string, unknown> | null | undefined,
+  ...keys: string[]
+): number {
+  for (const key of keys) {
+    const value = usage?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
 }
 
 export function asBoolean(value: unknown, fallback: boolean) {

@@ -3255,7 +3255,13 @@ describe("issue comment reopen routes", () => {
       reviewTargetBinding: { source: "required_quality_review" },
     });
     if (!policy) throw new Error("Expected opted-in review policy");
-    const issue = createReviewIssue(policy, reviewerAgentId);
+    const reviewIssue = createReviewIssue(policy, reviewerAgentId);
+    const issue = { ...reviewIssue, executionState: { ...reviewIssue.executionState,
+      reviewTargetBinding: { version: 1, requirementHash: "a".repeat(64), deliverables: [{
+        key: "copy", label: "Copy", target: { type: "issue_document", key: "copy",
+          revisionId: "99999999-9999-4999-8999-999999999999" },
+      }] },
+    } };
     const reviewBody = "kind: review\ndecision: approved\nsummary: ship it";
     mockIssueService.getById.mockResolvedValue(issue);
     mockIssueService.addComment.mockResolvedValue({ id: "comment-review-opt-in", issueId: issue.id,

@@ -1,6 +1,7 @@
 import { assertAgentInteraction } from "../services/agent-interaction-policy.js";
 import { isAppQuestionCardKey } from "../services/mcp-elicitation.js";
 import { listStalledDependencies } from "../services/recovery/blocker-stall-wakeups.js";
+import { dependencyDiagnosisForViewer } from "./issue-dependency-diagnosis-view.js";
 import { confirmMcpAttachmentCleanup, recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "../services/public-mcp/upload-cleanup.js";
 import { notifyDeferredExecutionWork } from "../services/deferred-execution-notifications.js";
 import { notifyNativeRecoveryNotices } from "../services/native-recovery-notice-notifications.js";
@@ -60,20 +61,22 @@ import { deferredWakeJoinsFirstTurn, firstTurnTakesAllQueuedComments, runAccepts
 import { reconstructNativeWorkspace, unreconciledNativeExportPredicate } from "../services/native-runtime/native-workspace-reconstruction.js";
 import { reconstructWorkspaceSchema } from "@groktopus/shared";
 import { hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
-import { captureRequiredQualityReviewDecisionBinding } from "../services/required-quality-review.js";
+import { withAuthorizationReadSnapshot } from "../services/authorization-read-scope.js";
+import { captureRequiredQualityReviewDecisionBinding, readExecutionReviewEvidence, recordExecutionStageDecision } from "../services/required-quality-review.js";
 import { deliverConversationComments, heldConversationComments, isConversation } from "../services/agent-conversations.js";
 import { assertOnboardingFirstTaskDependenciesAllowed } from "../services/onboarding-first-task-admission.js";
 import { resolveChatTaskAssignment } from "../services/chat-task-assignment.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { inspectWorkspaceSource } from "../services/workspace-source-inspection.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "@groktopus/shared";
+import { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "@groktopus/shared";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
 } from "../services/execution-recovery-resolution.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
@@ -96,7 +99,6 @@ import {
   issueAccessGrants,
   issueComments,
   issueDocuments,
-  issueExecutionDecisions,
   issueRelations,
   issueRecoveryActions,
   issueThreadInteractions,
@@ -109,6 +111,7 @@ import {
 } from "@groktopus/db";
 import {
   addIssueCommentSchema,
+  issueExecutionReviewEvidenceQuerySchema,
   acceptIssueThreadInteractionSchema,
   resolveConfirmationFromCommentSchema,
   attachmentArtifactWorkProductMetadataSchema,
@@ -131,6 +134,7 @@ import {
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   resumeWorkspaceFinalizationSchema,
   confirmNativeControllerStoppedSchema,
@@ -208,6 +212,7 @@ import { isUniqueViolation } from "../db-errors.js";
 import type { StorageService } from "../storage/types.js";
 import { validate, validateIssueMutationBody } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
+import { visibleAdmissionBlock } from "../services/budget-scope-visibility.js";
 import { conversationDecisionReceiptsService } from "../services/conversation-decision-receipts.js";
 import { attentionHandledDetails, attentionHandledFor, type AttentionHandledFor } from "../services/attention-receipts.js";
 import {
@@ -293,6 +298,8 @@ import {
   unprocessable,
 } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
+import { evidenceHistoryRateLimit } from "../middleware/evidence-history-rate-limit.js";
+import { boardMutationOriginAllowed } from "../middleware/board-mutation-guard.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
 import {
   assertBoard,
@@ -351,6 +358,7 @@ import {
 } from "../services/issues.js";
 import {
   loadParentChainWith,
+  lockIssuePrivacyTree,
   placeTaskParent,
   planParentChange,
   type IssueParentDepthPolicy,
@@ -379,6 +387,7 @@ import {
 import {
   applyIssueExecutionPolicyTransition,
   normalizeIssueExecutionPolicy,
+  isExecutionStageParticipant,
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
@@ -2095,20 +2104,6 @@ function executionPrincipalsEqual(
     : left.userId === right.userId;
 }
 
-function actorMatchesExecutionParticipant(
-  actor: { actorType: "user" | "agent"; actorId: string },
-  participant: ParsedExecutionState["currentParticipant"] | null,
-) {
-  if (!participant) return false;
-  // Require the actor kind to match the participant kind before comparing ids. Without this
-  // an agent and a user that happen to share an id value would falsely satisfy participant
-  // gating on the auto-approval path.
-  if (participant.type !== actor.actorType) return false;
-  return participant.type === "agent"
-    ? participant.agentId === actor.actorId
-    : participant.userId === actor.actorId;
-}
-
 // Negation/rejection markers that invalidate an otherwise approval-looking heading.
 // Match common phrasings ("NOT APPROVED", "Do not approve", "Not approving", "Changes requested",
 // "Rejected", "Denied", "Blocked") so a reviewer comment intending to reject cannot auto-complete
@@ -2172,6 +2167,19 @@ function summarizeIssueRelationForActivity(relation: {
 }
 
 const defaultCompanySearchRateLimiter = createCompanySearchRateLimiter();
+
+const dependencyInvestigationRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 12,
+  keyGenerator: req => req.actor?.type === "board" && req.actor.userId
+    ? `board:${req.actor.userId}`
+    : ipKeyGenerator(req.socket.remoteAddress ?? "0.0.0.0"),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Dependency investigation request limit exceeded" },
+});
+
+const executionReviewEvidenceRateLimit = evidenceHistoryRateLimit("Execution review evidence request limit exceeded");
 
 function companySearchRateLimitActor(req: Request, companyId: string) {
   if (req.actor.type === "agent") {
@@ -3455,6 +3463,7 @@ async function coordinateIssueListGet(input: {
   companyId: string;
   requestKey: ReturnType<typeof issueListRequestKey>;
   allowTtlCache: boolean;
+  joinInflight?: boolean;
   retireOnCompanyChange?: boolean;
   diagnostics?: IssueListDiagnostics;
   compute: () => Promise<IssueListPreparedResponse>;
@@ -3479,7 +3488,8 @@ async function coordinateIssueListGet(input: {
     };
   }
 
-  const existing = issueListInflight.get(input.requestKey.key);
+  const joinInflight = input.joinInflight !== false;
+  const existing = joinInflight ? issueListInflight.get(input.requestKey.key) : undefined;
   if (existing) {
     existing.waiterCount += 1;
     const identicalInFlightCount = existing.waiterCount + 1;
@@ -3544,11 +3554,11 @@ async function coordinateIssueListGet(input: {
     waiterCount: 0,
     stormLogged: false,
   };
-  issueListInflight.set(input.requestKey.key, inflightEntry);
+  if (joinInflight) issueListInflight.set(input.requestKey.key, inflightEntry);
   // Mine reads its primary rows before its optional context has necessarily
   // settled. A mutation must make subsequent GETs read again, while this work
   // and its existing readers keep their original admission until completion.
-  const unsubscribe = input.retireOnCompanyChange
+  const unsubscribe = joinInflight && input.retireOnCompanyChange
     ? subscribeCompanyLiveEvents(input.companyId, (event) => {
       if (event.type !== "activity.logged" && event.type !== "heartbeat.run.queued" && event.type !== "heartbeat.run.status") return;
       if (issueListInflight.get(input.requestKey.key) === inflightEntry) {
@@ -3875,8 +3885,9 @@ export function issueRoutes(
 
   const issueDetailEtag = privateJsonEtag();
   router.use((req, res, next) => {
-    // The chat bootstrap is `no-store`: always a fresh body, never a 304.
-    if (/^\/issues\/[^/]+(?:\/|$)/.test(req.path) && !/^\/issues\/[^/]+\/chat-bootstrap\/?$/.test(req.path)) {
+    // Chat bootstrap and signoff evidence use fresh, non-cacheable reads.
+    const uncached = /^\/issues\/[^/]+\/(?:chat-bootstrap|execution-review-evidence)\/?$/i.test(req.path);
+    if (!uncached && /^\/issues\/[^/]+(?:\/|$)/.test(req.path)) {
       issueDetailEtag(req, res, next);
       return;
     }
@@ -4679,6 +4690,7 @@ export function issueRoutes(
         : input.activeRecoveryAction;
     if (!activeRecoveryAction) return null;
 
+    if (activeRecoveryAction.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE) return activeRecoveryAction;
     if (await hasUnverifiedNativeWorkspaceFinalizationOwner(db, activeRecoveryAction)) {
       return activeRecoveryAction;
     }
@@ -5312,8 +5324,9 @@ export function issueRoutes(
       status: string;
     },
     action: "issue:comment" | "issue:read" | "issue:mutate",
+    issueAccess = access,
   ) {
-    return access.decide({
+    return issueAccess.decide({
       actor: req.actor,
       action,
       resource: {
@@ -5336,9 +5349,9 @@ export function issueRoutes(
     });
   }
 
-  async function canUseIssueBreakGlass(req: Request, issue: { companyId: string }) {
+  async function canUseIssueBreakGlass(req: Request, issue: { companyId: string }, readDb = db) {
     if (req.actor.type !== "board" || !req.actor.userId) return false;
-    return db
+    return readDb
       .select({ role: companyMemberships.membershipRole })
       .from(companyMemberships)
       .where(and(
@@ -7430,6 +7443,10 @@ export function issueRoutes(
     >,
     input: { source: "issue_update" | "recovery_action_resolution" },
   ) {
+    if (activeRecoveryAction?.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE) {
+      assertBoard(req);
+      return true;
+    }
     if (req.actor.type !== "agent") return true;
     if (!activeRecoveryAction) return true;
 
@@ -7675,7 +7692,7 @@ export function issueRoutes(
           code: "recovery_safe_hand_back_budget_blocked",
           issueId: input.issue.id,
           returnOwnerAgentId,
-          budgetBlock,
+          budgetBlock: visibleAdmissionBlock(budgetBlock),
         },
       );
     }
@@ -9065,13 +9082,16 @@ export function issueRoutes(
         view,
       },
     });
+    const fresh = req.header("cache-control")?.split(",")
+      .some(directive => ["no-cache", "no-store"].includes(directive.trim().toLowerCase())) === true;
     const coordinated = await coordinateIssueListGet({
       req,
       companyId,
       requestKey,
-      // The new collection projections must reflect read/archive/undo mutations
-      // immediately. Keep in-flight coalescing and ETags, without a stale TTL body.
-      allowTtlCache: view === "compact" && !inboxArchive,
+      // Authorization-sensitive clients can require a new read while normal
+      // projections retain their in-flight coalescing and compact cache.
+      allowTtlCache: !fresh && view === "compact" && !inboxArchive,
+      joinInflight: !fresh,
       diagnostics: opts.issueListDiagnostics,
       compute: async () => {
         return prepareIssueListForActor(req, companyId, listFilters, view, { reportPagination: true });
@@ -9079,6 +9099,7 @@ export function issueRoutes(
     });
 
     res.setHeader("X-Proprio-Request-Cache", coordinated.cacheStatus);
+    if (fresh) res.setHeader("Cache-Control", "private, no-store");
     if (!coordinated.response) {
       const body = {
         error: "Too many concurrent issue-list requests for this actor/client",
@@ -9104,9 +9125,11 @@ export function issueRoutes(
       setIssueListPaginationHeaders(res, coordinated.response.pagination);
     }
     if (coordinated.response.kind === "compact") {
-      res.setHeader("Cache-Control", coordinated.response.cacheControl);
-      res.setHeader("ETag", coordinated.response.etag);
-      const etagMatched = requestMatchesEtag(
+      if (!fresh) {
+        res.setHeader("Cache-Control", coordinated.response.cacheControl);
+        res.setHeader("ETag", coordinated.response.etag);
+      }
+      const etagMatched = !fresh && requestMatchesEtag(
         req.header("if-none-match"),
         coordinated.response.etag,
       );
@@ -9792,6 +9815,29 @@ export function issueRoutes(
     res.json(response);
   });
 
+  router.get("/issues/:ref/execution-review-evidence", executionReviewEvidenceRateLimit, async (req, res) => {
+    assertBoard(req);
+    res.setHeader("Cache-Control", "private, no-store");
+    const { cursor } = issueExecutionReviewEvidenceQuerySchema.parse(req.query);
+    const result = await db.transaction(transaction => withAuthorizationReadSnapshot(async () => {
+      const readDb = transaction as unknown as Db;
+      const issue = await getAccessibleResource(req, res, issueService(readDb).getById(req.params.ref as string),
+        "Issue not found", issueNotFoundBody(req));
+      if (!issue) return null;
+      const accessDecision = await decideIssueAccess(req, issue, "issue:read", accessService(readDb));
+      const breakGlass = !accessDecision.allowed && req.query.breakGlass === "true"
+        && accessDecision.reason === "deny_issue_private" && await canUseIssueBreakGlass(req, issue, readDb);
+      if (!accessDecision.allowed && !breakGlass) throw notFound("Issue not found");
+      if (breakGlass && !boardMutationOriginAllowed(req)) throw forbidden("Board mutation requires trusted browser origin");
+
+      const evidence = await readExecutionReviewEvidence(readDb, issue, cursor);
+      return { issue, breakGlass, evidence };
+    }), { isolationLevel: "repeatable read", accessMode: "read only" });
+    if (!result) return;
+    if (result.breakGlass) await recordIssueBreakGlassRead(req, result.issue);
+    res.json(result.evidence);
+  });
+
   router.get("/issues/:id", async (req, res) => {
     const timing = createIssueReadTiming();
     const id = req.params.id as string;
@@ -9891,6 +9937,10 @@ export function issueRoutes(
     const visibleMentionedProjects = mentionedProjects.filter((_, index) => mentionedProjectVisibility[index]);
     // Recovery revalidation may change the blocker; read it afterwards.
     const executionBlocker = await timing.time("execution_blocker", () => getExecutionBlocker(db, issue.companyId, issue.id));
+    const interruption = await taskInterruptionPresentation(db, issue);
+    const viewerCanRetry = interruption?.canRetry === true && req.actor.type === "board"
+      && (!issue.conversationAgentId || Boolean(req.actor.userId && req.actor.userId === issue.conversationUserId))
+      && (await decideIssueAccess(req, issue, "issue:mutate")).allowed;
     await recordAgentChildTaskRead(db, req, issue);
     res.setHeader("Server-Timing", timing.header());
     res.json({
@@ -9902,7 +9952,8 @@ export function issueRoutes(
       ...(reviewAttention ? { reviewAttention } : {}),
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       executionBlocker,
-      interruption: await taskInterruptionPresentation(db, issue),
+      interruption,
+      ...(viewerCanRetry ? { viewerCanRetry } : {}),
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       // Always present, so a cleared stall replaces the cached list.
@@ -10062,10 +10113,15 @@ export function issueRoutes(
       const selected = z.object({ inspectSourceRunId: z.string().uuid(), inspectSourceActionId: z.string().uuid().optional() })
         .safeParse(req.query);
       if (!selected.success) throw badRequest("A valid source run and optional recovery action are required.");
-      const { inspectSourceRunId: runId, inspectSourceActionId: actionId } = selected.data;
+      const runId = selected.data.inspectSourceRunId.toLowerCase();
+      const actionId = selected.data.inspectSourceActionId;
       const rows = await db.select().from(issueRecoveryActions).where(and(
         eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
-        sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+        or(sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+          and(eq(issueRecoveryActions.cause, "completion_evidence_incomplete"),
+            sql`${issueRecoveryActions.evidence}#>>'{caseHandoffCompletion,schema}' = 'proprio.case-handoff-completion-recovery.v1'`,
+            sql`${issueRecoveryActions.evidence}#>'{caseHandoffCompletion,attempts}'
+              @> jsonb_build_array(jsonb_build_object('runId', ${runId}::text))`)),
         actionId ? eq(issueRecoveryActions.id, actionId) : undefined,
       )).orderBy(desc(issueRecoveryActions.createdAt)).limit(actionId ? 1 : 20);
       if (actionId && !rows[0]) throw notFound("Recovery source not found.");
@@ -10095,6 +10151,51 @@ export function issueRoutes(
       actions: [...(active ? [active] : []), ...retainedHolds
         .filter(action => action.id !== active?.id).map(issueRecoveryActionReadModel)],
     });
+  });
+
+  router.get("/issues/:id/dependency-investigation", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found", issueNotFoundBody(req));
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue, { finalForAgents: true }))) return;
+    const { readParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");
+    const diagnosis = await readParentDependencyDiagnosis(db, { companyId: issue.companyId, issueId: issue.id });
+    res.setHeader("Cache-Control", "private, no-store");
+    res.type("json");
+    // Sending through Express's JSON helper can turn conditional GETs into 304s.
+    if (!diagnosis) {
+      res.end("null");
+      return;
+    }
+    const referencedIds = diagnosis.dependencyPath.map(({ issueId }) => issueId);
+    if (diagnosis.cause.issueId) referencedIds.push(diagnosis.cause.issueId);
+    const [readable, mayInvestigate] = await Promise.all([
+      readableIssueEdgeIds(req, issue.companyId, referencedIds),
+      diagnosis.canInvestigate && req.actor.type === "board"
+        && (!issue.conversationAgentId || Boolean(req.actor.userId && req.actor.userId === issue.conversationUserId))
+        ? decideIssueAccess(req, issue, "issue:mutate").then(({ allowed }) => allowed)
+        : false,
+    ]);
+    res.end(JSON.stringify(dependencyDiagnosisForViewer(diagnosis, readable, mayInvestigate)));
+  });
+
+  router.post("/issues/:id/dependency-investigation", dependencyInvestigationRateLimit, validate(dependencyInvestigationSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    if (issue.conversationAgentId && (!req.actor.userId || req.actor.userId !== issue.conversationUserId)) {
+      throw forbidden("Only the conversation owner can request a chat investigation");
+    }
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const { requestParentDependencyDiagnosis } = await import("../services/recovery/parent-dependency-diagnosis.js");
+    const actor = getActorInfo(req);
+    const receipt = await requestParentDependencyDiagnosis(db, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      idempotencyKey: req.body.idempotencyKey,
+      actorId: actor.actorId,
+      enqueueWakeup: heartbeat.wakeup,
+    });
+    res.status(receipt.accepted ? 202 : 200).json({ accepted: receipt.accepted, message: receipt.message });
   });
 
   router.post("/issues/:id/retry", validate(taskRetrySchema), async (req, res) => {
@@ -10376,7 +10477,7 @@ export function issueRoutes(
             workspaceRepairOnly: true,
           });
           if (workspaceRepairAction.evidence.executionReconciliation) {
-            return { issue: lockedIssue, recoveryAction: workspaceRepairAction, replayed: true, workspaceRepairOnly: true };
+            return { issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(workspaceRepairAction), replayed: true, workspaceRepairOnly: true };
           }
           await markExecutionReconciliation(tx as unknown as Db, workspaceRepairAction,
             executionReconciliation!, actor.actorId, undefined, { workspaceRepairOnly: true });
@@ -10384,7 +10485,8 @@ export function issueRoutes(
           const [recoveryAction] = await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored",
             resolutionNote: resolutionNote ?? null, resolvedAt: new Date(), updatedAt: new Date(),
           }).where(eq(issueRecoveryActions.id, workspaceRepairAction.id)).returning();
-          return { issue: lockedIssue, recoveryAction, chatRetry: null, workspaceRepairOnly: true };
+          if (!recoveryAction) throw notFound("Recovery action not found");
+          return { issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(recoveryAction), chatRetry: null, workspaceRepairOnly: true };
         }
 
         let activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
@@ -10440,7 +10542,7 @@ export function issueRoutes(
             } else {
               return {
                 issue: lockedIssue,
-                recoveryAction: settled,
+                recoveryAction: issueRecoveryActionReadModel(settled),
                 replayed: true,
               };
             }
@@ -10801,23 +10903,11 @@ export function issueRoutes(
                 ...nextExecutionState,
                 lastDecisionId: decisionId,
               };
-              const reviewTargetBinding = transition.decision.outcome === "approved"
-                ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
-                    issue: lockedIssue, previousPolicy: lockedIssue.executionPolicy, nextPolicy: lockedIssue.executionPolicy,
-                  })
-                : null;
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: lockedIssue.companyId,
-                issueId: lockedIssue.id,
-                stageId: transition.decision.stageId,
-                stageType: transition.decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: transition.decision.outcome,
-                body: transition.decision.body,
-                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
-                createdByRunId: actor.runId ?? null,
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: lockedIssue, previousPolicy: lockedIssue.executionPolicy, nextPolicy: lockedIssue.executionPolicy,
+                previousExecutionState: lockedIssue.executionState, decision: transition.decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
           }
@@ -10864,6 +10954,8 @@ export function issueRoutes(
             status: actionStatus,
             outcome: recordedOutcome,
             resolutionNote: resolutionNote ?? null,
+            boardConfirmedWithdrawalRelease: req.actor.type === "board"
+              && activeRecoveryAction.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE,
           },
           tx,
         );
@@ -14292,15 +14384,14 @@ export function issueRoutes(
       if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
       const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
       if (!managedIssue) return;
-      const [grant] = await db
-        .update(issueAccessGrants)
-        .set({ revokedAt: new Date() })
-        .where(and(
+      const [grant] = await db.transaction(async tx => {
+        await lockIssuePrivacyTree(tx, issue.companyId);
+        return tx.update(issueAccessGrants).set({ revokedAt: new Date() }).where(and(
           eq(issueAccessGrants.id, req.params.grantId as string),
           eq(issueAccessGrants.issueId, managedIssue.id),
           isNull(issueAccessGrants.revokedAt),
-        ))
-        .returning();
+        )).returning();
+      });
       if (!grant) {
         res.status(404).json({ error: "Issue access grant not found" });
         return;
@@ -15462,6 +15553,22 @@ export function issueRoutes(
         }
       }
 
+      if (transition.decision?.outcome === "approved" && existing.assigneeAgentId &&
+          (assigneeWillChange || updateFields.status === "done") &&
+          parseObject(existing.executionPolicy?.reviewTargetBinding).source === "required_quality_review") {
+        const decision = transition.decision;
+        await db.transaction(async (tx) => {
+          const locked = await svc.getByIdForUpdate(id, tx);
+          if (!locked || locked.companyId !== existing.companyId) throw notFound("Issue not found");
+          await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
+            issue: locked, previousPolicy: locked.executionPolicy, nextPolicy: nextExecutionPolicy,
+            expectedPolicy: existing.executionPolicy, previousExecutionState: locked.executionState,
+            expectedExecutionState: existing.executionState, stage: decision, actorAgentId: actor.agentId,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          });
+        });
+      }
+
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
@@ -15821,15 +15928,6 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            // updateIssue obtains the authoritative issue row lock. Validate and
-            // snapshot the exact artifacts while that lock remains held.
-            const policyChange = updated.changes?.executionPolicy;
-            const reviewTargetBinding = decision?.outcome === "approved"
-              ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
-                  issue: updated, previousPolicy: policyChange ? policyChange.from : existing.executionPolicy,
-                  nextPolicy: nextExecutionPolicy,
-                })
-              : null;
             if (commentAttachmentIds?.length || commentWithAdapterOverrides || agentCommentUpdate) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
@@ -15859,18 +15957,16 @@ export function issueRoutes(
             }
 
             if (decision && decisionId) {
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: updated.companyId,
-                issueId: updated.id,
-                stageId: decision.stageId,
-                stageType: decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: decision.outcome,
-                body: decision.body,
-                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
-                createdByRunId: actor.runId ?? null,
+              // updateIssue holds the task lock through decision insertion.
+              const policyChange = updated.changes?.executionPolicy;
+              const stateChange = updated.changes?.executionState;
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: updated, previousPolicy: policyChange ? policyChange.from : updated.executionPolicy,
+                expectedPolicy: existing.executionPolicy, nextPolicy: nextExecutionPolicy,
+                previousExecutionState: stateChange ? stateChange.from : existing.executionState,
+                expectedExecutionState: existing.executionState, decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
 
@@ -19763,10 +19859,10 @@ export function issueRoutes(
       const shouldAutoApproveReviewComment =
         currentIssue.status === "in_review" &&
         currentExecutionState?.status === "pending" &&
-        actorMatchesExecutionParticipant(
-          actor,
-          currentExecutionState.currentParticipant ?? null,
-        ) &&
+        isExecutionStageParticipant(currentExecutionState.currentParticipant ?? null, {
+          agentId: actor.actorType === "agent" ? actor.actorId : null,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        }) &&
         isApprovalReviewComment(req.body.body);
 
       // Persist the comment and the auto-approval state transition atomically when both apply.
@@ -19867,23 +19963,13 @@ export function issueRoutes(
             if (!updated) throw new AutoApprovalIssueMissingError();
 
             if (transition.decision && decisionId) {
-              const reviewTargetBinding = transition.decision.outcome === "approved"
-                ? await captureRequiredQualityReviewDecisionBinding(tx as unknown as Db, {
-                    issue: updated, previousPolicy: currentIssue.executionPolicy, nextPolicy: updated.executionPolicy,
-                  })
-                : null;
-              await tx.insert(issueExecutionDecisions).values({
-                id: decisionId,
-                companyId: updated.companyId,
-                issueId: updated.id,
-                stageId: transition.decision.stageId,
-                stageType: transition.decision.stageType,
-                actorAgentId: actor.agentId ?? null,
-                actorUserId: actor.actorType === "user" ? actor.actorId : null,
-                outcome: transition.decision.outcome,
-                body: transition.decision.body,
-                ...(reviewTargetBinding ? { reviewTargetBinding } : {}),
-                createdByRunId: actor.runId ?? null,
+              await recordExecutionStageDecision(tx as unknown as Db, {
+                issue: updated, previousPolicy: updated.executionPolicy, expectedPolicy: currentIssue.executionPolicy,
+                nextPolicy: currentExecutionPolicy, previousExecutionState: updated.changes?.executionState
+                  ? updated.changes.executionState.from : currentIssue.executionState,
+                expectedExecutionState: currentIssue.executionState, decision: transition.decision, decisionId,
+                actorAgentId: actor.agentId, actorUserId: actor.actorType === "user" ? actor.actorId : null,
+                actorRunId: actor.runId,
               });
             }
 

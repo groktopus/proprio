@@ -442,6 +442,10 @@ function principalsEqual(a: IssueExecutionStagePrincipal | null, b: IssueExecuti
   return a.type === "agent" ? a.agentId === b.agentId : a.userId === b.userId;
 }
 
+export function isExecutionStageParticipant(participant: IssueExecutionStagePrincipal | null, actor: ActorLike): boolean {
+  return principalsEqual(participant, actorPrincipal(actor));
+}
+
 function resolveMaxReviewRounds(policy: IssueExecutionPolicy | null): number {
   const configured = policy?.maxReviewRounds;
   return typeof configured === "number" && configured > 0 ? configured : DEFAULT_MAX_REVIEW_ROUNDS;
@@ -985,6 +989,13 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     requestedStatus === "in_review";
 
   if (!shouldStartWorkflow) {
+    if (requestedStatus === "in_progress" && input.issue.status === "in_review" &&
+      input.policy.reviewTargetBinding && existingState?.status === COMPLETED_STATUS && input.allowBoardOverride) {
+      patch.executionState = null;
+      if (!requestedAssigneePatchProvided && existingState.returnAssignee) {
+        Object.assign(patch, patchForPrincipal(existingState.returnAssignee));
+      }
+    }
     return { patch };
   }
 
@@ -1009,7 +1020,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         : explicitAssignee,
     exclude: returnAssignee,
   });
-  while (!participant && canAutoSkipPendingStage({ stage: pendingStage, returnAssignee, requestedStatus })) {
+  while (!participant && !input.policy.reviewTargetBinding && canAutoSkipPendingStage({ stage: pendingStage, returnAssignee, requestedStatus })) {
     skippedStageIds.push(pendingStage.id);
     pendingStage = nextPendingStage(
       input.policy,

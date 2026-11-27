@@ -6,6 +6,7 @@ import { logActivity, publishActivity, type ActivityPublication } from "./activi
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { budgetCancellationScopePredicate } from "./heartbeat/budget-cancellation.js";
 import { AGENT_LIFECYCLE_STOP_REASON } from "./governance-pause-stop.js";
+import { retryRunTaskIssueId } from "./task-retry-eligibility.js";
 
 /**
  * Resuming after a budget hard stop continues the work that the stop
@@ -41,7 +42,7 @@ const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const WAITING_AGENT_STATUSES = ["paused", "pending_approval"] as const;
 
 type BudgetResumeClaim = {
-  incidentId: string; actorUserId: string; actorSource: string | null; claimedAt: Date | null;
+  actorUserId: string; actorSource: string | null; claimedAt: Date | null;
 };
 
 type PrepareChatRetry = NonNullable<Parameters<typeof import("./task-retry.js").requestTaskRetry>[0]["prepareChatRetry"]>;
@@ -55,8 +56,7 @@ export type BudgetResumeDelivery = {
   requestRetry?: typeof import("./task-retry.js").requestTaskRetry;
 };
 
-const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.nativeIssueId}::text,
-  ${heartbeatRuns.contextSnapshot}->>'issueId')`;
+const runIssueId = retryRunTaskIssueId();
 
 /**
  * Stamp every task run this scope's budget stop cancelled since the incident
@@ -83,37 +83,33 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
     // the lifecycle operation's pauseCause, saved when the pause started, so a
     // resume that removed the holds before the Stop ran still leaves them here.
     const pauseStop = sql`${heartbeatRuns.resultJson}->'pauseStop'`;
-    const lifecycleStop = input.scopeType === "project" ? sql`false` : and(
+    const ownsLifecycleHold = input.scopeType === "company" || input.scopeType === "agent";
+    const lifecycleStop = ownsLifecycleHold ? and(
       sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${AGENT_LIFECYCLE_STOP_REASON}`,
       sql`${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type' = 'system'`,
       input.scopeType === "agent"
         ? and(eq(heartbeatRuns.agentId, input.scopeId), sql`(${pauseStop}->'holds') ? 'budget'`)
-        : sql`(${pauseStop}->'holds') ? 'company_paused' and ${pauseStop}->>'companyPauseReason' = 'budget'`)!;
+        : sql`(${pauseStop}->'holds') ? 'company_paused' and ${pauseStop}->>'companyPauseReason' = 'budget'`)! : sql`false`;
     // A run still active on an agent whose pause this budget caused: the
     // pause's Stop may land after the incident closes. The lifecycle operation
     // recorded the cause when the pause started (pauseCause).
     const pauseCause = sql`a.lifecycle_operation->'pauseCause'`;
-    const pendingPauseStop = input.scopeType === "project" ? sql`false` : sql`exists (select 1 from agents a
+    const pendingPauseStop = ownsLifecycleHold ? sql`exists (select 1 from agents a
       where a.id = ${heartbeatRuns.agentId} and a.company_id = ${heartbeatRuns.companyId}
         and a.lifecycle_state = 'pausing'
         and ${input.scopeType === "agent"
           ? sql`a.id = ${input.scopeId} and (${pauseCause}->'holds') ? 'budget'`
-          : sql`(${pauseCause}->'holds') ? 'company_paused' and ${pauseCause}->>'companyPauseReason' = 'budget'`})`;
+          : sql`(${pauseCause}->'holds') ? 'company_paused' and ${pauseCause}->>'companyPauseReason' = 'budget'`})` : sql`false`;
     // A queued run that admission cancelled for this budget's board-owned block.
     // Admission saves the stamp before it cancels; the recorded cancellation
     // must carry the stamp's reason, so a stamped run that later ran, or was
     // cancelled for another reason, never matches.
-    const admissionStop = and(
-      sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeType' = ${input.scopeType}`,
-      sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeId' = ${input.scopeId}`,
-      sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'reason'`)!;
-    const stoppedByThisScope = or(budgetCancellationScopePredicate(input), lifecycleStop, admissionStop)!;
-    // A queued run admission stamped for this budget but has not cancelled
-    // yet. Delivery waits for its Stop, and abandons the claim if the run was
-    // cancelled for another reason.
     const pendingAdmissionStop = and(
       sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeType' = ${input.scopeType}`,
       sql`${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'scopeId' = ${input.scopeId}`)!;
+    const admissionStop = and(pendingAdmissionStop,
+      sql`${heartbeatRuns.resultJson}->'cancellation'->>'reason' = ${heartbeatRuns.resultJson}->'budgetAdmissionStop'->>'reason'`)!;
+    const stoppedByThisScope = or(budgetCancellationScopePredicate(input), lifecycleStop, admissionStop)!;
     // A person's Stop stays stopped, even if budget enforcement also fenced
     // the run while that Stop was being delivered.
     const stoppedByPerson = sql`(coalesce(${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type', '') = 'user'
@@ -124,7 +120,8 @@ export async function markBudgetCancelledWorkForResume(db: Db, input: {
       sql`not ${stoppedByPerson}`,
       sql`${runIssueId} is not null`,
       input.scopeType === "task_tree"
-        ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`
+        // A run stopped before reservation has the admission stamp as its recovery proof.
+        ? or(pendingAdmissionStop, sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([input.scopeId])}::jsonb`)
         : undefined,
     );
     const stoppedSinceIncident = and(stoppedByThisScope,
@@ -221,7 +218,7 @@ export async function deliverBudgetResumeContinuations(db: Db, delivery: BudgetR
     const page = await db.select({
       id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
       agentStatus: agents.status, status: heartbeatRuns.status, createdAt: heartbeatRuns.createdAt, issueId: runIssueId,
-      incidentId: budgetResumeClaims.incidentId, actorUserId: budgetResumeClaims.actorUserId,
+      actorUserId: budgetResumeClaims.actorUserId,
       actorSource: budgetResumeClaims.actorSource, claimedAt: budgetResumeClaims.claimedAt,
       stoppedByPerson: sql<boolean>`(coalesce(${heartbeatRuns.resultJson}->'cancellation'->'initiator'->>'type', '') = 'user'
         or coalesce(${heartbeatRuns.resultJson}->'cancellation'->>'source', '') = 'operator'
@@ -238,8 +235,8 @@ export async function deliverBudgetResumeContinuations(db: Db, delivery: BudgetR
       .orderBy(asc(budgetResumeClaims.runId)).limit(PAGE_SIZE);
     if (!page.length) return;
     after = page[page.length - 1]!.id;
-    const rows: PendingRow[] = page.map(({ incidentId, actorUserId, actorSource, claimedAt, ...run }) =>
-      ({ ...run, claim: { incidentId, actorUserId, actorSource, claimedAt } }));
+    const rows: PendingRow[] = page.map(({ actorUserId, actorSource, claimedAt, ...run }) =>
+      ({ ...run, claim: { actorUserId, actorSource, claimedAt } }));
     for (const run of rows) {
       // One task's failure must not stop the others. Its claim goes stale and
       // a later pass retries it.
@@ -268,7 +265,8 @@ async function settle(db: Db, run: PendingRow, expectedClaimedAt: Date | null, o
     await logActivity(tx as unknown as Db, { companyId: run.companyId, actorType: "user", actorId: claim.actorUserId,
       action: outcome.state === "delivered" ? "budget.cancelled_work_continued" : "budget.cancelled_work_not_continued",
       entityType: "issue", entityId: run.issueId!,
-      details: { budgetIncidentId: claim.incidentId, interruptedRunId: run.id,
+      details: {
+        interruptedRunId: run.id,
         ...(outcome.requestId ? { retryRequestId: outcome.requestId } : {}),
         ...(outcome.reason ? { reason: outcome.reason } : {}) } }, publications);
     return true;
@@ -307,7 +305,7 @@ async function deliverOne(db: Db, delivery: BudgetResumeDelivery, now: Date, run
   let receipt: Awaited<ReturnType<typeof requestTaskRetry>>;
   try {
     receipt = await requestTaskRetry({ db, companyId: run.companyId, issueId: run.issueId,
-      observedRunId: run.id, idempotencyKey: `budget-resume:${run.id}`, actorId: claim.actorUserId,
+      observedRunId: run.id, idempotencyKey: `budget-resume:${run.id}`, actorId: claim.actorUserId, reauthorize: true,
       ...(claim.actorSource ? { actorSource: claim.actorSource } : {}),
       ...(delivery.prepareChatRetry ? { prepareChatRetry: delivery.prepareChatRetry } : {}) });
   } catch (error) {

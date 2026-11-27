@@ -3,10 +3,9 @@ import type { Db } from "@groktopus/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@groktopus/db";
 import { notFound } from "../errors.js";
 import { budgetServiceInTransaction } from "./budgets.js";
-import { visibleBudgetTaskTreeScopeIds } from "./budget-scope-visibility.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
-import { approvalReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { approvalReadSqlCondition, authorizationService, type AuthorizationActor } from "./authorization.js";
 import { resolvableApprovalStatuses } from "../lib/approval-records.js";
 import { withAccountingReadSnapshot } from "./accounting-transaction.js";
 
@@ -56,15 +55,18 @@ export function dashboardService(db: Db) {
 
       const readApprovalCounts = async (snapshotDb: Db) => {
         const approvalRead = await approvalReadSqlCondition(snapshotDb, actor);
+        const canReadBudgets = !options.actor || (await authorizationService(snapshotDb).decide({
+          actor, action: "company_scope:read", resource: { type: "company", companyId },
+        })).allowed;
         const pendingApprovals = await snapshotDb
           .select({ count: sql<number>`count(*)` })
           .from(approvals)
-          .where(and(eq(approvals.companyId, companyId), inArray(approvals.status, resolvableApprovalStatuses), approvalRead))
+          .where(and(eq(approvals.companyId, companyId), inArray(approvals.status, resolvableApprovalStatuses), approvalRead,
+            canReadBudgets ? undefined : sql`${approvals.type} <> 'budget_override_required'`))
           .then((rows) => Number(rows[0]?.count ?? 0));
-        const visibleTaskTreeScopeIds = options.actor ? await visibleBudgetTaskTreeScopeIds(snapshotDb, companyId, actor) : undefined;
-        const budgetOverview = await budgetServiceInTransaction(snapshotDb).overview(companyId, {
-          approvalReadCondition: approvalRead, visibleTaskTreeScopeIds,
-        });
+        const budgetOverview = canReadBudgets
+          ? await budgetServiceInTransaction(snapshotDb).overview(companyId, { approvalReadCondition: approvalRead, actor })
+          : null;
         return { pendingApprovals, budgetOverview };
       };
       // Keep the approval total and budget subset in one repeatable snapshot.
@@ -225,10 +227,10 @@ export function dashboardService(db: Db) {
         },
         pendingApprovals,
         budgets: {
-          activeIncidents: budgetOverview.activeIncidents.length,
-          pendingApprovals: budgetOverview.pendingApprovalCount,
-          pausedAgents: budgetOverview.pausedAgentCount,
-          pausedProjects: budgetOverview.pausedProjectCount,
+          activeIncidents: budgetOverview?.activeIncidents.length ?? 0,
+          pendingApprovals: budgetOverview?.pendingApprovalCount ?? 0,
+          pausedAgents: budgetOverview?.pausedAgentCount ?? 0,
+          pausedProjects: budgetOverview?.pausedProjectCount ?? 0,
         },
         runActivity: Array.from(runActivity.values()),
       };

@@ -17,6 +17,7 @@ import type { ExecutionProjection } from "@groktopus/shared";
 import { EXECUTION_CONTROL_DEADLINE_MS } from "./execution-control-deadline.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { projectCaseCompletionRecoveryAction } from "./issue-recovery-actions.js";
 import { workspaceRecoveryDisplay } from "./workspace-recovery-receipt.js";
 import { readTaskDrain } from "./task-admission.js";
 import { getStartupRecoveryState, startupQueuedRunPassOutstanding } from "../startup-recovery-state.js";
@@ -130,6 +131,7 @@ export async function executionProjectionsForRuns(
           cause: issueRecoveryActions.cause,
           nextAction: issueRecoveryActions.nextAction,
           evidence: issueRecoveryActions.evidence,
+          attemptCount: issueRecoveryActions.attemptCount,
           status: issueRecoveryActions.status,
         })
         .from(issueRecoveryActions)
@@ -307,7 +309,7 @@ export async function executionProjectionsForRuns(
         run,
         coordinatorByRun.get(run.id),
         pending.filter((row) => row.issueId === issueId),
-        action,
+        action && { ...action, nextAction: projectCaseCompletionRecoveryAction(action)?.nextAction ?? action.nextAction },
         now,
         waitingByRun.get(run.id),
         settlingPredecessorKeys.has(run.id),
