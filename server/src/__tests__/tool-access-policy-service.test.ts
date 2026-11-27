@@ -25,6 +25,7 @@ import {
   toolProfileEntries,
   toolProfiles,
   toolRateLimitCounters,
+  toolRuntimeMetricCounters,
 } from "@groktopus/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -888,6 +889,107 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
     expect(JSON.stringify(managedEvent)).not.toContain("ship it");
     expect(managedEvent).not.toHaveProperty("argumentsSummary");
+  });
+
+  it("does not treat legacy task context as a canonical run privacy binding", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const issue = await createIssue(db, company.id);
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: company.id,
+      agentId: agent.id,
+      scopeKind: "issue",
+      issueId: null,
+      contextSnapshot: { issueId: "", taskId: issue.id },
+      status: "running",
+    }).returning();
+    const { connection } = await createTool(db, company.id);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review writes",
+      policyType: "require_approval",
+      selectors: { toolName: "send_email" },
+    });
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id, issueId: issue.id },
+      request: { connectionId: connection.id, toolName: "send_email", arguments: { to: "ops@example.com" } },
+    };
+
+    const service = toolAccessPolicyService(db);
+    const decision = await service.decide(input);
+    const recorded = await service.recordInvocation(input, decision);
+    const [managedEvent] = await db.select().from(managedAuditEvents)
+      .where(eq(managedAuditEvents.invocationId, recorded.invocation.id));
+
+    expect(managedEvent).toMatchObject({ runId: run.id, runScopeKind: "issue", runIssueId: null });
+  });
+
+  it("counts provenance read failures as managed audit capture failures", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const issue = await createIssue(db, company.id);
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: company.id,
+      agentId: agent.id,
+      scopeKind: "issue",
+      issueId: issue.id,
+      contextSnapshot: { issueId: issue.id },
+      status: "running",
+    }).returning();
+    const { connection } = await createTool(db, company.id);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review writes",
+      policyType: "require_approval",
+      selectors: { toolName: "send_email" },
+    });
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id, issueId: issue.id },
+      request: { connectionId: connection.id, toolName: "send_email", arguments: { to: "ops@example.com" } },
+    };
+    const realTransaction = db.transaction.bind(db);
+    const wrapQuery = (query: unknown): unknown => new Proxy(query as object, {
+      get(target, property, receiver) {
+        if (property === "for") return () => { throw new Error("provenance read fault"); };
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => wrapQuery(Reflect.apply(value, target, args));
+      },
+    });
+    const faultingDb = new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === "transaction") {
+          return (callback: (tx: unknown) => unknown, ...args: unknown[]) =>
+            realTransaction((tx) => callback(new Proxy(tx as object, {
+              get(txTarget, txProperty, txReceiver) {
+                const value = Reflect.get(txTarget, txProperty, txReceiver);
+                if (txProperty === "select" && typeof value === "function") {
+                  return (...selectArgs: unknown[]) => wrapQuery(Reflect.apply(value, txTarget, selectArgs));
+                }
+                return typeof value === "function" ? value.bind(txTarget) : value;
+              },
+            })), ...args as never[]);
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const service = toolAccessPolicyService(faultingDb);
+    const decision = await service.decide(input);
+
+    await expect(service.recordInvocation(input, decision)).rejects.toThrow("provenance read fault");
+    const failures = await db.select().from(toolRuntimeMetricCounters).where(eq(
+      toolRuntimeMetricCounters.companyId, company.id,
+    ));
+    expect(failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ metric: "audit_write_failed", count: 1 }),
+    ]));
+    expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(0);
+    expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(0);
   });
 
   it("replays side-effecting calls with the same idempotency key instead of creating a new invocation", async () => {
