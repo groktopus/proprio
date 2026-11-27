@@ -1,3 +1,4 @@
+import { heartbeatRunReadAccessColumns } from "../heartbeat-run-privacy.js";
 import { notifyExternalConversationSettlement } from "../external-conversation-settlement-notifications.js";
 import { preservedAccountRuntimeState } from "../agent-provider-rate-limits.js";
 import { readRuntimeAccountingTotals } from "../runtime-accounting-totals.js";
@@ -350,13 +351,6 @@ const heartbeatRunSqlAsciiSafeColumns = {
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
   stdoutExcerpt: sql<string | null>`NULL`.as("stdoutExcerpt"),
   stderrExcerpt: sql<string | null>`NULL`.as("stderrExcerpt"),
-} as const;
-
-const heartbeatRunReadAccessColumns = {
-  id: heartbeatRuns.id,
-  companyId: heartbeatRuns.companyId,
-  scopeKind: heartbeatRuns.scopeKind,
-  issueId: heartbeatRuns.issueId,
 } as const;
 
 const heartbeatRunLogAccessColumns = {

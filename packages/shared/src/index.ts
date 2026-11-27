@@ -1702,6 +1702,8 @@ export type {
   ToolInvocationStatus,
   ToolPolicy,
   ToolPolicyDecision,
+  ToolPolicyEvaluationSnapshot,
+  ToolPolicyRunProvenance,
   ToolPolicyType,
   ToolProfile,
   ToolProfileBinding,

@@ -19977,6 +19977,7 @@ describeEmbeddedPostgres("tool access service", () => {
             runId: run.id,
             toolName: "send_email",
           }),
+          policyProvenance: { captureStatus: "unknown", matchedPolicyIds: [], policies: [] },
           actionRequest: expect.objectContaining({
             id: actionRequest.id,
             status: "pending",
@@ -19994,6 +19995,16 @@ describeEmbeddedPostgres("tool access service", () => {
           }),
         },
       ],
+    });
+
+    await db.update(toolInvocations).set({
+      matchedPolicyIds: [randomUUID()],
+      policyExplanation: { explicitMatchedPolicies: [] },
+    }).where(eq(toolInvocations.id, invocation.id));
+    const partialLookup = await createTestToolAccessService(db).getRunDecisionLookup(company.id, run.id);
+    expect(partialLookup.decisions[0]?.policyProvenance).toMatchObject({
+      captureStatus: "unknown",
+      policies: [],
     });
   });
 

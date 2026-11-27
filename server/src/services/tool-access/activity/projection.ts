@@ -1,5 +1,59 @@
 import { toolActionRequests, toolCallEvents, toolInvocations } from "@groktopus/db";
-import type { ToolActionRequest, ToolCallEvent, ToolInvocation } from "@groktopus/shared";
+import { TOOL_POLICY_TYPES } from "@groktopus/shared";
+import type { ToolActionRequest, ToolCallEvent, ToolInvocation, ToolPolicyEvaluationSnapshot, ToolPolicyRunProvenance, ToolPolicyType } from "@groktopus/shared";
+import { isRecord } from "../records.js";
+
+function policySnapshot(value: unknown): ToolPolicyEvaluationSnapshot | null {
+  const supportedType = isRecord(value) && typeof value.policyType === "string"
+    && (TOOL_POLICY_TYPES.includes(value.policyType as ToolPolicyType)
+      || value.policyType === "redact" || value.policyType === "validate");
+  if (!isRecord(value) || typeof value.policyId !== "string" ||
+    !supportedType ||
+    typeof value.priority !== "number" || !Number.isInteger(value.priority) ||
+    typeof value.revisionUpdatedAt !== "string" ||
+    typeof value.revisionFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.revisionFingerprint) ||
+    typeof value.decisionReason !== "string" || value.decisionReason.length > 100 ||
+    typeof value.evaluatedAt !== "string" ||
+    !(value.principalRole === "actor" || value.principalRole === "caller" || value.principalRole === "target") ||
+    typeof value.selected !== "boolean") return null;
+  return {
+    policyId: value.policyId,
+    policyType: value.policyType as ToolPolicyEvaluationSnapshot["policyType"],
+    priority: value.priority,
+    revisionUpdatedAt: value.revisionUpdatedAt,
+    revisionFingerprint: value.revisionFingerprint,
+    decisionReason: value.decisionReason,
+    evaluatedAt: value.evaluatedAt,
+    principalRole: value.principalRole,
+    selected: value.selected,
+  };
+}
+
+export function toToolPolicyRunProvenance(row: typeof toolInvocations.$inferSelect): ToolPolicyRunProvenance {
+  const stored = row.policyExplanation?.explicitMatchedPolicies;
+  const snapshots = Array.isArray(stored) ? stored.map(policySnapshot) : null;
+  const parsedPolicies = snapshots?.filter((snapshot): snapshot is ToolPolicyEvaluationSnapshot => snapshot !== null) ?? [];
+  const matchedIds = Array.isArray(row.matchedPolicyIds)
+    ? row.matchedPolicyIds.filter((id): id is string => typeof id === "string") : [];
+  const snapshotIds = new Set(parsedPolicies.map(policy => policy.policyId));
+  const recorded = snapshots !== null && snapshots.every(snapshot => snapshot !== null);
+  const complete = recorded && matchedIds.every(id => snapshotIds.has(id));
+  const policies = complete ? snapshots as ToolPolicyEvaluationSnapshot[] : [];
+  return {
+    captureStatus: complete ? "recorded" : "unknown",
+    policies,
+  };
+}
+
+function publicToolCallMetadata(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const metadata = { ...value };
+  if (isRecord(metadata.policyExplanation)) {
+    const { explicitMatchedPolicies: _evaluationSnapshots, ...explanation } = metadata.policyExplanation;
+    metadata.policyExplanation = explanation;
+  }
+  return metadata;
+}
 
 export function toToolInvocation(
   row: typeof toolInvocations.$inferSelect,
@@ -98,7 +152,7 @@ export function toToolCallEvent(
     resultSizeBytes: row.resultSizeBytes,
     redactionPlan: row.redactionPlan ?? null,
     rateLimitState: row.rateLimitState ?? null,
-    metadata: row.metadata ?? null,
+    metadata: publicToolCallMetadata(row.metadata),
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     createdAt: row.createdAt,

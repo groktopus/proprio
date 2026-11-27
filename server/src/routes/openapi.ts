@@ -13378,6 +13378,7 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/tools/runs/{runId}/decisions",
   tags: ["tool-access"],
   summary: "Get governed tool decisions for a run transcript",
+  description: "Requires connection audit authority and visibility of the run's task. An unreadable run returns the same 404 as a missing run. Decisions linked to unreadable tasks are excluded.",
 });
 
 registerCurrentRoute({
