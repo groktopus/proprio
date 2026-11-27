@@ -41,7 +41,7 @@ async function reservePort() {
 }
 
 async function startController(input: { home: string; config: string; port: number; databaseUrl: string;
-  crashControl: string; crashReceipt: string }) {
+  crashControl: string; crashReceipt: string; heartbeatSchedulerEnabled?: boolean }) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
@@ -63,7 +63,7 @@ async function startController(input: { home: string; config: string; port: numb
     PROPRIO_ANNOUNCEMENTS_ENABLED: "false",
     PROPRIO_DB_BACKUP_ENABLED: "false",
     PROPRIO_MANAGED_RUNTIME_HTTPS: "off",
-    HEARTBEAT_SCHEDULER_ENABLED: "true",
+    HEARTBEAT_SCHEDULER_ENABLED: input.heartbeatSchedulerEnabled === false ? "false" : "true",
   };
   const child = fork(childEntry, [], { cwd: path.resolve(import.meta.dirname, "../../.."),
     execArgv: ["--import", tsxLoader], env, stdio: ["ignore", "pipe", "pipe", "ipc"] });
@@ -103,7 +103,12 @@ async function startController(input: { home: string; config: string; port: numb
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.send({ id: 1, command: "shutdown" });
-      await exited;
+      const stopped = await exitedWithin(exited, 15_000);
+      if (!stopped) {
+        child.kill("SIGKILL");
+        const killed = await exitedWithin(exited, 5_000);
+        if (!killed) throw new Error(`Controller did not exit after shutdown or SIGKILL: ${output.slice(-8000)}`);
+      }
     },
     get output() { return output; },
   };
@@ -117,6 +122,13 @@ async function waitFor<T>(read: () => Promise<T | null>, ready: (value: T) => bo
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(message);
+}
+
+function exitedWithin(exited: Promise<unknown>, timeoutMs: number) {
+  return new Promise<boolean>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    void exited.then(() => { clearTimeout(timer); resolve(true); }, error => { clearTimeout(timer); reject(error); });
+  });
 }
 
 afterEach(async () => {
@@ -134,6 +146,8 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
     const control = path.join(home, "crash-point-control.txt");
     const receipt = path.join(home, "crash-point-receipt.jsonl");
     const effectFile = path.join(home, "diagnosis-effect.txt");
+    const effectStarted = path.join(home, "diagnosis-effect-started.txt");
+    const releaseEffect = path.join(home, "release-diagnosis-effect.txt");
     const companyId = randomUUID();
     const agentId = randomUUID();
     const parentId = randomUUID();
@@ -152,15 +166,24 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       }));
       await writeFile(control, `controller-crash ${crashPoint}\n`);
 
-      // First real server boot is empty. Arm before seeding because the
-      // relation write can wake the normal assigned-work queue immediately.
-      controller = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
+      // Keep the initial claim request-driven so this test reaches the armed
+      // claim-to-wake crash boundary deterministically. Restart recovery below
+      // still runs with the normal scheduler enabled.
+      controller = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt,
+        heartbeatSchedulerEnabled: false });
       const prefix = `D${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`;
       await db.insert(companies).values({ id: companyId, name: "Full controller diagnosis", issuePrefix: prefix, requireBoardApprovalForNewAgents: false });
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", membershipRole: "owner" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Process fixture", role: "engineer", status: "idle",
         lifecycleState: "ready", adapterType: "process", adapterConfig: { command: process.execPath,
-          args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'invoked')", effectFile], cwd: process.cwd() },
+          args: ["-e", [
+            "const fs = require('node:fs');",
+            "fs.appendFileSync(process.argv[1], 'invoked\\n');",
+            "fs.writeFileSync(process.argv[2], 'started');",
+            "const deadline = Date.now() + 30_000;",
+            "while (!fs.existsSync(process.argv[3]) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);",
+            "if (!fs.existsSync(process.argv[3])) process.exit(2);",
+          ].join(" "), effectFile, effectStarted, releaseEffect], cwd: process.cwd() },
         runtimeConfig: { heartbeat: { enabled: true, intervalSec: 0, wakeOnDemand: true } }, permissions: {} });
       const old = new Date(Date.now() - 10 * 60_000);
       await db.insert(issues).values([
@@ -171,7 +194,25 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       ]);
       await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
 
+      const beforeCrash = await controller.api<{ wake: { idempotencyKey: string } }>(
+        "GET", `/issues/${parentId}/dependency-investigation`);
+      const idempotencyKey = beforeCrash.wake.idempotencyKey;
+      expect(idempotencyKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
+      const requestOutcome = controller.api("POST", `/issues/${parentId}/dependency-investigation`, { idempotencyKey })
+        .then(value => ({ kind: "response" as const, value }), error => ({ kind: "error" as const, error }));
+      if (!(await exitedWithin(controller.exited, 45_000))) {
+        const [latestClaim] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
+          eq(activityLog.entityId, parentId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
+        const wakeRows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+        throw new Error(`The initial controller did not close after the armed diagnosis request: ${JSON.stringify({
+          exitCode: controller.child.exitCode, signalCode: controller.child.signalCode,
+          claim: latestClaim?.details ?? null, wakeStatuses: wakeRows.map(row => ({ status: row.status, key: row.idempotencyKey,
+            issueId: row.payload?.issueId })), output: controller.output.slice(-8000),
+        })}`);
+      }
       const crash = await controller.exited;
+      const failedRequest = await requestOutcome;
+      expect(failedRequest.kind).toBe("error");
       expect(crash.signal, controller.output).toBe("SIGKILL");
       expect(await readFile(receipt, "utf8")).toContain(crashPoint);
       const claim = await waitFor(async () => {
@@ -181,6 +222,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       }, row => (row.details as Record<string, unknown>).outcome === "pending", "The controller did not persist the diagnosis claim");
 
       const diagnosisKey = String((claim.details as Record<string, unknown>).idempotencyKey);
+      expect(diagnosisKey).toBe(idempotencyKey);
       expect(diagnosisKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
       const receiptFilter = and(eq(agentWakeupRequests.companyId, companyId),
         eq(agentWakeupRequests.idempotencyKey, diagnosisKey));
@@ -239,17 +281,59 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       }
       const wake = await waitFor(async () => {
         const [row] = await db.select().from(agentWakeupRequests).where(receiptFilter);
-        return row ?? null;
-      }, row => ["completed", "failed", "skipped", "cancelled"].includes(row.status),
-      "Controller restart did not settle its diagnosis wake");
+        return row?.runId ? row : null;
+      }, row => Boolean(row.runId), "Controller restart did not queue its diagnosis wake");
       expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(1);
-      expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system",
-        status: "completed", payload: { issueId: parentId } });
-      const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
-        eq(heartbeatRuns.wakeupRequestId, wake.id)));
-      expect(run).toMatchObject({ status: "succeeded",
-        contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
-      expect(await readFile(effectFile, "utf8")).toBe("invoked");
+      expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "user",
+        payload: { issueId: parentId } });
+      const running = await waitFor(async () => {
+        const [current] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.wakeupRequestId, wake.id)));
+        return current?.status === "running" ? current : null;
+      }, current => current.status === "running", "The restarted controller did not begin the diagnosis invocation");
+      expect(running).toMatchObject({ contextSnapshot: { issueId: parentId, dependencyDiagnosis: true,
+        dependencyDiagnosisKey: diagnosisKey } });
+      await waitFor(async () => {
+        try { await access(effectStarted); return { started: true }; } catch { return null; }
+      }, value => value.started, "The diagnosis process did not reach its deterministic effect barrier");
+
+      const replay = await restarted.api<{ accepted: boolean; message: string }>("POST",
+        `/issues/${parentId}/dependency-investigation`, { idempotencyKey: diagnosisKey });
+      expect(replay).toEqual({ accepted: true, message: "The diagnostic continuation is already recorded." });
+      expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(1);
+      expect((await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.wakeupRequestId, wake.id)))).map(row => row.status)).toEqual(["running"]);
+      await writeFile(releaseEffect, "release");
+      await waitFor(async () => {
+        const [agent] = await db.select({ status: agents.status }).from(agents).where(eq(agents.id, agentId));
+        const [issue] = await db.select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+          .from(issues).where(eq(issues.id, parentId));
+        const requests = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, agentId)));
+        const allAgentRuns = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId)));
+        const issueRuns = allAgentRuns.filter(row => (row.contextSnapshot as Record<string, unknown> | null)?.issueId === parentId);
+        const [currentClaim] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
+          eq(activityLog.entityId, parentId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
+        const activeRequests = requests.filter(row => ["queued", "claimed", "deferred_issue_execution"].includes(row.status));
+        const activeRuns = allAgentRuns.filter(row => ["queued", "running"].includes(row.status));
+        return { agentStatus: agent?.status, issueExecutionRunId: issue?.executionRunId,
+          issueCheckoutRunId: issue?.checkoutRunId, activeRequests, activeRuns, issueRuns, currentClaim };
+      }, state => state.agentStatus === "idle" && state.activeRequests.length === 0 && state.activeRuns.length === 0
+        && state.issueRuns.length > 0 && state.currentClaim?.details?.outcome === "queued"
+        && state.issueExecutionRunId === null && state.issueCheckoutRunId === null
+        && state.issueRuns.every(row => !["queued", "running"].includes(row.status)),
+      "Diagnosis and any follow-on issue dispatch did not settle while the controller was live");
+      const [settledIssue] = await db.select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+        .from(issues).where(eq(issues.id, parentId));
+      expect(settledIssue).toMatchObject({ executionRunId: null, checkoutRunId: null });
+      const [settledWake] = await db.select().from(agentWakeupRequests).where(receiptFilter);
+      expect(settledWake).toMatchObject({ status: "completed", runId: wake.runId });
+      expect((await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.wakeupRequestId, wake.id)))).map(row => row.status)).toEqual(["succeeded"]);
+      expect(restarted.child.exitCode, restarted.output).toBeNull();
+      expect(restarted.child.signalCode, restarted.output).toBeNull();
+      expect(await readFile(effectFile, "utf8")).toBe("invoked\n");
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
@@ -257,10 +341,11 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         "GET", `/issues/${parentId}/diagnostics/wakes`);
       expect(diagnostics.events).toContainEqual(expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled", status: "completed" }));
     } finally {
+      await writeFile(releaseEffect, "release").catch(() => {});
       if (restarted) await restarted.stop().catch(() => {});
       if (controller && controller.child.exitCode === null && controller.child.signalCode === null) {
         controller.child.kill("SIGKILL");
-        await controller.exited;
+        await exitedWithin(controller.exited, 5_000);
       }
       await proxy.stop();
       await db.$client.end({ timeout: 0 });
