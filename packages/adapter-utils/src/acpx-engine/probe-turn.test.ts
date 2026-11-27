@@ -3,6 +3,7 @@ import type { AdapterExecutionTarget } from "../execution-target.js";
 
 const { fixture } = vi.hoisted(() => {
   const fixture = {
+    ensureSession: vi.fn(async () => ({})),
     cancel: vi.fn(async () => { throw new Error("cancel failed"); }),
     close: vi.fn(async () => {}),
     shutdown: vi.fn(async () => {}),
@@ -13,7 +14,7 @@ const { fixture } = vi.hoisted(() => {
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: () => ({
-    ensureSession: async () => ({}),
+    ensureSession: fixture.ensureSession,
     startTurn: () => ({
       result: Promise.resolve({ status: "failed", error: { message: "probe failed" } }),
       events: { async *[Symbol.asyncIterator]() {} },
@@ -67,8 +68,23 @@ describe("ACP probe cleanup", () => {
 
     expect(result).toEqual({ status: "failed", text: "", toolCall: false });
     expect(fixture.cancel).toHaveBeenCalledOnce();
-    expect(fixture.close).toHaveBeenCalledOnce();
+    expect(fixture.close).not.toHaveBeenCalled();
     expect(fixture.shutdown).toHaveBeenCalledOnce();
     expect(fixture.stop).toHaveBeenCalledOnce();
+  });
+
+  it("applies one deadline to session startup and cleans up after it expires", async () => {
+    fixture.ensureSession.mockImplementationOnce(() => new Promise(() => {}));
+    const result = await runAcpProbeTurn({
+      agent: "claude",
+      command: "fixture-agent",
+      cwd: "/workspace",
+      env: {},
+      timeoutMs: 10,
+      prompt: "hello",
+    });
+
+    expect(result).toEqual({ status: "timeout", text: "", toolCall: false });
+    expect(fixture.shutdown).toHaveBeenCalledOnce();
   });
 });

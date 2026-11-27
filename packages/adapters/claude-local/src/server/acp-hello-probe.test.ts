@@ -32,6 +32,19 @@ async function probe(mode: string, text?: string, timeoutMs = 5_000) {
   return { result, observed };
 }
 
+async function expectProcessExit(pid: number) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`ACP fixture process ${pid} did not exit after probe timeout`);
+}
+
 describe("Claude ACP hello probe", () => {
   it("requires a positive turn from the selected ACP process with the selected model and key", async () => {
     const { result, observed } = await probe("success");
@@ -48,7 +61,9 @@ describe("Claude ACP hello probe", () => {
   });
 
   it("bounds a hung ACP turn and reports timeout", async () => {
-    const { result } = await probe("hang", undefined, 800);
+    const { result, observed } = await probe("hang", undefined, 800);
     expect(result).toEqual({ status: "timeout" });
+    const { pid } = JSON.parse(await readFile(observed, "utf8")) as { pid: number };
+    await expectProcessExit(pid);
   });
 });

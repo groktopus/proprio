@@ -21,6 +21,24 @@ async function cleanupWithinBudget(cleanup: () => Promise<unknown>): Promise<boo
   finally { clearTimeout(timer); }
 }
 
+function remainingProbeTime(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" });
+  return remaining;
+}
+
+async function awaitProbeStartup<T>(operation: Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), remainingProbeTime(deadline));
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 export type AcpProbeTurnResult =
   | { status: "completed"; text: string; toolCall: boolean }
   | { status: "auth_required" | "timeout" | "failed"; text: ""; toolCall: false };
@@ -37,6 +55,7 @@ export async function runAcpProbeTurn(input: {
   maxResponseChars?: number;
   prompt: string;
 }): Promise<AcpProbeTurnResult> {
+  const deadline = Date.now() + input.timeoutMs;
   const root = await mkdtemp(path.join(tmpdir(), "proprio-acp-probe-"));
   const runId = `acp-probe-${randomUUID()}`;
   let bridge: Awaited<ReturnType<typeof startAdapterExecutionTargetProcessSessionBridge>> | null = null;
@@ -60,7 +79,7 @@ export async function runAcpProbeTurn(input: {
         args: [],
         cwd: input.cwd,
         env: probeEnv,
-        timeoutSec: Math.ceil(input.timeoutMs / 1000),
+        timeoutSec: Math.ceil(remainingProbeTime(deadline) / 1000),
       });
       if (!bridge) return { status: "failed", text: "", toolCall: false };
       agentCommand = bridge.agentCommand;
@@ -75,15 +94,15 @@ export async function runAcpProbeTurn(input: {
       nonInteractivePermissions: "deny",
       fs: false,
       terminal: false,
-      timeoutMs: input.timeoutMs,
+      timeoutMs: remainingProbeTime(deadline),
     }));
-    handle = await runtime.ensureSession({
+    handle = await awaitProbeStartup(runtime.ensureSession({
       sessionKey: runId,
       agent: input.agent,
       mode: "oneshot",
       cwd: input.cwd,
       sessionOptions: { ...(input.model ? { model: input.model } : {}), allowedTools: [], maxTurns: 1 },
-    });
+    }), deadline);
 
     const response = { text: "", toolCall: false };
     turn = runtime.startTurn({
@@ -91,7 +110,7 @@ export async function runAcpProbeTurn(input: {
       text: input.prompt,
       mode: "prompt",
       requestId: randomUUID(),
-      timeoutMs: input.timeoutMs,
+      timeoutMs: remainingProbeTime(deadline),
     });
     const consume = (async () => {
       for await (const event of turn!.events) {
@@ -106,7 +125,8 @@ export async function runAcpProbeTurn(input: {
       outcome = await Promise.race([
         turn.result,
         new Promise<never>((_resolve, reject) => {
-          timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), input.timeoutMs);
+          const remaining = remainingProbeTime(deadline);
+          timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), remaining);
         }),
       ]);
     } finally { clearTimeout(timeoutTimer); }
@@ -124,7 +144,10 @@ export async function runAcpProbeTurn(input: {
   } finally {
     let cleanupFailed = false;
     if (turn && !result && !(await cleanupWithinBudget(() => turn!.cancel({ reason: "ACP probe ended" })))) cleanupFailed = true;
-    if (runtime && handle && !(await cleanupWithinBudget(() => runtime!.close({ handle: handle!, reason: "ACP probe complete", discardPersistentState: true })))) cleanupFailed = true;
+    // The one-shot turn retires its session owner when its result settles.
+    // Calling close() here can open a second ACP transport for optional
+    // session/close support after the relay's one-shot client has already
+    // ended. shutdown() closes any remaining local owners without reconnecting.
     if (runtime && !(await cleanupWithinBudget(() => runtime!.shutdown()))) cleanupFailed = true;
     if (bridge && !(await cleanupWithinBudget(() => bridge!.stop()))) cleanupFailed = true;
     if (!(await cleanupWithinBudget(() => rm(root, { recursive: true, force: true })))) cleanupFailed = true;
