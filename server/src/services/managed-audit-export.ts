@@ -157,6 +157,8 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
   const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  // If a surviving binding proves the event belongs to evidence the caller
+  // cannot see, do not reveal whether another task/run binding is missing.
   const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
     .where(and(
       eq(issues.companyId, scope.companyId),

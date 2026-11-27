@@ -131,6 +131,7 @@ export async function nativeCompletionFeedback(
       throw new Error("The published GitHub review wait is no longer authorized for this run. Reassess current task state without repeating the published review.");
   }
   const acceptedHandoff = await assertNativeCaseHandoffResult(db, runId, issue.id, result);
+  if (acceptedHandoff?.state === "offered") return "The handoff offer awaits a recipient decision. End the turn and leave the task open.";
   if (acceptedHandoff) return "The persisted case handoff controls this turn. End the turn; the task remains open for its next agent.";
   const reviewContext = readNativeReviewAssignmentContext(run.contextSnapshot);
   if (reviewContext) {

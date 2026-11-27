@@ -420,6 +420,40 @@ describe.skipIf(!runControlPostgresSupport.supported)("scoped budget cancellatio
     expect(wakes.map(wake => persisted.find(row => row.id === wake.id)?.status)).toEqual(["cancelled", "queued", "queued", "queued"]);
   });
 
+  it("cancels only runs and queued tasks with the historical task-tree lineage", async () => {
+    const { company, agent } = await fixture();
+    const [root, child, moved, unrelated] = await db.insert(issues).values([
+      { companyId: company.id, title: "Tree root" }, { companyId: company.id, title: "Child", identifier: "TREE-42" },
+      { companyId: company.id, title: "Moved task" }, { companyId: company.id, title: "Unrelated" },
+    ]).returning();
+    await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, child.id));
+    const [inside, historical, outside] = await db.insert(heartbeatRuns).values([
+      { companyId: company.id, agentId: agent.id, issueId: child.id, taskLineageJson: { version: 1, pathIssueIds: [child.id, root.id] }, status: "queued", runtimeMode: "legacy" },
+      { companyId: company.id, agentId: agent.id, issueId: moved.id, taskLineageJson: { version: 1, pathIssueIds: [moved.id, root.id] }, status: "queued", runtimeMode: "legacy" },
+      { companyId: company.id, agentId: agent.id, issueId: unrelated.id, taskLineageJson: { version: 1, pathIssueIds: [unrelated.id] }, status: "queued", runtimeMode: "legacy" },
+    ]).returning();
+    const wakes = await db.insert(agentWakeupRequests).values([
+      { issueId: child.id }, { taskId: child.id }, { _proprioWakeContext: { issueId: child.id } },
+      { taskKey: "tree-42" }, { issueId: unrelated.id },
+    ].map(payload => ({
+      companyId: company.id, agentId: agent.id, source: "assignment", status: "queued", payload,
+    }))).returning();
+
+    await createHeartbeatRunControl(db, callbacks(db)).cancelBudgetScopeWork({
+      companyId: company.id, scopeType: "task_tree", scopeId: root.id,
+    });
+
+    const stopped = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, [inside.id, historical.id, outside.id]));
+    expect(Object.fromEntries(stopped.map(run => [run.id, run.status]))).toEqual({
+      [inside.id]: "cancelled", [historical.id]: "cancelled", [outside.id]: "queued",
+    });
+    const persistedWakes = await db.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakes.map(wake => wake.id)));
+    expect(Object.fromEntries(persistedWakes.map(wake => [wake.id, wake.status]))).toEqual({
+      [wakes[0]!.id]: "cancelled", [wakes[1]!.id]: "cancelled", [wakes[2]!.id]: "cancelled",
+      [wakes[3]!.id]: "cancelled", [wakes[4]!.id]: "queued",
+    });
+  });
+
   it("fences detached browsers after their parent run finishes using admitted project scope and cutoff", async () => {
     const { company, agent } = await fixture();
     const [project, otherProject] = await db.insert(projects).values([

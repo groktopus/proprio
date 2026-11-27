@@ -3,7 +3,7 @@ import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external
 import { plugins } from "@groktopus/db";
 import { readTaskPanelActivations } from "../plugin-task-panels.js";
 import { startServerMetrics, stopServerMetrics } from "../server-metrics.js";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -18,6 +18,8 @@ import {
   agents,
   assets,
   authUsers,
+  caseHandoffs,
+  cases,
   companies,
   companyMemberships,
   completionContracts,
@@ -54,11 +56,20 @@ import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embed
 import { startRecoveryPostgres } from "../../__tests__/helpers/recovery-postgres.js";
 import { ProprioControlPlanePort } from "./proprio-control-plane-port.js";
 import { secretEnvironmentValues } from "../agent-identity-redaction.js";
+import { caseHandoffService } from "../case-handoffs.js";
+import { requestedRunCancellation } from "../run-cancellation.js";
+import { heartbeatService } from "../heartbeat.js";
+import { issueRecoveryActionReadModel } from "../issue-recovery-actions.js";
+import { readNativeContinuationSource } from "./native-continuation-delivery.js";
 import { nativeSha256 } from "./canonical.js";
+import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
+import { assertAcceptedOfferIsCurrent, computeCaseHandoffRequirementsDigest, readAcceptedCaseHandoffOffer } from "../case-handoff-offer-authority.js";
+import { captureCaseWorkflow } from "../case-workflows.js";
 import { NativeRunCoordinatorStore } from "./native-run-coordinator-store.js";
 import { finalizeNativeRun, repairCommittedNativeChatResponse } from "./native-run-finalizer.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
+import { instanceSettingsService } from "../instance-settings.js";
 import { documentService } from "../documents.js";
 import { claimNativeReviewExecutionLock, getNativeReviewAssignment } from "./native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-review-dispatch.js";
@@ -87,6 +98,9 @@ describe("ProprioControlPlanePort conformance", () => {
   let temporary: Awaited<ReturnType<typeof startRecoveryPostgres>> | null = null;
   let outputStorageRoot: string;
   let db: ReturnType<typeof createDb>;
+  let recoveryEvidenceCaseId: string | null = null;
+  let recoveryEvidenceHandoffId: string | null = null;
+  let recoveryEvidenceSuccessorHandoffId: string | null = null;
   const contractId = "00000000-0000-4000-8000-000000000004";
   const contractSha = "phase6-conformance-contract";
   const taskIssueId = "00000000-0000-4000-8000-000000000008";
@@ -327,6 +341,15 @@ describe("ProprioControlPlanePort conformance", () => {
       await temporary.cleanup();
     }
     await rm(outputStorageRoot, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    if (recoveryEvidenceSuccessorHandoffId) await db.delete(caseHandoffs).where(eq(caseHandoffs.id, recoveryEvidenceSuccessorHandoffId));
+    if (recoveryEvidenceHandoffId) await db.delete(caseHandoffs).where(eq(caseHandoffs.id, recoveryEvidenceHandoffId));
+    if (recoveryEvidenceCaseId) await db.delete(cases).where(eq(cases.id, recoveryEvidenceCaseId));
+    recoveryEvidenceSuccessorHandoffId = null;
+    recoveryEvidenceCaseId = null;
+    recoveryEvidenceHandoffId = null;
   });
 
   it.each(["settles", "checkpoint timeout", "unscoped terminal", "verified shutdown"] as const)("settles a durable governed wait through its recorded terminal or shutdown: %s", async mode => {
@@ -2753,11 +2776,54 @@ describe("ProprioControlPlanePort conformance", () => {
     return { companyId, agentId, issueId, runId, port, result };
   }
 
-  it("keeps synthetic provider completion open until the requested task document is published", async () => {
-    const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
+  async function bindAcceptedCurrentCaseHandoff(input: { companyId: string; agentId: string; issueId: string; runId: string }, versioned = true) {
+    const [sourceRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+    const [acceptedContract] = await db.select().from(completionContracts).where(and(
+      eq(completionContracts.id, sourceRun!.completionContractId!), eq(completionContracts.companyId, input.companyId),
+      eq(completionContracts.issueId, input.issueId),
+    ));
+    const [task] = await db.select({ title: issues.title, description: issues.description }).from(issues).where(eq(issues.id, input.issueId));
+    const sourceAgentId = randomUUID();
+    await db.insert(agents).values({ id: sourceAgentId, companyId: input.companyId, name: "Handoff sender", adapterType: "proprio_runner", status: "idle" });
+    const caseId = randomUUID(), handoffId = randomUUID();
+    recoveryEvidenceCaseId = caseId;
+    recoveryEvidenceHandoffId = handoffId;
+    const phase = "delivery";
+    const instructions = "Deliver the result";
+    const workflow = await captureCaseWorkflow(db, input.companyId, { workflowId: null, phase }, input.issueId, phase);
+    const requirements = {
+      taskTitle: task!.title, taskDescription: task!.description, phase, instructions,
+      expectedDeliverable: "Complete task", prerequisites: [],
+      requirementRevision: { id: acceptedContract!.id, revision: acceptedContract!.revision,
+        canonicalSha256: acceptedContract!.canonicalSha256 },
+      workflowTransition: workflow.workflowTransition, workflowPromptDigest: null,
+    };
+    const requirementsDigest = computeCaseHandoffRequirementsDigest(requirements);
+    const offerContract = { schema: "proprio.case-handoff-offer.v1" as const, expectedDeliverable: requirements.expectedDeliverable,
+      prerequisites: requirements.prerequisites, requirementRevision: requirements.requirementRevision, requirementsDigest, taskBrief: task! };
+    await db.insert(cases).values({ id: caseId, companyId: input.companyId, caseNumber: 700000 + Math.floor(Math.random() * 100000),
+      identifier: "C-" + caseId, caseType: "native-completion", title: "Native completion handoff", workIssueId: input.issueId,
+      phase, handoffVersion: 1 });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { ...sourceRun!.contextSnapshot, caseHandoffId: handoffId } })
+      .where(eq(heartbeatRuns.id, input.runId));
+    await db.insert(caseHandoffs).values({ id: handoffId, companyId: input.companyId, caseId, issueId: input.issueId, version: 1,
+      fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: input.agentId, phase, instructions, ...workflow,
+      actorType: "agent", actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: "native-completion-" + handoffId,
+      inputFingerprint: "native-completion-" + handoffId, offerContract: versioned ? offerContract : null,
+      recipientDecision: versioned ? { outcome: "accepted", actorType: "agent", actorId: input.agentId, handoffVersion: 1,
+        requirementRevisionId: acceptedContract!.id, requirementsDigest, decidedAt: new Date().toISOString() } : null,
+      state: "delivered" });
+    return { caseId, handoffId, acceptedContract: acceptedContract!, offerContract, sourceAgentId, requirements };
+  }
+
+  it.each(["current", "historical recovery", "different recovery", "cancelled", "withdrawn", "withdrawn before dispatch"] as const)(
+    "handles an unpublished task document after a %s Case corrective wake", async caseState => {
     const objective = "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Put the returned page titles and service receipt code in the document. When complete, give me the document link.";
+    const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
     await db.update(issues).set({ title: "Create the service briefing", description: objective }).where(eq(issues.id, issueId));
-    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));
+    const { caseId, handoffId, acceptedContract } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, caseHandoffId: handoffId,
+      executionContinuation: { objective } } }).where(eq(heartbeatRuns.id, runId));
     const synthetic: PrpStructuredRunResult = { ...result, summary: "Created briefing.md with the returned page titles and service receipt.",
       evidence: [{ ref: "provider:opencode:agent-message" }], artifacts: [] };
     await port.completeRun({ result: synthetic, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
@@ -2772,15 +2838,76 @@ describe("ProprioControlPlanePort conformance", () => {
     await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded" });
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
       .toHaveLength(wakes.length);
-    const followUpId = randomUUID(), runnerInstanceId = randomUUID();
+    const runnerInstanceId = randomUUID();
     const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const wake = wakes.find(row => row.payload?.continuationIdempotencyKey === "native-completion-incomplete")!;
-    await db.insert(heartbeatRuns).values({ id: followUpId, companyId, agentId, status: "succeeded", runtimeMode: "native",
-      nativeIssueId: issueId, nativeSessionId: source!.nativeSessionId, runnerInstanceId,
+    await db.update(agents).set({ status: "active", adapterType: "proprio_runner",
+      adapterConfig: { provider: "opencode", model: "openrouter/test-model" } }).where(eq(agents.id, agentId));
+    // Exercise normal wake admission while leaving execution to the conformance port.
+    const heartbeat = heartbeatService(db, { runStartHandover: { isYielding: () => true, refreshIfStale: () => null } });
+    if (caseState === "withdrawn before dispatch") {
+      const userId = source!.responsibleUserId!;
+      const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
+        ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+        nativeCancellation: { schema: "proprio.native-cancellation.v1", runId, companyId, issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+      } }).where(eq(heartbeatRuns.id, runId));
+      const board = { type: "board" as const, source: "local_implicit" as const, userId };
+      await expect(caseHandoffService(db).withdrawDelivered(board, caseId, handoffId,
+        { expectedHandoffVersion: 1, stoppedRunId: runId })).resolves.toMatchObject({ state: "cancelled" });
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ dispatched: 0 });
+      const [intent] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(intent).toMatchObject({ status: "skipped", runId: null });
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "case_handoff_superseded")))).toHaveLength(1);
+      expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+        .toMatchObject({ scanned: 0, dispatched: 0 });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+      return;
+    }
+    expect(await heartbeat.dispatchPendingNativeStatusWakeups({ companyId, requestId: wake.id }))
+      .toMatchObject({ dispatched: 1 });
+    const [dispatchedRun] = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .filter(row => row.contextSnapshot?.nativeStatusWakeIntentId === wake.id);
+    expect(dispatchedRun).toMatchObject({ status: "queued" });
+    expect(dispatchedRun!.contextSnapshot).not.toHaveProperty("caseHandoffId");
+    const followUpId = dispatchedRun!.id;
+    await db.update(heartbeatRuns).set({ status: "succeeded", runtimeMode: "native", nativeIssueId: issueId,
+      nativeSessionId: source!.nativeSessionId, runnerInstanceId,
       completionContractId: source!.completionContractId, completionContractSha256: source!.completionContractSha256,
-      wakeupRequestId: wake.id, contextSnapshot: source!.contextSnapshot });
-    await db.update(agentWakeupRequests).set({ runId: followUpId }).where(eq(agentWakeupRequests.id, wake.id));
+      contextSnapshot: { ...dispatchedRun!.contextSnapshot, executionContinuation: { objective } } })
+      .where(eq(heartbeatRuns.id, followUpId));
+    const binding = { companyId, issueId, runId: followUpId, completionRecovery: true as const };
+    expect(await readNativeContinuationSource(db, binding)).toBe(runId);
+    expect(await readNativeContinuationSource(db, { companyId, issueId, runId: followUpId })).toBeNull();
     await db.update(issues).set({ executionRunId: followUpId }).where(eq(issues.id, issueId));
+    if (caseState === "withdrawn") {
+      // The production dispatcher created this run. Persist the provider Stop
+      // receipt as the cancel service would after an acknowledged dispatch.
+      const userId = source!.responsibleUserId!;
+      const attribution = { cancelledByActorType: "user", cancelledByUserId: userId };
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), resultJson: {
+        ...attribution, cancellation: requestedRunCancellation(attribution, "Cancelled by a board operator"),
+        executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() },
+        nativeCancellation: { schema: "proprio.native-cancellation.v1", runId: followUpId, companyId, issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+      } }).where(eq(heartbeatRuns.id, followUpId));
+      await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, dispatchedRun!.wakeupRequestId!));
+      const board = { type: "board" as const, source: "local_implicit" as const, userId };
+      await expect(caseHandoffService(db).withdrawDelivered(board, caseId, handoffId,
+        { expectedHandoffVersion: 1, stoppedRunId: followUpId })).resolves.toMatchObject({
+        state: "cancelled", recipientDecision: { outcome: "accepted", actorId: agentId },
+      });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0])
+        .toMatchObject({ status: "blocked", unblockDescriptor: { owner: "board" } });
+      return;
+    }
     const followUp = new ProprioControlPlanePort(db, { companyId, issueId, agentId, runId: followUpId,
       sessionId: source!.nativeSessionId!, sourceInstanceId: runnerInstanceId,
       completionContractId: source!.completionContractId!, completionContractSha256: source!.completionContractSha256!,
@@ -2788,14 +2915,246 @@ describe("ProprioControlPlanePort conformance", () => {
     await followUp.openRun({ identity: { ...CONTROL_PLANE_CONFORMANCE_OPEN.identity, companyId, issueId, agentId, runId: followUpId },
       backendKind: "mock", sourceInstanceId: runnerInstanceId });
     await followUp.completeRun({ result: synthetic, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
+    if (caseState === "cancelled") {
+      await db.update(cases).set({ status: "cancelled" }).where(eq(cases.id, caseId));
+    }
+    const seedPreviousRecovery = async () => {
+      const [decision] = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, runId));
+      const [assessment] = await db.select().from(workAssessments).where(eq(workAssessments.id, decision!.assessmentId));
+      const prior = { ...assessment!, id: randomUUID(), inputDigest: nativeSha256({ priorAssessmentId: assessment!.id }) };
+      await db.insert(workAssessments).values(prior);
+      const effect = { kind: "record_finalization_error", cause: "completion_evidence_incomplete", agentId,
+        nextAction: "Review the prior assessment.", taskRemedy: "publish_task_document" };
+      const [previousDecision] = await db.insert(statusDecisions).values({ ...decision!, id: randomUUID(),
+        decisionVersion: decision!.decisionVersion + 1, assessmentId: prior.id, reasonCode: "prior_status_preserved_no_live_path",
+        decisionJson: { ...decision!.decisionJson, effects: [effect] },
+        decisionDigest: nativeSha256({ priorDecisionId: decision!.id, effect }),
+      }).returning();
+      const receipt = await readAcceptedCaseHandoffCompletionEvidence({ db, companyId, issueId, runId, decisionId: previousDecision!.id });
+      const previousReceipt = { ...receipt!, caseHandoff: {
+        ...receipt!.caseHandoff, id: caseState === "historical recovery" ? handoffId : randomUUID(),
+      }, taskRemedy: effect.taskRemedy };
+      const fingerprint = nativeSha256({ runId, decisionId: previousDecision!.id, cause: effect.cause });
+      const [action] = await db.insert(issueRecoveryActions).values({
+        companyId, sourceIssueId: issueId, kind: "active_run_watchdog", status: "active",
+        ownerType: "agent", ownerAgentId: agentId, cause: effect.cause, attemptCount: 1, maxAttempts: 3,
+        fingerprint, nextAction: effect.nextAction,
+        evidence: { runId, decisionId: previousDecision!.id, caseHandoffCompletion: previousReceipt },
+      }).returning();
+      await db.insert(statusDecisionEffects).values({ companyId, issueId, decisionId: previousDecision!.id, ordinal: 0,
+        effectKind: effect.kind, targetType: "issue_recovery_action", targetId: action!.id, deliveryState: "delivered",
+        deliveredAt: new Date(), payload: { cause: effect.cause, nextAction: effect.nextAction },
+        idempotencyKey: `tested-previous-recovery:${previousDecision!.id}`,
+      });
+      return { decision: previousDecision!, action: action!, resultId: previousReceipt.assessment.resultId };
+    };
+    const previousRecovery = caseState === "historical recovery" || caseState === "different recovery"
+      ? await seedPreviousRecovery() : null;
+    const [before] = await db.select().from(issues).where(eq(issues.id, issueId));
     await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
+    if (caseState === "cancelled") {
+      const [after] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(after).toMatchObject({ status: before!.status, statusVersion: before!.statusVersion,
+        assigneeAgentId: before!.assigneeAgentId, lastStatusDecisionId: before!.lastStatusDecisionId });
+      const [decision] = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, followUpId));
+      expect(decision).toMatchObject({ reasonCode: "case_handoff_superseded", applicationState: "applied",
+        decisionJson: { statusAction: "preserve", effects: [] } });
+      expect(await db.select().from(statusDecisionEffects).where(eq(statusDecisionEffects.decisionId, decision!.id))).toEqual([]);
+      expect(await db.select().from(workAssessments).where(eq(workAssessments.runId, followUpId))).toHaveLength(1);
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([]);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, followUpId));
+      expect(run).toMatchObject({ nativePhase: "committed", resultJson: { finalizationPhase: "committed",
+        finalizationReasonCode: "case_handoff_superseded", authoritativeDecision: before!.status } });
+      return;
+    }
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_progress");
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId))))
-      .toHaveLength(wakes.length);
-    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
-      .toContainEqual(expect.objectContaining({ ownerAgentId: agentId, cause: "completion_evidence_incomplete", nextAction: expect.stringContaining("write_document") }));
+      .toHaveLength(wakes.length + 1);
+    const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toContainEqual(expect.objectContaining({ ownerAgentId: agentId, cause: "completion_evidence_incomplete", nextAction: expect.stringContaining("write_document") }));
+    const completionRecovery = recoveryActions.find(action =>
+      action.cause === "completion_evidence_incomplete" && action.status === "active");
+    expect(completionRecovery?.evidence.caseHandoffCompletion).toMatchObject({
+      caseHandoff: { id: handoffId, acceptedRequirementRevision: { id: acceptedContract!.id } },
+      decision: { statusDecisionReasonCode: "prior_status_preserved_no_live_path" },
+      assessment: { resultId: expect.any(String), assessedContractRevision: { id: acceptedContract!.id } },
+      taskRemedy: "publish_task_document",
+    });
+    const retainedPriorAttempt = caseState === "historical recovery";
+    const expectedAttemptCount = retainedPriorAttempt ? 2 : 1;
+    const expectedAttempts = retainedPriorAttempt ? [{ runId, decisionId: previousRecovery!.decision.id, resultId: previousRecovery!.resultId,
+      assessmentId: previousRecovery!.decision.assessmentId, assessedContractId: acceptedContract.id,
+      reasonCode: previousRecovery!.decision.reasonCode }] : [];
+    expect(completionRecovery).toMatchObject({ attemptCount: expectedAttemptCount,
+      evidence: { caseHandoffCompletion: { attempts: [...expectedAttempts, {
+        runId: followUpId, decisionId: completionRecovery!.evidence.decisionId,
+        assessmentId: expect.any(String), assessedContractId: acceptedContract.id, reasonCode: "prior_status_preserved_no_live_path",
+      }] } } });
+    if (retainedPriorAttempt) expect(completionRecovery?.id).toBe(previousRecovery?.action.id);
+    if (caseState === "different recovery") {
+      expect(completionRecovery?.id).not.toBe(previousRecovery?.action.id);
+      expect(recoveryActions.find(action => action.id === previousRecovery?.action.id)).toMatchObject({
+        status: "cancelled", attemptCount: 1, evidence: previousRecovery?.action.evidence,
+      });
+    }
+    await finalizeNativeRun({ db, runId: followUpId, workspaceFinalizeStatus: "succeeded" });
+    const [replayed] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, completionRecovery!.id));
+    expect(replayed).toMatchObject({ attemptCount: expectedAttemptCount, evidence: completionRecovery!.evidence });
+    expect(JSON.stringify(completionRecovery?.evidence)).not.toContain("provider:opencode:agent-message");
+    expect(issueRecoveryActionReadModel(completionRecovery!).nextAction).toContain("write_document");
     expect((await db.select().from(nativeRunResults).where(eq(nativeRunResults.runId, runId)))[0]!.resultJson)
       .toMatchObject({ result: { reportedWorkDisposition: "done", evidence: synthetic.evidence, artifacts: [] } });
+  });
+
+  it.each(["same-recipient newer handoff", "accepted scope correction through Case service", "withdrawal", "Case cancellation"] as const)("preserves a late accepted result after %s", async authorityChange => {
+    const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
+    const { caseId, handoffId, acceptedContract, offerContract, sourceAgentId, requirements } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId });
+    const initialIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const turnId = "late-case-result";
+    await port.appendEvent({ schema: "proprio.prp.event.v1", sourceEventId: "late-case-answer",
+      sourceSeq: 1, sourceInstanceId: run!.runnerInstanceId!, sourceKind: "runner", runId,
+      normalizedSessionId: run!.nativeSessionId!, turnId, eventType: "item.completed", schemaVersion: 1,
+      priority: 0, emittedAt: new Date().toISOString(),
+      payload: { kind: "agentMessage", channel: "final", text: "The previous handoff requirements are complete." } });
+    const usesCaseService = authorityChange === "accepted scope correction through Case service";
+    if (!usesCaseService) await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
+
+    const correctedDeliverable = "Corrected scope with verified publication";
+    const correctedInstructions = "Publish the corrected deliverable and include verified evidence.";
+    let successorId: string | undefined;
+    let issueBeforeFinalization = initialIssue;
+    let correctedDigest: string | undefined;
+    if (usesCaseService) {
+      await db.update(agents).set({ adapterType: "proprio_runner" }).where(eq(agents.id, agentId));
+      const [correctionSource] = await db.insert(heartbeatRuns).values({
+        companyId, agentId: sourceAgentId, issueId, nativeIssueId: issueId, runtimeMode: "native", status: "running",
+        responsibleUserId: initialIssue.responsibleUserId, completionContractId: acceptedContract.id,
+        completionContractSha256: acceptedContract.canonicalSha256, contextSnapshot: { issueId },
+      }).returning();
+      const correctionRunId = correctionSource!.id;
+      const [taskAtCorrection] = await db.update(issues).set({ assigneeAgentId: sourceAgentId, executionRunId: correctionRunId })
+        .where(eq(issues.id, issueId)).returning();
+      const service = caseHandoffService(db);
+      const prerequisites = ["Verify the publication receipt"];
+      const settings = instanceSettingsService(db);
+      const { enableCases } = await settings.getExperimental();
+      if (!enableCases) {
+        onTestFinished(async () => { await settings.updateExperimental({ enableCases }); });
+        await settings.updateExperimental({ enableCases: true });
+      }
+      const correction = await service.handoff(companyId, {
+        type: "agent", source: "agent_jwt", companyId, agentId: sourceAgentId, runId: correctionRunId,
+      }, {
+        case: { id: caseId }, idempotencyKey: `scope-correction-${caseId}`, expectedHandoffVersion: 1,
+        expectedIssueStatusVersion: taskAtCorrection!.statusVersion, toAgentId: agentId, phase: requirements.phase,
+        instructions: correctedInstructions, offer: { expectedDeliverable: correctedDeliverable, prerequisites },
+      }, { enableVersionedOffers: true });
+      successorId = correction.handoffId;
+      recoveryEvidenceSuccessorHandoffId = successorId;
+      expect(correction).toMatchObject({ handoffVersion: 2, state: "offered" });
+      correctedDigest = computeCaseHandoffRequirementsDigest({
+        ...requirements, instructions: correctedInstructions, expectedDeliverable: correctedDeliverable, prerequisites,
+      });
+      expect(correctedDigest).not.toBe(offerContract.requirementsDigest);
+      await expect(service.recordRecipientDecision({
+        type: "agent", source: "agent_key", companyId, agentId,
+      }, caseId, successorId, {
+        outcome: "accepted", expectedHandoffVersion: correction.handoffVersion, requirementRevisionId: acceptedContract.id,
+      })).resolves.toMatchObject({
+        state: "awaiting_release", recipientDecision: { outcome: "accepted", actorId: agentId,
+          handoffVersion: 2, requirementRevisionId: acceptedContract.id, requirementsDigest: correctedDigest },
+      });
+      // The correcting sender still owns the task until its run releases it.
+      const [currentIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      issueBeforeFinalization = currentIssue!;
+      expect(issueBeforeFinalization).toMatchObject({ status: initialIssue.status, statusVersion: taskAtCorrection!.statusVersion,
+        assigneeAgentId: sourceAgentId, executionRunId: correctionRunId });
+      await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, turnId });
+    } else if (authorityChange === "same-recipient newer handoff") {
+      successorId = randomUUID();
+      recoveryEvidenceSuccessorHandoffId = successorId;
+      const [currentCase] = await db.select().from(cases).where(eq(cases.id, caseId));
+      const workflow = await captureCaseWorkflow(db, companyId, currentCase!, issueId, requirements.phase);
+      expect(workflow.workflowTransition).toEqual(requirements.workflowTransition);
+      correctedDigest = computeCaseHandoffRequirementsDigest({
+        ...requirements, instructions: correctedInstructions, expectedDeliverable: correctedDeliverable,
+        workflowTransition: workflow.workflowTransition,
+      });
+      expect(correctedDigest).not.toBe(offerContract.requirementsDigest);
+      const correctedOfferContract = { ...offerContract, expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest };
+      const [correctionSource] = await db.insert(heartbeatRuns).values({ companyId, issueId, nativeIssueId: issueId,
+        agentId: sourceAgentId, runtimeMode: "native", status: "succeeded", invocationSource: "assignment", triggerDetail: "system",
+        completionContractId: acceptedContract.id, completionContractSha256: acceptedContract.canonicalSha256,
+        contextSnapshot: { issueId }, finishedAt: new Date() }).returning();
+      await db.update(cases).set({ handoffVersion: 2 }).where(eq(cases.id, caseId));
+      const [successor] = await db.insert(caseHandoffs).values({ id: successorId, companyId, caseId, issueId, version: 2,
+        sourceRunId: correctionSource!.id, fromAgentId: sourceAgentId, destinationKind: "agent", toAgentId: agentId,
+        phase: requirements.phase, instructions: correctedInstructions, ...workflow,
+        actorType: "agent", actorId: sourceAgentId, wakeupRequestId: randomUUID(), idempotencyKey: `newer-handoff-${successorId}`,
+        inputFingerprint: `newer-handoff-${successorId}`, offerContract: correctedOfferContract,
+        recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 2,
+          requirementRevisionId: acceptedContract.id, requirementsDigest: correctedDigest, decidedAt: new Date().toISOString() },
+        state: "delivered", assignmentAppliedAt: new Date() }).returning();
+      await db.transaction(tx => assertAcceptedOfferIsCurrent(tx as unknown as typeof db, successor!, initialIssue));
+    } else if (authorityChange === "withdrawal") {
+      await db.update(caseHandoffs).set({ state: "cancelled", cancelledAt: new Date() }).where(eq(caseHandoffs.id, handoffId));
+    } else {
+      await db.update(cases).set({ status: "cancelled" }).where(eq(cases.id, caseId));
+    }
+
+    await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+    const currentIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    expect(currentIssue).toMatchObject({ status: issueBeforeFinalization.status, statusVersion: issueBeforeFinalization.statusVersion,
+      assigneeAgentId: issueBeforeFinalization.assigneeAgentId, executionRunId: issueBeforeFinalization.executionRunId });
+    const [decision] = await db.select().from(statusDecisions).where(and(eq(statusDecisions.companyId, companyId),
+      eq(statusDecisions.issueId, issueId), eq(statusDecisions.runId, runId)));
+    expect(decision).toMatchObject({ reasonCode: "case_handoff_superseded", applicationState: "applied",
+      decisionJson: { statusAction: "preserve", toStatus: issueBeforeFinalization.status, effects: [] } });
+    if (successorId) {
+      const [successor] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, successorId));
+      const [currentCase] = await db.select({ handoffVersion: cases.handoffVersion }).from(cases).where(eq(cases.id, caseId));
+      expect(currentCase?.handoffVersion).toBe(2);
+      expect(successor).toMatchObject({ state: usesCaseService ? "awaiting_release" : "delivered",
+        version: 2, instructions: correctedInstructions, toAgentId: agentId });
+      expect(readAcceptedCaseHandoffOffer(successor!)).toMatchObject({
+        expectedDeliverable: correctedDeliverable, requirementsDigest: correctedDigest,
+      });
+      if (usesCaseService) {
+        const [original] = await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, handoffId));
+        expect(original).toMatchObject({ state: "delivered", version: 1, offerContract,
+          recipientDecision: { outcome: "accepted", actorType: "agent", actorId: agentId, handoffVersion: 1,
+            requirementRevisionId: acceptedContract.id, requirementsDigest: offerContract.requirementsDigest } });
+        expect(successor).toMatchObject({ sourceRunId: issueBeforeFinalization.executionRunId, assignmentAppliedAt: null });
+        expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, successor!.wakeupRequestId))).toEqual([]);
+      }
+    }
+    expect(await db.select().from(nativeRunResults).where(and(eq(nativeRunResults.companyId, companyId),
+      eq(nativeRunResults.issueId, issueId), eq(nativeRunResults.runId, runId)))).toHaveLength(1);
+    expect(await db.select().from(workAssessments).where(and(eq(workAssessments.companyId, companyId),
+      eq(workAssessments.issueId, issueId), eq(workAssessments.runId, runId)))).toHaveLength(1);
+    expect(await db.select().from(issueComments).where(eq(issueComments.createdByRunId, runId))).toEqual([]);
+    expect(await nativeResponsePresentationWork(db).load({ companyId, issueId, runId })).toEqual([]);
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId)))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ eventType: "item.completed" })]));
+    expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.agentId, agentId), sql`${agentWakeupRequests.payload}->>'continuationIdempotencyKey' = 'native-completion-incomplete'`)))
+      .toHaveLength(0);
+  });
+
+  it("keeps pre-versioned case handoff runs on the legacy status path", async () => {
+    const { companyId, agentId, issueId, runId, port, result } = await prepareFirstTaskCompletion("ordinary task");
+    const { handoffId } = await bindAcceptedCurrentCaseHandoff({ companyId, agentId, issueId, runId }, false);
+    const initialIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    await port.completeRun({ result, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL });
+    await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+    const currentIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    expect(currentIssue).toMatchObject({ status: "done", statusVersion: initialIssue.statusVersion + 1 });
+    const [decision] = await db.select().from(statusDecisions).where(and(eq(statusDecisions.companyId, companyId),
+      eq(statusDecisions.issueId, issueId), eq(statusDecisions.runId, runId)));
+    expect(decision?.reasonCode).not.toBe("case_handoff_superseded");
+    expect(decision?.decisionJson.statusAction).toBe("done");
+    expect((await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, handoffId)))[0]?.offerContract).toBeNull();
   });
 
   it.each(["saved document", "registered attachment", "plain Ask"] as const)(
