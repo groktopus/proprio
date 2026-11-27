@@ -35,3 +35,11 @@ version tag alone cannot qualify unpublished source.
 The Playwright global teardown captures container logs and removes the app and
 provider-mock containers; the data directory and metadata remain for
 inspection. Do not reuse production data for this test.
+
+The browser check also opens the held setup conversation and confirms its
+greeting is blocked with no run or welcome-start activity. After the same draft
+passes the controlled Codex probe, the check uses the normal chat transition,
+reloads the chat, and submits two concurrent duplicate greeting requests. It
+expects one welcome-start activity and one issue run. This checks request
+deduplication through the public API and issue read endpoints; it does not
+replace a genuine-provider acceptance run.
