@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_ROOT="$repo_root"
+# shellcheck source=../release-lib.sh
+. "$repo_root/scripts/release-lib.sh"
+
 image=ghcr.io/groktopus/proprio
 source_sha="${1:-}"
 built_digest="${2:-}"
@@ -25,21 +30,17 @@ reference="$image@$built_digest"
 source_tag="v${release_tag#linux-}"
 release_metadata="$(gh release view "$source_tag" --repo "$repo" --json tagName,isDraft --jq '.tagName + " " + (.isDraft | tostring)')"
 read -r published_tag is_draft <<<"$release_metadata"
-[[ "$published_tag" == "$source_tag" && "$is_draft" == false ]]
-tag_object="$(gh api "repos/$repo/git/ref/tags/$source_tag" --jq '.object.sha + " " + .object.type')"
-read -r tag_sha tag_type <<<"$tag_object"
-tag_depth=0
-while [[ "$tag_type" == tag ]]; do
-  (( tag_depth += 1 ))
-  if (( tag_depth > 10 )); then
-    echo "Release source tag $source_tag has too many nested tag objects." >&2
-    exit 1
-  fi
-  tag_object="$(gh api "repos/$repo/git/tags/$tag_sha" --jq '.object.sha + " " + .object.type')"
-  read -r tag_sha tag_type <<<"$tag_object"
-done
-if [[ "$tag_type" != commit || "$tag_sha" != "$source_sha" ]]; then
-  echo "Release source tag $source_tag does not resolve to dispatched source $source_sha." >&2
+if [[ "$published_tag" != "$source_tag" || "$is_draft" != false ]]; then
+  echo "Publish the matching GitHub source release $source_tag before promoting $release_tag." >&2
+  exit 1
+fi
+source_remote="https://github.com/$repo.git"
+tag_sha="$(remote_tag_commit "$source_remote" "$source_tag")" || {
+  echo "Could not resolve the source tag $source_tag from $source_remote." >&2
+  exit 1
+}
+if [[ "$tag_sha" != "$source_sha" ]]; then
+  echo "Release source tag $source_tag resolves to $tag_sha, not dispatched source $source_sha." >&2
   exit 1
 fi
 
