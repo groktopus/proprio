@@ -113,6 +113,21 @@ jobs:
         run: node --test scripts/ci/durable-work-acceptance.test.mjs scripts/ci/durable-work-policy.test.mjs scripts/ci/durable-work-release-evidence.test.mjs scripts/ci/write-durable-work-acceptance.test.mjs scripts/create-github-release.test.mjs scripts/__tests__/e2e-update-migrations.test.mjs
       - name: Test the task readiness report
         run: node --test tests/perf/issue-detail/task-open-report.test.mjs
+      - name: Check dependency diagnosis recovery after controller restart
+        run: |
+          test_file=server/src/__tests__/parent-dependency-diagnosis-controller-restart.integration.test.ts
+          report="$RUNNER_TEMP/dependency-diagnosis-restart.json"
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$report" "$test_file"
+          node --input-type=module - "$test_file" "$report" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          assertRequiredVitestTests(JSON.parse(readFileSync(process.argv[3], 'utf8')), {
+            [process.argv[2]]: [
+              'reconciles one claim after restart with retained agent',
+              'reconciles one claim after restart with reassigned to board',
+            ],
+          });
+          JS
       - name: Check competing approval revision requests
         run: |
           test_file=server/src/__tests__/approval-queue-seeding-work.test.ts
