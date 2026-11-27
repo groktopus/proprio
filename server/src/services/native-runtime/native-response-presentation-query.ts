@@ -1,6 +1,7 @@
 import { alias, QueryBuilder } from "drizzle-orm/pg-core";
 import { and, asc, eq, exists, gt, inArray, isNotNull, isNull, ne, notExists, or, sql } from "drizzle-orm";
 import { chatActions, heartbeatRunEvents, heartbeatRuns, issues, nativeRunFinalizations, nativeRunResults, statusDecisions, statusDecisionEffects } from "@groktopus/db";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
 import type { NativeResponsePresentationScope } from "../native-response-presentation-notifications.js";
 
 const laterDecisions = alias(statusDecisions, "later_status_decisions");
@@ -31,6 +32,7 @@ export function nativeResponsePresentationCandidates(scope?: NativeResponsePrese
       eq(heartbeatRuns.runtimeMode, "native"), inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out"]),
       isNotNull(heartbeatRuns.finishedAt), eq(nativeRunFinalizations.phase, "committed"), isNull(nativeRunFinalizations.leaseOwner),
       eq(nativeRunResults.schemaStatus, "accepted"),
+      ne(statusDecisions.reasonCode, CASE_HANDOFF_SUPERSEDED_REASON),
       sql`jsonb_typeof(${heartbeatRuns.resultJson} #> '{presentationDecision,commentId}') is distinct from 'string'`,
       sql`coalesce(${heartbeatRuns.resultJson} #> '{presentationDecision,commentAction}', '"create"'::jsonb) = '"create"'::jsonb`,
       // A reply whose bounded publication retries are exhausted stays visible
