@@ -61,7 +61,7 @@ describe("Git physical source roots", () => {
   it("ignores an empty sandbox Git target only at an exact isolated task workspace", async () => {
     vi.stubEnv("PROPRIO_HOME", root);
     const companyId = randomUUID(), issueId = randomUUID();
-    const cwd = path.join(root, "isolated-workspaces", companyId, issueId);
+    const cwd = path.join(resolveProprioInstanceRoot(), "isolated-workspaces", companyId, issueId);
     await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
 
     await expect(workspaceSourceIdentities(companyId, cwd)).resolves.toMatchObject({
@@ -75,7 +75,7 @@ describe("Git physical source roots", () => {
     vi.stubEnv("PROPRIO_HOME", root);
     await git(root, "init", "-q");
     const companyId = randomUUID(), issueId = randomUUID();
-    const cwd = path.join(root, "isolated-workspaces", companyId, issueId);
+    const cwd = path.join(resolveProprioInstanceRoot(), "isolated-workspaces", companyId, issueId);
     await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
 
     const identities = await workspaceSourceIdentities(companyId, cwd);
@@ -92,12 +92,22 @@ describe("Git physical source roots", () => {
       } else {
         const owner = kind === "foreign company" ? randomUUID() : companyId;
         const taskId = kind === "noncanonical task UUID" ? issueId.toUpperCase() : issueId;
-        cwd = path.join(root, "isolated-workspaces", owner, taskId);
+        cwd = path.join(resolveProprioInstanceRoot(), "isolated-workspaces", owner, taskId);
         if (kind === "nested workspace") cwd = path.join(cwd, "nested");
       }
       await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
       await expect(workspaceSourceIdentities(companyId, cwd)).rejects.toThrow("workspace_git_source_unproven");
     });
+  it("does not ignore a .git symlink at an otherwise eligible isolated task root", async () => {
+    vi.stubEnv("PROPRIO_HOME", root);
+    const companyId = randomUUID(), issueId = randomUUID();
+    const cwd = path.join(resolveProprioInstanceRoot(), "isolated-workspaces", companyId, issueId);
+    const target = path.join(root, "git-target");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(cwd, ".git"));
+    await expect(workspaceSourceIdentities(companyId, cwd)).rejects.toThrow("workspace_git_source_unproven");
+  });
   it("binds actual linked worktree administration and the full shared object-store root", async () => {
     const source = await repository(), cwd = path.join(root, "task worktree");
     await git(source, "worktree", "add", "-b", "task", cwd);
