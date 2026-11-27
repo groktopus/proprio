@@ -18,19 +18,21 @@ import {
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
+import { githubNativeGitService, taskGitHubRepository } from "./github-native-git.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
   source?: "personal" | "dedicated";
   login?: string;
   reason?: string;
+  repository?: string;
   connectionId?: string;
   grantId?: string;
   authenticationMode?: "managed" | "host" | "anonymous";
 };
 
 type GitHubCredentialRun = Pick<typeof heartbeatRuns.$inferSelect,
-  "id" | "companyId" | "agentId" | "nativeIssueId" | "contextSnapshot">;
+  "id" | "companyId" | "agentId" | "nativeIssueId" | "issueId" | "runtimeMode" | "contextSnapshot">;
 
 /** A raw GitHub token cannot enforce the low-trust read-only tool boundary. */
 async function allowsGitHubCredentialExport(
@@ -126,11 +128,12 @@ export async function resolveGitHubOperationCredentials(
     companyId: string;
     agentId: string;
     runId: string;
+    expectedRepository?: string | null;
   },
 ) {
   const { run, context } = await captureRunIdentity(db, input, { readScope: "github_credentials" });
   if (!context) throw forbidden("This run predates managed GitHub credentials");
-  return resolveCapturedGitHubCredentials(db, run, context);
+  return resolveCapturedGitHubCredentials(db, run, context, input.expectedRepository);
 }
 
 export async function resolveGitHubCompletionCredentials(
@@ -149,7 +152,7 @@ export async function resolveGitHubCompletionCredentials(
   return resolveCapturedGitHubCredentials(db, run, context);
 }
 
-async function resolveCapturedGitHubCredentials(db: Db, run: GitHubCredentialRun, context: RunIdentityContext) {
+async function resolveCapturedGitHubCredentials(db: Db, run: GitHubCredentialRun, context: RunIdentityContext, expectedRepository?: string | null) {
   let summary: GitHubCredentialSummary;
   let env: Record<string, string> = {};
   // A sponsored guest's responsible person is an internal accountability field,
@@ -199,6 +202,26 @@ async function resolveCapturedGitHubCredentials(db: Db, run: GitHubCredentialRun
         authenticationMode: "managed",
       };
       env = buildGitAuthInvocation(resolved.credential).env;
+    } else if ((!resolved.configured || resolved.mcpOnly)
+      && await githubNativeGitService(db).hasBinding(run.companyId, run.agentId)) {
+      const issueId = run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId;
+      const repository = await taskGitHubRepository(db, run.companyId, typeof issueId === "string" ? issueId : null, run.agentId);
+      const scoped = githubNativeGitService(db);
+      const eligibility = run.runtimeMode === "native"
+        ? await scoped.eligibility(run.companyId, run.agentId,
+          expectedRepository === undefined || expectedRepository === repository ? repository : null, "read")
+        : { status: "unavailable" as const, reason: "This GitHub App grant requires a Proprio Runner execution." };
+      if (eligibility.status === "available") {
+        const issued = await scoped.issueToken(run.companyId, run.agentId, repository);
+        if (await taskGitHubRepository(db, run.companyId, typeof issueId === "string" ? issueId : null, run.agentId) !== repository) {
+          throw forbidden("The task repository changed during credential issuance.");
+        }
+        summary = { status: "available", source: "dedicated", login: `${issued.grant.appSlug}[bot]`,
+          grantId: issued.grant.id, repository: issued.grant.repository, authenticationMode: "managed" };
+        env = buildGitAuthInvocation({ token: issued.token, source: "managed_connection", secretName: null }).env;
+      } else {
+        summary = { status: "unavailable", source: "dedicated", reason: eligibility.reason };
+      }
     } else {
       summary = {
         status: resolved.configured ? "unavailable" : "absent",

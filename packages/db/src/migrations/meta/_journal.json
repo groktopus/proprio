@@ -3571,6 +3571,13 @@
       "when": 1795793466001,
       "tag": "0511_large_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 512,
+      "version": "7",
+      "when": 1795814342651,
+      "tag": "0512_magical_wolf_cub",
+      "breakpoints": true
     }
   ]
 }

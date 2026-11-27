@@ -1,3 +1,4 @@
+import { githubNativeSetupSchema } from "@groktopus/shared";
 import { BUDGET_POLICY_EXISTS_ERROR_CODE, nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
@@ -11995,6 +11996,15 @@ for (const route of [
       ? { body: pluginLocalFolderRequestSchema }
       : {}),
   });
+}
+
+for (const operation of [
+  { method: "get", path: "/api/companies/{companyId}/github-native-git", summary: "List terminal GitHub App grants" },
+  { method: "post", path: "/api/companies/{companyId}/github-native-git", summary: "Verify and save a terminal GitHub App grant", body: githubNativeSetupSchema },
+  { method: "delete", path: "/api/companies/{companyId}/github-native-git/{grantId}", summary: "Revoke a terminal GitHub App grant" },
+] as const) {
+  registerCurrentRoute({ ...operation, tags: ["connection-intents"],
+    responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 }
 
 // --- Connection intents ------------------------------------------------------

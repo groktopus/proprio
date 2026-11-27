@@ -315,6 +315,12 @@ export function createGitRemoteAuthProvider(
       if (!managed.credential) throw new Error(managed.error ?? "Managed GitHub connection is unavailable");
       return managed.credential;
     }
+    if (db && context?.agentId) {
+      const { githubNativeGitService } = await import("./github-native-git.js");
+      if (await githubNativeGitService(db).hasBinding(companyId, context.agentId)) {
+        throw new Error("GitHub App repository grants require a task-bound Proprio Runner execution");
+      }
+    }
     for (const secretName of secretNames) {
       const secret = await Promise.resolve(secrets.getByName(companyId, secretName)).catch(() => null);
       if (!secret) continue;
@@ -348,8 +354,10 @@ export function createGitRemoteAuthProvider(
       ));
       if (run?.contextId) {
         const { resolveGitHubOperationCredentials } = await import("./github-operation-credentials.js");
+        const { normalizeGitHubNativeRepositoryUrl } = await import("./github-native-git.js");
         const result = await resolveGitHubOperationCredentials(db, {
           companyId, runId: context.heartbeatRunId, agentId: context.agentId,
+          expectedRepository: normalizeGitHubNativeRepositoryUrl(remoteUrl),
         });
         if (result.status === "absent") {
           const credential = await resolveCredential();
@@ -385,6 +393,7 @@ export async function resolveManagedGitHubIdentitySelection(
   identitySource?: "personal" | "dedicated";
   grant?: typeof connectionGrants.$inferSelect;
   error?: string;
+  mcpOnly?: true;
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
@@ -423,6 +432,10 @@ export async function resolveManagedGitHubIdentitySelection(
   const nativeConnectionIds = githubConnections.filter((connection) =>
     eligibleConnectionIds.has(connection.id) && !isGitHubMcpPatConnection(connection),
   ).map((connection) => connection.id);
+  if (nativeConnectionIds.length === 0) return {
+    configured: true, identitySource: "personal", mcpOnly: true,
+    error: "No managed GitHub identity is available for this run",
+  };
   const grants = await db.select().from(connectionGrants).where(and(
     eq(connectionGrants.companyId, companyId),
     inArray(connectionGrants.connectionId, nativeConnectionIds),
@@ -565,10 +578,10 @@ export async function resolveManagedGitHubCredential(
     allowStandingDelegation?: boolean;
     explicitGrantId?: string;
   },
-): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string }> {
+): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string; mcpOnly?: true }> {
   const selection = await resolveManagedGitHubIdentitySelection(db, companyId, context);
   if (!selection.configured) return { configured: false };
-  if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error };
+  if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error, ...(selection.mcpOnly ? { mcpOnly: true as const } : {}) };
   const acquire = async (selection: Awaited<ReturnType<typeof resolveManagedGitHubIdentitySelection>>) => {
     let grant = selection.grant!;
     if (grant.kind === "user" && grant.subjectUserId) {

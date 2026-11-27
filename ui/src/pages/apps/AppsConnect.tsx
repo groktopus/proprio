@@ -1,3 +1,4 @@
+import { GitHubNativeGitSetup } from "./GitHubNativeGitSetup";
 import { describeError } from "@/api/errors";
 import { useQuery } from "@tanstack/react-query";
 import { aiConnectionsApi } from "@/api/ai-connections";
@@ -14,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { ConnectionSetupFlow } from "@/features/connections/ConnectionSetupFlow";
 import { aiProviderSetupPreset, type ToolConnectionCredentialSource } from "@groktopus/shared";
 import { useCompany } from "@/context/CompanyContext";
-import { useNavigate, useParams, useSearchParams } from "@/lib/router";
+import { Link, useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { consumeSkillSourceReturn, skillSourceReturnPath } from "@/lib/skill-source-connect-return";
 
 export { AccessStep, OAuthConnectStateScreen, type OAuthConnectPhase } from "@/features/connections/ConnectionSetupFlow";
@@ -116,7 +117,17 @@ export function AppsConnect({ byoOnly = false, credentialSource = "proprio_vault
       <Button variant="ghost" onClick={() => navigate("/apps")}>Back to Connectors</Button>
     </div>;
   }
-  return <ConnectionSetupFlow byoOnly={byoOnly} credentialSource={credentialSource} host="page"
+  const showGitHubNativeGit = source === "github" && !byoOnly && selectedCompanyId && !returningToSkills
+    && !reconnectId && !searchParams.has("resume");
+  if (showGitHubNativeGit && searchParams.get("nativeGit") === "1") {
+    return <GitHubNativeGitSetup companyId={selectedCompanyId} />;
+  }
+  return <>
+    {showGitHubNativeGit && <Button asChild variant="outline">
+      <Link to="/apps/connect?source=github&nativeGit=1">Configure a GitHub App for terminal Git</Link>
+    </Button>}
+    <ConnectionSetupFlow byoOnly={byoOnly} credentialSource={credentialSource} host="page"
     onComplete={returningToSkills ? returnToSkills : undefined}
-    onCancel={returningToSkills ? returnToSkills : undefined} />;
+    onCancel={returningToSkills ? returnToSkills : undefined} />
+  </>;
 }

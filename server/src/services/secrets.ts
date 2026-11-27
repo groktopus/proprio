@@ -1394,7 +1394,7 @@ export function secretService(db: Db | DbTransaction) {
     options?: SecretResolutionOptions,
     readOnlyEnvironmentInspection = false,
     preloaded?: { secret: typeof companySecrets.$inferSelect; version: typeof companySecretVersions.$inferSelect | null },
-    systemPurpose?: "tailscale_network",
+    systemPurpose?: "tailscale_network" | "github_native_git",
   ): Promise<RuntimeSecretResolution> {
     const bindingContext = options?.bindingContext;
     const accessContext = options?.accessContext ?? bindingContext;
@@ -2261,7 +2261,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
     instanceOwner?: InstanceSecretOwner,
-    systemPurpose?: "tailscale_network",
+    systemPurpose?: "tailscale_network" | "github_native_git",
   ) {
     const existing = instanceOwner ? null : await getByName(companyId, input.name);
     if (existing) throw conflict(`Secret already exists: ${input.name}`);
@@ -4714,11 +4714,11 @@ export function secretService(db: Db | DbTransaction) {
     getByName,
     getByKey,
     resolveSecretValue,
-    resolveSystemSecretValue: async (companyId: string, secretId: string, version: number | "latest", purpose: "tailscale_network", consumerId: string) =>
+    resolveSystemSecretValue: async (companyId: string, secretId: string, version: number | "latest", purpose: "tailscale_network" | "github_native_git", consumerId: string) =>
       (await resolveSecretValueInternal(companyId, secretId, version, {
         accessContext: { consumerType: "system", consumerId, actorType: "system", actorId: null },
       }, false, undefined, purpose)).value,
-    createSystemSecret: async (companyId: string, input: Parameters<typeof createSecretUnlocked>[1], purpose: "tailscale_network",
+    createSystemSecret: async (companyId: string, input: Parameters<typeof createSecretUnlocked>[1], purpose: "tailscale_network" | "github_native_git",
       actor?: { userId?: string | null; agentId?: string | null }) =>
       withAccountHomeSecretMutationLock(undefined, companyId, async () => {
         if (input.value) await assertAccountHomeCacheDirStillValid(undefined, companyId, input.value);
