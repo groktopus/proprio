@@ -1,13 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   classifyPullRequest,
+  configuredRefreshAppLogin,
+  hasVerifiedRefreshAppCommits,
   findDependabotLockCommit,
   findMergedDependabotPull,
+  isReviewedMainBootstrap,
+  REVIEWED_MAIN_BOOTSTRAP,
   isDependabotCommit,
   isGitHubSignedCommit,
   LOCKFILES,
@@ -15,7 +20,17 @@ import {
 } from '../lockfile-trust.mjs';
 
 const repo = 'groktopus/proprio';
-const base = { author: 'someuser', headRepo: repo, baseRepo: repo, headRef: 'fix/bug', dependabotLockCommits: {} };
+const refreshAppLogin = 'proprio-lock-refresh-test[bot]';
+const base = { author: 'someuser', headRepo: repo, baseRepo: repo, headRef: 'fix/bug', dependabotLockCommits: {},
+  refreshPrAuthor: refreshAppLogin };
+const hash = (value) => createHash('sha256').update(value).digest('hex');
+function validRefreshProof(lockText) {
+  return {
+    'tests/runner-e2e/report-lock.json': JSON.stringify({ inputSha256: hash(lockText), outputSha256: hash(lockText),
+      patchSha256: hash(''), basis: 'fixture' }) + '\n',
+    'tests/runner-e2e/report-lock.patch': '',
+  };
+}
 
 test('allows a pull request that does not change lock content', () => {
   assert.deepEqual(
@@ -44,16 +59,59 @@ test('blocks a contributor branch named like the refresh branch', () => {
 });
 
 test('blocks the refresh author and branch from a fork', () => {
-  const result = classifyPullRequest({ ...base, author: 'github-actions[bot]', headRepo: 'someone/proprio',
+  const result = classifyPullRequest({ ...base, author: refreshAppLogin, headRepo: 'someone/proprio',
     headRef: 'chore/refresh-lockfile', changedPaths: ['pnpm-lock.yaml'] });
   assert.equal(result.allowed, false);
 });
 
-test('allows the refresh workflow to change the lockfile and its proof', () => {
+test('does not accept github-actions[bot] as a substitute for the configured refresh App', () => {
   const result = classifyPullRequest({ ...base, author: 'github-actions[bot]', headRef: 'chore/refresh-lockfile',
-    changedPaths: ['pnpm-lock.yaml', 'tests/runner-e2e/report-lock.json', 'tests/runner-e2e/report-lock.patch'] });
+    changedPaths: ['tests/runner-e2e/report-lock.json'] });
+  assert.equal(result.allowed, false);
+});
+
+test('allows the verified refresh App to change only the reporting proof pair', () => {
+  const result = classifyPullRequest({ ...base, author: refreshAppLogin, headRef: 'chore/refresh-lockfile',
+    refreshAppCommitsVerified: true, changedPaths: ['tests/runner-e2e/report-lock.json', 'tests/runner-e2e/report-lock.patch',
+      'tests/runner-e2e/source-sdk-public-inputs.json'] });
   assert.equal(result.allowed, true);
   assert.equal(result.writer, 'refresh-bot');
+});
+
+test('App refresh identity cannot authorize managed lockfiles or unrelated files', () => {
+  for (const changedPaths of [
+    ['pnpm-lock.yaml', 'tests/runner-e2e/report-lock.json'],
+    ['tests/runner-e2e/report-lock.json', 'README.md'],
+  ]) {
+    const result = classifyPullRequest({ ...base, author: refreshAppLogin, headRef: 'chore/refresh-lockfile',
+      refreshAppCommitsVerified: true, changedPaths });
+    assert.equal(result.allowed, false, changedPaths.join(', '));
+  }
+});
+
+test('refresh App commits must be signed and attributed to the configured App', () => {
+  const chain = [{ sha: 'head', parents: ['base'], login: refreshAppLogin, committer: 'web-flow', verified: true }];
+  assert.equal(hasVerifiedRefreshAppCommits(chain, refreshAppLogin, 'base', 'head'), true);
+  assert.equal(hasVerifiedRefreshAppCommits([{ ...chain[0], verified: false }], refreshAppLogin, 'base', 'head'), false);
+  assert.equal(hasVerifiedRefreshAppCommits([{ ...chain[0], login: 'someuser' }], refreshAppLogin, 'base', 'head'), false);
+  assert.equal(hasVerifiedRefreshAppCommits([{ ...chain[0], parents: ['other'] }], refreshAppLogin, 'base', 'head'), false);
+  assert.equal(hasVerifiedRefreshAppCommits([], refreshAppLogin, 'base', 'head'), false);
+});
+
+test('does not trust the generic Actions bot or an absent App identity as the refresh writer', () => {
+  for (const author of ['github-actions[bot]', refreshAppLogin]) {
+    const result = classifyPullRequest({ ...base, author, refreshPrAuthor: '', headRef: 'chore/refresh-lockfile',
+      changedPaths: ['tests/runner-e2e/report-lock.json'] });
+    assert.equal(result.allowed, false, author);
+  }
+});
+
+test('accepts only a configured App bot login, not reserved automation identities', () => {
+  assert.equal(configuredRefreshAppLogin('runner-lock-refresh[bot]'), 'runner-lock-refresh[bot]');
+  assert.equal(configuredRefreshAppLogin('github-actions[bot]'), '');
+  assert.equal(configuredRefreshAppLogin('dependabot[bot]'), '');
+  assert.equal(configuredRefreshAppLogin('Runner Lock Refresh'), '');
+  assert.equal(configuredRefreshAppLogin(''), '');
 });
 
 test('allows a Dependabot lockfile that matches a verified Dependabot commit', () => {
@@ -90,11 +148,11 @@ test('guards the sandbox provider lockfiles as well as the root lockfile', () =>
   }
 });
 
-test('allows the refresh workflow to change the provider lockfiles', () => {
-  const result = classifyPullRequest({ ...base, author: 'github-actions[bot]', headRef: 'chore/refresh-lockfile',
+test('dedicated report App cannot change provider lockfiles', () => {
+  const result = classifyPullRequest({ ...base, author: refreshAppLogin, headRef: 'chore/refresh-lockfile',
     changedPaths: LOCKFILES });
-  assert.equal(result.allowed, true);
-  assert.equal(result.writer, 'refresh-bot');
+  assert.equal(result.allowed, false);
+  assert.equal(result.writer, 'none');
 });
 
 test('allows a Dependabot provider lockfile that matches a verified Dependabot commit', () => {
@@ -153,6 +211,25 @@ test('finds the merged Dependabot pull request for a master commit', () => {
   assert.equal(findMergedDependabotPull([pull({ base: { ref: 'release' } })], 'm', 'master'), null);
 });
 
+test('admits only the exact signed #125 main lock bootstrap', () => {
+  const input = { repository: 'groktopus/proprio', defaultBranch: 'main',
+    lockCommit: '7d7c362107390b8f9778ba061c867d5401ede31e',
+    pull: { number: 125, merged_at: '2026-11-23T17:30:16Z',
+      merge_commit_sha: '7d7c362107390b8f9778ba061c867d5401ede31e', base: { ref: 'main' } },
+    githubSigned: true, lockSha256: '535010469947806e6b8f0edff97bd211ca96b573dccd81dd08556e3f7b43b337' };
+  assert.equal(isReviewedMainBootstrap(input), true);
+  assert.deepEqual(REVIEWED_MAIN_BOOTSTRAP, { repository: input.repository, branch: input.defaultBranch,
+    lockCommit: input.lockCommit, pullRequest: 125, lockSha256: input.lockSha256 });
+  for (const [key, value] of Object.entries({ repository: 'other/repo', defaultBranch: 'master', lockCommit: 'other',
+    githubSigned: false, lockSha256: '0'.repeat(64), pull: { ...input.pull, number: 124 } })) {
+    assert.equal(isReviewedMainBootstrap({ ...input, [key]: value }), false, key);
+  }
+  for (const pull of [{ ...input.pull, merged_at: null }, { ...input.pull, base: { ref: 'release' } },
+    { ...input.pull, merge_commit_sha: 'other' }]) {
+    assert.equal(isReviewedMainBootstrap({ ...input, pull }), false);
+  }
+});
+
 test('trusts only merge commits that GitHub created and signed', () => {
   assert.equal(isGitHubSignedCommit({ committer: { login: 'web-flow' }, commit: { verification: { committer: 'web-flow', verified: true } } }), true);
   assert.equal(isGitHubSignedCommit({ committer: { login: 'web-flow' }, commit: { verification: { committer: 'web-flow', verified: false } } }), false);
@@ -161,7 +238,7 @@ test('trusts only merge commits that GitHub created and signed', () => {
 });
 
 // Run the `pr` command against a real git history, with a stub `gh` that lists the PR commits.
-function runPrCheck(build) {
+function runPrCheck(build, refreshAppLogin = '', signature = { isValid: true, wasSignedByGitHub: true }) {
   const root = mkdtempSync(path.join(tmpdir(), 'lockfile-trust-'));
   try {
     const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -175,19 +252,28 @@ function runPrCheck(build) {
       return git('rev-parse', 'HEAD');
     };
     git('init', '-q');
-    const baseSha = commit('base', { 'pnpm-lock.yaml': 'lock: base\n', 'package.json': '{}\n' });
-    const { author, commits } = build(commit);
+    const baseLock = 'lock: base\n';
+    const baseSha = commit('base', {
+      'pnpm-lock.yaml': baseLock, 'package.json': '{}\n',
+      'tests/runner-e2e/report-lock.json': JSON.stringify({ inputSha256: hash(baseLock), outputSha256: hash(baseLock),
+        patchSha256: hash(''), basis: 'initial' }) + '\n',
+      'tests/runner-e2e/report-lock.patch': '',
+      'tests/runner-e2e/source-sdk-public-inputs.json': JSON.stringify({ lockSha256: hash(baseLock), inputs: {} }) + '\n',
+      'tests/runner-e2e/prepare-report-lock.mjs': readFileSync(path.resolve('tests/runner-e2e/prepare-report-lock.mjs')),
+    });
+    const { author, commits, headRef } = build(commit, baseSha);
     const bin = path.join(root, '.bin');
     execFileSync('mkdir', [bin]);
-    writeFileSync(path.join(bin, 'gh'), '#!/bin/sh\nprintf "%s\\n" "$GH_STUB_OUTPUT"\n');
+    writeFileSync(path.join(bin, 'gh'), '#!/bin/sh\nif [ "$1" = api ] && [ "$2" = graphql ]; then printf "%s\\n" "$GH_GRAPHQL_STUB_OUTPUT"; else printf "%s\\n" "$GH_STUB_OUTPUT"; fi\n');
     chmodSync(path.join(bin, 'gh'), 0o755);
     const output = path.join(root, '.output');
     writeFileSync(output, '');
     const result = spawnSync(process.execPath, [path.resolve('.github/scripts/lockfile-trust.mjs'), 'pr'], {
       cwd: root, encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: output, GITHUB_REPOSITORY: repo,
+    env: { ...process.env, LOCKFILE_REFRESH_APP_LOGIN: refreshAppLogin, PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: output, GITHUB_REPOSITORY: repo,
         PR_NUMBER: '7', BASE_SHA: baseSha, HEAD_SHA: git('rev-parse', 'HEAD'), PR_AUTHOR: author, HEAD_REPO: repo,
-        HEAD_REF: 'dependabot/npm_and_yarn/zod', GH_STUB_OUTPUT: commits.map((entry) => JSON.stringify(entry)).join('\n') },
+        HEAD_REF: headRef ?? 'dependabot/npm_and_yarn/zod', GH_STUB_OUTPUT: commits.map((entry) => JSON.stringify(entry)).join('\n'),
+        GH_GRAPHQL_STUB_OUTPUT: JSON.stringify({ data: { repository: { object: { signature } } } }) },
     });
     return { status: result.status, stdout: result.stdout, output: readFileSync(output, 'utf8') };
   } finally {
@@ -266,22 +352,54 @@ test('pr command blocks a contributor lockfile change', () => {
   assert.match(result.output, /^writer=none$/m);
 });
 
-test('workflows run the trust policy from trusted code and pass the verified hash to the proof refresh', () => {
-  const pr = readFileSync('.github/workflows/pr-trusted.yml', 'utf8');
-  assert.match(pr, /git show "\$trusted_base:\.github\/scripts\/lockfile-trust\.mjs" > "\$policy"/);
-  assert.match(pr, /BASE_SHA="\$trusted_base" node "\$policy" pr/);
-  assert.match(pr, /PROPRIO_CI_PR_AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}/);
-  assert.doesNotMatch(pr, /github\.head_ref != 'chore\/refresh-lockfile'/);
+test('pr command trusts the configured App only as the actual same-repository author on the fixed branch', () => {
+  const permitted = runPrCheck((commit, baseSha) => {
+    const sha = commit('refresh-app', validRefreshProof('lock: base\n'));
+    return { author: refreshAppLogin, headRef: 'chore/refresh-lockfile', commits: [{ sha, parents: [baseSha],
+      login: refreshAppLogin, committer: 'web-flow', verified: true }] };
+  }, refreshAppLogin);
+  assert.equal(permitted.status, 0, permitted.stdout);
+  assert.match(permitted.output, /^writer=refresh-bot$/m);
 
-  const refresh = readFileSync('.github/workflows/refresh-lockfile.yml', 'utf8');
-  assert.match(refresh, /node \.github\/scripts\/lockfile-trust\.mjs merged/);
-  assert.match(refresh, /--refresh --trusted-lock-sha256 "\$TRUSTED_LOCK_SHA256"/);
-  assert.ok(refresh.indexOf('lockfile-trust.mjs merged') < refresh.indexOf('--trusted-lock-sha256'));
+  const spoofed = runPrCheck((commit) => {
+    commit('github-actions[bot]', { 'tests/runner-e2e/report-lock.json': '{"proof":"new"}\n' });
+    return { author: 'github-actions[bot]', headRef: 'chore/refresh-lockfile', commits: [] };
+  }, refreshAppLogin);
+  assert.equal(spoofed.status, 1);
+  assert.match(spoofed.stdout, /Untrusted lockfile change/);
+
+  const invalidProof = runPrCheck((commit, baseSha) => {
+    const sha = commit('refresh-app', { 'tests/runner-e2e/report-lock.json': '{"inputSha256":"wrong"}\n',
+      'tests/runner-e2e/report-lock.patch': '' });
+    return { author: refreshAppLogin, headRef: 'chore/refresh-lockfile', commits: [{ sha, parents: [baseSha],
+      login: refreshAppLogin, committer: 'web-flow', verified: true }] };
+  }, refreshAppLogin);
+  assert.equal(invalidProof.status, 1);
+  assert.match(invalidProof.stdout, /does not validate against the exact base lock/);
+
+  const unsigned = runPrCheck((commit, baseSha) => {
+    const sha = commit('refresh-app', validRefreshProof('lock: base\n'));
+    return { author: refreshAppLogin, headRef: 'chore/refresh-lockfile', commits: [{ sha, parents: [baseSha],
+      login: refreshAppLogin, committer: 'web-flow', verified: true }] };
+  }, refreshAppLogin, { isValid: true, wasSignedByGitHub: false });
+  assert.equal(unsigned.status, 1);
+  assert.match(unsigned.stdout, /Do not commit/);
 });
 
-// Run the policy job's step script, as GitHub would, against a merge commit.
-// RUNNER_TEMP is a symlink, so the policy must still recognize itself as the entry point.
-function runPolicyStep({ staleBase, githubSha, headSha, author, headRef, root }) {
+test('the PR workflow runs the trust policy from the exact trusted base', () => {
+  const pr = readFileSync('.github/workflows/pr-trusted.yml', 'utf8');
+  assert.match(pr, /git show "\$BASE_SHA:\.github\/scripts\/lockfile-trust\.mjs" > "\$policy"/);
+  assert.match(pr, /test "\$\(git rev-parse HEAD\)" = "\$BASE_SHA"/);
+  assert.match(pr, /git fetch --no-tags origin "\$PR_HEAD_REF"/);
+  assert.match(pr, /test "\$fetched_head" = "\$HEAD_SHA"/);
+  assert.match(pr, /BASE_SHA="\$BASE_SHA" node "\$policy" pr/);
+  assert.match(pr, /PROPRIO_CI_PR_AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}/);
+  assert.doesNotMatch(pr, /github\.head_ref != 'chore\/refresh-lockfile'/);
+});
+
+// Run the pull_request_target policy step with an exact base and fetched PR head.
+function runPolicyStep({ baseSha, headSha, author, headRef, root }) {
+  execFileSync('git', ['-C', root, 'checkout', '--quiet', '--detach', baseSha]);
   const workflow = readFileSync('.github/workflows/pr-trusted.yml', 'utf8');
   const step = workflow.split('      - name: Block untrusted lockfile edits\n')[1];
   const lines = step.split('\n');
@@ -295,13 +413,13 @@ function runPolicyStep({ staleBase, githubSha, headSha, author, headRef, root })
   const result = spawnSync('bash', ['-e', '-c', script], {
     cwd: root, encoding: 'utf8',
     env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_OUTPUT: output,
-      GITHUB_REPOSITORY: repo, GITHUB_SHA: githubSha, BASE_SHA: staleBase, HEAD_SHA: headSha, PR_NUMBER: '1',
-      PR_AUTHOR: author, HEAD_REPO: repo, HEAD_REF: headRef },
+      GITHUB_REPOSITORY: repo, BASE_SHA: baseSha, HEAD_SHA: headSha, PR_NUMBER: '1',
+      PR_AUTHOR: author, HEAD_REPO: repo, HEAD_REF: headRef, PR_HEAD_REF: 'refs/pull/1/head' },
   });
   return { status: result.status, stdout: result.stdout + result.stderr, output: readFileSync(output, 'utf8') };
 }
 
-test('the policy step loads the policy from the merge commit when the recorded base is stale', () => {
+test('the policy step loads policy from the exact trusted base and verifies the exact PR head', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'lockfile-policy-step-'));
   try {
     const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -311,38 +429,42 @@ test('the policy step loads the policy from the merge commit when the recorded b
       return git('rev-parse', 'HEAD');
     };
     git('init', '-q', '-b', 'master');
+    git('remote', 'add', 'origin', root);
     writeFileSync(path.join(root, 'pnpm-lock.yaml'), 'lock: base\n');
-    const staleBase = commit('base before the policy');
-    // A contributor branch named like the refresh branch, from the stale base. The earlier rule exempts it.
+    commit('base before the policy');
+    // The PR head is deliberately based before the policy was added to main.
     git('checkout', '-q', '-b', 'chore/refresh-lockfile');
     writeFileSync(path.join(root, 'pnpm-lock.yaml'), 'lock: contributor\n');
     const head = commit('contributor lockfile');
     git('checkout', '-q', 'master');
     execFileSync('mkdir', ['-p', path.join(root, '.github/scripts')]);
     writeFileSync(path.join(root, '.github/scripts/lockfile-trust.mjs'), readFileSync('.github/scripts/lockfile-trust.mjs'));
-    commit('add the policy');
-    git('-c', 'user.name=GitHub', '-c', 'user.email=noreply@github.com', 'merge', '-q', '--no-ff', '-X', 'theirs', '-m', 'merge', head);
-    const merge = git('rev-parse', 'HEAD');
+    const currentBase = commit('add the policy');
+    git('update-ref', 'refs/pull/1/head', head);
 
-    const blocked = runPolicyStep({ root, staleBase, githubSha: merge, headSha: head, author: 'someuser', headRef: 'chore/refresh-lockfile' });
+    const blocked = runPolicyStep({ root, baseSha: currentBase, headSha: head, author: 'someuser', headRef: 'chore/refresh-lockfile' });
     assert.equal(blocked.status, 1, blocked.stdout);
     assert.match(blocked.stdout, /Untrusted lockfile change/);
 
-    // A contributor pull request that does not touch lock content passes through the loaded policy.
-    git('checkout', '-q', '-b', 'docs', staleBase);
+    // A docs-only PR passes through the policy loaded from the exact base.
+    git('checkout', '-q', '-b', 'docs', currentBase);
     writeFileSync(path.join(root, 'notes.md'), 'docs\n');
     const docs = commit('docs only');
-    git('checkout', '-q', 'master');
-    git('-c', 'user.name=GitHub', '-c', 'user.email=noreply@github.com', 'merge', '-q', '--no-ff', '-m', 'merge docs', docs);
-    const allowed = runPolicyStep({ root, staleBase, githubSha: git('rev-parse', 'HEAD'), headSha: docs, author: 'someuser', headRef: 'docs' });
+    git('update-ref', 'refs/pull/1/head', docs);
+    const movedHead = runPolicyStep({ root, baseSha: currentBase, headSha: head, author: 'someuser', headRef: 'docs' });
+    assert.equal(movedHead.status, 1, JSON.stringify(movedHead));
+    assert.match(movedHead.stdout, /differs from event head/, JSON.stringify(movedHead));
+
+    const allowed = runPolicyStep({ root, baseSha: currentBase, headSha: docs, author: 'someuser', headRef: 'docs' });
     assert.equal(allowed.status, 0, allowed.stdout);
     assert.match(allowed.stdout, /does not change lock content/);
     assert.match(allowed.output, /^writer=none$/m);
 
-    // Without GitHub's merge commit, the step keeps the recorded base, which predates the policy.
-    const fallback = runPolicyStep({ root, staleBase, githubSha: head, headSha: head, author: 'someuser', headRef: 'chore/refresh-lockfile' });
-    assert.equal(fallback.status, 0, fallback.stdout);
-    assert.match(fallback.output, /^writer=none$/m);
+    // A missing base policy is a hard failure, never a permissive legacy fallback.
+    const missingPolicy = runPolicyStep({ root, baseSha: git('rev-parse', 'master^'), headSha: head, author: 'someuser', headRef: 'chore/refresh-lockfile' });
+    assert.equal(missingPolicy.status, 1);
+    assert.match(missingPolicy.stdout, /Trusted base .* is missing lockfile-trust\.mjs/);
+    assert.doesNotMatch(missingPolicy.output, /^writer=/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -358,16 +480,16 @@ test('the policy step fails when the loaded policy exits without reporting a wri
       return git('rev-parse', 'HEAD');
     };
     git('init', '-q', '-b', 'master');
+    git('remote', 'add', 'origin', root);
     execFileSync('mkdir', ['-p', path.join(root, '.github/scripts')]);
     writeFileSync(path.join(root, '.github/scripts/lockfile-trust.mjs'), 'process.exit(0);\n');
     const baseSha = commit('a policy that skips its checks');
     git('checkout', '-q', '-b', 'feature');
     writeFileSync(path.join(root, 'pnpm-lock.yaml'), 'lock: contributor\n');
     const head = commit('contributor lockfile');
-    git('checkout', '-q', 'master');
-    git('-c', 'user.name=GitHub', '-c', 'user.email=noreply@github.com', 'merge', '-q', '--no-ff', '-m', 'merge', head);
+    git('update-ref', 'refs/pull/1/head', head);
 
-    const result = runPolicyStep({ root, staleBase: baseSha, githubSha: git('rev-parse', 'HEAD'), headSha: head, author: 'someuser', headRef: 'feature' });
+    const result = runPolicyStep({ root, baseSha, headSha: head, author: 'someuser', headRef: 'feature' });
     assert.equal(result.status, 1, result.stdout);
     assert.match(result.stdout, /did not report a lockfile writer/);
   } finally {

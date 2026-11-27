@@ -152,6 +152,20 @@ it('admits a verified trusted lock that already resolves without a correction', 
   });
 });
 
+it('records reviewed main bootstrap provenance without labeling it Dependabot', async () => {
+  await trustedLockFixture('trusted-bootstrap', async (root, relative, hash, original) => {
+    const cli = path.join(relative, 'prepare-report-lock.mjs');
+    await copyFile(path.join(import.meta.dirname, 'prepare-report-lock.mjs'), cli);
+    expect(execFileSync(process.execPath, [cli, '--refresh', '--trusted-lock-sha256', hash(original),
+      '--trust-basis', 'reviewed-main-bootstrap'], { cwd: root, encoding: 'utf8' }).trim()).toBe('refreshed');
+    const policy = JSON.parse(await readFile(path.join(relative, 'report-lock.json'), 'utf8'));
+    expect(policy.basis).toContain('#125');
+    expect(policy.basis).not.toMatch(/Dependabot/i);
+    expect(() => execFileSync(process.execPath, [cli, '--refresh', '--trusted-lock-sha256', hash(original),
+      '--trust-basis', 'arbitrary'], { cwd: root, stdio: 'pipe' })).toThrow();
+  });
+});
+
 it('records the correction for a verified trusted lock that resolves differently', async () => {
   await trustedLockFixture('trusted-corrected', async (root, relative, hash, original, resolved) => {
     await writeFile(path.join(root, 'pnpm-lock.yaml'), resolved);

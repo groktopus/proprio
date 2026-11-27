@@ -15,11 +15,27 @@ import { checkLinkedIssue } from './check-pr-linked-issue.mjs';
 import { checkDedupSearch } from './check-pr-dedup-search.mjs';
 import { checkTestCoverage } from './check-pr-test-coverage.mjs';
 import { checkLockfile } from './check-pr-lockfile.mjs';
+import { REFRESH_PR_AUTHOR } from './lockfile-trust.mjs';
 import { checkDependencies } from './check-pr-dependencies.mjs';
 import { checkReleaseBootstrap } from './check-pr-release-bootstrap.mjs';
 import { checkCoauthors, fetchAllPullRequestCommits } from './check-pr-coauthors.mjs';
 
 const COMMENT_SIGNATURE = '— commitperclip';
+
+export async function verifyRefreshAppCommitSignatures(repo, commits, token, fetcher = ghFetch) {
+  if (commits.length !== 1) return commits.map(commit => ({ ...commit, appSignatureVerified: false }));
+  const [owner, name] = repo.split('/');
+  const query = 'query($owner:String!,$name:String!,$oid:GitObjectID!){repository(owner:$owner,name:$name){object(oid:$oid){... on Commit{signature{isValid wasSignedByGitHub}}}}}';
+  const commit = commits[0];
+  if (!/^[0-9a-f]{40}$/.test(commit.sha)) return [{ ...commit, appSignatureVerified: false }];
+  const result = await fetcher('/graphql', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables: { owner, name, oid: commit.sha } }),
+  });
+  const signature = result?.data?.repository?.object?.signature;
+  return [{ ...commit, appSignatureVerified: signature?.isValid === true && signature?.wasSignedByGitHub === true }];
+}
 
 function buildComment(author, failures, informational) {
   if (failures.length === 0 && informational.length === 0) {
@@ -118,6 +134,17 @@ async function main() {
     console.error(`co-author lookup skipped: ${error.message}`);
   }
 
+  const appProofChange = pr.user.login === REFRESH_PR_AUTHOR &&
+    files.some(file => ['tests/runner-e2e/report-lock.json', 'tests/runner-e2e/report-lock.patch'].includes(file.filename));
+  if (appProofChange) {
+    try {
+      commits = await verifyRefreshAppCommitSignatures(GH_REPO, commits, GH_TOKEN);
+    } catch (error) {
+      console.error(`refresh App signature lookup failed closed: ${error.message}`);
+      commits = commits.map(commit => ({ ...commit, appSignatureVerified: false }));
+    }
+  }
+
   const prBody = pr.body ?? '';
   const author = PR_AUTHOR ?? pr.user.login;
   const branch = PR_BRANCH ?? pr.head.ref;
@@ -130,7 +157,14 @@ async function main() {
       Promise.resolve(checkLinkedIssue(prBody, prTitle)),
       Promise.resolve(checkDedupSearch(prBody, prTitle)),
       Promise.resolve(checkTestCoverage(files, prTitle)),
-      Promise.resolve(checkLockfile(files, author, branch)),
+      Promise.resolve(checkLockfile(files, pr.user.login, pr.head.ref, {
+        refreshPrAuthor: REFRESH_PR_AUTHOR,
+        headRepo: pr.head.repo?.full_name ?? '',
+        baseRepo: pr.base?.repo?.full_name ?? GH_REPO,
+        commits,
+        baseSha: pr.base?.sha ?? '',
+        headSha: pr.head?.sha ?? '',
+      })),
       checkDependencies(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
       checkReleaseBootstrap(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
     ]);

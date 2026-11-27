@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findExistingComment } from '../run-quality-gates.mjs';
+import { findExistingComment, verifyRefreshAppCommitSignatures } from '../run-quality-gates.mjs';
 
 test('findExistingComment: paginates until it finds the commitperclip comment', async () => {
   const seenPaths = [];
@@ -40,4 +40,29 @@ test('findExistingComment: returns null when no signed comment exists', async ()
   ]), 'token', 'groktopus/proprio', 6469);
 
   assert.equal(comment, null);
+});
+
+test('refresh App signature lookup binds GraphQL signature fields to the exact commit SHA', async () => {
+  const sha = 'a'.repeat(40);
+  let call;
+  const commits = [{ sha, author: { login: 'proprio-lock-refresh[bot]' } }];
+  const result = await verifyRefreshAppCommitSignatures('groktopus/proprio', commits, 'token', async (...args) => {
+    call = args;
+    return { data: { repository: { object: { signature: { isValid: true, wasSignedByGitHub: true } } } } };
+  });
+  assert.equal(call[0], '/graphql');
+  assert.equal(call[1], 'token');
+  const request = JSON.parse(call[2].body);
+  assert.equal(request.variables.oid, sha);
+  assert.match(request.query, /signature\{isValid wasSignedByGitHub\}/);
+  assert.equal(result[0].appSignatureVerified, true);
+
+  const unsigned = await verifyRefreshAppCommitSignatures('groktopus/proprio', commits, 'token', async () => ({
+    data: { repository: { object: { signature: { isValid: true, wasSignedByGitHub: false } } } },
+  }));
+  assert.equal(unsigned[0].appSignatureVerified, false);
+  const multiple = await verifyRefreshAppCommitSignatures('groktopus/proprio', [commits[0], commits[0]], 'token', async () => {
+    assert.fail('signature lookup must reject multi-commit refresh chains without a query');
+  });
+  assert.deepEqual(multiple.map(c => c.appSignatureVerified), [false, false]);
 });
