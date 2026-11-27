@@ -27,7 +27,7 @@ import { canonicalExecutionUuid } from "./execution-identity.js";
 import { chatActionDeadline } from "./chat-action-work.js";
 import { NATIVE_CLEANUP_SETTLING_MESSAGE, NATIVE_SESSION_CLEANUP_QUARANTINED } from "./native-runtime/completed-turn-cleanup.js";
 import { isAcknowledgedLegacyUserStop, isQueuedDependencyWait, runStopPresentationJson } from "./run-cancellation.js";
-import { heldRetryOffersRetry, liveExecutionOwnerCondition, taskAttemptCondition } from "./task-retry-eligibility.js";
+import { heldRetryOffersRetry, legacyRetryTaskIssueId, liveExecutionOwnerCondition, taskAttemptCondition } from "./task-retry-eligibility.js";
 import { exhaustedNativeFinalizationCondition, savedResultRetryPendingCondition } from "./native-runtime/exhausted-finalization-retry.js";
 import { AI_CONNECTION_BUSY_RETRY_REASON, AI_CONNECTION_POOL_WAIT_RETRY_REASON, RUNNER_REVISION_WAIT_RETRY_REASON,
   WORKSPACE_BUSY_RETRY_REASON } from "../modules/run-dispatch/index.js";
@@ -455,23 +455,39 @@ export async function taskInterruptionPresentations(db: Db, companyId: string, i
   const result = new Map<string, TaskInterruptionPresentation | null>();
   if (!selected.length) return result;
   const ids = selected.map(issue => issue.id);
-  const requested = sql`unnest(${sql.param([...new Set(ids)])}::text[]) as requested_interruption_issues(requested_issue_id)`;
+  const contextIssue = sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`;
+  const legacyIssue = legacyRetryTaskIssueId();
+  // The direct context lookup uses the existing per-task index. Resolve the
+  // historical binding once for the whole requested batch.
+  const historical = db.selectDistinctOn([legacyIssue], {
+    issueId: legacyIssue.as("historical_issue_id"), runId: sql<string>`${heartbeatRuns.id}`.as("historical_run_id"),
+  }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+    isNull(heartbeatRuns.nativeIssueId), isNull(heartbeatRuns.issueId), taskAttemptCondition(),
+    inArray(legacyIssue, ids), sql`${contextIssue} is distinct from ${legacyIssue}`,
+  )).orderBy(legacyIssue, desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
+  const requested = sql`(with historical as materialized (${historical})
+    select requested.requested_issue_id, historical.historical_run_id
+    from unnest(${sql.param([...new Set(ids)])}::text[]) as requested(requested_issue_id)
+    left join historical on historical.historical_issue_id = requested.requested_issue_id
+  ) as requested_interruption_issues`;
   const requestedIssueId = sql<string>`"requested_interruption_issues"."requested_issue_id"`;
   const requestedUuid = sql<string>`case when ${requestedIssueId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     then ${requestedIssueId}::uuid else null end`;
-  const legacyIssue = sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`;
   const candidate = (condition: SQL | undefined, executionOwner = false) => db.select({ id: heartbeatRuns.id,
     createdAt: heartbeatRuns.createdAt, executionOwner: sql<number>`${executionOwner ? 1 : 0}::int`.as("execution_owner") })
     .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), condition, taskAttemptCondition()))
     .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
   const nativeRun = eq(heartbeatRuns.nativeIssueId, requestedUuid);
   const firstClassRun = and(isNull(heartbeatRuns.nativeIssueId), eq(heartbeatRuns.issueId, requestedUuid));
-  const legacyRun = and(isNull(heartbeatRuns.nativeIssueId), isNull(heartbeatRuns.issueId), eq(legacyIssue, requestedIssueId));
+  const legacyRun = and(isNull(heartbeatRuns.nativeIssueId), isNull(heartbeatRuns.issueId), eq(contextIssue, requestedIssueId));
+  const historicalRun = eq(heartbeatRuns.id, sql<string>`"requested_interruption_issues"."historical_run_id"`);
   const candidates = unionAll(
-    candidate(and(liveExecutionOwnerCondition(companyId, requestedUuid), or(nativeRun, firstClassRun, legacyRun)), true),
+    candidate(and(liveExecutionOwnerCondition(companyId, requestedUuid), or(nativeRun, firstClassRun,
+      and(isNull(heartbeatRuns.nativeIssueId), isNull(heartbeatRuns.issueId), eq(legacyIssue, requestedIssueId)))), true),
     candidate(nativeRun),
     candidate(firstClassRun),
     candidate(legacyRun),
+    candidate(historicalRun),
   ).as("interruption_run_candidates");
   const latestRuns = db.select({ id: candidates.id }).from(candidates)
     .orderBy(desc(candidates.executionOwner), desc(candidates.createdAt), desc(candidates.id)).limit(1).as("latest_interruption_runs");

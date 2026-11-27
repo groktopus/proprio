@@ -1,25 +1,17 @@
-import type { BoardBootstrap } from "@groktopus/shared";
+import type { BoardBootstrap, BoardBootstrapSession } from "@groktopus/shared";
+import type { QueryClient } from "@tanstack/react-query";
 import { accessApi } from "./access";
-import { ApiError, detachInflightGet } from "./client";
+import { ApiError } from "./client";
 import { queryKeys } from "../lib/queryKeys";
 
 export function boardAccessQueryOptions(
   userId: string | null,
-  bootstrap: BoardBootstrap | undefined,
-  updatedAt: number,
   onAccountChanged: () => void,
 ) {
-  const initialData = userId && bootstrap?.userId === userId && bootstrap.boardAccess.userId === userId
-    ? bootstrap.boardAccess
-    : undefined;
   return {
     queryKey: [...queryKeys.access.currentBoardAccess, userId] as const,
-    initialData,
-    initialDataUpdatedAt: initialData ? updatedAt : undefined,
-    queryFn: async (): Promise<BoardBootstrap["boardAccess"]> => {
-      // Path-only request coalescing must not join reads from two accounts.
-      detachInflightGet("/cli-auth/me");
-      const access = await accessApi.getCurrentBoardAccess();
+    queryFn: async ({ signal }: { signal?: AbortSignal } = {}): Promise<BoardBootstrap["boardAccess"]> => {
+      const access = await accessApi.getCurrentBoardAccess({ signal });
       if (access.userId !== userId) {
         onAccountChanged();
         throw new ApiError("The signed-in account changed. Checking your session again.", 401, { code: "session_changed" });
@@ -27,4 +19,23 @@ export function boardAccessQueryOptions(
       return { userId: access.userId, isInstanceAdmin: access.isInstanceAdmin, companyIds: access.companyIds };
     },
   };
+}
+
+/** Retire access from before a membership change, including the session's seed. */
+export function refreshBoardAccessAfterMembershipChange(client: QueryClient) {
+  const sessionKey = queryKeys.auth.session;
+  const sessionQuery = client.getQueryCache().find({ queryKey: sessionKey, exact: true });
+  const session = client.getQueryData<BoardBootstrapSession>(sessionKey);
+  if (sessionQuery) {
+    const wasFetching = sessionQuery.state.fetchStatus === "fetching";
+    void client.cancelQueries({ queryKey: sessionKey, exact: true }, { revert: false, silent: true });
+    sessionQuery.setState({
+      data: session?.boardBootstrap ? { ...session, boardBootstrap: undefined } : session,
+      fetchStatus: "idle",
+    });
+    if (wasFetching) void client.refetchQueries({ queryKey: sessionKey, exact: true, type: "active" });
+  }
+
+  void client.resetQueries({ queryKey: queryKeys.access.currentBoardAccess });
+  void client.resetQueries({ queryKey: queryKeys.companies.list(session?.user.id ?? null), exact: true });
 }

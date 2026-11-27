@@ -425,6 +425,6 @@ export const accessApi = {
   setUserCompanyAccess: (userId: string, companyIds: string[]) =>
     api.put<UserCompanyAccessResponse>(`/admin/users/${userId}/company-access`, { companyIds }),
 
-  getCurrentBoardAccess: () =>
-    api.get<CurrentBoardAccess>("/cli-auth/me"),
+  getCurrentBoardAccess: (options?: RequestOptions) =>
+    api.get<CurrentBoardAccess>("/cli-auth/me", { ...options, fresh: true, cache: "no-store" }),
 };

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { agentApiKeys, agents, companies, companyMemberships, heartbeatRuns, issueComments, issues, nativeRunResults, type Db } from "@groktopus/db";
 import { agentApiKeyScopeSchema, isUuidLike, sendChatMessageSchema, type AgentApiKeyScope } from "@groktopus/shared";
 import { badRequest, conflict, forbidden, tooManyRequests } from "../errors.js";
 import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
 import { authorizationService, canActorReadIssuePrivacy, type AuthorizationActor } from "./authorization.js";
 import { persistActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
+import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
 import { issueService } from "./issues.js";
 import { issueTreeControlService } from "./issue-tree-control.js";
 import { resolveActorSourceTrustForIssue } from "./source-trust.js";
@@ -47,7 +48,7 @@ export async function sendAgentChatMessage(
   const result = await db.transaction(async transaction => {
     const tx = transaction as unknown as Db;
     await tx.select({ id: companies.id }).from(companies).where(eq(companies.id, actor.companyId)).for("no key update");
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${actor.companyId}`}, 0))`);
+    await lockIssuePrivacyTree(tx, actor.companyId);
     const runWhere = and(eq(heartbeatRuns.id, actor.runId), eq(heartbeatRuns.companyId, actor.companyId), eq(heartbeatRuns.agentId, actor.agentId));
     const [initial] = await tx.select().from(heartbeatRuns).where(runWhere);
     const sourceId = initial && runTask(initial);

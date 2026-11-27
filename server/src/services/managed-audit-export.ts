@@ -62,6 +62,8 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
   const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  // If a surviving binding proves the event belongs to evidence the caller
+  // cannot see, do not reveal whether another task/run binding is missing.
   const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
     .where(and(
       eq(issues.companyId, scope.companyId),
@@ -100,8 +102,11 @@ export async function createManagedAuditExport(
   window: { from: Date; to: Date },
 ) {
   const publications: ActivityPublication[] = [];
-  const snapshot = await db.transaction(async tx => {
-    const userId = await assertCurrentAuditAuthority(tx, scope);
+  // Expiry cleanup is best-effort maintenance. Commit it in a normal
+  // read-committed transaction so competing creators do not make the
+  // repeatable-read snapshot transaction fail on the same expired rows.
+  await db.transaction(async tx => {
+    await assertCurrentAuditAuthority(tx, scope);
     assertRetainedWindow(scope, window.from);
     if (window.from < scope.captureFrom) {
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
@@ -110,6 +115,14 @@ export async function createManagedAuditExport(
     await tx.delete(managedAuditExports).where(and(
       eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
     ));
+  });
+  const snapshot = await db.transaction(async tx => {
+    const userId = await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
+    const now = new Date();
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)

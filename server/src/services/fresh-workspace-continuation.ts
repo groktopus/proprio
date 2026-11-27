@@ -7,6 +7,7 @@ import { persistActivity } from "./activity-log.js";
 import { logger } from "../middleware/logger.js";
 import { readSystemRecovery } from "./system-recovery-state.js";
 import { readTaskRetryIntent } from "./task-retry.js";
+import { retryRunTaskIssueId } from "./task-retry-eligibility.js";
 import { z } from "zod";
 import { adapterExecutionControls } from "./adapter-execution-control.js";
 import { hasPendingRunCleanup } from "./execution-blocker.js";
@@ -402,8 +403,7 @@ export async function readFreshWorkspaceReadiness(db: Db, run: Pick<typeof heart
     }
     const [source] = await db.select().from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
-      eq(heartbeatRuns.id, intent.sourceRunId), sql`coalesce(${heartbeatRuns.nativeIssueId}::text,
-        ${heartbeatRuns.issueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${issueId}`,
+      eq(heartbeatRuns.id, intent.sourceRunId), eq(retryRunTaskIssueId(), issueId),
     )).limit(1);
     if (!source) throw new Error("Fresh retry source changed");
     if (intent.strategy !== "fresh_isolated_workspace") {
@@ -532,7 +532,7 @@ export async function verifyRetryWorkspace(
   const [source] = await db.select().from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
     eq(heartbeatRuns.id, readiness.sourceRunId),
-    sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.issueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${issueId}`,
+    eq(retryRunTaskIssueId(), issueId),
   ));
   if (!source) return readiness;
   const holds = await db.select({ cause: issueRecoveryActions.cause, evidence: issueRecoveryActions.evidence })

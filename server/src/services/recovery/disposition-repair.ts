@@ -1,3 +1,4 @@
+import { stableJson } from "./stable-json.js";
 import { createHash } from "node:crypto";
 import { and, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
@@ -49,14 +50,7 @@ export type DispositionRepairSourceState = {
   durablePathReason: string | null;
 };
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
+
 
 function boundedRecoveryDelayMs(
   attempt: number,
