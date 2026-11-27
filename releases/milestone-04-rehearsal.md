@@ -1,24 +1,24 @@
 # Milestone 04 rehearsal evidence
 
-**Promotion remains on hold.** The integration tracker records 43/45 scoped
-PRs merged. Main is `0ebc5c6d81ae36de6312453e13691ce976f4212f`; #372 is the
-published successor with hosted qualification underway, followed by this final
-documentation-only record in #356. The published source release is v0.0.4, but
-no Milestone 04 candidate has been selected or qualified. Candidate selection,
-release sign-off, staging recovery, and a bounded pilot remain pending. The
-release plan assigns agent sign-offs; @magnus919 is the sole human maintainer.
-It defines no recurring human approval gate.
-[Release plan #222](https://github.com/groktopus/proprio/issues/222) ·
-[v0.0.4 qualification](v0.0.4-qualification.md)
+**Promotion remains on hold.** At this rehearsal checkpoint, 43 of 45 scoped
+PRs are merged on main `0ebc5c6d81ae36de6312453e13691ce976f4212f`.
+The budget recovery PR #372 is in hosted verification, followed by rehearsal
+record #356. The most recent published source prerelease is v0.0.4 at
+`9a280c0c8d0ab67e945f6ed3cbac94e916a3a85c`. @magnus919 is the sole human
+maintainer. Integration, independent QA, operations, documentation review, and
+release engineering agents own the milestone sign-offs under their authorized
+scope. [Release plan #222](https://github.com/groktopus/proprio/issues/222) ·
+[v0.0.4 qualification](v0.0.4-qualification.md) ·
+[Published source prerelease](https://github.com/groktopus/proprio/releases/tag/v0.0.4)
 
 ## Scope and evidence
 
-The current main revision is `0ebc5c6d81ae36de6312453e13691ce976f4212f`.
-The final rehearsal-record change is scoped to this file and its PR head, which
-also carries #372's budget-resolution test on top of main. That PR's exact
-hosted qualification is still underway. Neither this PR head nor current main
-is a selected or qualified release candidate. The pull requests below identify
-the narrower source revisions and test scope for their results. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
+On November 24, 2026, 44 draft heads composed on main
+`6e6ebf51cb0cf214375523171f80f19d14da073f` for the local rehearsal
+`b089265c8dc80fcdf179b4e12b4a78c42ebc1dfc`. The linked pull requests
+identify the source revisions and test scope for their results.
+Release engineering will select the final candidate from integrated main after
+#372 and #356 land. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
 - **Parent liveness, diagnosis, and restart.** PostgreSQL tests interrupted a
   claimed diagnostic wake and checked recovery after controller restart. A
@@ -34,10 +34,9 @@ the narrower source revisions and test scope for their results. [Milestone 04](h
   denial, and authorized acceptance. Native finalization tests exercised
   corrected scope and withdrawal. Chromium displayed completion evidence and
   retained an earlier accepted recovery revision after a newer acceptance.
-  Two runs of the controller restart test compared the full accept,
-  clarification, and decline receipts and checked the task's Case audit
-  events after restart. The fixture uses a static loader and seeded agents
-  to keep the receipt checks independent of model calls and onboarding.
+  The local and hosted controller restart tests checked accept,
+  clarification, and decline receipts, the audit API, and the persisted Case
+  events. The fixture uses a guarded loader and seeded agents.
   [Native handoff #342](https://github.com/groktopus/proprio/pull/342) · [Completion history #335](https://github.com/groktopus/proprio/pull/335) · [Scope correction #345](https://github.com/groktopus/proprio/pull/345) · [Recovery history #355](https://github.com/groktopus/proprio/pull/355) · [Decision restart #364](https://github.com/groktopus/proprio/pull/364)
 - **Bound signoff and shared spend.** PostgreSQL tests exercised an edit racing
   with signoff, concurrent sibling reservations, reparenting, overlapping
@@ -57,23 +56,27 @@ the narrower source revisions and test scope for their results. [Milestone 04](h
   [Mixed handoff #319](https://github.com/groktopus/proprio/pull/319) · [Restart #323](https://github.com/groktopus/proprio/pull/323) · [Authority #332](https://github.com/groktopus/proprio/pull/332) · [Uncertain effect #341](https://github.com/groktopus/proprio/pull/341)
 - **Context compaction.** The separately authorized live Codex subscription
   campaign on the repaired #321 revision completed seven runs. Its 15/15
-  behavior checks passed, while the launcher reported missing capture files
-  (`final-state.png` and `snapshots/api-state.json`); this live run is not a
-  complete packaged-evidence pass. The later capture-only fix was verified in a
-  full credential-free offline package run with seven synthetic runs and all
-  15 behavior checks. Keep the live behavioral result and offline packaging
-  result distinct. Neither establishes a live campaign on the final integrated
-  source. ACPX Claude requires its own trial.
+  behavior checks passed. The launcher reported two missing capture files,
+  `final-state.png` and `snapshots/api-state.json`, so the original package
+  status is incomplete. The capture follow-up passed a full credential-free
+  offline package run with seven synthetic runs and 15 behavior checks.
+  The live evidence covers the repaired Codex subscription revision.
+  ACPX Claude qualification remains pending.
   [Codex experiment #321](https://github.com/groktopus/proprio/pull/321) ·
   [Live and offline evidence](https://github.com/groktopus/proprio/pull/321#issuecomment-7207223985)
 
-The full-integration rehearsals recorded selected tests, typechecks, and browser
-journeys on their respective composed revisions. Those results support the
-listed PR scopes; they do not qualify the exact current main revision. #367's
-exhausted-diagnosis browser path passed its hosted Chromium check and protected
-smoke on its exact PR revision. #372's budget-resolution test passed the exact local selector, the full affected
-test file, and Server typecheck. Its hosted qualification is underway; do not
-count it as merged or as hosted-qualified yet. [Exhausted diagnosis #367](https://github.com/groktopus/proprio/pull/367) · [Budget resolution #372](https://github.com/groktopus/proprio/pull/372)
+The hosted Linux qualification for #365 tested
+`a6a88f3f89c4db8e322b92e51274d25958bf1076` from previous release
+v0.0.1 at `49611a24b54166eda41cde8a26706592cc394034`. Its artifact
+records five passing outcomes, including managed update and rollback, native
+restore to a fresh target, and active-run migration recovery.
+[Exact #365 Linux artifact](https://github.com/groktopus/proprio/actions/runs/45941147752/artifacts/15174531363)
+
+#367 passed hosted Chromium, protected smoke, and CodeQL on its exact PR
+revision. #372 passed the exact local budget selector, all 13 tests in its
+affected file, and server typecheck. Its hosted qualification is underway.
+[Exhausted diagnosis #367](https://github.com/groktopus/proprio/pull/367) ·
+[Budget resolution #372](https://github.com/groktopus/proprio/pull/372)
 
 The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
 passed 4,429 selected tests with one skip, 13 additional Runner contract
@@ -90,18 +93,17 @@ script with local fixtures.
 
 - Local embedded PostgreSQL rehearsal applied migrations 0507–0509 to seeded
   data: an existing pending handoff retained its owner and wake, the prior
-  schema client read the seeded row, and reapplication was idempotent. This is
-  local evidence only. Staging still needs the managed migration 0507 upgrade
-  and an exercised restore or roll-forward, with elapsed time and observed data
-  loss recorded. [Migration #310](https://github.com/groktopus/proprio/pull/310) · [Release checklist](../doc/RELEASE-CHECKLIST.md)
+  schema client read the seeded row, and reapplication was idempotent.
+  Migration 0507 requires staging evidence because it adds unique indexes and
+  validated checks to existing tables. Migrations 0508 and 0509 add nullable
+  columns. The operating agent must record the staging upgrade, a restore or
+  roll-forward rehearsal, elapsed time, and any observed data loss. [Migration #310](https://github.com/groktopus/proprio/pull/310) · [Release checklist](../doc/RELEASE-CHECKLIST.md)
 - #409's infrastructure draft has green focused tests, protected smoke, and
-  CodeQL. The signed Runner report proof and organization-side App activation
-  are still pending; activation remains queued by the user's choice. Do not
-  treat the draft checks as proof that the trusted refresh path is active or
-  that the final source is qualified. [Runner report writer #409](https://github.com/groktopus/proprio/pull/409#issuecomment-7208010648)
+  CodeQL. Organization-side App activation is queued. The signed Runner report
+  proof remains pending. [Runner report writer #409](https://github.com/groktopus/proprio/pull/409#issuecomment-7208010648)
 - Qualify the exact selected main candidate in Linux source CI after integration
   is complete. Keep the signed-off scope limited to tested runner and model
-  combinations. The exact integrated-source qualification, staging migration
-  recovery, and bounded opt-in pilot have not been completed. Before promotion,
-  record the operator, observation window, task ownership, wake and effect
+  combinations. Final-source qualification, staging migration recovery, and
+  the bounded opt-in pilot remain pending. Before promotion, record the
+  operator, observation window, task ownership, wake and effect
   counts, spend holds, and recovery verification. [Source release runbook](../doc/RELEASING.md) · [Release plan #222](https://github.com/groktopus/proprio/issues/222)
