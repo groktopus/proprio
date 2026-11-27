@@ -5,10 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { cliProbeResponse, resultText } from './codex-fixture-helpers.mjs';
 if (process.argv.includes('--version') || process.argv.includes('exec')) {
   const response = process.argv.includes('--version')
     ? 'codex-cli 0.115.0 (in-feed fixture)'
-    : JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'hello' } });
+    : cliProbeResponse();
   process.stdout.write(`${response}\n`);
   process.exit(0);
 }
@@ -127,35 +128,42 @@ async function execute() {
     // this provider session pinned its tools. The next session must do the read.
     text = 'Access is ready. I will continue the archive read with the updated tools.';
   } else {
+    const matchesFixtureTool = (item) => typeof item?.name === 'string'
+      && (query === 'gmail-fixture' ? /gmail-fixture/i : /heliotrope/i).test(item.description ?? '');
+    let result;
     if (recoveryFixture) {
       // Recovery runs receive provider-ready dynamic tools in the thread
       // context. Invoke that exact binding through item/tool/call so the
       // production authority and MCP connection handle the external request.
-      const service = query === 'gmail-fixture' ? 'gmail' : 'archive';
-      const prefix = `app_mcp_app_gallery_link_${service}_read_`;
-      const tool = advertisedDynamicTools.find((item) =>
-        typeof item?.name === 'string' && item.name.startsWith(prefix));
-      if (!tool) throw new Error(`Task context did not advertise ${service} archive_read`);
-      const result = unwrap(await call(tool.name, {}));
-      if (result?.isError) throw new Error(JSON.stringify(result));
-      const content = result?.data?.content ?? result?.contentItems ?? result?.content ?? [];
-      if (!Array.isArray(content)) throw new Error('Advertised archive_read returned no text content');
-      text = content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+      const tool = advertisedDynamicTools.find(matchesFixtureTool);
+      if (!tool) throw new Error(`Task context did not advertise the ${query} fixture tool`);
+      result = unwrap(await call(tool.name, {}));
     } else {
       await mcp('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'in-feed-fixture', version: '1' } });
       const list = await mcp('tools/list');
-      const tool = list.tools.find((item) => (query === 'gmail-fixture' ? /gmail-fixture/.test(item.description ?? '') : /heliotrope/.test(item.description ?? '')));
+      const tool = list.tools.find(matchesFixtureTool);
       if (!tool) throw new Error('Updated native tool snapshot does not contain archive_read');
-      const result = await mcp('tools/call', { name: tool.name, arguments: {} });
-      if (result.isError) throw new Error(JSON.stringify(result));
-      text = result.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
+      result = await mcp('tools/call', { name: tool.name, arguments: {} });
     }
+    text = resultText(result);
     if (recoveryFixture && text.includes('RECOVERY-INJECT-')) {
       // An unrelated informational event must not terminate the root. The next
       // event deliberately supplies the terminal failure used by recovery tests.
       send({ method: 'thread/status/changed', params: { threadId: 'unrelated-fixture-thread', status: { type: 'idle' } } });
       if (text.includes('RECOVERY-INJECT-UNKNOWN-WRITE')) {
         send({ method: 'item/started', params: { threadId, turnId, item: { id: 'uncertain-email-write', type: 'mcpToolCall', tool: 'send_fixture_email', readOnlyHint: false, status: 'inProgress' } } });
+        // Model a provider-owned write that reaches its receiver, then lose the
+        // terminal tool receipt when the provider turn fails below.
+        const endpoint = new URL(process.env.RECOVERY_FIXTURE_EFFECT_URL ?? '');
+        if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || !endpoint.port
+          || endpoint.pathname !== '/effects' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+          throw new Error('The recovery fixture only accepts its local effect receiver');
+        }
+        const effect = await fetch(endpoint, { method: 'POST', redirect: 'error' });
+        if (effect.status !== 204) throw new Error(`Unexpected fixture effect response ${effect.status}`);
+        if (effect.headers.get('x-proprio-fixture-inject-failure') !== '1') {
+          throw new Error('Unexpected replay of uncertain provider write was recorded');
+        }
       }
       send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { code: 'fixture_checkpoint_unusable', message: 'Deterministic failed provider session after Gmail access' } } } });
       return;
@@ -187,7 +195,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
   else if (method === 'thread/read') send({ id, result: { thread: { id: threadId, turns: [] } } });
   else if (method === 'turn/start') {
-    helloProbe = recoveryFixture
+    helloProbe = (recoveryFixture || process.argv.includes('--completion-stream-fixture'))
       && JSON.stringify(message.params?.input).includes('Respond only with hello. Do not use tools or inspect files.');
     emitCeoLineage = JSON.stringify(message.params).includes('CEO descendant fixture');
     declined = /connection_intent/.test(JSON.stringify(message.params)) && /rejected/.test(JSON.stringify(message.params));
@@ -197,13 +205,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         const envelope = typeof outer.message === "string" ? JSON.parse(outer.message) : outer;
         const contract = envelope.task?.completionContract ?? envelope.completionContract;
         for (const line of (envelope.task?.task?.prompt ?? envelope.task?.prompt ?? '').split('\n')) {
-          try { const context = JSON.parse(line); if (context.version === 1 && Array.isArray(context.messages)) currentObjective = context.objective; } catch {}
+          try {
+            const context = JSON.parse(line);
+            if (context.version !== 1 || !Array.isArray(context.messages)) continue;
+            currentObjective = context.objective ?? '';
+            if (!currentObjective && context.objectiveSource?.kind === 'comment') {
+              const source = context.objectiveSource;
+              const message = context.messages.find((item) => item.id === source.id && item.updatedAt === source.revision && !item.deleted);
+              currentObjective = message?.body ?? message?.text ?? '';
+            }
+          } catch {}
         }
         if (contract?.revision && contract.criteria) completionContract = { revision: contract.revision, criterionIds: contract.criteria.map((criterion) => criterion.id) };
       } catch { /* Non-envelope text is ordinary task context. */ }
-    }
-    if (recoveryFixture && /Now summarize my Gmail emails about launch decisions/i.test(JSON.stringify(message.params?.input))) {
-      currentObjective = 'Now summarize my Gmail emails about launch decisions, with the source link.';
     }
     turnId = randomUUID();
     send({ id, result: { turn: { id: turnId, status: 'inProgress' } } });

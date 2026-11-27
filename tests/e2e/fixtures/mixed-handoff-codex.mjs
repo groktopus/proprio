@@ -1,10 +1,11 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { cliProbeResponse } from "./codex-fixture-helpers.mjs";
 
 if (process.argv.includes("--version") || process.argv.includes("exec")) {
   const response = process.argv.includes("--version") ? "codex-cli 0.140.0"
-    : JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hello" } });
+    : cliProbeResponse();
   process.stdout.write(`${response}\n`);
   process.exit(0);
 }
