@@ -1,4 +1,7 @@
 import { isAgentCreatedIssue, type ExternalObjectSummary, type Issue } from "@groktopus/shared";
+import { formatCodeLabel as issueFilterLabel } from "./utils";
+
+export { issueFilterLabel };
 
 export type IssueFilterWorkspaceLookup = {
   mode?: string | null;
@@ -89,10 +92,6 @@ export const issueQuickFilterPresets = [
   { label: "Backlog", statuses: ["backlog"] },
   { label: "Done", statuses: ["done", "cancelled"] },
 ];
-
-export function issueFilterLabel(value: string): string {
-  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
 
 export function issueFilterArraysEqual(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;

@@ -12,6 +12,7 @@ import {
   expandHomePrefix,
   resolveDefaultConfigPath,
   resolveDefaultContextPath,
+  resolveProprioInstanceId,
 } from "../config/home.js";
 import { readConfig } from "../config/store.js";
 import type { ProprioConfig } from "../config/schema.js";
@@ -23,6 +24,7 @@ export type TestDriveHarness = (typeof TEST_DRIVE_HARNESSES)[number];
 
 export interface TestDriveOptions {
   dataDir?: string;
+  instance?: string;
   companyName?: string;
   agentName?: string;
   harness?: TestDriveHarness;
@@ -166,7 +168,7 @@ export async function resolveTestDriveServerPort(preferredPort = 3100, available
  * a PROPRIO_ prefix; all other Proprio routing/configuration is discarded.
  */
 export async function prepareTestDriveEnvironment(
-  options: Pick<TestDriveOptions, "dataDir" | "apiKeyEnv">,
+  options: Pick<TestDriveOptions, "dataDir" | "apiKeyEnv" | "instance">,
   cwd = process.cwd(),
 ): Promise<{ dataDir: string; linkedWorktree: boolean }> {
   const sourceEnvName = options.apiKeyEnv?.trim();
@@ -186,9 +188,10 @@ export async function prepareTestDriveEnvironment(
 
   const dataDir = resolveTestDriveDataDir(options.dataDir);
   const linkedWorktree = isLinkedGitWorktree(cwd);
+  const instanceId = resolveProprioInstanceId(options.instance);
   process.env.PROPRIO_HOME = dataDir;
-  process.env.PROPRIO_INSTANCE_ID = "default";
-  process.env.PROPRIO_CONFIG = resolveDefaultConfigPath("default");
+  process.env.PROPRIO_INSTANCE_ID = instanceId;
+  process.env.PROPRIO_CONFIG = resolveDefaultConfigPath(instanceId);
   process.env.PROPRIO_CONTEXT = resolveDefaultContextPath();
   process.env.PROPRIO_IN_WORKTREE = linkedWorktree ? "true" : "false";
   process.env.PROPRIO_OPEN_ON_LISTEN = "false";
@@ -424,7 +427,7 @@ export async function testDriveCommand(
   redactTestDriveArgv(options.apiKey);
   const dataDir = path.resolve(process.env.PROPRIO_HOME ?? resolveTestDriveDataDir(options.dataDir));
   const linkedWorktree = process.env.PROPRIO_IN_WORKTREE === "true";
-  const instanceId = process.env.PROPRIO_INSTANCE_ID ?? "default";
+  const instanceId = resolveProprioInstanceId(options.instance);
   // Resolve environment-backed credentials against the CLI environment as it
   // exists before server startup. In-process server initialization must not
   // change which credential the post-listen bootstrap observes.
@@ -443,6 +446,7 @@ export async function testDriveCommand(
 
   try {
     await dependencies.run({
+      instance: instanceId,
       repair: true,
       yes: true,
       bind: "loopback",
@@ -496,6 +500,7 @@ export function registerTestDriveCommand(program: Command): void {
     .command("test-drive")
     .description("Start an isolated, initialized Proprio instance for manual testing")
     .option("-d, --data-dir <path>", "Proprio data directory to create or reuse")
+    .option("--instance <id>", "Select an instance inside the data directory (default: default)")
     .option("--company-name <name>", "Initial company name", "Test Company")
     .option("--agent-name <name>", "Initial CEO agent name", "CEO")
     .addOption(
