@@ -58,6 +58,46 @@ describe("Git physical source roots", () => {
     expect(await workspaceSourceIdentities(companyId, alias)).toEqual(await workspaceSourceIdentities(companyId, cwd));
     await expect(readWorkspaceGitSourceRoots(alias)).rejects.toThrow("workspace_git_source_unproven");
   });
+  it("ignores an empty sandbox Git target only at an exact isolated task workspace", async () => {
+    vi.stubEnv("PROPRIO_HOME", root);
+    const companyId = randomUUID(), issueId = randomUUID();
+    const cwd = path.join(root, "isolated-workspaces", companyId, issueId);
+    await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+
+    await expect(workspaceSourceIdentities(companyId, cwd)).resolves.toMatchObject({
+      projectIds: [], issueIds: [issueId], git: null,
+    });
+
+    await fs.writeFile(path.join(cwd, ".git", "config"), "[core]\n");
+    await expect(workspaceSourceIdentities(companyId, cwd)).rejects.toThrow("workspace_git_source_unproven");
+  });
+  it("continues checking ancestors after ignoring an exact task-root empty Git target", async () => {
+    vi.stubEnv("PROPRIO_HOME", root);
+    await git(root, "init", "-q");
+    const companyId = randomUUID(), issueId = randomUUID();
+    const cwd = path.join(root, "isolated-workspaces", companyId, issueId);
+    await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+
+    const identities = await workspaceSourceIdentities(companyId, cwd);
+    expect(identities.issueIds).toEqual([issueId]);
+    expect(identities.git?.root).toBe(root);
+  });
+  it.each(["project", "foreign company", "nested workspace", "noncanonical task UUID"] as const)(
+    "does not ignore an empty Git marker in a %s path", async kind => {
+      vi.stubEnv("PROPRIO_HOME", root);
+      const companyId = randomUUID(), issueId = randomUUID();
+      let cwd: string;
+      if (kind === "project") {
+        cwd = resolveManagedProjectWorkspaceDir({ companyId, projectId: randomUUID() });
+      } else {
+        const owner = kind === "foreign company" ? randomUUID() : companyId;
+        const taskId = kind === "noncanonical task UUID" ? issueId.toUpperCase() : issueId;
+        cwd = path.join(root, "isolated-workspaces", owner, taskId);
+        if (kind === "nested workspace") cwd = path.join(cwd, "nested");
+      }
+      await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+      await expect(workspaceSourceIdentities(companyId, cwd)).rejects.toThrow("workspace_git_source_unproven");
+    });
   it("binds actual linked worktree administration and the full shared object-store root", async () => {
     const source = await repository(), cwd = path.join(root, "task worktree");
     await git(source, "worktree", "add", "-b", "task", cwd);

@@ -141,6 +141,15 @@ export async function isolatedTaskSourceIdentity(companyId: string, cwd: string)
   return relative[2] && /^[a-f0-9-]{36}$/.test(relative[2]) ? relative[2] : null;
 }
 
+async function emptyTaskGitMarkerPath(companyId: string, cwd: string): Promise<string | undefined> {
+  const instanceRoot = await canonicalRepositoryRoot(resolveProprioInstanceRoot());
+  const relative = path.relative(instanceRoot, cwd);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
+  const parts = relative.split(path.sep);
+  if (parts.length === 3 && parts[0] === "isolated-workspaces" && parts[1] === companyId
+    && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(parts[2])) return path.join(cwd, ".git");
+}
+
 export async function retainManagedProjectSource(db: Db, companyId: string, cwd: string): Promise<void> {
   const projectId = await managedProjectSourceIdentity(companyId, cwd);
   if (!projectId) return;
@@ -150,7 +159,8 @@ export async function retainManagedProjectSource(db: Db, companyId: string, cwd:
 
 export async function workspaceSourceIdentities(companyId: string, cwd: string) {
   cwd = await canonicalRepositoryRoot(cwd);
-  const git = await readWorkspaceGitSourceRoots(cwd, { ancestors: true });
+  const git = await readWorkspaceGitSourceRoots(cwd, { ancestors: true,
+    ignoreEmptyGitMarkerAt: await emptyTaskGitMarkerPath(companyId, cwd) });
   const roots = [cwd, ...(git ? [git.root, git.gitDirectory.path, git.commonDirectory.path,
     ...git.objectDirectories.map(directory => directory.path)] : [])];
   const projectIds = new Set<string>(), issueIds = new Set<string>(), unownedPaths: string[] = [];
