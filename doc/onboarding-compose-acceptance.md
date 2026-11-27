@@ -25,6 +25,13 @@ pnpm exec playwright test --config tests/e2e/playwright-docker-onboard.config.ts
 ```
 
 `SMOKE_SKIP_BUILD=true` requires an already-built `proprio-onboard-smoke`
-image. The Playwright global teardown captures container logs and removes the
-app and provider-mock containers; the data directory and metadata remain for
+image. `IMAGE_NAME` already accepts an explicit local tag or an exact
+`repository/image@sha256:...` reference. Pull or build and tag the image before
+running this script; the script checks that exact image and does not build it.
+For source qualification, that image must contain the app built from the exact
+PR revision. The default Dockerfile installs the published npm package, so a
+version tag alone cannot qualify unpublished source.
+
+The Playwright global teardown captures container logs and removes the app and
+provider-mock containers; the data directory and metadata remain for
 inspection. Do not reuse production data for this test.
