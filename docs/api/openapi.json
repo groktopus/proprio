@@ -63564,7 +63564,7 @@
         "description": "Responses are no-store. Each successful GET records a page release before returning its body, even when conditional request headers are supplied. HEAD validates the page without recording a release.",
         "responses": {
           "200": {
-            "description": "Managed audit export page",
+            "description": "Managed audit export page. During a mixed-version rollout, an older reader can return an empty complete page after membership is cleared. Compare the response and archived membership with the count and watermark saved at creation before accepting completion.",
             "content": {
               "application/json": {
                 "schema": {
@@ -63802,7 +63802,7 @@
             }
           },
           "404": {
-            "description": "Export not found",
+            "description": "Export not found. For snapshot_missing, reconcile the checkpoint. An older replica can delete a marker early during rollout or rollback, and it stays missing after the rollout completes.",
             "content": {
               "application/json": {
                 "schema": {
@@ -63831,7 +63831,7 @@
             }
           },
           "409": {
-            "description": "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. The owner receives snapshot_expired for at least 24 hours after expiry when the source epoch and retention window still apply. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
+            "description": "Export requires reconciliation. An upgraded reader that still considers a cleared snapshot live returns snapshot_incomplete. That response permanently invalidates the snapshot. With a retained marker in the current source epoch and retention window, an expired snapshot returns snapshot_expired. Marker-aware cleanup retains existing markers for at least 24 hours after expiry. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.",
             "content": {
               "application/json": {
                 "schema": {

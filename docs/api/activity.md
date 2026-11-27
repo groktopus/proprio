@@ -56,15 +56,23 @@ Responses are `no-store`; a GET returns its authenticated page body despite
 conditional request headers, and records access before releasing that body.
 HEAD validates the request without recording a page release. A page access
 record failure returns HTTP `500` with a fixed diagnostic and releases no page.
-Every page verifies access to all events in the snapshot. If any event is
+An upgraded reader verifies access to all events in the snapshot. If any event is
 missing or no longer visible, the API returns HTTP `409` with
 `details.reasonCode` set to `snapshot_incomplete`. The response contains no
 events, event count, or watermark. The snapshot and its cursors remain invalid
 if the missing event returns or becomes visible again. Reconcile the checkpoint
 before opening a new snapshot.
-If a snapshot expires, its owner receives `409 snapshot_expired` for at least
-24 hours when the source epoch and retention window still apply. After cleanup removes that
-marker, the response is `404 snapshot_missing`.
+Marker-aware cleanup retains existing markers for at least 24 hours after
+expiry. With a retained marker in the current epoch and retention window, an
+expired snapshot returns `409 snapshot_expired`. Older replicas can remove a
+marker early during rollout or rollback. After removal, the response is
+`404 snapshot_missing` and the checkpoint needs reconciliation, even after all
+replicas complete the upgrade.
+
+While any reader runs the older code, a cleared snapshot may return `200`
+with no events and `complete: true`. Compare the response and archived
+membership with the count and watermark saved at creation before accepting
+completion.
 
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
