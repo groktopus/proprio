@@ -1,14 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { setTimeout } from "node:timers/promises";
 import { and, eq } from "../../../server/node_modules/drizzle-orm/index.js";
 import { expect, test } from "@playwright/test";
 import { agentApiKeys, agents, caseAccessSources, caseEvents, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
 import { caseHandoffService } from "../../../server/src/services/case-handoffs.ts";
+import { launchTestDrive, stopTestDrive } from "../fixtures/test-drive-process";
 
 const outcomes: { outcome: string; reasonCode?: string }[] = [
   { outcome: "accepted" },
@@ -28,33 +26,19 @@ test("recipient decisions survive a controller restart with their Case audit his
   const env = { ...process.env, NODE_ENV: "test", PROPRIO_HOME: dataDir, PROPRIO_INSTANCE_ID: "default", CODEX_HOME: codexHome,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${codexLoader}`,
     OPENAI_API_KEY: "recipient-decision-fixture", DATABASE_URL: undefined, DATABASE_MIGRATION_URL: undefined };
-  let drive: ReturnType<typeof spawn> | undefined;
-  let exited: ReturnType<typeof once> | undefined;
+  let drive: ReturnType<typeof launchTestDrive> | undefined;
   function startDrive() {
-    drive = spawn(process.execPath, ["--import", "./cli/node_modules/tsx/dist/loader.mjs", "cli/src/index.ts", "test-drive",
-      "--data-dir", dataDir, "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Recipient Decision Fixture", "--no-browser"],
-    { cwd: repo, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    drive.stdout!.on("data", chunk => { log.text += chunk.toString(); });
-    drive.stderr!.on("data", chunk => { log.text += chunk.toString(); });
-    exited = once(drive, "exit");
+    drive = launchTestDrive({ cwd: repo, env,
+      args: ["--data-dir", dataDir, "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Recipient Decision Fixture", "--no-browser"],
+      onOutput: chunk => { log.text += chunk; },
+    });
+    return drive.ready;
   }
   async function stopDrive() {
-    if (!drive?.pid || drive.exitCode !== null || drive.signalCode !== null) return;
-    process.kill(-drive.pid, "SIGTERM");
-    const timeout = new AbortController();
-    try {
-      await Promise.race([exited, setTimeout(10_000, undefined, { signal: timeout.signal }).then(() => {
-        if (drive?.exitCode === null && drive.signalCode === null) process.kill(-drive.pid!, "SIGKILL");
-      })]);
-    } finally { timeout.abort(); await exited; }
-  }
-  async function readyUrl(offset = 0) {
-    const url = () => log.text.slice(offset).match(/Proprio is ready at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
-    await Promise.race([
-      expect.poll(url, { timeout: 100_000 }).toBeTruthy(),
-      exited!.then(([code, signal]) => { throw new Error(`Test-drive exited during startup (${code ?? signal})\n${log.text}`); }),
-    ]);
-    return url()!;
+    const active = drive;
+    if (!active) return;
+    drive = undefined;
+    await stopTestDrive(active.child);
   }
 
   let databaseUrl: string | undefined;
@@ -64,8 +48,7 @@ test("recipient decisions survive a controller restart with their Case audit his
     await writeFile(codex, "#!/bin/sh\nexit 78\n", { mode: 0o700 });
     await chmod(codex, 0o700);
     await copyFile(resolve(import.meta.dirname, "../fixtures/recipient-decision-codex-loader.mjs"), codexLoader);
-    startDrive();
-    let base = await readyUrl();
+    let base = await startDrive();
     const api = async (path: string, method = "GET", data?: unknown) => {
       const response = await request.fetch(`${base}/api${path}`, { method, data });
       const body = await response.text();
@@ -146,8 +129,7 @@ test("recipient decisions survive a controller restart with their Case audit his
 
     const stopTime = new Date().toISOString();
     await stopDrive();
-    startDrive();
-    base = await readyUrl(log.text.length);
+    base = await startDrive();
     expect((await api("/companies"))[0].id).toBe(company.id);
     for (const entry of seeded) {
       const history = await api(`/cases/${entry.caseId}/handoffs?limit=5`);
