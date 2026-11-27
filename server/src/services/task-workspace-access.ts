@@ -168,7 +168,7 @@ export async function assertTaskWorkspaceExecutionAccess(
       : input.workspaceId;
     const [workspace] = workspaceId ? await measureRunPhase("workspace.access.workspace_read", async () => db.select({
       id: executionWorkspaces.id, companyId: executionWorkspaces.companyId,
-      projectId: executionWorkspaces.projectId, projectWorkspaceId: executionWorkspaces.projectWorkspaceId,
+      projectId: executionWorkspaces.projectId, projectWorkspaceId: executionWorkspaces.projectWorkspaceId, repoUrl: executionWorkspaces.repoUrl,
     }).from(executionWorkspaces).where(and(eq(executionWorkspaces.id, workspaceId), eq(executionWorkspaces.companyId, companyId)))) : [];
     if (workspaceId && (!workspace || (task.executionWorkspaceId !== workspace.id
       && !(selection?.kind === "existing" && selection.workspaceId === workspace.id)

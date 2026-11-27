@@ -924,6 +924,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       heartbeatRunId: run.id,
       responsibleUserId: run.responsibleUserId,
       agentId: agent.id,
+      projectCheckoutSourceId: resolvedWorkspace.workspaceId,
     },
   );
   if (freshNeedsSeed && issueId && !pluginPrepared && !pluginTaskWorkspace && !remoteAuthority) {

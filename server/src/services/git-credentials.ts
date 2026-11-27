@@ -292,6 +292,7 @@ export function createGitRemoteAuthProvider(
     heartbeatRunId?: string | null;
     responsibleUserId?: string | null;
     agentId?: string | null;
+    projectCheckoutSourceId?: string | null;
   },
   deps?: {
     secrets?: GitCredentialSecretsDeps;
@@ -311,10 +312,14 @@ export function createGitRemoteAuthProvider(
     const managed = db
       ? await resolveManagedGitHubCredential(db, secrets, companyId, context ?? {})
       : { configured: false as const };
-    if (managed.configured) {
-      if (!managed.credential) throw new Error(managed.error ?? "Managed GitHub connection is unavailable");
-      return managed.credential;
+    if (managed.credential) return managed.credential;
+    if (db && context?.agentId) {
+      const { githubNativeGitService } = await import("./github-native-git.js");
+      if (await githubNativeGitService(db).hasBinding(companyId, context.agentId)) {
+        return { token: "", source: "managed_connection", secretName: null };
+      }
     }
+    if (managed.configured) throw new Error(managed.error ?? "Managed GitHub connection is unavailable");
     for (const secretName of secretNames) {
       const secret = await Promise.resolve(secrets.getByName(companyId, secretName)).catch(() => null);
       if (!secret) continue;
@@ -340,6 +345,18 @@ export function createGitRemoteAuthProvider(
     return null;
   };
 
+  function isolatedInvocation(env: Record<string, string> = {}) {
+    const anonymous = buildGitAuthInvocation({ token: "", source: "managed_connection", secretName: null });
+    return { ...anonymous, env: {
+      ...anonymous.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_AUTHOR_NAME: "", GIT_AUTHOR_EMAIL: "", GIT_COMMITTER_NAME: "", GIT_COMMITTER_EMAIL: "", ...env,
+    } };
+  }
+
+  function invocation(credential: GitCredential | null) {
+    return credential ? credential.token ? buildGitAuthInvocation(credential) : isolatedInvocation() : null;
+  }
+
   return async (remoteUrl: string) => {
     if (!isSupportedGitHubRemoteUrl(remoteUrl)) return null;
     if (db && context?.heartbeatRunId && context.agentId) {
@@ -347,26 +364,25 @@ export function createGitRemoteAuthProvider(
         eq(heartbeatRuns.id, context.heartbeatRunId), eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, context.agentId),
       ));
       if (run?.contextId) {
-        const { resolveGitHubOperationCredentials } = await import("./github-operation-credentials.js");
-        const result = await resolveGitHubOperationCredentials(db, {
+        const { resolveGitHubOperationCredentials, resolveGitHubProjectCheckoutCredentials } = await import("./github-operation-credentials.js");
+        const { normalizeGitHubNativeRepositoryUrl } = await import("./github-native-git.js");
+        const input = {
           companyId, runId: context.heartbeatRunId, agentId: context.agentId,
-        });
+          expectedRepository: normalizeGitHubNativeRepositoryUrl(remoteUrl),
+        };
+        const result = context.projectCheckoutSourceId && input.expectedRepository
+          ? await resolveGitHubProjectCheckoutCredentials(db, {
+            ...input, expectedRepository: input.expectedRepository, projectCheckoutSourceId: context.projectCheckoutSourceId,
+          })
+          : await resolveGitHubOperationCredentials(db, input);
         if (result.status === "absent") {
-          const credential = await resolveCredential();
-          return credential ? buildGitAuthInvocation(credential) : null;
+          return invocation(await resolveCredential());
         }
-        const anonymous = buildGitAuthInvocation({ token: "", source: "managed_connection", secretName: null });
-        return { ...anonymous, env: {
-          ...anonymous.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
-          GIT_AUTHOR_NAME: "", GIT_AUTHOR_EMAIL: "", GIT_COMMITTER_NAME: "", GIT_COMMITTER_EMAIL: "",
-          ...result.env,
-        } };
+        return isolatedInvocation(result.env);
       }
     }
     credentialPromise ??= resolveCredential();
-    const credential = await credentialPromise;
-    if (!credential) return null;
-    return buildGitAuthInvocation(credential);
+    return invocation(await credentialPromise);
   };
 }
 
@@ -385,6 +401,7 @@ export async function resolveManagedGitHubIdentitySelection(
   identitySource?: "personal" | "dedicated";
   grant?: typeof connectionGrants.$inferSelect;
   error?: string;
+  mcpOnly?: true;
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
@@ -423,6 +440,10 @@ export async function resolveManagedGitHubIdentitySelection(
   const nativeConnectionIds = githubConnections.filter((connection) =>
     eligibleConnectionIds.has(connection.id) && !isGitHubMcpPatConnection(connection),
   ).map((connection) => connection.id);
+  if (nativeConnectionIds.length === 0) return {
+    configured: true, identitySource: "personal", mcpOnly: true,
+    error: "No managed GitHub identity is available for this run",
+  };
   const grants = await db.select().from(connectionGrants).where(and(
     eq(connectionGrants.companyId, companyId),
     inArray(connectionGrants.connectionId, nativeConnectionIds),
@@ -565,10 +586,10 @@ export async function resolveManagedGitHubCredential(
     allowStandingDelegation?: boolean;
     explicitGrantId?: string;
   },
-): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string }> {
+): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string; mcpOnly?: true }> {
   const selection = await resolveManagedGitHubIdentitySelection(db, companyId, context);
   if (!selection.configured) return { configured: false };
-  if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error };
+  if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error, ...(selection.mcpOnly ? { mcpOnly: true as const } : {}) };
   const acquire = async (selection: Awaited<ReturnType<typeof resolveManagedGitHubIdentitySelection>>) => {
     let grant = selection.grant!;
     if (grant.kind === "user" && grant.subjectUserId) {

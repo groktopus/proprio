@@ -50,6 +50,7 @@ import {
   approvals,
   activityLog,
   companySecrets,
+  githubNativeGrants,
   joinRequests,
   invites,
   principalPermissionGrants,
@@ -135,6 +136,7 @@ export async function deleteCompany(db: Db, id: string) {
         await notifyCompanyRetentionWork(tx, id);
         await tx.delete(approvals).where(eq(approvals.companyId, id));
         await tailscaleDeletion.deleteCompanyData(tx, id);
+        await tx.delete(githubNativeGrants).where(eq(githubNativeGrants.companyId, id));
         await tx.delete(companySecrets).where(eq(companySecrets.companyId, id));
         await tx.delete(joinRequests).where(eq(joinRequests.companyId, id));
         await tx.delete(invites).where(eq(invites.companyId, id));
