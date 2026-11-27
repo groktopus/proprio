@@ -46,6 +46,7 @@ import {
   updateCompanyMemberWithPermissionsSchema,
   updateCompanyMemberSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   PERMISSION_KEYS,
@@ -4529,8 +4530,9 @@ export function accessRoutes(
   router.get(
     "/companies/:companyId/members/:memberId/archive-preview",
     async (req, res) => {
-      const companyId = req.params.companyId as string;
-      const memberId = req.params.memberId as string;
+      const params = archiveCompanyMemberPreviewParamsSchema.safeParse(req.params);
+      if (!params.success) throw badRequest("Invalid company or member ID");
+      const { companyId, memberId } = params.data;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");
       const member = await access.getMemberById(companyId, memberId);
       if (!member) throw notFound("Member not found");

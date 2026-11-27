@@ -175,7 +175,9 @@ or `--no-browser` to suppress browser opening. Reused directories must use the
 embedded database: the command rejects database URL environment overrides and
 configs with `database.mode: postgres`, suppresses the invocation directory's
 `.env` when the server starts, and keeps the normal managed-service collision
-guard. The selected instance's own environment file still loads. The command
+guard. Use `--instance <id>` to select an instance inside the data directory
+and give a retained test drive its own service identity. Pass the same ID when
+reopening it. The selected instance's environment file still loads. The command
 selects the first available loopback port at or above `3100`.
 
 Source-checkout startup builds the shared and plugin SDK packages when needed
