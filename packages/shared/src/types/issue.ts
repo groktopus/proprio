@@ -635,9 +635,8 @@ export interface IssueUnblockDescriptor {
   action: string;
 }
 
-/** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
 export interface DependencyDiagnosis {
-  state: "no_execution_path" | "active" | "external_wait";
+  state: "no_execution_path" | "active" | "external_wait" | "restricted";
   dependencyPath: Array<{
     issueId: string;
     identifier: string | null;
@@ -647,18 +646,17 @@ export interface DependencyDiagnosis {
   cause: {
     kind: string;
     issueId: string | null;
-    recoveryActionId?: string;
   };
-  nextOwner: { type: "agent" | "user" | "board"; id?: string; name?: string };
+  nextOwner: { type: "agent" | "user" | "board"; name?: string };
   nextAction: string;
   wake: {
-    idempotencyKey: string;
+    idempotencyKey?: string;
     status: "not_requested" | "queued" | "running" | "deferred" | "refused" | "exhausted" | "completed";
-    wakeupRequestId?: string;
   };
   canInvestigate: boolean;
 }
 
+/** Wake context of `issue_blocker_stalled`: the stalled issue and the recovery action it waits on. */
 export interface IssueBlockerStalledWakeContext {
   stalledIssueId: string;
   stalledIssueIdentifier: string | null;
@@ -821,9 +819,31 @@ export interface QualityReviewBinding {
   requirementHash?: string;
 }
 
+/** Opt-in source for binding an execution-stage signoff to required quality outputs. */
+export interface IssueExecutionReviewTargetBindingPolicy {
+  source: "required_quality_review";
+}
+
+export type IssueExecutionReviewTargetReference =
+  | Pick<RequestConfirmationIssueDocumentTarget, "type" | "key" | "revisionId">
+  | Pick<RequestConfirmationIssueAttachmentTarget, "type" | "attachmentId" | "assetId" | "sha256">;
+
+/** Immutable requirement and artifact references captured when a stage is submitted for signoff. */
+export interface IssueExecutionReviewTargetBinding {
+  version: 1;
+  requirementHash: string;
+  deliverables: Array<{
+    key: string;
+    label: string;
+    target: IssueExecutionReviewTargetReference;
+  }>;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   requiredQualityReview?: RequiredQualityReview;
+  /** Opt-in source for transactional signoff validation. */
+  reviewTargetBinding?: IssueExecutionReviewTargetBindingPolicy;
   commentRequired: boolean;
   stages: IssueExecutionStage[];
   monitor?: IssueExecutionMonitorPolicy | null;
@@ -866,6 +886,7 @@ export interface IssueExecutionState {
   currentParticipant: IssueExecutionStagePrincipal | null;
   returnAssignee: IssueExecutionStagePrincipal | null;
   reviewRequest: IssueReviewRequest | null;
+  reviewTargetBinding?: IssueExecutionReviewTargetBinding | null;
   completedStageIds: string[];
   lastDecisionId: string | null;
   lastDecisionOutcome: IssueExecutionDecisionOutcome | null;
@@ -884,6 +905,7 @@ export interface IssueExecutionDecision {
   actorUserId: string | null;
   outcome: IssueExecutionDecisionOutcome;
   body: string;
+  reviewTargetBinding?: IssueExecutionReviewTargetBinding | null;
   createdByRunId: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -941,6 +963,29 @@ export type IssueSummary = Pick<
   subtaskCount?: number;
   unreadSubtaskCount?: number;
 };
+
+export interface RequiredQualityReviewState {
+  required: boolean;
+  satisfied: boolean;
+  missing: Array<{ key: string; label: string; reason: "missing" | "pending" | "not_approved" | "stale"; interactionId?: string }>;
+}
+
+export interface IssueExecutionReviewEvidence {
+  submittedSignoff: { binding: IssueExecutionReviewTargetBinding | null; stale: boolean } | null;
+  currentRequests: Array<{
+    key: string;
+    label: string;
+    interactionId: string;
+    target: IssueExecutionReviewTargetReference;
+    requirementHash: string;
+    outdated: boolean;
+  }>;
+  executionDecisions: Array<Pick<IssueExecutionDecision, "id" | "stageType" | "outcome"> & {
+    reviewTargetBinding: IssueExecutionReviewTargetBinding;
+  }>;
+  nextCursor: string | null;
+  requiredQualityReviewState: RequiredQualityReviewState;
+}
 
 export interface Issue {
   /** Read-only status for task presentation; never use it for execution admission. */
@@ -1041,6 +1086,8 @@ export interface Issue {
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   executionBlocker?: ExecutionBlocker | null;
   interruption?: TaskInterruptionPresentation | null;
+  /** Whether the current Board viewer may request a Retry from this task detail. */
+  viewerCanRetry?: boolean;
   watchdog?: IssueWatchdogSummary | null;
   scheduledRetry?: IssueScheduledRetry | null;
   liveDescendantCount?: number;

@@ -372,7 +372,7 @@ describe("TaskChatThread dependency diagnosis", () => {
         status: "resolved", ownerType: "board", nextAction: "Automatic recovery stopped." },
     };
     vi.spyOn(issuesApi, "get").mockResolvedValue({
-      id: "child-id", identifier: "CHA-8", status: "blocked",
+      id: "child-id", identifier: "CHA-8", status: "blocked", viewerCanRetry: true,
       interruption: { canRetry: true, observedRunId: "child-run" },
     } as Issue);
     const retry = vi.spyOn(issuesApi, "retryTask").mockResolvedValue({
@@ -384,7 +384,11 @@ describe("TaskChatThread dependency diagnosis", () => {
 
     expect(container.querySelector("[data-testid='dependency-diagnosis-notice']")?.textContent).toContain("CHA-8: Ship the migration");
     expect(container.querySelector("[data-testid='dependency-parent-wake-state']")?.textContent).toBe("The parent wake has exhausted its attempts.");
-    const retryButton = await vi.waitFor(() => container.querySelector<HTMLButtonElement>("button[aria-label='Retry CHA-8']"));
+    const retryButton = await vi.waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>("button[aria-label='Retry CHA-8']");
+      expect(button).not.toBeNull();
+      return button!;
+    });
     await act(async () => { retryButton!.click(); });
     await vi.waitFor(() => expect(retry).toHaveBeenCalledWith("child-id", expect.objectContaining({ observedRunId: "child-run" })));
   });

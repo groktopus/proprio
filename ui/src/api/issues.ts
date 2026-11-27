@@ -19,6 +19,7 @@ import type {
   FeedbackVote,
   Issue,
   DependencyDiagnosis,
+  DependencyInvestigationInput,
   IssueAccessGrant,
   IssueAccessGrantSubjectType,
   IssueVisibility,
@@ -30,6 +31,7 @@ import type {
   IssueRecentComments,
   IssueQueuedCommentQueue,
   IssueDocument,
+  IssueExecutionReviewEvidence,
   IssueLabel,
   IssueRecoveryAction,
   WorkspaceSourceInspection,
@@ -388,6 +390,11 @@ export const issuesApi = {
   createLabel: (companyId: string, data: { name: string; color: string }) =>
     api.post<IssueLabel>(`/companies/${companyId}/labels`, data),
   deleteLabel: (id: string) => api.delete<IssueLabel>(`/labels/${id}`),
+  executionReviewEvidence: (id: string, cursor: string | null, signal?: AbortSignal) =>
+    api.get<IssueExecutionReviewEvidence>(
+      `/issues/${id}/execution-review-evidence${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+      { signal, cache: "no-store" },
+    ),
   getCore: (id: string, options?: RequestOptions) => api.get<Issue>(`/issues/${id}?view=core`, options),
   recentComments: (id: string, options?: RequestOptions) => api.get<IssueRecentComments>(`/issues/${id}/recent-comments`, options),
   get: (id: string, options?: RequestOptions) =>
@@ -460,7 +467,7 @@ export const issuesApi = {
       presentation: import("@groktopus/shared").TaskInterruptionPresentation | null }>(`/issues/${issueId}/retry`, body),
   getDependencyInvestigation: (issueId: string) =>
     api.get<DependencyDiagnosis | null>(`/issues/${issueId}/dependency-investigation`, { cache: "no-store" }),
-  requestDependencyInvestigation: (issueId: string, body: { idempotencyKey: string }) =>
+  requestDependencyInvestigation: (issueId: string, body: DependencyInvestigationInput) =>
     api.post<{ accepted: boolean; message: string }>(`/issues/${issueId}/dependency-investigation`, body),
   recoverWorkspace: (id: string, data: { actionId: string; runId: string; idempotencyKey: string }) =>
     api.post<{ actionId: string; status: string }>(`/issues/${id}/recovery-actions/recover-workspace`, data),

@@ -41,6 +41,11 @@ Query parameters:
 
 Results sorted by priority.
 
+Send `Cache-Control: no-cache` or `Cache-Control: no-store` for a fresh
+authorization-sensitive read. The server bypasses in-flight request coalescing
+and the compact response cache. The response carries `Cache-Control: private,
+no-store` and the usual concurrent-request limit still applies.
+
 `inboxArchive` requires a signed-in board user. The filter cannot be combined
 with `attention`. When `inboxArchive` is present, each result includes the
 boolean `isArchivedForMe`. Proprio uses the same activity rules as Mine to
@@ -125,6 +130,27 @@ Headers: X-Proprio-Run-Id: {runId}
 ```
 
 The optional `comment` field adds a comment in the same call. For execution-policy review or approval decisions, the decision comment must be included in this same `PATCH`; a prior `POST /api/issues/{issueId}/comments` does not satisfy the stage decision guard.
+
+Set `executionPolicy.reviewTargetBinding` to `{"source":"required_quality_review"}`
+with `requiredQualityReview` to require immutable signoff. Submitting a stage
+records the requirements digest and the exact output document revisions or
+attachment byte hashes in `executionState.reviewTargetBinding`. Approval checks
+that the submitted values still match the current human-approved outputs. An
+approved decision retains its submitted binding.
+
+A `422` with code `required_quality_review_incomplete` identifies an outstanding
+human quality review. A `422` with code `required_quality_review_stale` means the
+reviewer needs a fresh submission. Request changes and submit the current
+outputs to start a new review.
+
+These errors also apply when `POST /api/issues/{issueId}/comments` auto-approves
+a stage or `POST /api/issues/{issueId}/recovery-actions/resolve` approves one.
+An auto-approval comment records its own decision. An ordinary earlier comment
+cannot satisfy the decision comment guard on a later PATCH.
+
+For `POST /api/issues/{id}/stalled-review-decision`, an approval that would bypass
+immutable signoff returns `required_quality_review_stale`. Request changes and
+resubmit the current outputs to an available reviewer.
 
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
 
@@ -253,19 +279,25 @@ GET /api/issues/{issueId}/dependency-investigation
 
 Reads the required dependency's state, its next owner and action, and the
 parent's wake state. The response is `null` when there is no current
-diagnosis. Dependency details follow the viewer's task access.
+diagnosis. The response uses `Cache-Control: private, no-store`. When a
+prerequisite is outside the viewer's task access, the response identifies
+the dependency as restricted and shows the parent wake status. The response
+includes an investigation key only when the viewer can use it.
 
 ```http
 POST /api/issues/{issueId}/dependency-investigation
 ```
 
 A board member with permission to change the task can ask its current agent
-assignee to investigate. Send the `wake.idempotencyKey` from the diagnosis
-as `idempotencyKey`. Repeat the same request if the response is lost.
+assignee to investigate. Agent Chat investigations require the conversation
+owner. Send the `wake.idempotencyKey` from the diagnosis as `idempotencyKey`.
+Repeating a saved request after a lost response acknowledges its existing claim.
 
 The response includes `accepted` and `message`. Read the diagnosis again to
 see the current wake state. An accepted request leaves the dependency open.
-Approval, budget, workspace and stop controls still apply.
+Approval, budget, workspace and stop controls still apply. Each Board viewer
+can submit up to 12 investigation requests per minute. A `429` response
+includes `Retry-After` in seconds.
 
 ## Comments
 
@@ -375,6 +407,21 @@ Board users can resolve all interactions. Under `anyone`, an eligible in-company
 Resolving a card records the response only. Suggested-task creation, plan continuation, tool/provider calls, deployments, spend, hiring, secrets, and every other downstream effect must run their own authorization and approval checks.
 
 The creator agent or a board user may withdraw a pending interaction. Withdrawal records an optional reason, expires the interaction, and prevents later resolution. Low-trust and task-watchdog agent runs cannot withdraw interactions.
+
+## Review evidence
+
+`GET /api/issues/{ref}/execution-review-evidence` reads signoff evidence for an
+authorized board user. Explicit break-glass access applies the board's trusted
+origin check and records the access and owner notice before returning.
+
+The response pairs `submittedSignoff.binding` and `submittedSignoff.stale` with
+the current review requests and `requiredQualityReviewState` from one database
+snapshot. A replacement can have human quality approval while the earlier
+signoff still needs a fresh submission. The board labels outdated requests.
+
+Bound decisions remain readable after policy changes. The endpoint returns up
+to 20 decisions. Send the returned `nextCursor` as `?cursor=<value>` for the next
+page. An absent cursor starts at the newest bound decision.
 
 ## Documents
 

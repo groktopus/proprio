@@ -33,9 +33,9 @@ process.env.PROPRIO_TOOL_ACTION_SIGNING_SECRET = PROPRIO_TOOL_ACTION_SIGNING_SEC
 export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
-  // These suites target dedicated multi-user configurations/ports and are
-  // intentionally not part of the default local_trusted e2e run.
-  testIgnore: ["in-feed-native/**", "multi-user.spec.ts", "multi-user-authenticated.spec.ts"],
+  // These suites use their own controller or multi-user configuration.
+  testIgnore: ["in-feed-native/**", "multi-user.spec.ts", "multi-user-authenticated.spec.ts",
+    "**/execution-recovery/mixed-case-handoff.spec.ts"],
   timeout: 60_000,
   retries: 0,
   // All specs share one throwaway server, and several toggle instance-level

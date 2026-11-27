@@ -445,7 +445,7 @@ describe("SidebarCompanyMenu", () => {
     expect(document.body.textContent).toContain("Create organization");
     expect(document.body.textContent).not.toContain("Add company...");
 
-    const editButton = Array.from(document.body.querySelectorAll("button"))
+    const editButton = Array.from(document.body.querySelectorAll('[role="menuitem"]'))
       .find((element) => element.textContent === "Edit");
     expect(editButton).toBeTruthy();
 
@@ -457,11 +457,11 @@ describe("SidebarCompanyMenu", () => {
     expect(document.body.textContent).toContain("Done");
     expect(document.body.textContent).not.toContain("PAP");
     expect(document.body.textContent).not.toContain("ANA");
-    const reorderButton = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="Reorder Strata"]',
+    const reorderRow = document.body.querySelector<HTMLElement>(
+      '[role="menuitem"][aria-label="Reorder Strata"]',
     );
-    expect(reorderButton).toBeTruthy();
-    expect(reorderButton?.classList).toContain("size-8");
+    expect(reorderRow).toBeTruthy();
+    expect(reorderRow?.getAttribute("aria-keyshortcuts")).toBe("Alt+ArrowUp Alt+ArrowDown");
 
     const strataItem = Array.from(document.body.querySelectorAll('[data-slot="dropdown-menu-item"]'))
       .find((element) => element.textContent?.includes("Strata"));

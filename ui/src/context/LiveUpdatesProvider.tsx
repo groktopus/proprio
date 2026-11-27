@@ -48,6 +48,8 @@ import type { ActiveRunForIssue, LiveRunForIssue } from "../api/heartbeats";
 import type { CompanyUserDirectoryResponse } from "../api/access";
 import type { CaseDetail, IssueCaseLink } from "../api/cases";
 import { issuesApi } from "../api/issues";
+import { refreshBoardAccessAfterMembershipChange } from "../api/board-access-query";
+import { projectsApi } from "../api/projects";
 import { authApi } from "../api/auth";
 import type { CompanyListResult } from "../api/companies-query";
 import { healthApi } from "../api/health";
@@ -1521,33 +1523,65 @@ const ISSUE_RELATION_SUMMARY_ACTIVITY_ACTIONS = new Set([
   "issue.scheduled_retry_retry_now",
 ]);
 
-/**
- * A task detail embeds summaries of its blockers and the tasks it blocks. When
- * one of those changes, refresh every cached detail that embeds it so the
- * dependent page does not keep showing the old blocker status.
- */
+const dependencyDiagnosisQueryFamily = ["issues", "dependency-investigation"] as const;
+
+function blockerSummariesContain(summaries: unknown, refs: ReadonlySet<string>): boolean {
+  return Array.isArray(summaries) && summaries.some((summary) => {
+    const record = readRecord(summary);
+    return !!record && (refs.has(readString(record.id) ?? "") || refs.has(readString(record.identifier) ?? "")
+      || blockerSummariesContain(record.terminalBlockers, refs));
+  });
+}
+
+function invalidateDependencyDiagnoses(queryClient: QueryClient, refs: Iterable<string>, parentIds: string[] = []) {
+  const changed = new Set(refs);
+  const affected = new Set([...changed, ...parentIds]);
+  void queryClient.invalidateQueries({
+    queryKey: dependencyDiagnosisQueryFamily,
+    predicate: ({ queryKey, state }) => {
+      if (affected.has(String(queryKey[2]))) return true;
+      const diagnosis = readRecord(state.data);
+      return Array.isArray(diagnosis?.dependencyPath) && diagnosis.dependencyPath.some((entry) => {
+        const task = readRecord(entry);
+        return !!task && (changed.has(readString(task.issueId) ?? "") || changed.has(readString(task.identifier) ?? ""));
+      });
+    },
+  });
+}
+
+/** Task details embed both direct blockers and the terminal blockers that explain them. */
 function invalidateIssueDetailsEmbeddingRelation(queryClient: QueryClient, refs: Iterable<string>) {
   const changed = new Set(refs);
   if (changed.size === 0) return;
-  const embeds = (summaries: unknown) =>
-    Array.isArray(summaries) &&
-    summaries.some((summary) => {
-      const record = readRecord(summary);
-      return !!record && (changed.has(readString(record.id) ?? "") || changed.has(readString(record.identifier) ?? ""));
-    });
-  const affectedDetails = queryClient.getQueryCache().findAll({ queryKey: ["issues", "detail"] }).filter((query) => {
-    const cached = readRecord(query.state.data);
-    return !!cached && !changed.has(readString(cached.id) ?? "") && (embeds(cached.blockedBy) || embeds(cached.blocks));
-  });
-  queryClient.invalidateQueries({
-    queryKey: ["issues", "detail"],
-    predicate: (query) => affectedDetails.includes(query),
-  });
-  for (const query of affectedDetails) {
+  const parentIds: string[] = [];
+  const affected = queryClient.getQueryCache().findAll({ queryKey: ["issues", "detail"] }).filter((query) => {
     const cached = readRecord(query.state.data);
     const issueId = cached ? readString(cached.id) : null;
-    if (issueId) queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(issueId) });
+    if (!cached || !issueId || changed.has(issueId)) return false;
+    if (!blockerSummariesContain(cached.blockedBy, changed) && !blockerSummariesContain(cached.blocks, changed)) return false;
+    parentIds.push(issueId);
+    return true;
+  });
+  void queryClient.invalidateQueries({
+    queryKey: ["issues", "detail"],
+    predicate: (query) => affected.includes(query),
+  });
+  invalidateDependencyDiagnoses(queryClient, changed, parentIds);
+}
+
+function resetCompanyTaskAudienceQueries(queryClient: QueryClient, companyId: string) {
+  for (const queryKey of [queryKeys.issues.list(companyId), queryKeys.budgets.overview(companyId)]) {
+    void queryClient.resetQueries({ queryKey });
   }
+  projectsApi.detachInflightList(companyId);
+  void queryClient.resetQueries({ queryKey: queryKeys.projects.all(companyId) });
+  void queryClient.resetQueries({
+    queryKey: ["projects", "detail"],
+    predicate: query => {
+      const companyScope = query.queryKey[3] ?? (query.state.data as { companyId?: string } | undefined)?.companyId;
+      return !companyScope || companyScope === companyId;
+    },
+  });
 }
 
 function invalidateActivityQueries(
@@ -1603,15 +1637,29 @@ function invalidateActivityQueries(
     action === "issue.status_decision_recorded" ||
     action === "issue.conversation_session_started" ||
     (entityType === "issue" && ["issue.created", "issue.updated", "issue.deleted"].includes(action ?? ""));
-  const decisionAudienceChanged = action?.startsWith("issue_access_grant.") ||
-    action?.startsWith("resource_membership.") ||
-    action?.startsWith("company_membership.") ||
-    action?.startsWith("membership.") || action?.includes("privacy");
+  const companyMembershipChanged = action === "company_membership.changed" ||
+    (entityType === "company_membership" && action?.startsWith("company_member."));
+  const decisionAudienceChanged = companyMembershipChanged || action?.startsWith("issue_access_grant.") ||
+    action?.startsWith("resource_membership.") || action === "project.access_member_removed" || action?.includes("privacy");
   if (decisionAudienceChanged) {
-    void queryClient.resetQueries({ queryKey: queryKeys.issues.summaries(companyId) });
+    void queryClient.resetQueries({
+      queryKey: ["issues", "activity"],
+      predicate: query => query.queryKey[3] === "completion-history",
+    });
+    void queryClient.resetQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history",
+    });
+    void queryClient.resetQueries({
+      queryKey: queryKeys.issues.executionReviewEvidenceFamily,
+    });
+    resetCompanyTaskAudienceQueries(queryClient, companyId);
+    if (companyMembershipChanged) {
+      refreshBoardAccessAfterMembershipChange(queryClient);
+    }
     // Drop old permission-filtered payloads immediately while the API resolves
     // the current audience. A failed refetch must not retain a revoked receipt.
-    for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"]]) {
+    for (const queryKey of [queryKeys.attention(companyId), ["decisions", companyId, "task-record"], ["issues", "decision-receipts"], ["issues", "chat-handoffs"], ["issues", "pending-questions"], dependencyDiagnosisQueryFamily]) {
       void queryClient.resetQueries({ queryKey });
     }
   } else if (decisionProjectionChanged) {
@@ -1624,6 +1672,13 @@ function invalidateActivityQueries(
     queryClient.invalidateQueries({ queryKey: ["issues", "decision-receipts"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "chat-handoffs"] });
     queryClient.invalidateQueries({ queryKey: ["issues", "pending-questions"] });
+  }
+  if (entityType === "issue" && entityId &&
+      (action === "issue.status_decision_recorded" || action === "issue.recovery_action_resolved")) {
+    void queryClient.invalidateQueries({
+      queryKey: ["cases", "handoffs"],
+      predicate: query => query.queryKey[3] === "recovery-history" && query.queryKey[5] === entityId,
+    });
   }
   const ownActorActivity =
     (actorType === "user" &&
@@ -1762,6 +1817,11 @@ function invalidateActivityQueries(
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
         if (action === "issue.comment_added" || action === "issue.conversation_session_started" || visibleConversation) {
           queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...(visibleConversation ? undefined : invalidationOptions) });
+        }
+        if (action === "issue.updated" || action === "issue.status_decision_recorded" ||
+            action?.startsWith("issue.thread_interaction_") ||
+            action?.startsWith("issue.attachment_") || (action && ISSUE_DOCUMENT_ACTIVITY_ACTIONS.has(action))) {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.issues.executionReviewEvidence(ref), refetchType: "active" });
         }
         if (action?.startsWith("issue.attachment_") || action?.startsWith("issue.work_product_")) {
           // These cards are durable API objects, not streamed text. Refresh the
@@ -2181,6 +2241,8 @@ function handleLiveEvent(
       payload,
     );
     invalidateHeartbeatQueries(queryClient, expectedCompanyId, payload);
+    const changedIssueId = readString(payload.issueId);
+    if (changedIssueId) invalidateDependencyDiagnoses(queryClient, [changedIssueId]);
     if (!liveRunsPatched) {
       // A new run we couldn't reconstruct from the event — refetch once to add it.
       queryClient.invalidateQueries({
@@ -2483,6 +2545,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     if (!canConnectSocket || !liveCompanyId) return;
     if (wasHidden.current) {
       wasHidden.current = false;
+      // A revocation may have happened while the socket was closed.
+      void queryClient.resetQueries({ queryKey: queryKeys.issues.executionReviewEvidenceFamily });
+      resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+      refreshBoardAccessAfterMembershipChange(queryClient);
       // Reconcile events missed while hidden, including completed runs/issues.
       void queryClient.invalidateQueries({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
     }
@@ -2562,6 +2628,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         // too. Reconcile that gap as well as reconnects: events are not replayed.
         const initialHealthyOpen = !hasOpenedSocket.current && !hasNeededSocketRecovery.current;
         hasOpenedSocket.current = true;
+        resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+        if (!initialHealthyOpen) {
+          refreshBoardAccessAfterMembershipChange(queryClient);
+        }
         // Browser lists stop polling on an empty result. A reconcile that joins
         // an older read needs one more read after it. Scan before reconciling,
         // so the reconcile's own reads are not followed up again.
@@ -2586,6 +2656,8 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
           const parsed = JSON.parse(raw) as LiveEvent;
           if (transcripts.receive(parsed, recoverQueries)) {
             if ((parsed as { type: string }).type === "live.resync") {
+              resetCompanyTaskAudienceQueries(queryClient, liveCompanyId);
+              refreshBoardAccessAfterMembershipChange(queryClient);
               refreshPendingTaskBrowserReads(queryClient);
               void queryClient.invalidateQueries({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
             }

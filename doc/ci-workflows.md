@@ -27,14 +27,15 @@ pnpm lockfile. Its checks include:
 - strict cron parsing and routine and plugin schedule recovery;
 - late live-settlement metadata regressions;
 - Team Catalog runtime preview parity and the install wizard tests;
-- the server typecheck, Hermes adapter build, and server TypeScript build compilation.
+- the Agent Detail header regression for a loaded agent;
+- the server and board UI typechecks, Hermes adapter build, and server TypeScript build compilation;
 - recovery of interrupted plugin jobs and preservation of active owners.
 
 Named PostgreSQL and selected regression cases must report a passing result.
 A platform skip does not satisfy those assertions.
 
 The workflow has read-only repository permissions and a 25-minute timeout. It
-is a focused smoke lane. The server typecheck and selected builds do not replace
+is a focused smoke lane. The typechecks and selected builds do not replace
 repo-wide typecheck, release packaging, the full test suite, or E2E acceptance.
 Fork runs use no secrets, a read-only token, and checkout without credential
 persistence. GitHub can require a maintainer to approve a fork workflow run.
@@ -64,6 +65,16 @@ see [PR #257](https://github.com/groktopus/proprio/pull/257) at
 [executed test job](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138206578219)
 and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
 Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
+
+### Board performance
+
+The [Board performance workflow](../.github/workflows/board-performance.yml)
+runs on applicable pull requests and by manual dispatch. A pinned Chromium on
+Ubuntu uses a production board and an isolated seeded instance. The workflow
+checks deterministic request and browser work and retains a separate timing
+report, readiness samples, and Playwright failure artifacts. Diagnostic timing
+outcomes do not determine the work check. The workflow is informational for
+`main`. [Local command and fixture scope](../tests/perf/collections/README.md#focused-ci-suite)
 
 ### Durable-work acceptance
 

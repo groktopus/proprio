@@ -323,14 +323,21 @@ describe("durable case handoff queue admission", () => {
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued!.id)))[0]).toMatchObject({ status: "cancelled", startedAt: null,
       errorCode: "case_handoff_superseded" });
   });
-  it("an explicit Stop after source termination cancels the pending successor and records history", async () => {
+  it.each(["awaiting_release", "offered"] as const)("Stop after source termination cancels %s and records history", async state => {
     const f = await fixture(), sourceRunId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.agentId, status: "succeeded", finishedAt: new Date(),
       contextSnapshot: { issueId: f.issueId } });
-    await db.update(caseHandoffs).set({ sourceRunId, state: "awaiting_release" }).where(eq(caseHandoffs.id, f.handoffId));
-    await heartbeatService(db).cancelRun(sourceRunId, "Cancelled by a board operator", { resultJson: { cancelledByActorType: "user", cancelledByUserId: f.userId } });
+    await db.update(caseHandoffs).set({ sourceRunId, state }).where(eq(caseHandoffs.id, f.handoffId));
+    const heartbeat = heartbeatService(db);
+    if (state === "offered") {
+      expect(await heartbeat.wakeup(f.agentId, { source: "assignment", reason: "issue_assigned", payload: { issueId: f.issueId } })).toBeNull();
+      expect(await heartbeat.wakeup(f.agentId, f.options)).toBeNull();
+    }
+    await heartbeat.cancelRun(sourceRunId, "Cancelled by a board operator", { resultJson: { cancelledByActorType: "user", cancelledByUserId: f.userId } });
     expect((await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, f.handoffId)))[0]?.state).toBe("cancelled");
     expect(await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, f.caseId), eq(caseEvents.kind, "handoff_cancelled")))).toHaveLength(1);
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0]).toMatchObject({ assigneeAgentId: f.agentId });
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.wakeupRequestId))).toHaveLength(0);
   });
   it("releases a paused source that was queued but never acquired execution", async () => {
     const f = await fixture(), sourceRunId = randomUUID();

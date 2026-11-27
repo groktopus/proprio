@@ -1,6 +1,6 @@
 {
-  "id": "72d4f1fd-05d3-425a-8dfa-6d1a9e24e6bc",
-  "prevId": "789ff1b9-fa8c-418c-8c23-e5708d718611",
+  "id": "15f6ccae-7361-45bd-bb8d-f46c421aa84a",
+  "prevId": "0c60b7d7-cc69-400a-bfa1-7aba00f17d0f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3599,6 +3599,25 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": false
+        },
+        "goal_observation_source_id": {
+          "name": "goal_observation_source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_observation_cursor": {
+          "name": "goal_observation_cursor",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_authority_revision": {
+          "name": "goal_authority_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "goal_revision": {
           "name": "goal_revision",
@@ -8970,7 +8989,7 @@
       "checkConstraints": {
         "case_events_kind_check": {
           "name": "case_events_kind_check",
-          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
+          "value": "\"case_events\".\"kind\" in (\n        'created',\n        'updated',\n        'fields_changed',\n        'status_changed',\n        'issue_linked',\n        'issue_unlinked',\n        'document_revised',\n        'child_linked',\n        'attachment_added',\n        'label_added',\n        'label_removed',\n        'handoff_requested',\n        'handoff_decision_recorded',\n        'handoff_applied',\n        'handoff_delivered',\n        'handoff_completed',\n        'handoff_cancelled'\n      )"
         },
         "case_events_actor_type_check": {
           "name": "case_events_actor_type_check",
@@ -9129,6 +9148,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "offer_contract": {
+          "name": "offer_contract",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recipient_decision": {
+          "name": "recipient_decision",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state": {
           "name": "state",
           "type": "text",
@@ -9278,7 +9309,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9294,7 +9325,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'awaiting_completion')",
+          "where": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'awaiting_completion')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -9447,7 +9478,7 @@
       "checkConstraints": {
         "case_handoffs_state_check": {
           "name": "case_handoffs_state_check",
-          "value": "\"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
+          "value": "\"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'awaiting_completion', 'completed', 'cancelled')"
         },
         "case_handoffs_destination_check": {
           "name": "case_handoffs_destination_check",
@@ -9455,7 +9486,7 @@
         },
         "case_handoffs_destination_state_check": {
           "name": "case_handoffs_destination_state_check",
-          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
+          "value": "(\"case_handoffs\".\"destination_kind\" = 'agent' and \"case_handoffs\".\"state\" in ('offered', 'awaiting_release', 'pending_dispatch', 'delivered', 'cancelled')) or (\"case_handoffs\".\"destination_kind\" = 'done' and \"case_handoffs\".\"state\" in ('awaiting_completion', 'completed', 'cancelled'))"
         },
         "case_handoffs_actor_type_check": {
           "name": "case_handoffs_actor_type_check",
@@ -35460,6 +35491,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "task_lineage_json": {
+          "name": "task_lineage_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "result_json": {
           "name": "result_json",
           "type": "jsonb",
@@ -39447,6 +39484,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "review_target_binding": {
+          "name": "review_target_binding",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_by_run_id": {
           "name": "created_by_run_id",

@@ -332,13 +332,12 @@ function waitingReason(facts: AssignedWorkFacts, now: Date): WaitingReason | nul
   }
   if (facts.pendingInteractions > 0) return "question";
   if (facts.pendingApprovals > 0) return "approval";
+  if (facts.sessionGoal === "paused" || facts.latestRun?.operatorStopped) return "user_stop";
   if (facts.openBlockers > 0) return "dependency";
   if (facts.reviewPending) return "review";
   if (facts.budgetStop) return "budget";
   if (facts.companyPaused) return "company_paused";
   if (facts.pauseHold || !facts.agent || !facts.agent.invokable) return "agent_paused";
-  if (facts.sessionGoal === "paused") return "user_stop";
-  if (facts.latestRun?.operatorStopped) return "user_stop";
   const action = facts.activeRecoveryAction;
   if (action) {
     const mapped = WAITING_RECOVERY_CAUSES[action.cause];

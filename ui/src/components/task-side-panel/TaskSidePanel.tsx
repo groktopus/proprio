@@ -8,6 +8,8 @@ import { taskPluginPanelActivationKey, taskPluginPanelId, type TaskPluginPanel }
 import { PluginSlotMount } from "@/plugins/slots";
 import { TaskBrowserPanel } from "./TaskBrowserPanel";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -98,11 +100,15 @@ import {
 import { cn } from "@/lib/utils";
 import { TaskDocumentPanel, TaskDocumentSourceLink } from "./TaskDocumentPanel";
 import { parseDocumentAnnotationHash } from "@/lib/document-annotation-hash";
-import { TaskWorkspaceFilePanel } from "./TaskWorkspaceFilePanel";
 import { TaskSkillPanel } from "./TaskSkillPanel";
+
+const TaskWorkspaceFilePanel = lazy(() =>
+  import("./TaskWorkspaceFilePanel").then((module) => ({ default: module.TaskWorkspaceFilePanel })),
+);
 
 export interface TaskSidePanelProps {
   issue: Issue;
+  showExecutionReviewEvidence?: boolean;
   documentEditor?: TaskDocumentEditorOptions;
   pluginPanels?: TaskPluginPanel[];
   pluginPanelsLoading?: boolean;
@@ -270,6 +276,7 @@ function TaskSidePanelForScope({
   openBrowserId,
   onBrowserOpened,
   issue,
+  showExecutionReviewEvidence,
   documentEditor,
   accountScope,
   childIssues = [],
@@ -829,6 +836,7 @@ function TaskSidePanelForScope({
     content = (
       <IssueProperties
         issue={issue}
+        showExecutionReviewEvidence={showExecutionReviewEvidence}
         childIssues={childIssues}
         issueLinkState={issueLinkState}
         onAddSubIssue={onAddSubIssue}
@@ -928,13 +936,15 @@ function TaskSidePanelForScope({
   } else {
     const filePayload = activeTab.payload;
     content = (
-      <TaskWorkspaceFilePanel
-        issueId={issue.id}
-        payload={filePayload}
-        onFallbackToProject={filePayload.workspace !== "project" && !filePayload.projectId && !filePayload.workspaceId
-          ? () => openWorkspaceFile({ ...filePayload, workspace: "project" })
-          : undefined}
-      />
+      <Suspense fallback={<p role="status" className="p-3 text-sm">Loading file preview…</p>}>
+        <TaskWorkspaceFilePanel
+          issueId={issue.id}
+          payload={filePayload}
+          onFallbackToProject={filePayload.workspace !== "project" && !filePayload.projectId && !filePayload.workspaceId
+            ? () => openWorkspaceFile({ ...filePayload, workspace: "project" })
+            : undefined}
+        />
+      </Suspense>
     );
   }
 

@@ -132,12 +132,20 @@ describe("LiveUpdatesProvider issue invalidation", () => {
       client.clear();
     });
   });
-  it("drops cached decision content when its access is revoked", () => {
+  it("drops permission-filtered decisions and dependency diagnoses when access is revoked", () => {
     const client = new QueryClient();
     const receiptKey = ["issues", "decision-receipts", "chat-1", "user-1"];
     const historyKey = [...queryKeys.attention("company-1"), "history"];
     const questionKey = ["issues", "pending-questions", "chat-1", "user-1"];
     const taskRecordKey = queryKeys.decisions.taskRecord("company-1", "task-1", "user-1", "decision-1");
+    const completionHistoryKey = queryKeys.issues.completionHistory("another-task");
+    const caseRecoveryKey = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+    const signoffEvidenceKey = queryKeys.issues.executionReviewEvidence("task-1");
+    const diagnosisKey = queryKeys.issues.dependencyInvestigation("parent-issue");
+    client.setQueryData(completionHistoryKey, [{ id: "revoked-history" }]);
+    client.setQueryData(caseRecoveryKey, { entries: [{ purpose: "Private recovery history" }] });
+    client.setQueryData(signoffEvidenceKey, { executionDecisions: [{ label: "Private signoff" }] });
+    client.setQueryData(diagnosisKey, { dependencyPath: [{ title: "Private dependency" }] });
     client.setQueryData(taskRecordKey, { title: "Private decision" });
     client.setQueryData(questionKey, [{ title: "Private question" }]);
     client.setQueryData(receiptKey, { items: [{ title: "Private decision" }] });
@@ -149,8 +157,110 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     expect(client.getQueryData(historyKey)).toBeUndefined();
     expect(client.getQueryData(questionKey)).toBeUndefined();
     expect(client.getQueryData(taskRecordKey)).toBeUndefined();
+    expect(client.getQueryData(caseRecoveryKey)).toBeUndefined();
+    expect(client.getQueryData(signoffEvidenceKey)).toBeUndefined();
+    expect(client.getQueryData(diagnosisKey)).toBeUndefined();
+    expect(client.getQueryData(completionHistoryKey)).toBeUndefined();
     client.clear();
   });
+  it.each(["issue.status_decision_recorded", "issue.recovery_action_resolved"])(
+    "refreshes only the Case recovery history for the source task on %s", action => {
+      const client = new QueryClient();
+      const current = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+      const unrelated = queryKeys.cases.handoffRecoveryHistory("case-2", "handoff-2", "task-2");
+      client.setQueryData(current, { entries: [] });
+      client.setQueryData(unrelated, { entries: [] });
+      __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+        entityType: "issue", entityId: "task-1", action,
+      }, { userId: "user-1", agentId: null });
+      expect(client.getQueryState(current)?.isInvalidated).toBe(true);
+      expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
+      client.clear();
+    },
+  );
+  it("clears Case recovery history on a content-free audience change", () => {
+    const client = new QueryClient();
+    const key = queryKeys.cases.handoffRecoveryHistory("case-1", "handoff-1", "task-1");
+    client.setQueryData(key, { entries: [{ requirement: "Private recovery history" }] });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+      action: "resource_membership.changed",
+    }, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
+    client.clear();
+  });
+  it("clears cached task tree budgets on an audience change", () => {
+    const client = new QueryClient();
+    const key = queryKeys.budgets.overview("company-1");
+    const otherCompany = queryKeys.budgets.overview("company-2");
+    const rootSearch = [...queryKeys.issues.search("company-1", "Private", undefined, 20), "task-budget-roots"];
+    const otherRootSearch = [...queryKeys.issues.search("company-2", "Public", undefined, 20), "task-budget-roots"];
+    const projects = queryKeys.projects.list("company-1");
+    const selectedRoot = [...queryKeys.issues.summaries("company-1"), "selected-budget-root", "private-root"];
+    const detail = [...queryKeys.projects.detail("private"), "company-1"];
+    const otherDetail = [...queryKeys.projects.detail("visible"), "company-2"];
+    const taskIndex = queryKeys.issues.listIndex("company-1");
+    const policies = [{ scopeId: "private-root", amount: 150 }];
+    client.setQueryData(key, { policies });
+    client.setQueryData(otherCompany, { policies: [] });
+    client.setQueryData(rootSearch, [{ id: "private-root" }]);
+    client.setQueryData(selectedRoot, [{ id: "private-root" }]);
+    client.setQueryData(projects, [{ name: "Private project" }]);
+    client.setQueryData(detail, { name: "Private project", companyId: "company-1" });
+    client.setQueryData(otherDetail, { name: "Other project", companyId: "company-2" });
+    client.setQueryData(taskIndex, [{ id: "private-root" }]);
+    client.setQueryData(otherRootSearch, [{ id: "other-root" }]);
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+      action: "resource_membership.changed",
+    }, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
+    expect(client.getQueryData(otherCompany)).toEqual({ policies: [] });
+    expect(client.getQueryData(rootSearch)).toBeUndefined();
+    expect(client.getQueryData(selectedRoot)).toBeUndefined();
+    expect(client.getQueryData(projects)).toBeUndefined();
+    expect(client.getQueryData(detail)).toBeUndefined();
+    expect(client.getQueryData(otherDetail)).toMatchObject({ name: "Other project" });
+    expect(client.getQueryData(taskIndex)).toBeUndefined();
+    expect(client.getQueryData(otherRootSearch)).toEqual([{ id: "other-root" }]);
+    client.clear();
+  });
+  it.each([
+    { action: "company_member.updated", entityType: "company_membership" },
+    { action: "company_member.access_updated", entityType: "company_membership" },
+    { action: "company_membership.changed" },
+  ])("clears cached board authority on $action", (event) => {
+    const client = new QueryClient();
+    const key = queryKeys.access.currentBoardAccess;
+    client.setQueryData(key, { userId: "user-1", companyIds: ["company-1"] });
+    __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", event, { userId: "user-1", agentId: null });
+    expect(client.getQueryData(key)).toBeUndefined();
+    client.clear();
+  });
+
+  it.each(["issue.updated", "heartbeat.run.status"] as const)("refreshes the parent diagnosis on a transitive blocker %s", type => {
+    const client = new QueryClient();
+    const parent = queryKeys.issues.dependencyInvestigation("parent");
+    const unrelated = queryKeys.issues.dependencyInvestigation("unrelated");
+    client.setQueryData(queryKeys.issues.detail("parent"), {
+      id: "parent", blockedBy: [{ id: "middle", terminalBlockers: [{ id: "leaf" }] }],
+    });
+    client.setQueryData(parent, { dependencyPath: [{ issueId: "middle" }, { issueId: "leaf" }] });
+    client.setQueryData(unrelated, { dependencyPath: [] });
+    if (type === "issue.updated") {
+      __liveUpdatesTestUtils.invalidateActivityQueries(client, "company-1", {
+        entityType: "issue", entityId: "leaf", action: type,
+      }, { userId: null, agentId: null });
+    } else {
+      __liveUpdatesTestUtils.handleLiveEvent(client, "company-1", "/", {
+        id: 1, companyId: "company-1", type, createdAt: "2020-01-01T00:00:01Z",
+        payload: { runId: "run-1", issueId: "leaf", agentId: "agent-1", status: "succeeded" },
+      }, () => null, { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set() },
+      { userId: null, agentId: null });
+    }
+    expect(client.getQueryState(parent)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
+    client.clear();
+  });
+
   it("refreshes saved project access with permission saves and live agent activity", async () => {
     const client = new QueryClient();
     const target = queryKeys.agents.projectAccess("agent-1");
@@ -1199,7 +1309,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     });
   });
 
-  it("keeps visible issue detail refetches inactive for downstream agent updates", () => {
+  it("refreshes visible signoff evidence while keeping downstream agent detail refetches inactive", () => {
     const invalidations: unknown[] = [];
     const queryClient = {
       getQueryCache: () => ({ findAll: () => [] }),
@@ -1236,6 +1346,10 @@ describe("LiveUpdatesProvider issue invalidation", () => {
       { pathname: "/PAP/issues/PAP-759", isForegrounded: true },
     );
 
+    expect(invalidations).toContainEqual({
+      queryKey: queryKeys.issues.executionReviewEvidence("issue-1"),
+      refetchType: "active",
+    });
     expect(invalidations).toContainEqual({
       queryKey: queryKeys.issues.detail("issue-1"),
       refetchType: "inactive",

@@ -9,7 +9,7 @@ import { readWorkspaceRecovery } from "./workspace-recovery-receipt.js";
 import { randomUUID } from "node:crypto";
 import { taskRetryRunAncestry } from "./recovery-run-ancestry.js";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, heartbeatRuns, issues, issueComments, runIdentityContexts, issueRecoveryActions, type Db } from "@groktopus/db";
+import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, companyMemberships, heartbeatRuns, issues, issueComments, runIdentityContexts, issueRecoveryActions, type Db } from "@groktopus/db";
 import { conflict, forbidden, notFound, HttpError } from "../errors.js";
 import { persistActivity } from "./activity-log.js";
 import { createSystemRecovery, readSystemRecovery, savedFilesUnrecoverable } from "./system-recovery-state.js";
@@ -23,7 +23,9 @@ import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state
 import { deferredChatInputPredicate, resumeDeferredChatWake, unadmittedChatWakeupCondition } from "./durable-chat-wakeup.js";
 import { notifyDeferredExecutionWork } from "./deferred-execution-notifications.js";
 import { hasPendingRunCleanup } from "./execution-blocker.js";
-import { liveExecutionOwnerCondition, taskAttemptCondition } from "./task-retry-eligibility.js";
+import { liveExecutionOwnerCondition, taskAttemptCondition, taskRetryRunIssueCondition } from "./task-retry-eligibility.js";
+import { lockIssuePrivacyTree } from "./issue-hierarchy.js";
+import { isCurrentCloudOwnerInstanceAdmin, loadCurrentCloudOwnerAuthority, type CurrentCloudOwnerAuthority } from "./cloud-tenant-authority.js";
 import { undeliveredContinuation } from "./fresh-continuation-retry-fold.js";
 import { PersistedExecutionWaitRefusal } from "./deferred-execution-wait.js";
 import { rearmExhaustedNativeFinalization } from "./native-runtime/exhausted-finalization-retry.js";
@@ -33,15 +35,26 @@ import { selectTaskRetryInput } from "./chat-channels/task-retry-input.js";
 
 export async function taskRetryMutationAllowed(db: Db, input: {
   companyId: string; issueId: string; actorId: string; actorSource: TaskRetryIntent["actorSource"];
+  cloudAuthority?: CurrentCloudOwnerAuthority | null;
 }) {
-  const [issue] = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId,
+  const [issue] = await db.select({ status: issues.status, projectId: issues.projectId, parentIssueId: issues.parentId, assigneeAgentId: issues.assigneeAgentId,
     assigneeUserId: issues.assigneeUserId }).from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)));
   if (!issue) return false;
-  const permission = await authorizationService(db).decide({
-    actor: { type: "board", userId: input.actorId, source: input.actorSource }, action: "issue:mutate",
-    resource: { type: "issue", companyId: input.companyId, issueId: input.issueId, ...issue },
-  });
-  return permission.allowed;
+  const access = authorizationService(db);
+  let isInstanceAdmin = false;
+  if (input.actorSource === "cloud_tenant") {
+    const [membership] = await db.select({ role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
+      eq(companyMemberships.companyId, input.companyId), eq(companyMemberships.principalType, "user"),
+      eq(companyMemberships.principalId, input.actorId), eq(companyMemberships.status, "active"),
+    )).for("share");
+    if (!membership || membership.role === "viewer" || input.cloudAuthority?.role === "viewer") return false;
+    isInstanceAdmin = await isCurrentCloudOwnerInstanceAdmin(db, input.actorId, input.cloudAuthority);
+  }
+  const actor = { type: "board" as const, userId: input.actorId, source: input.actorSource,
+    ...(isInstanceAdmin ? { isInstanceAdmin } : {}) };
+  const resource = { type: "issue" as const, companyId: input.companyId, issueId: input.issueId, ...issue };
+  return (await access.decide({ actor, resource, action: "issue:read" })).allowed
+    && (await access.decide({ actor, resource, action: "issue:mutate" })).allowed;
 }
 
 export function assertTaskRetryConversationAllowed(
@@ -203,8 +216,7 @@ export async function retireSupersededTaskRetry(db: Db, input: {
 }) {
   const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, input.companyId),
-    or(eq(heartbeatRuns.issueId, input.issueId), eq(heartbeatRuns.nativeIssueId, input.issueId),
-      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${input.issueId}`), taskAttemptCondition(),
+    taskRetryRunIssueCondition(input.issueId), taskAttemptCondition(),
   )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
   if (latest?.id === input.sourceRunId) return false;
   const [wake] = await db.select({ agentId: agentWakeupRequests.agentId }).from(agentWakeupRequests).where(and(
@@ -244,6 +256,8 @@ type TaskRetryRequest = {
   db: Db; companyId: string; issueId: string; actorId: string;
   idempotencyKey: string; observedRunId: string | null; actorSource?: string;
   retryAction?: "move_forward";
+  /** Deferred budget recovery begins outside a task route and must check the task itself. */
+  reauthorize?: true;
   /** Proprio requests the user's Retry itself: after a restart lost an
    * unstarted turn, or once a provider usage limit it waited on has reset. */
   initiatedBy?: "restart_recovery" | "provider_limit_reset";
@@ -275,7 +289,9 @@ function isTaskRetryContention(error: unknown) {
 export async function requestTaskRetry(input: TaskRetryRequest) {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await admitTaskRetry(input);
+      const cloudAuthority = input.reauthorize && input.actorSource === "cloud_tenant"
+        ? await loadCurrentCloudOwnerAuthority(input.actorId) : null;
+      return await admitTaskRetry(input, cloudAuthority);
     } catch (error) {
       if (!isTaskRetryContention(error)) throw error;
       // Chat authorization for the same principal is briefly locked. The whole
@@ -288,12 +304,17 @@ export async function requestTaskRetry(input: TaskRetryRequest) {
   }
 }
 
-function admitTaskRetry(input: TaskRetryRequest) {
+function admitTaskRetry(input: TaskRetryRequest, cloudAuthority: CurrentCloudOwnerAuthority | null) {
   return writeExecutionControl(input.db, DELIVERY_QUEUES.workspaceRecovery, async tx => {
     const db = tx as unknown as Db;
+    if (input.reauthorize) await lockIssuePrivacyTree(tx, input.companyId, "shared");
     const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, input.companyId),
       eq(issues.id, input.issueId))).for("update");
     if (!issue) throw notFound("Task not found");
+    if (input.reauthorize && !await taskRetryMutationAllowed(db, { companyId: input.companyId, issueId: issue.id,
+      actorId: input.actorId, actorSource: taskRetryIntentSchema.shape.actorSource.parse(input.actorSource), cloudAuthority })) {
+      throw forbidden("Current task read and write access are required to retry");
+    }
     assertTaskRetryConversationAllowed(issue, input.actorId);
     const key = `task-retry:${input.idempotencyKey}`;
     const [sameRequest] = await tx.select().from(agentWakeupRequests).where(and(
@@ -311,8 +332,7 @@ function admitTaskRetry(input: TaskRetryRequest) {
         ...(coalescedRun?.status === "scheduled_retry" ? { scheduledRetryRunId: coalescedRun.id } : {}) };
     }
     const [latest] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, issue.companyId),
-      or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
-        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`), taskAttemptCondition()))
+      taskRetryRunIssueCondition(issue.id), taskAttemptCondition()))
       .orderBy(...(input.observedRunId ? [sql`case when ${heartbeatRuns.id}::text = ${input.observedRunId}
         and ${liveExecutionOwnerCondition(issue.companyId, issue.id)} then 0 else 1 end`] : []),
         desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
@@ -544,8 +564,7 @@ async function continueRefusedTaskChatRetry(db: Db, wake: typeof agentWakeupRequ
     if (!issue || issue.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(issue.status)) return false;
     const [latest] = await tx.select({ id: heartbeatRuns.id, finishedAt: heartbeatRuns.finishedAt, status: heartbeatRuns.status,
       startedAt: heartbeatRuns.startedAt, errorCode: heartbeatRuns.errorCode, resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.companyId, wake.companyId), or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
-        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`), taskAttemptCondition()))
+      eq(heartbeatRuns.companyId, wake.companyId), taskRetryRunIssueCondition(issueId), taskAttemptCondition()))
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
     if (latest?.id !== intent.sourceRunId || !latest.finishedAt) return false;
     if (intent.initiatedBy) {

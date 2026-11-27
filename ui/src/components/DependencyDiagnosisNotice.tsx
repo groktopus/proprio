@@ -1,10 +1,11 @@
-import type { DependencyDiagnosis } from "@groktopus/shared";
+import type { DependencyDiagnosis, IssueRelationIssueSummary } from "@groktopus/shared";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
 import { issuesApi } from "@/api/issues";
 import { describeError } from "@/api/errors";
 import { Button } from "@/components/ui/button";
 import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
+import { resolveTaskStatusPresentation } from "@/lib/task-status-presentation";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link } from "@/lib/router";
 import { useState } from "react";
@@ -23,6 +24,7 @@ const stateLabels: Record<DependencyDiagnosis["state"], string> = {
   no_execution_path: "No execution path",
   active: "Dependency in progress",
   external_wait: "Waiting on an external dependency",
+  restricted: "Restricted dependency",
 };
 
 function humanizeKind(kind: string): string {
@@ -36,37 +38,53 @@ function ownerLabel(owner: DependencyDiagnosis["nextOwner"]): string {
   return "The board";
 }
 
-export function DependencyDiagnosisNotice({
-  issueId,
-  diagnosis,
-  canRequest = true,
-  diagnosisError,
-  onRetryDiagnosis,
-}: {
+type DependencyDiagnosisNoticeProps = {
   issueId: string;
   diagnosis: DependencyDiagnosis | null | undefined;
-  canRequest?: boolean;
+  canRequest: boolean;
+  blockerSummaries?: readonly IssueRelationIssueSummary[];
   diagnosisError?: string | null;
   onRetryDiagnosis?: () => void;
-}) {
+};
+
+export function DependencyDiagnosisNotice(props: DependencyDiagnosisNoticeProps) {
+  const hasDiagnosis = Boolean(props.diagnosis || props.diagnosisError);
+  const [hasShownDiagnosis, setHasShownDiagnosis] = useState(hasDiagnosis);
+  if (hasDiagnosis && !hasShownDiagnosis) setHasShownDiagnosis(true);
+  if (!hasDiagnosis && !hasShownDiagnosis) return null;
+  return <DependencyDiagnosisPanel key={props.issueId} {...props} />;
+}
+
+function DependencyDiagnosisPanel({
+  issueId,
+  diagnosis,
+  canRequest,
+  blockerSummaries = [],
+  diagnosisError,
+  onRetryDiagnosis,
+}: DependencyDiagnosisNoticeProps) {
   const queryClient = useQueryClient();
-  const [submittedKey, setSubmittedKey] = useState<string | null>(null);
   const request = useMutation({
-    mutationFn: ({ idempotencyKey }: { idempotencyKey: string }) =>
-      issuesApi.requestDependencyInvestigation(issueId, { idempotencyKey }),
+    mutationFn: ({ taskId, input }: { taskId: string; input: Parameters<typeof issuesApi.requestDependencyInvestigation>[1] }) =>
+      issuesApi.requestDependencyInvestigation(taskId, input),
     retry: false,
-    onSuccess: async () => Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(issueId) }),
+    onSuccess: async (_result, { taskId }) => Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(taskId) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.dependencyInvestigation(taskId) }),
     ]),
   });
+  const submittedHere = request.variables?.taskId === issueId;
+  const resultMessage = submittedHere && request.data?.accepted === false ? request.data.message : null;
+  const requestError = submittedHere && request.error ? describeError(request.error).body : null;
 
   if (!diagnosis) {
-    if (!diagnosisError) return null;
+    if (!diagnosisError && !resultMessage && !requestError) return null;
     return (
       <section data-testid="dependency-diagnosis-notice" className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
-        <p role="alert" className="text-destructive">Could not load dependency diagnosis: {diagnosisError}</p>
-        {onRetryDiagnosis ? <Button type="button" size="sm" variant="outline" onClick={onRetryDiagnosis}>Reload</Button> : null}
+        {resultMessage ? <p role="alert" className="text-destructive">{resultMessage}</p> : null}
+        {requestError ? <p role="alert" className="text-destructive">{requestError}</p> : null}
+        {diagnosisError ? <p role="alert" className="text-destructive">Could not load dependency diagnosis: {diagnosisError}</p> : null}
+        {diagnosisError && onRetryDiagnosis ? <Button type="button" size="sm" variant="outline" onClick={onRetryDiagnosis}>Reload</Button> : null}
       </section>
     );
   }
@@ -77,14 +95,15 @@ export function DependencyDiagnosisNotice({
   const causeLabel = `${humanizeKind(diagnosis.cause.kind)}${causeTask
     ? ` — ${causeTask.identifier ? `${causeTask.identifier}: ` : ""}${causeTask.title}`
     : ""}`;
-  const requestMatchesDiagnosis = submittedKey === diagnosis.wake.idempotencyKey;
-  const isRequestPending = request.isPending && requestMatchesDiagnosis;
-  const resultMessage = requestMatchesDiagnosis && request.data?.accepted === false ? request.data.message : null;
-  const requestError = requestMatchesDiagnosis && request.error ? describeError(request.error).body : null;
+  const idempotencyKey = diagnosis.wake.idempotencyKey;
+  const canSubmit = Boolean(diagnosis.canInvestigate && canRequest && idempotencyKey);
+  const requestMatchesDiagnosis = submittedHere && request.variables?.input.idempotencyKey === idempotencyKey;
+  const isRequestPending = request.isPending && submittedHere;
+  const summariesByIssueId = new Map(blockerSummaries
+    .flatMap(blocker => [blocker, ...(blocker.terminalBlockers ?? [])])
+    .map(blocker => [blocker.id, blocker]));
   const submitRequest = () => {
-    const idempotencyKey = diagnosis.wake.idempotencyKey;
-    setSubmittedKey(idempotencyKey);
-    request.mutate({ idempotencyKey });
+    if (canSubmit && idempotencyKey) request.mutate({ taskId: issueId, input: { idempotencyKey } });
   };
 
   return (
@@ -110,7 +129,9 @@ export function DependencyDiagnosisNotice({
               <Link to={createIssueDetailPath(task.identifier ?? task.issueId)} className="underline-offset-2 hover:underline">
                 {task.identifier ? `${task.identifier}: ${task.title}` : task.title}
               </Link>
-              <span className="text-muted-foreground">({task.status.replaceAll("_", " ")})</span>
+              <span className="text-muted-foreground">({resolveTaskStatusPresentation({
+                status: task.status, displayStatus: summariesByIssueId.get(task.issueId)?.displayStatus,
+              }).label})</span>
             </li>
           ))}
         </ol>
@@ -124,7 +145,7 @@ export function DependencyDiagnosisNotice({
         <p data-testid="dependency-parent-wake-state" role="status" className="text-xs text-muted-foreground">
           {wakeLabels[diagnosis.wake.status]}
         </p>
-        {diagnosis.canInvestigate && canRequest ? (
+        {canSubmit ? (
           <Button
             type="button"
             size="sm"
@@ -146,7 +167,7 @@ export function DependencyDiagnosisNotice({
       {requestError ? (
         <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
           <span>{requestError} If the response was lost, retrying will use the same request.</span>
-          {diagnosis.canInvestigate && canRequest ? (
+          {canSubmit && requestMatchesDiagnosis ? (
             <Button
               type="button"
               size="sm"
