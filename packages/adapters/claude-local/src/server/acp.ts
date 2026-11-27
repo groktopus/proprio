@@ -21,7 +21,6 @@ import {
   readAdapterExecutionTarget,
   prepareAdapterExecutionTargetRuntime,
   resolveAdapterExecutionTargetCwd,
-  runAdapterExecutionTargetProcess,
 } from "@groktopus/adapter-utils/execution-target";
 import type { AdapterExecutionTarget } from "@groktopus/adapter-utils/execution-target";
 import {
@@ -53,12 +52,11 @@ import {
   buildAdapterTestTargetCheck,
   buildClaudeLoginRequiredHint,
   classifyThrownErrorClass,
-  logSandboxProbeDiagnostic,
 } from "./probe-diagnostics.js";
 import { createWorkspaceRestoreTeardown } from "@groktopus/adapter-utils/workspace-restore-teardown";
 import { buildLocalAdapterTestProbeEnv } from "./probe-env.js";
-import { detectClaudeLoginRequired, extractClaudeRetryNotBefore, isClaudeProviderQuotaError, parseClaudeStreamJson } from "./parse.js";
-import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
+import { extractClaudeRetryNotBefore, isClaudeProviderQuotaError } from "./parse.js";
+import { claudeSandboxPermissionEnv } from "./permissions.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 import { probeClaudeAcpHello } from "./acp-hello-probe.js";
 import {
@@ -770,137 +768,6 @@ async function prepareClaudeProbeRemoteHome(input: {
   }
 }
 
-/**
- * Probe the stored Claude login for the probed target on the ACP path. The ACP
- * engine and the Claude CLI share the same stored Claude login, so the probe
- * runs the `claude` command with a short hello turn. The probe runs against any
- * target: a local host, an SSH remote, or a sandbox. On a local target the
- * probe builds the child env and the executable from the shared
- * deny-by-default builder, so a hostile caller value can neither select the
- * executable nor reach the child. On a remote target the caller passes the
- * prepared `env`, so the probe reads the managed `CLAUDE_CONFIG_DIR` the same
- * way the CLI lane does.
- *
- * When the probe reports that login is required, the function returns the
- * auth-required checks. Only a sandbox target also gets the canonical
- * `adapter_auth_missing` code, so the user interface offers login for sandbox
- * targets only.
- *
- * The function keeps two signals distinct. It returns the auth-required check
- * only when the probe ran and login is required. It returns a separate warn
- * check when the probe could not run, timed out, or did not complete. It never
- * maps "probe could not run" to a silent pass.
- */
-export async function probeClaudeAcpSandboxLogin(input: {
-  config: Record<string, unknown>;
-  target: AdapterExecutionTarget | null;
-  env?: Record<string, string>;
-}): Promise<AdapterEnvironmentCheck[]> {
-  const { config, target } = input;
-  const targetIsRemote = target?.kind === "remote";
-  const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
-
-  // The caller-derived env. On a local target the shared builder filters it to
-  // a deny-by-default allowlist. On a remote target the prepared env is used
-  // directly, because the remote transport owns its own env sanitization.
-  let callerEnv: Record<string, string>;
-  if (input.env) {
-    callerEnv = input.env;
-  } else {
-    const envConfig = parseObject(config.env);
-    callerEnv = {};
-    for (const [key, value] of Object.entries(envConfig)) {
-      if (typeof value === "string") callerEnv[key] = value;
-    }
-  }
-
-  let command: string;
-  let env: Record<string, string>;
-  let cwd: string;
-  if (targetIsRemote && target) {
-    command = "claude";
-    env = callerEnv;
-    cwd = target.kind === "remote" ? target.remoteCwd : process.cwd();
-  } else {
-    const built = await buildLocalAdapterTestProbeEnv({
-      callerEnv,
-      trustedEnv: process.env,
-    });
-    if (!built.command) {
-      return [buildAcpLoginProbeUnavailableCheck("Claude is not installed on the Proprio host.")];
-    }
-    command = built.command;
-    env = built.env;
-    cwd = asString(config.cwd, process.cwd());
-  }
-
-  Object.assign(env, claudeSandboxPermissionEnv({
-    dangerouslySkipPermissions: asBoolean(config.dangerouslySkipPermissions, true), targetIsSandbox,
-  }));
-  const args = ["--print", "-", "--output-format", "stream-json", "--verbose"];
-  if (config.managedAiConnection) args.push("--setting-sources", "user");
-  args.push(
-    ...buildClaudeProbePermissionArgs({
-      dangerouslySkipPermissions: asBoolean(config.dangerouslySkipPermissions, true),
-      targetIsRemote,
-      localProcessUid: process.getuid?.() ?? null,
-    }),
-  );
-  const timeoutSec = Math.max(1, asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45));
-  const runId = `claude-acp-authprobe-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  let probe: Awaited<ReturnType<typeof runAdapterExecutionTargetProcess>>;
-  try {
-    probe = await runAdapterExecutionTargetProcess(runId, target, command, args, {
-      cwd,
-      env,
-      timeoutSec,
-      graceSec: 5,
-      stdin: "Respond with hello.",
-      onLog: async () => {},
-    });
-  } catch (err) {
-    // Keep the raw error out of the Test-result check and the server log. Log
-    // only the fixed context, the allowlisted classification, and a safe error
-    // class name.
-    logSandboxProbeDiagnostic("Claude ACP login probe could not run", "spawn_error", {
-      errorClass: classifyThrownErrorClass(err),
-    });
-    return [
-      buildAcpLoginProbeUnavailableCheck(
-        targetIsSandbox
-          ? "The Claude login probe could not run in the sandbox."
-          : "The Claude login probe could not run.",
-        targetIsSandbox,
-      ),
-    ];
-  }
-  if (probe.timedOut) {
-    return [buildAcpLoginProbeUnavailableCheck("The Claude login probe timed out.", targetIsSandbox)];
-  }
-  const parsedStream = parseClaudeStreamJson(probe.stdout);
-  const loginMeta = detectClaudeLoginRequired({
-    parsed: parsedStream.resultJson,
-    stdout: probe.stdout,
-    stderr: probe.stderr,
-  });
-  if (loginMeta.requiresLogin) {
-    return buildAcpAuthMissingChecks({ targetIsSandbox, loginUrl: loginMeta.loginUrl });
-  }
-  if ((probe.exitCode ?? 1) !== 0) {
-    // Keep the raw stderr and stdout out of the Test-result check and the
-    // server log. Log only the fixed context, the allowlisted classification,
-    // and the safe exit code.
-    logSandboxProbeDiagnostic("Claude ACP login probe did not complete", "nonzero_exit", {
-      exitCode: probe.exitCode ?? null,
-    });
-    return [buildAcpLoginProbeUnavailableCheck("The Claude login probe did not complete.", targetIsSandbox)];
-  }
-  if (!/\bhello\b/i.test(parsedStream.summary)) {
-    return [buildAcpLoginProbeUnavailableCheck("The Claude login probe did not return hello.", targetIsSandbox)];
-  }
-  return [{ code: "claude_hello_probe_passed", level: "info", message: "Claude login probe succeeded." }];
-}
-
 export async function testClaudeAcpEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
@@ -1099,9 +966,7 @@ export async function testClaudeAcpEnvironment(
         })).env;
         // The executable is resolved separately. Keep only trusted host PATH for
         // the local ACP server's shebang; remote targets use their own PATH.
-        const selectedProbeEnv = targetIsRemote
-          ? safeProbeEnv
-          : { PATH: process.env.PATH ?? "", ...safeProbeEnv };
+        const selectedProbeEnv = safeProbeEnv;
         const selectedModel = resolveClaudeModel(
           config.model,
           targetIsRemote ? selectedProbeEnv : { ...process.env, ...selectedProbeEnv },
