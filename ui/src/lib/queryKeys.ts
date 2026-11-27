@@ -1,3 +1,7 @@
+const executionReviewEvidenceFamily = ["issues", "execution-review-evidence"] as const;
+
+const issueSearchPrefix = (companyId: string) => ["issues", companyId, "search"] as const;
+
 export const queryKeys = {
   linkPreview: (companyId: string, userId: string | null, url: string) =>
     ["link-preview", companyId, userId, url] as const,
@@ -335,6 +339,7 @@ export const queryKeys = {
       ["issues", companyId, "star-prompt-done"] as const,
     mentionPool: (companyId: string) =>
       ["issues", companyId, "mention-pool"] as const,
+    searches: issueSearchPrefix,
     search: (
       companyId: string,
       q: string,
@@ -342,9 +347,7 @@ export const queryKeys = {
       limit?: number,
     ) =>
       [
-        "issues",
-        companyId,
-        "search",
+        ...issueSearchPrefix(companyId),
         q,
         projectId ?? "__all-projects__",
         limit ?? "__no-limit__",
@@ -399,6 +402,7 @@ export const queryKeys = {
     summaryBatch: (companyId: string, userId: string | null | undefined, sortedIds: readonly string[]) =>
       ["issues", companyId, "summaries", userId ?? "__local_board__", sortedIds] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
+    dependencyInvestigation: (issueId: string) => ["issues", "dependency-investigation", issueId] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
     acknowledgedComments: (issueId: string) => ["issues", "comments", issueId, "acknowledged"] as const,
     earlierComments: (issueId: string) => ["issues", "comments", issueId, "earlier"] as const,
@@ -416,6 +420,10 @@ export const queryKeys = {
       options.excludeRoot
         ? (["issues", "cost-summary", issueId, "exclude-root"] as const)
         : (["issues", "cost-summary", issueId] as const),
+    executionReviewEvidenceFamily,
+    executionReviewEvidence: (id: string, cursor?: string | null) => [
+      ...executionReviewEvidenceFamily, id, ...(cursor ? [cursor] : []),
+    ] as const,
     privacyConstraints: (issueId: string) => ["issues", "privacy-constraints", issueId] as const,
     accessGrants: (issueId: string) => ["issues", "access-grants", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
@@ -431,6 +439,7 @@ export const queryKeys = {
       status: "open" | "resolved" | "all" = "all",
     ) => ["issues", "document-annotations", issueId, key, status] as const,
     activity: (issueId: string) => ["issues", "activity", issueId] as const,
+    completionHistory: (issueId: string) => ["issues", "activity", issueId, "completion-history"] as const,
     runs: (issueId: string) => ["issues", "runs", issueId] as const,
     approvals: (issueId: string) => ["issues", "approvals", issueId] as const,
     liveRuns: (issueId: string) => ["issues", "live-runs", issueId] as const,
@@ -547,6 +556,8 @@ export const queryKeys = {
   },
   cases: {
     handoffs: (id: string) => ["cases", "handoffs", id] as const,
+    handoffRecoveryHistory: (caseId: string, handoffId: string, issueId: string) =>
+      ["cases", "handoffs", caseId, "recovery-history", handoffId, issueId] as const,
     list: (companyId: string) => ["cases", companyId] as const,
     detail: (id: string) => ["cases", "detail", id] as const,
     documents: (id: string) => ["cases", "documents", id] as const,
@@ -725,6 +736,7 @@ export const queryKeys = {
     ) => ["company-search", companyId, q, scope, limit, offset] as const,
   },
   dashboard: (companyId: string) => ["dashboard", companyId] as const,
+  dashboardResumeReceipts: (companyId: string) => ["dashboard", companyId, "resume-receipts"] as const,
   attention: (companyId: string) => ["attention", companyId] as const,
   decisions: {
     list: (companyId: string, status?: string) =>

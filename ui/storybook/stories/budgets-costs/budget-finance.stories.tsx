@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type {
   BudgetIncident,
@@ -14,6 +15,7 @@ import { AlertTriangle, CheckCircle2, CreditCard, Landmark, ReceiptText, WalletC
 import { AccountingModelCard } from "@/components/AccountingModelCard";
 import { BillerSpendCard } from "@/components/BillerSpendCard";
 import { BudgetIncidentCard } from "@/components/BudgetIncidentCard";
+import { TaskTreeBudgetCreate } from "@/components/TaskTreeBudgetCreate";
 import { BudgetSidebarMarker, type BudgetSidebarMarkerLevel } from "@/components/BudgetSidebarMarker";
 import { ClaudeSubscriptionPanel } from "@/components/ClaudeSubscriptionPanel";
 import { CodexSubscriptionPanel } from "@/components/CodexSubscriptionPanel";
@@ -79,7 +81,7 @@ function CaseFrame({
 
 const budgetIncidents: BudgetIncident[] = [
   {
-    id: "incident-agent-resolved",
+    id: "incident-agent-open",
     companyId: "company-storybook",
     policyId: "budget-agent-codex",
     scopeType: "agent",
@@ -89,13 +91,13 @@ const budgetIncidents: BudgetIncident[] = [
     windowKind: "calendar_month_utc",
     windowStart,
     windowEnd,
-    thresholdType: "hard",
+    thresholdType: "soft",
     amountLimit: 40_000,
-    amountObserved: 42_450,
-    status: "resolved",
-    approvalId: "approval-budget-resolved",
-    approvalStatus: "approved",
-    resolvedAt: at(42),
+    amountObserved: 35_000,
+    status: "open",
+    approvalId: null,
+    approvalStatus: null,
+    resolvedAt: null,
     createdAt: at(180),
     updatedAt: at(42),
   },
@@ -580,9 +582,9 @@ function BudgetFinanceMatrix() {
           </div>
         </section>
 
-        <Section eyebrow="Incidents" title="BudgetIncidentCard resolution, pending, and escalated states">
+        <Section eyebrow="Incidents" title="BudgetIncidentCard open, pending, and escalated states">
           <div className="grid gap-5 xl:grid-cols-3">
-            <CaseFrame title="Resolved raise-and-resume" detail="Approval approved and incident resolved after the budget was raised." tone="healthy">
+            <CaseFrame title="Open budget warning" detail="Agent spend crossed the warning threshold. Work can continue while the warning is open." tone="warning">
               <BudgetIncidentCard
                 incident={budgetIncidents[0]!}
                 onKeepPaused={() => undefined}
@@ -772,7 +774,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "Budget and finance stories cover incident resolution states, sidebar markers, provider and biller quotas, finance ledgers, and Claude/Codex subscription panels.",
+          "Budget and finance stories cover active incidents, sidebar markers, provider and biller quotas, finance ledgers, and Claude/Codex subscription panels.",
       },
     },
     proprio: {
@@ -783,7 +785,7 @@ const meta = {
       ],
       "implementation": "production",
       "boundary": "fixtures",
-      "notes": "FullMatrix renders BudgetIncidentCard in warning, resolved, pending-approval and escalated hard-stop states. Resolution handlers are no-ops; budget relief and resumption remain unverified. The upstream budget UI distinguishes soft warnings from hard stops; hard incidents retain raise-and-resume and keep-paused controls."
+      "notes": "FullMatrix shows active BudgetIncidentCard examples for an open warning, a hard stop pending approval, and an escalated hard stop. TaskBudgetForm uses fixture task search results and simulated submission to exercise root selection, amount validation, and read-only controls. Resolution handlers are no-ops; budget relief and resumption remain unverified. Hard incidents retain raise-and-resume and keep-paused controls."
     },
   },
 } satisfies Meta<typeof BudgetFinanceMatrix>;
@@ -793,3 +795,52 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const FullMatrix: Story = {};
+
+
+function TaskBudgetFormFixture() {
+  const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+  const companyId = "task-budget-fixture";
+
+  useEffect(() => {
+    const original = window.fetch;
+    const fixture: typeof fetch = async (input, init) => {
+      const address = input instanceof Request ? input.url : input;
+      const url = new URL(address, window.location.origin);
+      if (url.pathname === `/api/companies/${companyId}/issues`) {
+        const rows = [
+          { id: "release-plan", identifier: "PRO-39", title: "Review the release plan, verify the build with a clean installation, and document the rollback steps for the next maintenance window" },
+          { id: "release", identifier: "PRO-40", title: "Prepare the release checklist" },
+          { id: "budgeted", identifier: "PRO-41", title: "Write release notes" },
+        ];
+        const query = url.searchParams.get("q")?.toLowerCase() ?? "";
+        return Response.json(rows.filter(row => `${row.identifier} ${row.title}`.toLowerCase().includes(query)));
+      }
+      return original(input, init);
+    };
+    window.fetch = fixture;
+    return () => {
+      if (window.fetch === fixture) window.fetch = original;
+      client.clear();
+    };
+  }, [client]);
+
+  return (
+    <QueryClientProvider client={client}>
+      <main className="mx-auto grid max-w-3xl gap-6 p-4">
+        <section aria-label="Operator view" className="space-y-2">
+          <h2 className="text-lg font-semibold">Set a task budget</h2>
+          <p className="text-sm text-muted-foreground">Search for release, then enter a lifetime limit.</p>
+          <TaskTreeBudgetCreate companyId={companyId} existingRootIds={["budgeted"]} onCreate={async () => undefined} />
+        </section>
+        <section aria-label="Read-only view" className="space-y-2">
+          <h2 className="text-lg font-semibold">Read-only access</h2>
+          <TaskTreeBudgetCreate companyId={companyId} existingRootIds={[]} disabled onCreate={async () => undefined} />
+        </section>
+      </main>
+    </QueryClientProvider>
+  );
+}
+
+export const TaskBudgetForm: Story = {
+  render: () => <TaskBudgetFormFixture />,
+};

@@ -22,6 +22,9 @@ export const requiredCases = {
       'preserves saved work and a queued request at a controlled recovery boundary (unknown_action)',
       'cancels a durable native retry even when its previous provider is already failed',
     ],
+    'server/src/__tests__/case-handoff-native.integration.test.ts': [
+      "yields through A→B→A, resumes each agent's own session, then closes only after accepted task completion",
+    ],
   },
   integration: {
     'server/src/services/native-runtime/proprio-runner-real-server.integration.test.ts': [

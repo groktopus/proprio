@@ -1,3 +1,4 @@
+import { isStrictUuid } from "../../uuid.js";
 import { resolve } from "node:path";
 
 import { and, eq } from "drizzle-orm";
@@ -25,8 +26,6 @@ import {
 } from "./native-question-bridge.js";
 import { ProprioRunnerSemanticAuthority } from "./runner-semantic-authority.js";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STABLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/;
 const RUNNER_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
@@ -99,7 +98,7 @@ function validateInput(input: PrepareRunnerPrpSessionInput): void {
     input.runnerInstanceId,
     input.normalizedSessionId,
   ]) {
-    if (!UUID_PATTERN.test(id)) throw new Error("runner_prp_binding_invalid");
+    if (!isStrictUuid(id)) throw new Error("runner_prp_binding_invalid");
   }
   for (const id of [input.environmentLeaseId, input.turnId, input.itemId]) {
     if (!STABLE_ID_PATTERN.test(id))

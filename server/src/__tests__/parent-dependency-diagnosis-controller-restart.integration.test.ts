@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, issueRelations, issues,
+import { activityLog, agentWakeupRequests, agents, companyMemberships, companies, createDb, heartbeatRuns, issueRelations, issues,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import type { Request } from "express";
 import { errorHandler } from "../middleware/index.js";
@@ -180,6 +180,12 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         return row ?? null;
       }, row => (row.details as Record<string, unknown>).outcome === "pending", "The controller did not persist the diagnosis claim");
 
+      const diagnosisKey = String((claim.details as Record<string, unknown>).idempotencyKey);
+      expect(diagnosisKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
+      const receiptFilter = and(eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.idempotencyKey, diagnosisKey));
+      expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(0);
+
       let eligibleParentId: string | null = null;
       if (ownership === "reassigned to board") {
         // Reassign through the production task PATCH route while the old worker
@@ -213,7 +219,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       }
 
       // Reuse the same config, PostgreSQL proxy, database and runtime control
-      // file. Startup recovery must finish the committed claim with one wake.
+      // file. Startup recovery must respect the task's current owner.
       await writeFile(control, "");
       restarted = await startController({ home, config, port, databaseUrl: proxy.url, crashControl: control, crashReceipt: receipt });
       if (eligibleParentId) {
@@ -221,6 +227,7 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
           const rows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
           return rows.find(row => (row.payload as Record<string, unknown>).issueId === eligibleParentId) ?? null;
         }, row => row.reason === "issue_blocker_stalled", "The restarted controller did not diagnose the eligible parent");
+        expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(0);
         const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string }> }>(
           "GET", `/issues/${parentId}/diagnostics/wakes`);
         expect(diagnostics.events.some(event => event.kind === "wake_request" && event.reason === "issue_blocker_stalled")).toBe(false);
@@ -231,23 +238,24 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
         return;
       }
       const wake = await waitFor(async () => {
-        const rows = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
-        return rows[0] ?? null;
-      }, row => row.status === "completed", "Controller restart did not complete its diagnosis wake");
-      const wakes = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
-        eq(agentWakeupRequests.idempotencyKey, String((claim.details as Record<string, unknown>).idempotencyKey))));
-      expect(wakes).toHaveLength(1);
+        const [row] = await db.select().from(agentWakeupRequests).where(receiptFilter);
+        return row ?? null;
+      }, row => ["completed", "failed", "skipped", "cancelled"].includes(row.status),
+      "Controller restart did not settle its diagnosis wake");
+      expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(1);
       expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system",
-        payload: { issueId: parentId, dependencyDiagnosis: true } });
-      expect(await readFile(effectFile, "utf8")).toBe("invoked\n");
+        status: "completed", payload: { issueId: parentId, dependencyDiagnosis: true } });
+      const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.wakeupRequestId, wake.id)));
+      expect(run).toMatchObject({ status: "succeeded",
+        contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
+      expect(await readFile(effectFile, "utf8")).toBe("invoked");
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
       const diagnostics = await restarted.api<{ events: Array<{ kind: string; reason?: string; status?: string }> }>(
         "GET", `/issues/${parentId}/diagnostics/wakes`);
-      expect(diagnostics.events.filter(event => event.kind === "wake_request" && event.reason === "issue_blocker_stalled"))
-        .toEqual([expect.objectContaining({ status: "completed" })]);
+      expect(diagnostics.events).toContainEqual(expect.objectContaining({ kind: "wake_request", reason: "issue_blocker_stalled", status: "completed" }));
     } finally {
       if (restarted) await restarted.stop().catch(() => {});
       if (controller && controller.child.exitCode === null && controller.child.signalCode === null) {

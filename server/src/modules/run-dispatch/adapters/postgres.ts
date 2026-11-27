@@ -38,10 +38,11 @@ import {
 } from "@groktopus/db";
 import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON, isUuidLike } from "@groktopus/shared";
 import { withOperationAccountingTransaction } from "../../../services/accounting-transaction.js";
-import { lockBudgetAdmissionControls } from "../../../services/budget-admission-controls.js";
+import { lockBudgetAdmissionControls, lockTaskTreeBudgetConfiguration } from "../../../services/budget-admission-controls.js";
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
+import { visibleAdmissionBlock } from "../../../services/budget-scope-visibility.js";
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
@@ -221,7 +222,7 @@ async function verifyDispatchStallWake(db: Db, input: {
       .where(and(eq(agentWakeupRequests.companyId, input.companyId), eq(agentWakeupRequests.id, wakeupRequestId)))
       .then(rows => rows[0]?.actor ?? null)
     : null;
-  return verifyBlockerStallWake(db, { ...wake, requestedByActorType });
+  return verifyBlockerStallWake(db, { ...wake, requestedByActorType, wakeupRequestId });
 }
 
 function queuedEffect(run: HeartbeatRun): PostCommitEffect {
@@ -290,6 +291,7 @@ export function createPostgresRunDispatchAdapter(
 
       const locked = async (typedTx: Db, publications: ActivityPublication[]) => {
         if (mode === "accounting") {
+          await lockTaskTreeBudgetConfiguration(typedTx, input.companyId, "shared");
           await lockBudgetAdmissionControls(typedTx, input.companyId, hint.projectId);
           await typedTx.select({ id: agents.id }).from(agents)
             .where(and(eq(agents.id, hint.agentId), eq(agents.companyId, input.companyId))).for("share");
@@ -422,9 +424,10 @@ export function createPostgresRunDispatchAdapter(
     const budgetBlock = await budgetsForRead.getInvocationBlock(input.companyId, input.agentId, {
       issueId,
       projectId: readNonEmptyString(input.contextSnapshot.projectId),
+      runId: input.runId,
     });
     facts.budgetBlock = budgetBlock
-      ? { reason: budgetBlock.reason, scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId }
+      ? visibleAdmissionBlock({ reason: budgetBlock.reason, scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId })
       : null;
     if (facts.budgetBlock) return { agentFound: true, facts };
 

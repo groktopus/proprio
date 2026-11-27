@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { act } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
-import type { BudgetIncident } from "@groktopus/shared";
+import { BUDGET_AMOUNT_MAX_CENTS, type BudgetIncident } from "@groktopus/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BudgetIncidentCard } from "./BudgetIncidentCard";
+import { MemoryRouter } from "react-router-dom";
+
+vi.mock("@/context/CompanyContext", () => ({ useCompany: () => ({ selectedCompany: null }) }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -32,14 +36,19 @@ function incident(overrides: Partial<BudgetIncident> = {}): BudgetIncident {
   };
 }
 
-async function renderCard(value: BudgetIncident) {
+async function renderCard(value: BudgetIncident, canResolve = true) {
   const div = document.createElement("div");
   document.body.append(div);
   const root = createRoot(div);
   const onKeepPaused = vi.fn();
   const onRaiseAndResume = vi.fn();
+  const queryClient = new QueryClient();
   await act(async () => root.render(
-    <BudgetIncidentCard incident={value} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} />,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/PRO/activity/budgets"]}>
+        <BudgetIncidentCard incident={value} canResolve={canResolve} onKeepPaused={onKeepPaused} onRaiseAndResume={onRaiseAndResume} />
+      </MemoryRouter>
+    </QueryClientProvider>,
   ));
   const buttons = () => Array.from(div.querySelectorAll("button"), (button) => button.textContent?.trim());
   return {
@@ -48,6 +57,7 @@ async function renderCard(value: BudgetIncident) {
     onKeepPaused,
     cleanup: async () => {
       await act(async () => root.unmount());
+      queryClient.clear();
       div.remove();
     },
   };
@@ -65,6 +75,24 @@ describe("BudgetIncidentCard", () => {
     await cleanup();
   });
 
+  it("links task-tree stops to their root and disables resolution without board authority", async () => {
+    const { div, buttons, cleanup } = await renderCard(incident({ scopeType: "task_tree", scopeId: "root-task" }));
+    expect(div.querySelector('a[href="/PRO/issues/root-task"]')?.textContent).toBe("Budget Demo");
+    expect(div.textContent).toContain("Task budget hard stop");
+    expect(div.textContent).toContain("New runs for this task and its descendants cannot start");
+    const { div: viewerDiv, cleanup: cleanupViewer } = await renderCard(incident({ scopeType: "task_tree" }), false);
+    expect(Array.from(viewerDiv.querySelectorAll("button"), button => ({
+      label: button.textContent?.trim(), disabled: button.disabled,
+    }))).toEqual([
+      { label: "Raise budget & resume", disabled: true },
+      { label: "Keep paused", disabled: true },
+    ]);
+    expect(viewerDiv.querySelector("input")?.disabled).toBe(true);
+    expect(buttons()).toContain("Raise budget & resume");
+    await cleanup();
+    await cleanupViewer();
+  });
+
   it("labels a soft-threshold incident as a warning that does not pause the scope", async () => {
     const { div, buttons, onKeepPaused, cleanup } = await renderCard(
       incident({ thresholdType: "soft", amountObserved: 80_000 }),
@@ -80,6 +108,21 @@ describe("BudgetIncidentCard", () => {
     await act(async () => dismiss.click());
     expect(onKeepPaused).toHaveBeenCalledTimes(1);
     await cleanup();
+  });
+
+  it("keeps a near-maximum task budget suggestion within range and explains the maximum", async () => {
+    const maximum = BUDGET_AMOUNT_MAX_CENTS;
+    const base = { scopeType: "task_tree", thresholdType: "soft", amountObserved: maximum - 1000 } as const;
+    const near = await renderCard(incident({ ...base, amountLimit: maximum - 100 }));
+    expect(near.div.querySelector("input")?.value).toBe((maximum / 100).toFixed(2));
+    expect(near.div.querySelector("button")?.disabled).toBe(false);
+    await near.cleanup();
+    const full = await renderCard(incident({ ...base, amountLimit: maximum }));
+    const input = full.div.querySelector("input")!;
+    expect(full.div.querySelector("button")?.disabled).toBe(true);
+    expect(full.div.querySelector("[id='" + input.getAttribute("aria-describedby") + "']")?.textContent)
+      .toContain("maximum supported limit");
+    await full.cleanup();
   });
 
   it("describes a paused project for a project hard stop", async () => {

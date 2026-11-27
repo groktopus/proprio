@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { expect, it } from "vitest";
-import { authUsers, companies, companyMemberships, issueRelations, issues } from "@groktopus/db";
+import { authUsers, companies, companyMemberships, issueExecutionDecisions, issueRelations, issues } from "@groktopus/db";
 import { boardSessionApp, seedBoardRouteFixture } from "./helpers/route-census-fixture.js";
 import { describeEmbeddedPostgres, useEmbeddedPostgres } from "./helpers/route-test-harness.js";
 import { createStatementCensus, formatStatementCensus } from "./helpers/statement-census.js";
@@ -100,6 +100,75 @@ describeEmbeddedPostgres("GET /api/issues/:id statements per request", () => {
     const hiddenResponse = await request(memberApp).get(`/api/issues/${hidden!.id}`);
     expect(hiddenResponse.status).toBe(200);
     expect(hiddenResponse.body.hiddenAt).not.toBeNull();
+  }, 60_000);
+
+  it("returns only the readable task's execution review evidence after the policy is removed", async () => {
+    const fixture = await seed();
+    const outsider = await seedBoardRouteFixture(ctx.db, "ReviewOutsider");
+    const memberApp = boardSessionApp(ctx.db, () => fixture.userId);
+    const outsiderApp = boardSessionApp(ctx.db, () => outsider.userId);
+    const decisionId = randomUUID();
+    const binding = {
+      version: 1 as const,
+      requirementHash: "a".repeat(64),
+      deliverables: [{
+        key: "draft", label: "Draft",
+        target: { type: "issue_document" as const, key: "draft", revisionId: randomUUID() },
+      }],
+    };
+    const decision = { companyId: fixture.companyId, stageId: randomUUID(), stageType: "review",
+      outcome: "approved", body: "Approved draft", reviewTargetBinding: binding };
+    await ctx.db.insert(issueExecutionDecisions).values([
+      { ...decision, id: decisionId, issueId: fixture.issue.id },
+      { ...decision, issueId: fixture.parent.id },
+    ]);
+    const path = `/api/issues/${fixture.issue.id}/execution-review-evidence`;
+    const response = await request(memberApp).get(path).expect(200).expect("Cache-Control", "private, no-store");
+    expect(response.body.submittedSignoff).toBeNull();
+    expect(response.body.executionDecisions).toEqual([{
+      id: decisionId, stageType: "review", outcome: "approved", reviewTargetBinding: binding,
+    }]);
+    expect(response.body.requiredQualityReviewState).toEqual({ required: false, satisfied: true, missing: [] });
+    await request(outsiderApp).get(path).expect(404);
+    await ctx.db.delete(companyMemberships).where(eq(companyMemberships.principalId, fixture.userId));
+    await request(memberApp).get(path).expect(404);
+  }, 60_000);
+
+  it("paginates bound decisions after newer unbound history", async () => {
+    const fixture = await seed();
+    const app = boardSessionApp(ctx.db, () => fixture.userId);
+    const stageId = randomUUID();
+    const base = { companyId: fixture.companyId, issueId: fixture.issue.id, stageId, stageType: "review",
+      outcome: "approved", body: "Saved decision" };
+    const target = { type: "issue_document" as const, key: "draft", revisionId: randomUUID() };
+    const binding = { version: 1 as const, requirementHash: "a".repeat(64), deliverables: [{ key: "draft", label: "Draft", target }] };
+    const oldest = randomUUID();
+    await ctx.db.insert(issueExecutionDecisions).values([
+      { ...base, id: oldest, createdAt: new Date("2026-11-01T12:00:00Z"), reviewTargetBinding: binding },
+      ...Array.from({ length: 20 }, () => ({ ...base, createdAt: new Date("2026-11-02T12:00:00Z"), reviewTargetBinding: binding })),
+      ...Array.from({ length: 105 }, () => ({ ...base, createdAt: new Date("2026-11-03T12:00:00Z") })),
+    ]);
+
+    const path = `/api/issues/${fixture.issue.identifier ?? fixture.issue.id}/execution-review-evidence`;
+    const first = await request(app).get(path).expect(200);
+    expect(first.body.executionDecisions).toHaveLength(20);
+    expect(first.body.nextCursor).toBe(first.body.executionDecisions[19].id);
+    const last = await request(app).get(path).query({ cursor: first.body.nextCursor }).expect(200);
+    expect(last.body.executionDecisions).toMatchObject([{ id: oldest, reviewTargetBinding: binding }]);
+    expect(last.body.nextCursor).toBeNull();
+    await request(app).get(path).query({ cursor: "invalid" }).expect(400);
+  }, 60_000);
+
+  it("rate limits review evidence reads per account", async () => {
+    const fixture = await seed();
+    const other = await seedBoardRouteFixture(ctx.db, "ReviewRateLimitOther");
+    const path = "/api/issues/ABSENT-123/execution-review-evidence";
+    const app = boardSessionApp(ctx.db, () => fixture.userId);
+    for (let requestCount = 0; requestCount < 30; requestCount++) {
+      await request(app).get(path).expect(404);
+    }
+    await request(app).get(path).expect(429);
+    await request(boardSessionApp(ctx.db, () => other.userId)).get(path).expect(404);
   }, 60_000);
 
   it("denies the very next request after the membership is removed", async () => {

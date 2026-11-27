@@ -87,6 +87,9 @@ describe("dashboard read connection recovery", () => {
         pendingApprovals: 3,
       });
       expect(test.companyParameters).toEqual([[companyId], [companyId]]);
+      expect(test.parameters.get("approvals")?.[0]).toEqual(
+        expect.arrayContaining([companyId, "pending", "revision_requested"]),
+      );
       expect(test.reads).toEqual(["companies", "companies", "agents", "issues", "approvals", "cost_events"]);
       expect(test.execute).toHaveBeenCalledTimes(1);
       expect(overview).toHaveBeenCalledExactlyOnceWith(companyId);

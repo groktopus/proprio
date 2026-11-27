@@ -1,10 +1,13 @@
-import { and, eq, gte, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from "@groktopus/db";
 import { notFound } from "../errors.js";
-import { budgetService } from "./budgets.js";
+import { budgetServiceInTransaction } from "./budgets.js";
 import { executionIssueCondition } from "./issue-visibility.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { approvalReadSqlCondition, authorizationService, type AuthorizationActor } from "./authorization.js";
+import { resolvableApprovalStatuses } from "../lib/approval-records.js";
+import { withAccountingReadSnapshot } from "./accounting-transaction.js";
 
 const DASHBOARD_RUN_ACTIVITY_DAYS = 14;
 
@@ -25,9 +28,9 @@ function getRecentUtcDateKeys(now: Date, days: number): string[] {
 }
 
 export function dashboardService(db: Db) {
-  const budgets = budgetService(db);
   return {
-    summary: async (companyId: string) => {
+    summary: async (companyId: string, options: { actor?: AuthorizationActor } = {}) => {
+      const actor = options.actor ?? { type: "board" as const, source: "local_implicit" as const, isInstanceAdmin: true };
       // This lookup only reads the company row. Rebuild it after a transient
       // disconnect; do not replay the later summary or budget workflows.
       const company = await retryIdempotentDatabaseOperation(() => db
@@ -50,11 +53,27 @@ export function dashboardService(db: Db) {
         .where(and(eq(issues.companyId, companyId), executionIssueCondition()))
         .groupBy(issues.status));
 
-      const pendingApprovals = await retryIdempotentDatabaseOperation(() => db
-        .select({ count: sql<number>`count(*)` })
-        .from(approvals)
-        .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending")))
-        .then((rows) => Number(rows[0]?.count ?? 0)));
+      const readApprovalCounts = async (snapshotDb: Db) => {
+        const approvalRead = await approvalReadSqlCondition(snapshotDb, actor);
+        const canReadBudgets = !options.actor || (await authorizationService(snapshotDb).decide({
+          actor, action: "company_scope:read", resource: { type: "company", companyId },
+        })).allowed;
+        const pendingApprovals = await snapshotDb
+          .select({ count: sql<number>`count(*)` })
+          .from(approvals)
+          .where(and(eq(approvals.companyId, companyId), inArray(approvals.status, resolvableApprovalStatuses), approvalRead,
+            canReadBudgets ? undefined : sql`${approvals.type} <> 'budget_override_required'`))
+          .then((rows) => Number(rows[0]?.count ?? 0));
+        const budgetOverview = canReadBudgets
+          ? await budgetServiceInTransaction(snapshotDb).overview(companyId, { approvalReadCondition: approvalRead, actor })
+          : null;
+        return { pendingApprovals, budgetOverview };
+      };
+      // Keep the approval total and budget subset in one repeatable snapshot.
+      // The fallback preserves the small disconnected-db test doubles.
+      const { pendingApprovals, budgetOverview } = typeof db.transaction === "function"
+        ? await withAccountingReadSnapshot(db, companyId, tx => readApprovalCounts(tx))
+        : await readApprovalCounts(db);
 
       const agentCounts: Record<string, number> = {
         active: 0,
@@ -192,8 +211,6 @@ export function dashboardService(db: Db) {
         company.budgetMonthlyCents > 0
           ? (monthSpendCents / company.budgetMonthlyCents) * 100
           : 0;
-      const budgetOverview = await budgets.overview(companyId);
-
       return {
         companyId,
         agents: {
@@ -210,10 +227,10 @@ export function dashboardService(db: Db) {
         },
         pendingApprovals,
         budgets: {
-          activeIncidents: budgetOverview.activeIncidents.length,
-          pendingApprovals: budgetOverview.pendingApprovalCount,
-          pausedAgents: budgetOverview.pausedAgentCount,
-          pausedProjects: budgetOverview.pausedProjectCount,
+          activeIncidents: budgetOverview?.activeIncidents.length ?? 0,
+          pendingApprovals: budgetOverview?.pendingApprovalCount ?? 0,
+          pausedAgents: budgetOverview?.pausedAgentCount ?? 0,
+          pausedProjects: budgetOverview?.pausedProjectCount ?? 0,
         },
         runActivity: Array.from(runActivity.values()),
       };

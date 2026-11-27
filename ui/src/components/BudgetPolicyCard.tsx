@@ -1,7 +1,9 @@
-import { centsToUsd, usdToCents } from "@groktopus/shared";
+import { BUDGET_AMOUNT_MAX_CENTS, centsToUsd, usdToCents } from "@groktopus/shared";
 import { useEffect, useId, useState } from "react";
 import type { BudgetPolicySummary } from "@groktopus/shared";
 import { AlertTriangle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { parseBudgetDollarAmount } from "@/lib/budget-amount";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -84,7 +86,11 @@ export function BudgetPolicyCard({
     </details>
   ) : null;
 
-  const parsedDraft = parseDollarInput(draftBudget);
+  const budgetAmountId = useId();
+  const budgetAmountErrorId = useId();
+  const isTaskTree = summary.scopeType === "task_tree";
+  const scopeLabel = isTaskTree ? "Task budget" : summary.scopeType;
+  const parsedDraft = isTaskTree ? parseBudgetDollarAmount(draftBudget, true) : parseDollarInput(draftBudget);
   const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
   const progress = summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
   const StatusIcon = summary.status === "hard_stop" ? ShieldAlert : summary.status === "warning" ? AlertTriangle : Wallet;
@@ -175,16 +181,27 @@ export function BudgetPolicyCard({
   const saveSection = onSave ? (
     <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
       <div className="min-w-0 flex-1">
-        <label className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
+        <label htmlFor={budgetAmountId} className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
           Budget (USD)
         </label>
         <Input
+          id={budgetAmountId}
+          disabled={isSaving}
+          aria-invalid={parsedDraft === null}
+          aria-describedby={parsedDraft === null ? budgetAmountErrorId : undefined}
           value={draftBudget}
           onChange={(event) => setDraftBudget(event.target.value)}
           className="mt-2"
           inputMode="decimal"
           placeholder="0.00"
         />
+        {parsedDraft === null && (
+          <p id={budgetAmountErrorId} className="text-xs text-destructive">
+            {isTaskTree
+              ? `Enter an amount from $0.00 to ${formatCents(BUDGET_AMOUNT_MAX_CENTS)} with up to two decimal places. Zero disables the budget.`
+              : "Enter a valid non-negative dollar amount."}
+          </p>
+        )}
       </div>
       <Button
         onClick={() => {
@@ -203,9 +220,9 @@ export function BudgetPolicyCard({
         <div className="flex items-start justify-between gap-6">
           <div>
             <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
-              {summary.scopeType}
+              {scopeLabel}
             </div>
-            <div className="mt-2 text-xl font-semibold">{summary.scopeName}</div>
+            <div className={cn("mt-2 text-xl font-semibold", isTaskTree && ANALYTICS_MASK_CLASS)}>{summary.scopeName}</div>
             <div className="mt-2 text-sm text-muted-foreground">{windowLabel(summary.windowKind)}</div>
           </div>
           <div
@@ -228,9 +245,6 @@ export function BudgetPolicyCard({
         {pausedPane}
         {saveSection}
         {advancedSettings}
-        {parsedDraft === null ? (
-          <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
-        ) : null}
       </div>
     );
   }
@@ -241,9 +255,9 @@ export function BudgetPolicyCard({
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
-              {summary.scopeType}
+              {scopeLabel}
             </div>
-            <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
+            <CardTitle className={cn("mt-1 text-base", isTaskTree && ANALYTICS_MASK_CLASS)}>{summary.scopeName}</CardTitle>
             <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
           </div>
           <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status))}>
@@ -258,9 +272,6 @@ export function BudgetPolicyCard({
         {pausedPane}
         {saveSection}
         {advancedSettings}
-        {parsedDraft === null ? (
-          <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
-        ) : null}
       </CardContent>
     </Card>
   );
