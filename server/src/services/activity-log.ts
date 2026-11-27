@@ -162,12 +162,17 @@ export function publishActivity(publication: ActivityPublication) {
       });
       return;
     }
+    const details = publication.payload.details;
+    const taskTreeBudget = Boolean(details && typeof details === "object" && !Array.isArray(details)
+      && (details as Record<string, unknown>).scopeType === "task_tree");
     publishLiveEvent({
       companyId: publication.companyId,
       type: "activity.logged",
-      payload: publication.payload,
+      payload: taskTreeBudget
+        ? { entityType: "budget_policy" }
+        : publication.payload,
     });
-    if (publication.pluginEvent) publishPluginDomainEvent(publication.pluginEvent);
+    if (publication.pluginEvent && !taskTreeBudget) publishPluginDomainEvent(publication.pluginEvent);
   } finally { finish(); }
 }
 

@@ -30,6 +30,7 @@ import { conflict } from "../errors.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService, type AuthorizationActor, type AuthorizationResource } from "./authorization.js";
 import { ensureHumanRoleDefaultGrants } from "./principal-access-compatibility.js";
+import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
 type GrantInput = {
@@ -854,7 +855,8 @@ export function accessService(db: Db) {
   ) {
     const target = new Set(companyIds);
 
-    await memberAccessTransaction(async (tx) => {
+    const publications = await memberAccessTransaction(async (tx) => {
+      const publications: ActivityPublication[] = [];
       // Serialize every company-access removal/reactivation with personal OAuth
       // completion, which locks the same membership row before writing secrets.
       const existing = await tx
@@ -916,6 +918,16 @@ export function accessService(db: Db) {
               inArray(principalPermissionGrants.companyId, toArchive.map((row) => row.companyId)),
             ),
           );
+        for (const membership of toArchive) {
+          await logActivity(tx as unknown as Db, {
+            companyId: membership.companyId,
+            actorType: options.actorUserId ? "user" : "system",
+            actorId: options.actorUserId ?? "company-access",
+            action: "company_member.archived",
+            entityType: "company_membership",
+            entityId: membership.id,
+          }, publications);
+        }
       }
 
       for (const companyId of target) {
@@ -947,7 +959,9 @@ export function accessService(db: Db) {
           membershipRole: "operator",
         });
       }
+      return publications;
     });
+    for (const publication of publications) publishActivity(publication);
 
     return listUserCompanyAccess(userId);
   }
