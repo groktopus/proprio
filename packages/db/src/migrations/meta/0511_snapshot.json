@@ -1,5 +1,5 @@
 {
-  "id": "190dcf98-7eef-48fe-8c85-d984ae8575de",
+  "id": "d6bb9637-1115-4f9d-a406-45dc90407e17",
   "prevId": "a1f22e7b-f557-459b-9dff-432920f5e98a",
   "version": "7",
   "dialect": "postgresql",
@@ -45965,13 +45965,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "gen_random_uuid()"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         },
         "expires_at": {
           "name": "expires_at",
