@@ -8,18 +8,14 @@ export type ClaudeAcpHelloProbeResult =
 /** Require a useful, tool-free hello response from the selected Claude ACP server. */
 export async function probeClaudeAcpHello(input: {
   command: string;
-  cwd: string;
   env: Record<string, string>;
-  model: string | null;
   target: AdapterExecutionTarget | null;
   timeoutMs: number;
 }): Promise<ClaudeAcpHelloProbeResult> {
   const turn = await runAcpProbeTurn({
     agent: "claude",
     command: input.command,
-    cwd: input.cwd,
     env: input.env,
-    model: input.model,
     target: input.target,
     timeoutMs: input.timeoutMs,
     maxResponseChars: 2_048,

@@ -18,14 +18,13 @@ async function probe(mode: string, text?: string, timeoutMs = 5_000) {
   const observed = path.join(root, "observed.json");
   const result = await probeClaudeAcpHello({
     command: `${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)}`,
-    cwd: root,
     env: {
       ANTHROPIC_API_KEY: "fixture-only-secret",
+      ANTHROPIC_MODEL: "claude-test-model",
       PROPRIO_ACP_PROBE_FIXTURE_MODE: mode,
       PROPRIO_ACP_PROBE_FIXTURE_OBSERVED: observed,
       ...(text ? { PROPRIO_ACP_PROBE_FIXTURE_TEXT: text } : {}),
     },
-    model: "claude-test-model",
     target: null,
     timeoutMs,
   });
@@ -52,6 +51,7 @@ describe("Claude ACP hello probe", () => {
     expect(JSON.parse(await readFile(observed, "utf8"))).toMatchObject({
       key: "fixture-only-secret",
       model: "claude-test-model",
+      modelOptions: [],
     });
   });
 

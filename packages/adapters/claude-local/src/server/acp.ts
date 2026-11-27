@@ -894,6 +894,7 @@ export async function testClaudeAcpEnvironment(
   });
 
   const command = await resolveClaudeAcpCommandForTarget(config, target);
+  const customCommand = Boolean(firstNonEmptyString(config.agentCommand, config.acpAgentCommand));
   const commandResolvable = await commandIsResolvable(command, {
     config,
     executionTarget: ctx.executionTarget,
@@ -1008,7 +1009,15 @@ export async function testClaudeAcpEnvironment(
     if (isNonEmpty(hostConfigDir) && !isNonEmpty(probeEnv.CLAUDE_CONFIG_DIR)) {
       probeEnv.CLAUDE_CONFIG_DIR = hostConfigDir.trim();
     }
-    try {
+    if (!targetIsRemote && customCommand) {
+      // agents:create permits setup tests by agent keys, so a prospective
+      // adapter command is not authority to execute an arbitrary host binary.
+      // Until host-command authorization exists, only the resolved bundled
+      // command may be launched by this local setup path.
+      checks.push(buildAcpLoginProbeUnavailableCheck(
+        "The configured local ACP command cannot be executed by a setup test.",
+      ));
+    } else try {
       const safeProbeEnv = (await buildLocalAdapterTestProbeEnv({
         callerEnv: probeEnv,
         trustedEnv: targetIsRemote ? {} : process.env,
@@ -1018,14 +1027,14 @@ export async function testClaudeAcpEnvironment(
       const selectedProbeEnv = targetIsRemote
         ? safeProbeEnv
         : { PATH: process.env.PATH ?? "", ...safeProbeEnv };
-      const selectedModel = resolveClaudeModel(config.model, selectedProbeEnv);
+      const selectedModel = resolveClaudeModel(
+        config.model,
+        targetIsRemote ? selectedProbeEnv : { ...process.env, ...selectedProbeEnv },
+      );
       if (selectedModel) selectedProbeEnv.ANTHROPIC_MODEL = selectedModel;
-      const selectedCommand = await resolveClaudeAcpCommandForTarget(config, target);
       const probe = await probeClaudeAcpHello({
-        command: selectedCommand,
-        cwd: targetIsRemote ? target!.remoteCwd : cwd,
+        command,
         env: selectedProbeEnv,
-        model: selectedModel || null,
         target,
         timeoutMs: Math.max(1, asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45)) * 1000,
       });

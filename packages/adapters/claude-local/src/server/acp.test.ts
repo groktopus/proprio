@@ -23,6 +23,10 @@ vi.mock("./cli-capabilities.js", async (importActual) => {
   const actual = await importActual<typeof import("./cli-capabilities.js")>();
   return { ...actual, readBundledClaudeCodeVersion: vi.fn(actual.readBundledClaudeCodeVersion) };
 });
+const { probeClaudeAcpHelloMock } = vi.hoisted(() => ({
+  probeClaudeAcpHelloMock: vi.fn(async () => ({ status: "passed" as const })),
+}));
+vi.mock("./acp-hello-probe.js", () => ({ probeClaudeAcpHello: probeClaudeAcpHelloMock }));
 import { readBundledClaudeCodeVersion } from "./cli-capabilities.js";
 import {
   buildClaudeAcpConfig,
@@ -100,6 +104,8 @@ function setNodeVersion(version: string): void {
 }
 
 afterEach(async () => {
+  probeClaudeAcpHelloMock.mockReset();
+  probeClaudeAcpHelloMock.mockResolvedValue({ status: "passed" as const });
   setNodeVersion(originalNodeVersion);
   for (const [key, value] of Object.entries(originalEnv)) {
     if (value === undefined) delete process.env[key];

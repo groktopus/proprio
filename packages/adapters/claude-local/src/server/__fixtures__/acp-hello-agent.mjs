@@ -7,6 +7,7 @@ const sessionId = randomUUID();
 const lines = createInterface({ input: process.stdin });
 const write = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 const selectedModel = process.env.ANTHROPIC_MODEL ?? "fixture-model";
+const selectedConfigModels = [];
 const modelConfigOptions = currentValue => [{
   id: "model",
   name: "Model",
@@ -32,12 +33,15 @@ lines.on("line", async line => {
         models: { currentModelId: "fixture-default", availableModels: [{ modelId: selectedModel, name: selectedModel }] },
       } });
     } else if (request.method === "session/set_config_option") {
+      selectedConfigModels.push(request.params.value);
       write({ jsonrpc: "2.0", id: request.id, result: {
         configOptions: modelConfigOptions(request.params.value),
         models: { currentModelId: request.params.value, availableModels: [{ modelId: selectedModel, name: selectedModel }] },
       } });
     } else if (request.method === "session/prompt") {
       if (process.env.PROPRIO_ACP_PROBE_FIXTURE_MODE === "hang") return;
+      const observedPath = process.env.PROPRIO_ACP_PROBE_FIXTURE_OBSERVED;
+      if (observedPath) await writeFile(observedPath, JSON.stringify({ pid: process.pid, key: process.env.ANTHROPIC_API_KEY ?? null, model: process.env.ANTHROPIC_MODEL ?? null, modelOptions: selectedConfigModels }));
       write({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.PROPRIO_ACP_PROBE_FIXTURE_TEXT ?? "hello" } } } });
       write({ jsonrpc: "2.0", id: request.id, result: { stopReason: "end_turn" } });
     } else if (request.method === "session/cancel") {

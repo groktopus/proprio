@@ -31,7 +31,9 @@ const { runAdapterExecutionTargetProcess, probeResult } = vi.hoisted(() => {
     }),
   };
 });
-const { probeAcpHello } = vi.hoisted(() => ({ probeAcpHello: vi.fn(async () => ({ status: "passed" as const })) }));
+const { probeAcpHello } = vi.hoisted(() => ({
+  probeAcpHello: vi.fn<typeof import("./acp-hello-probe.js").probeClaudeAcpHello>(async () => ({ status: "passed" })),
+}));
 
 vi.mock("@groktopus/adapter-utils/execution-target", async () => {
   const actual = await vi.importActual<typeof import("@groktopus/adapter-utils/execution-target")>(
@@ -423,14 +425,18 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
   ];
   let tempDir: string | null = null;
   let claudePath = "";
+  let acpPath = "";
   let savedPath: string | undefined;
   let savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "proprio-acp-localprobe-"));
     claudePath = path.join(tempDir, "claude");
+    acpPath = path.join(tempDir, "claude-agent-acp");
     await writeFile(claudePath, "#!/bin/sh\nexit 0\n");
+    await writeFile(acpPath, "#!/bin/sh\nexit 0\n");
     await chmod(claudePath, 0o755);
+    await chmod(acpPath, 0o755);
     savedPath = process.env.PATH;
     process.env.PATH = tempDir;
     savedEnv = {};
@@ -519,7 +525,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "acp", agentCommand: process.execPath, env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      config: { engine: "acp", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
       executionTarget: null,
       environmentName: null,
     });
@@ -533,17 +539,33 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     }));
     expect(JSON.stringify(result.checks)).not.toContain("selected-test-key");
     expect(probeAcpHello).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      command: process.execPath,
-      model: expect.any(String),
-      env: expect.objectContaining({ ANTHROPIC_API_KEY: "selected-test-key" }),
+      command: expect.stringContaining("claude-agent-acp"),
+      env: expect.objectContaining({ ANTHROPIC_API_KEY: "selected-test-key", ANTHROPIC_MODEL: expect.any(String) }),
       target: null,
     }));
+  });
+
+  it("does not launch a caller-selected local ACP executable during setup", async () => {
+    const result = await testClaudeAcpEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { engine: "acp", agentCommand: process.execPath, env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      executionTarget: null,
+      environmentName: null,
+    });
+
+    expect(result.status).toBe("warn");
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "claude_acp_login_probe_unavailable",
+      message: "The configured local ACP command cannot be executed by a setup test.",
+    }));
+    expect(probeAcpHello).not.toHaveBeenCalled();
   });
 
   it("keeps the selected key unqualified when the ACP turn is not positive", async () => {
     probeAcpHello.mockResolvedValueOnce({ status: "failed" });
     const result = await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",
-      config: { engine: "acp", agentCommand: process.execPath, model: "claude-sonnet-5", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      config: { engine: "acp", model: "claude-sonnet-5", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
       executionTarget: null, environmentName: null });
     expect(result.status).toBe("warn");
     expect(result.checks.some(check => check.code === "claude_hello_probe_passed")).toBe(false);
@@ -553,11 +575,17 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
   it("forwards the exact selected model to ACP even when the host has a model override", async () => {
     process.env.ANTHROPIC_MODEL = "host-default-model";
     const result = await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",
-      config: { engine: "acp", agentCommand: process.execPath, model: "saved-agent-model", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      config: { engine: "acp", model: "saved-agent-model", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
       executionTarget: null, environmentName: null });
     expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_hello_probe_passed", level: "info" }));
-    expect(probeAcpHello.mock.calls.at(-1)?.[0]?.model).toBe("saved-agent-model");
     expect(probeAcpHello.mock.calls.at(-1)?.[0]?.env.ANTHROPIC_MODEL).toBe("saved-agent-model");
+  });
+
+  it("inherits the host model when the local adapter has no model selection", async () => {
+    process.env.ANTHROPIC_MODEL = "host-default-model";
+    await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",
+      config: { engine: "acp", env: { ANTHROPIC_API_KEY: "selected-test-key" } }, executionTarget: null, environmentName: null });
+    expect(probeAcpHello.mock.calls.at(-1)?.[0]?.env.ANTHROPIC_MODEL).toBe("host-default-model");
   });
 
   it("runs the host login probe with the host ANTHROPIC_API_KEY on a local target", async () => {
@@ -571,7 +599,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "acp", agentCommand: process.execPath },
+      config: { engine: "acp" },
       executionTarget: null,
       environmentName: null,
     });
