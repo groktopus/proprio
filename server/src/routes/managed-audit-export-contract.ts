@@ -41,7 +41,6 @@ export const managedAuditEventSchema = z.object({
 
 export const managedAuditExportPageSchema = managedAuditExportReceiptSchema.extend({
   events: z.array(managedAuditEventSchema),
-  deliveredThrough: z.number().int().nonnegative(),
   nextCursor: z.string().nullable(),
   complete: z.boolean(),
 });
