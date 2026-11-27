@@ -1,7 +1,7 @@
 import { runAcpProbeTurn } from "@groktopus/adapter-utils/acpx-engine/probe-turn";
 import type { AdapterExecutionTarget } from "@groktopus/adapter-utils/execution-target";
 
-export type ClaudeAcpHelloProbeResult =
+type ClaudeAcpHelloProbeResult =
   | { status: "passed" }
   | { status: "auth_required" | "timeout" | "failed" };
 
@@ -18,9 +18,14 @@ export async function probeClaudeAcpHello(input: {
     env: input.env,
     target: input.target,
     timeoutMs: input.timeoutMs,
-    maxResponseChars: 2_048,
     prompt: "Respond only with hello. Do not use tools or inspect files.",
   });
-  if (turn.status === "completed" && !turn.toolCall && /\bhello\b/i.test(turn.text)) return { status: "passed" };
+  if (
+    turn.status === "completed" &&
+    turn.stopReason !== "refusal" &&
+    turn.stopReason !== "cancelled" &&
+    !turn.toolCall &&
+    /^\s*hello[!.]*\s*$/i.test(turn.text)
+  ) return { status: "passed" };
   return { status: turn.status === "completed" ? "failed" : turn.status };
 }

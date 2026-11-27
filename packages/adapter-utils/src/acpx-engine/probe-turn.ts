@@ -39,8 +39,8 @@ async function awaitProbeStartup<T>(operation: Promise<T>, deadline: number): Pr
   } finally { clearTimeout(timer); }
 }
 
-export type AcpProbeTurnResult =
-  | { status: "completed"; text: string; toolCall: boolean }
+type AcpProbeTurnResult =
+  | { status: "completed"; text: string; toolCall: boolean; stopReason?: string }
   | { status: "auth_required" | "timeout" | "failed"; text: ""; toolCall: false };
 
 /** Run one bounded, tool-free ACP turn through the selected agent command. */
@@ -51,7 +51,6 @@ export async function runAcpProbeTurn(input: {
   sessionOptions?: { model?: string };
   target?: AdapterExecutionTarget | null;
   timeoutMs: number;
-  maxResponseChars?: number;
   prompt: string;
 }): Promise<AcpProbeTurnResult> {
   const deadline = Date.now() + input.timeoutMs;
@@ -91,6 +90,8 @@ export async function runAcpProbeTurn(input: {
         cwd: probeCwd,
         env: probeEnv,
         timeoutSec: Math.ceil(remainingProbeTime(deadline) / 1000),
+        streamOutputViaSession: input.target.transport === "sandbox" &&
+          input.target.effectiveCapabilities?.incrementalSessionOutput === true,
       });
       if (!bridge) return { status: "failed", text: "", toolCall: false };
       agentCommand = bridge.agentCommand;
@@ -131,7 +132,7 @@ export async function runAcpProbeTurn(input: {
     const consume = (async () => {
       for await (const event of turn!.events) {
         if (event.type === "text_delta" && event.stream !== "thought") {
-          response.text = `${response.text}${event.text}`.slice(-(input.maxResponseChars ?? 2_048));
+          response.text = `${response.text}${event.text}`.slice(-2_048);
         } else if (event.type === "tool_call") response.toolCall = true;
       }
     })();
@@ -152,7 +153,11 @@ export async function runAcpProbeTurn(input: {
       throw new Error("ACP probe event stream did not close");
     }
     if (!(await cleanupWithinBudget(() => consume))) throw new Error("ACP probe event consumer did not finish");
-    if (outcome.status === "completed") result = { status: "completed", ...response };
+    if (outcome.status === "completed") result = {
+      status: "completed",
+      ...response,
+      ...(typeof outcome.stopReason === "string" ? { stopReason: outcome.stopReason } : {}),
+    };
     else if (outcome.status === "failed" && /(?:authentication|required|unauthorized|unauthenticated|\b(?:401|403)\b)/i.test(outcome.error.message)) failure = "auth_required";
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "PROBE_TIMEOUT") failure = "timeout";

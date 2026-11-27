@@ -43,7 +43,7 @@ lines.on("line", async line => {
       const observedPath = process.env.PROPRIO_ACP_PROBE_FIXTURE_OBSERVED;
       if (observedPath) await writeFile(observedPath, JSON.stringify({ pid: process.pid, key: process.env.ANTHROPIC_API_KEY ?? null, model: process.env.ANTHROPIC_MODEL ?? null, modelOptions: selectedConfigModels }));
       write({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.PROPRIO_ACP_PROBE_FIXTURE_TEXT ?? "hello" } } } });
-      write({ jsonrpc: "2.0", id: request.id, result: { stopReason: "end_turn" } });
+      write({ jsonrpc: "2.0", id: request.id, result: { stopReason: process.env.PROPRIO_ACP_PROBE_FIXTURE_STOP_REASON ?? "end_turn" } });
     } else if (request.method === "session/cancel") {
       write({ jsonrpc: "2.0", id: request.id, result: {} });
     } else if (request.method === "session/close" || request.method === "session/set_mode") {

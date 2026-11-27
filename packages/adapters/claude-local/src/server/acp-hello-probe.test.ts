@@ -22,6 +22,7 @@ async function probe(mode: string, text?: string, timeoutMs = 5_000) {
       ANTHROPIC_API_KEY: "fixture-only-secret",
       ANTHROPIC_MODEL: "claude-test-model",
       PROPRIO_ACP_PROBE_FIXTURE_MODE: mode,
+      ...(mode === "refusal" ? { PROPRIO_ACP_PROBE_FIXTURE_STOP_REASON: "refusal" } : {}),
       PROPRIO_ACP_PROBE_FIXTURE_OBSERVED: observed,
       ...(text ? { PROPRIO_ACP_PROBE_FIXTURE_TEXT: text } : {}),
     },
@@ -56,7 +57,12 @@ describe("Claude ACP hello probe", () => {
   });
 
   it("does not qualify a completed turn without a hello response", async () => {
-    const { result } = await probe("success", "I cannot help with that request.");
+    const { result } = await probe("success", "I cannot respond with hello.");
+    expect(result).toEqual({ status: "failed" });
+  });
+
+  it("does not qualify a refusal even if it contains an affirmative greeting", async () => {
+    const { result } = await probe("refusal", "hello");
     expect(result).toEqual({ status: "failed" });
   });
 

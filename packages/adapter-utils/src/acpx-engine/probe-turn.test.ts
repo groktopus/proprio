@@ -106,12 +106,18 @@ describe("ACP probe cleanup", () => {
     const remoteExecute = vi.fn(async () => ({ exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: new Date().toISOString() }));
     const target: AdapterExecutionTarget = {
       kind: "remote", transport: "sandbox", providerKey: "fixture", remoteCwd: "/remote/only/workspace",
+      effectiveCapabilities: {
+        reusableLeases: false, nativeSyncIn: false, nativeSyncOut: false, persistentProcessSessions: false,
+        independentControlCommands: false, incrementalSessionOutput: true, concurrentSyncOperations: false,
+        duplexCommandStream: false, runnerWebSocketIngress: false,
+      },
       runner: { execute: remoteExecute },
     };
     await runAcpProbeTurn({ agent: "claude", command: "claude-agent-acp --flag value", env: {}, target, timeoutMs: 100, prompt: "hello" });
 
     expect(fixture.bridgeOptions).toHaveBeenCalledWith(expect.objectContaining({
       command: "sh", args: ["-lc", "exec claude-agent-acp --flag value"], cwd: expect.stringMatching(/^\/tmp\/proprio-acp-probe-/),
+      streamOutputViaSession: true,
     }));
     const runtimeOptions = fixture.runtimeOptions.mock.calls.at(-1)?.[0] as { cwd: string; spawnCwd?: string };
     expect(runtimeOptions.cwd).toMatch(/^\/tmp\/proprio-acp-probe-/);
