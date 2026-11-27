@@ -105,6 +105,7 @@ export {
   connectionsSearchInputSchema,
   connectionRequestInputSchema,
   completeConnectionIntentSchema,
+  adoptAiConnectionIntentSchema,
   declineConnectionIntentSchema,
   type ConnectionsSearchInput,
   type ConnectionRequestInput,

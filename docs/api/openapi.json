@@ -112532,8 +112532,49 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": {}
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "agentId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "repository": {
+                        "type": "string"
+                      },
+                      "appSlug": {
+                        "type": "string"
+                      },
+                      "push": {
+                        "type": "boolean"
+                      },
+                      "pullRequests": {
+                        "type": "boolean"
+                      },
+                      "verifiedAt": {
+                        "type": "string"
+                      },
+                      "revokedAt": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "agentId",
+                      "repository",
+                      "appSlug",
+                      "push",
+                      "pullRequests",
+                      "verifiedAt",
+                      "revokedAt"
+                    ]
+                  }
                 }
               }
             }
@@ -112550,26 +112591,6 @@
           },
           "403": {
             "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -112595,13 +112616,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       },
       "post": {
@@ -112616,7 +112634,55 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": {}
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "agentId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "appSlug": {
+                      "type": "string"
+                    },
+                    "push": {
+                      "type": "boolean"
+                    },
+                    "pullRequests": {
+                      "type": "boolean"
+                    },
+                    "verifiedAt": {
+                      "type": "string"
+                    },
+                    "revokedAt": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "agentId",
+                    "repository",
+                    "appSlug",
+                    "push",
+                    "pullRequests",
+                    "verifiedAt",
+                    "revokedAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -112641,8 +112707,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "409": {
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -112651,8 +112717,8 @@
               }
             }
           },
-          "409": {
-            "description": "Conflict",
+          "422": {
+            "description": "Unprocessable entity",
             "content": {
               "application/json": {
                 "schema": {
@@ -112723,13 +112789,75 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
+        }
+      }
+    },
+    "/api/companies/{companyId}/github-native-git/eligible-agents": {
+      "get": {
+        "tags": [
+          "connection-intents"
+        ],
+        "summary": "List agent IDs eligible for a terminal GitHub App grant",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
         }
       }
     },
@@ -112746,7 +112874,45 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": {}
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "agentId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "repository": {
+                      "type": "string"
+                    },
+                    "appSlug": {
+                      "type": "string"
+                    },
+                    "push": {
+                      "type": "boolean"
+                    },
+                    "pullRequests": {
+                      "type": "boolean"
+                    },
+                    "verifiedAt": {
+                      "type": "string"
+                    },
+                    "revokedAt": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "agentId",
+                    "repository",
+                    "appSlug",
+                    "push",
+                    "pullRequests",
+                    "verifiedAt",
+                    "revokedAt"
+                  ]
                 }
               }
             }
@@ -112780,16 +112946,6 @@
                 }
               }
             }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           }
         },
         "parameters": [
@@ -112816,13 +112972,10 @@
           },
           {
             "BoardApiKeyAuth": []
-          },
-          {
-            "AgentBearerAuth": []
           }
         ],
         "x-proprio-authorization": {
-          "actor": "board_or_agent"
+          "actor": "board"
         }
       }
     },
@@ -113599,7 +113752,7 @@
           "connection-intents"
         ],
         "summary": "Complete an addressed connection request",
-        "description": "Person-only: a connection request card is addressed to one person, its addresseeUserId. Only that person, signed in to their own browser, can open its setup, connect their account or decline it. The server refuses every other member, board user and agent, so nobody can finish it for them. When someone else offers to finish it, tell them the addressee must connect their own account from the card on its task, linked as [<identifier>](/<prefix>/issues/<identifier>). Do not create another request for the addressee and do not search for another route.",
+        "description": "Person-only: a connection request card is addressed to one person, its addresseeUserId. Only that person, signed in to their own browser, can open its setup, connect their account or decline it. The server refuses every other member, board user and agent, so nobody can finish it for them. When someone else offers to finish it, tell them the addressee must connect their own account from the card on its task, linked as [<identifier>](/<prefix>/issues/<identifier>). Do not create another request for the addressee and do not search for another route. For terminal Git, submit the grant ID and exact verifiedAt from setup-options. A change to the grant requires a fresh selection.",
         "responses": {
           "200": {
             "description": "Success",
@@ -113644,6 +113797,16 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -113806,9 +113969,6 @@
                   "connectionId": {
                     "type": "string",
                     "format": "uuid"
-                  },
-                  "nativeGitVerifiedAt": {
-                    "type": "string"
                   }
                 },
                 "required": [

@@ -1,4 +1,4 @@
-import { CONNECTION_REQUEST_TOOL_DESCRIPTION, CONNECTIONS_SEARCH_TOOL_DESCRIPTION } from "@groktopus/shared";
+import { CONNECTION_REQUEST_TOOL_DESCRIPTION, CONNECTIONS_SEARCH_TOOL_DESCRIPTION, githubNativeOperationSchema } from "@groktopus/shared";
 
 export const RUNTIME_CONNECTION_TOOL_DEFINITIONS = [
   {
@@ -18,7 +18,7 @@ export const RUNTIME_CONNECTION_TOOL_DEFINITIONS = [
       properties: { service: { type: "string" }, githubGit: {
         type: "object", description: "Use only with service github for terminal Git or gh, with the task workspace repository",
         properties: { repository: { type: "string", description: "GitHub owner/repo" },
-          operation: { type: "string", enum: ["read", "push", "create_pull_request"] } },
+          operation: { type: "string", enum: githubNativeOperationSchema.options } },
         required: ["repository", "operation"], additionalProperties: false,
       }, connectionId: { type: "string", description: "Reuse this saved connection" }, toolNames: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 20, uniqueItems: true, description: "Exact indexed tools needed by this agent" }, targetService: { type: "string", description: "App slug returned by search only when the user explicitly named this external provider" }, selectionInteractionId: { type: "string", description: "Saved answered provider-choice interaction ID for aggregator routes" } },
       required: ["service"],

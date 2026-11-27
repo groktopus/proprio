@@ -388,10 +388,15 @@ export function ConnectionIntentInteractionBody({
           <p role="alert" className="text-sm text-destructive">{describeError(completeMutation.error ?? declineMutation.error).body}</p>}
         <DecisionCardFooter leading={footerSlot}>
           <Button variant="ghost" disabled={busy} onClick={() => declineMutation.mutate()}>Not now</Button>
-          {availableGrant ? <Button disabled={busy} onClick={() => completeMutation.mutate(availableGrant.id)}>Use GitHub App</Button> : <>
+          {availableGrant ? <Button disabled={busy || setupQuery.isFetching} onClick={() => completeMutation.mutate(availableGrant.id, {
+            onError: () => { void setupQuery.refetch(); },
+          })}>Use GitHub App</Button> : <>
             {eligibility?.status === "unavailable" && setupQuery.data?.canGrantAccess
               && ["no_identity", "repository_denied", "action_denied", "revoked"].includes(eligibility.code)
               && <Button asChild variant="outline"><Link to="/apps/connect?source=github&nativeGit=1" target="_blank" rel="noopener noreferrer">Open GitHub setup</Link></Button>}
+            {eligibility?.status === "unavailable" && setupQuery.data?.canGrantAccess
+              && ["ambiguous", "managed_identity", "managed_repository_denied"].includes(eligibility.code)
+              && <Button asChild variant="outline"><Link to="/apps" target="_blank" rel="noopener noreferrer">Review GitHub identities</Link></Button>}
             <Button variant="outline" disabled={busy || setupQuery.isFetching} onClick={() => void setupQuery.refetch()}>Recheck access</Button>
           </>}
         </DecisionCardFooter>

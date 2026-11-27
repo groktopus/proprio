@@ -75,7 +75,6 @@ export interface ConnectionRequestResult {
   state: "ready" | "needs_user_action";
   connectionId: string | null;
   interactionId: string | null;
-  nativeGitGrantId?: string;
   instruction: string;
 }
 
@@ -103,10 +102,7 @@ export interface ConnectionIntentSetupOptions {
   requestedAgentId: string;
 }
 
-export interface CompleteConnectionIntentInput {
-  connectionId: string;
-  nativeGitVerifiedAt?: string;
-}
+export type CompleteConnectionIntentInput = import("../validators/connection-intent.js").CompleteConnectionIntent;
 
 export interface DeclineConnectionIntentInput {
   reason?: string;

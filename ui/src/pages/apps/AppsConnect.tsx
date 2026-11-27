@@ -120,7 +120,7 @@ export function AppsConnect({ byoOnly = false, credentialSource = "proprio_vault
   const showGitHubNativeGit = source === "github" && !byoOnly && selectedCompanyId && !returningToSkills
     && !reconnectId && !searchParams.has("resume");
   if (showGitHubNativeGit && searchParams.get("nativeGit") === "1") {
-    return <GitHubNativeGitSetup companyId={selectedCompanyId} />;
+    return <GitHubNativeGitSetup key={selectedCompanyId} companyId={selectedCompanyId} />;
   }
   return <>
     {showGitHubNativeGit && <Button asChild variant="outline">

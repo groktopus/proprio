@@ -1,4 +1,4 @@
-# GitHub managed connection
+# GitHub connections
 
 GitHub is a Proprio Cloud-managed GitHub App connection with an advanced PAT
 compatibility method. Cloud owns the fixed public OAuth callback and signed
@@ -75,6 +75,39 @@ If an unapproved enrollment link expires, return to setup and select
 live pending enrollment or replaces an expired one; this does not revoke or
 repeat an existing instance approval.
 
+## GitHub App for terminal Git
+
+In **Connectors → GitHub**, open **Configure a GitHub App for terminal Git**.
+A company connection manager selects an active Proprio Runner agent that
+supports terminal Git and enters the repository, numeric GitHub App ID, and
+PEM private key. Install the App on the selected repository and use that
+repository as the task's workspace source. This setup runs on the self-hosted
+controller without Cloud enrollment or a Proprio GitHub OAuth client.
+
+Grant the App **Contents: Read** for checkout, **Contents: Read and write**
+for branch pushes, and **Pull requests: Read and write** for opening PRs.
+**Pull requests: Read** lets Proprio verify a PR someone else opened for the
+agent's branch. Keep the repository's normal branch protections and rulesets.
+
+Proprio checks the App, its repository installation and a short-lived token
+scoped to the verified repository. Setup retires that token after verification.
+The initial checkout uses a contents-read token. The terminal broker issues
+tokens for the repository recorded at run admission and checks current task
+and workspace access before releasing them. A healthy Organization PAT
+continues to supply hosted MCP access through its own connection.
+
+Revoking a grant retires the saved private key and denies subsequent token
+issuance. GitHub controls tokens already issued to running processes and
+applies its normal installation, repository and branch policies. Remove the
+installation at GitHub to stop provider-side access.
+
+For deployment qualification, start the selected Compose candidate with an
+empty workspace cache and use one App-bound agent to check out the private
+fixture, push an allowed branch and open a PR. Check a protected write and a
+different repository for denial, then revoke the grant and confirm the next
+Git operation fails. Exercise the Organization PAT in the same fixture if it
+will coexist in production.
+
 ## Identity resolution
 
 Fresh setup does not reuse an archived personal connection found by name and
@@ -83,8 +116,7 @@ name, such as `GitHub (2)`. The archived identity, credentials, grants, and
 history stay unchanged. An explicit reconnect or application-targeted setup
 continues the existing identity and requires its personal owner.
 
-Every MCP call, `gh` invocation, native Git operation, checkout, health check,
-and webhook binding uses the same order:
+Managed GitHub identity uses this order when the operation permits it:
 
 1. An active dedicated GitHub grant for the current agent.
 2. The active personal GitHub grant owned by the run's `responsibleUserId`.
@@ -97,6 +129,13 @@ An unavailable or ambiguous managed identity fails visibly. It never falls
 through to another person, an organization credential, or a legacy token.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
+
+For terminal Git, the repository-scoped App grant applies after managed
+identity resolution reports no identity or only an MCP-only Organization PAT.
+A managed identity conflict or denial still stops credential export. Older
+runs keep their existing managed identity receipts. A repository-scoped App
+token requires a stored workspace admission, with a separate read-only path
+for workspace preparation before admission.
 
 The connection installation is the credential owner's consent boundary. A
 personal setup may target every agent or a selected set, and runtime resolution

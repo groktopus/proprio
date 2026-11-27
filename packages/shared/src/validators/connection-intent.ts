@@ -17,10 +17,14 @@ export const connectionRequestInputSchema = z.object({
   input.service === "github" && !input.toolNames && !input.connectionId && !input.targetService && !input.selectionInteractionId
 ), "Terminal Git requests require GitHub, a repository, and an operation.");
 
-export const completeConnectionIntentSchema = z.object({
+export const adoptAiConnectionIntentSchema = z.object({
   connectionId: z.string().guid(),
-  nativeGitVerifiedAt: z.iso.datetime().optional(),
 }).strict();
+
+export const completeConnectionIntentSchema = adoptAiConnectionIntentSchema.extend({
+  connectionId: z.string().guid().describe("Connection ID, or the GitHub App grant ID from setup options for a terminal Git request."),
+  nativeGitVerifiedAt: z.iso.datetime().optional().describe("Required for terminal Git requests. Use the exact verifiedAt value of the selected GitHub App grant from setup options."),
+});
 
 export const declineConnectionIntentSchema = z.object({
   reason: z.string().trim().max(4000).optional(),

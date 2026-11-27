@@ -809,6 +809,8 @@ export function connectionIntentService(db: Db) {
         ? results[0]!.state === "ready"
           ? "An active AgentMail inbox is assigned to you. Use agentmail_inboxes to read its address. Do not request another connection."
           : "Call connection_request with service agentmail to show the inline API-key card. Do not send a setup link or ask for the key in chat. The card creates an inbox for this agent; wait for completion before claiming an email address."
+      : results[0]!.service === "github" && results[0]!.state === "ready"
+        ? "Use the installed connection for GitHub MCP tools. For terminal Git or gh, call connection_request with service github and githubGit for the workspace repository and operation."
       : results[0]!.methods.every(method => method.purpose && method.purpose !== "tool")
         ? "Choose the method relevant to the task using its purpose and label. If method.management.allowed, configure through search_api/call_api using nextApiOperation. Hand off only required human authentication or consent at the saved setupPath. These methods do not use the tool connection_request card. Do not claim tools or an inbox are ready before setup finishes."
       : results[0]!.state === "ready" ? "Use the installed connection. Do not create another connection request."
@@ -912,13 +914,15 @@ export function connectionIntentService(db: Db) {
     }
     const nativeGit = options.githubGit ? await githubNativeIntentEligibility(db, {
       companyId: context.run.companyId, agentId: context.agent.id, issueId: context.issue.id,
-      sourceRunId: context.run.id, request: options.githubGit,
+      sourceRunId: context.run.id, request: options.githubGit, requireLauncher: true,
     }) : undefined;
     if (nativeGit?.status === "available") return {
       version: 1, service: "github", state: "ready", interactionId: null, connectionId: null,
-      nativeGitGrantId: nativeGit.grant.id,
       instruction: `The GitHub App grant covers ${nativeGit.grant.repository} for this terminal Git operation. Use the task workspace's GitHub remote.`,
     };
+    if (nativeGit?.status === "unavailable" && ["runtime_denied", "workspace_mismatch"].includes(nativeGit.code)) {
+      throw unprocessable(nativeGit.reason, { code: nativeGit.code });
+    }
     const route = parseAggregatorRoute(serviceSlug);
     let upstreamService: { slug: string; name: string; selectionInteractionId?: string } | undefined;
     if (options.targetService) {
@@ -1118,6 +1122,7 @@ export function connectionIntentService(db: Db) {
       const githubGit = await githubNativeIntentEligibility(db, {
         companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, issueId: loaded.issue.id,
         sourceRunId: loaded.interaction.sourceRunId, request: payload.githubGit,
+        identityContextId: loaded.interaction.sourceIdentityContextId, responsibleUserId: loaded.interaction.addresseeUserId,
       });
       return {
         version: 1, interaction: loaded.interaction, requestedAgentId: payload.requestingAgentId, existingConnections: [],
@@ -1301,7 +1306,8 @@ export function connectionIntentService(db: Db) {
       if (currentPayload.githubGit) {
         const eligible = await githubNativeIntentEligibility(txDb, {
           companyId: task.companyId, agentId: currentPayload.requestingAgentId, issueId: task.id,
-          sourceRunId: current.sourceRunId, request: currentPayload.githubGit, lockGrant: true,
+          sourceRunId: current.sourceRunId, request: currentPayload.githubGit, lockAuthority: true,
+          identityContextId: current.sourceIdentityContextId, responsibleUserId: current.addresseeUserId,
         });
         if (eligible.status !== "available") throw conflict(eligible.reason, { code: eligible.code });
         if (eligible.grant.id !== connectionId || eligible.grant.verifiedAt !== options.nativeGitVerifiedAt) {
@@ -1645,7 +1651,7 @@ export function connectionIntentService(db: Db) {
       );
       const setupAccess = connectionIntentPayloadSchema.shape.setupAccess.parse(options.setupAccess);
       if (setupAccess) {
-        if (loaded.interaction.payload.purpose || loaded.interaction.payload.accessRequest) {
+        if (loaded.interaction.payload.purpose || loaded.interaction.payload.accessRequest || loaded.interaction.payload.githubGit) {
           throw unprocessable("Only tool connection setup can select a new audience");
         }
         await access.getConnection(setupAccess.connectionId, loaded.issue.companyId);

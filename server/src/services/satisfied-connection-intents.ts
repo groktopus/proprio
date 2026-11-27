@@ -4,7 +4,7 @@ import { notifyChatConfirmationResolution } from "./chat-confirmation-notificati
 import { enqueueTerminalIssueInteractionChatPublications } from "./chat-interaction-publications.js";
 import { connectionManagementService } from "./connection-management.js";
 import { chatCredentialEntryGenerations } from "./chat-channels/credentials.js";
-import { and, asc, eq, gt, inArray, isNull, notInArray, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import { chatEndpoints, chatExternalPrincipals, chatIdentityLinks, toolConnections, companyMemberships, connectionIntentDeliveries, issueThreadInteractions, issues, type Db } from "@groktopus/db";
 import { connectionIntentPayloadSchema } from "@groktopus/shared";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -126,6 +126,7 @@ export function satisfiedConnectionIntentService(db: Db) {
           eq(issues.id, issueThreadInteractions.issueId), eq(issues.companyId, issueThreadInteractions.companyId),
         )).where(and(eq(issueThreadInteractions.kind, "connection_intent"), eq(issueThreadInteractions.status, "pending"),
           notInArray(issues.status, ["done", "cancelled"]), isNull(issues.assigneeUserId),
+          sql`(${issueThreadInteractions.payload} ? 'githubGit') IS NOT TRUE`,
           ...(afterId ? [gt(issueThreadInteractions.id, afterId)] : [])))
         .orderBy(asc(issueThreadInteractions.id)).limit(50);
       // Rotate past unavailable cards so they cannot starve a later ready one.

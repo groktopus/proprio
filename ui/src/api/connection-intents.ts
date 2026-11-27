@@ -1,4 +1,5 @@
 import type {
+  CompleteConnectionIntentInput,
   ConnectionIntentInteraction,
   ConnectionIntentSetupOptions,
 } from "@groktopus/shared";
@@ -18,7 +19,7 @@ export const connectionIntentsApi = {
       `/connection-intents/${interactionId}/phase`,
       { phase, ...(setupAccess ? { setupAccess } : {}) },
     ),
-  complete: (interactionId: string, connectionId: string, nativeGitVerifiedAt?: string) =>
+  complete: (interactionId: string, connectionId: CompleteConnectionIntentInput["connectionId"], nativeGitVerifiedAt?: CompleteConnectionIntentInput["nativeGitVerifiedAt"]) =>
     api.post<ConnectionIntentInteraction>(
       `/connection-intents/${interactionId}/complete`,
       { connectionId, ...(nativeGitVerifiedAt ? { nativeGitVerifiedAt } : {}) },

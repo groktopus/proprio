@@ -37,4 +37,4 @@ export interface GitHubNativeGrantSummary {
 
 export type GitHubNativeEligibility =
   | { status: "available"; grant: GitHubNativeGrantSummary }
-  | { status: "unavailable"; reason: string; code: "no_identity" | "ambiguous" | "repository_denied" | "action_denied" | "runtime_denied" | "workspace_mismatch" | "managed_identity" | "revoked" };
+  | { status: "unavailable"; reason: string; code: "no_identity" | "ambiguous" | "repository_denied" | "action_denied" | "runtime_denied" | "workspace_mismatch" | "managed_identity" | "managed_repository_denied" | "revoked" | "fresh_turn_required" };

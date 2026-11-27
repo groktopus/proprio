@@ -223,8 +223,14 @@ it("offers only the eligible App and sends the reviewed grant version for termin
     grant: { id: "app-grant", appSlug: "engineer-app", verifiedAt: version } } });
   await act(async () => button("Recheck access")?.click());
   await waitForAssertion(() => expect(button("Use GitHub App")).toBeDefined());
+  completeMock.mockRejectedValueOnce(new ApiError("The selected GitHub App grant changed.", 409, null));
+  setupOptionsMock.mockResolvedValue({ existingConnections: [], githubGit: {
+    status: "unavailable", code: "revoked", reason: "The GitHub App grant was revoked.",
+  } });
   await act(async () => button("Use GitHub App")?.click());
   expect(completeMock).toHaveBeenCalledWith(interaction.id, "app-grant", version);
+  await waitForAssertion(() => expect(document.body.textContent).toContain("The GitHub App grant was revoked."));
+  expect(button("Use GitHub App")).toBeUndefined();
 });
 
 it("explains all-agent defaults consistently on compact connector cards", () => {

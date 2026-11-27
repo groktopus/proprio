@@ -10,7 +10,7 @@ import {
   connectionsSearchInputSchema,
   declineConnectionIntentSchema,
 } from "@groktopus/shared";
-import { forbidden, unauthorized } from "../errors.js";
+import { forbidden, notFound, unauthorized } from "../errors.js";
 import { verifyRuntimeToolsToken } from "../runtime-tools-token.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { logActivity } from "../services/activity-log.js";
@@ -168,6 +168,12 @@ export function connectionIntentBoardRoutes(db: Db, heartbeat: Heartbeat) {
     const userId = req.actor.userId ?? "local-board";
     if (loaded.interaction.addresseeUserId !== userId) {
       throw forbidden("Only the addressed user can act on this connection request");
+    }
+    if (loaded.interaction.payload.githubGit) {
+      const decision = await access.decide({ actor: req.actor, action: "issue:read", resource: {
+        type: "issue", companyId: loaded.issue.companyId, issueId: loaded.issue.id,
+      } });
+      if (!decision.allowed) throw notFound("Connection intent not found");
     }
     return { loaded, userId };
   }

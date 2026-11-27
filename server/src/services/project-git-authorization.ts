@@ -13,7 +13,8 @@ import {
 import type { ProjectGitAuthorization } from "@groktopus/shared";
 import { forbidden, notFound } from "../errors.js";
 import { resolveManagedGitHubCredential } from "./git-credentials.js";
-import { resolveGitHubOperationCredentials } from "./github-operation-credentials.js";
+import { resolveGitHubOperationCredentials, resolveGitHubProjectCheckoutCredentials } from "./github-operation-credentials.js";
+import { githubNativeGitService } from "./github-native-git.js";
 import { normalizeProjectRepositoryUrl, projectRepositoryIsPrivate } from "./project-repositories.js";
 import { recordProjectLifecycleEvent } from "./resource-lifecycle-events.js";
 import { persistActivity, publishActivity } from "./activity-log.js";
@@ -168,7 +169,6 @@ export function projectGitAuthorizationService(db: Db) {
       const repo = normalizeProjectRepositoryUrl(workspace.repoUrl);
       if (input.expectedRepository && repo.fullName.toLowerCase() !== input.expectedRepository.toLowerCase())
         throw forbidden("Project repository changed before GitHub authorization");
-      const isPrivate = await projectRepositoryIsPrivate(db, input.companyId, workspace);
       if (scope.runId || scope.agentId) {
         if (!scope.runId || !scope.agentId) throw forbidden("Incomplete foreground Git identity");
         const [run] = await db
@@ -205,17 +205,24 @@ export function projectGitAuthorizationService(db: Db) {
         }, input.companyId, {
           issueId, workspaceId: issue.executionWorkspaceId, projectWorkspaceId: workspace.id,
         });
-        if (!isPrivate) return null;
-        const result = await resolveGitHubOperationCredentials(db, {
+        const credentialInput = {
           companyId: input.companyId,
           runId: scope.runId,
           agentId: scope.agentId,
           expectedRepository: repo.fullName.toLowerCase(),
-        });
+        };
+        const boundResult = await githubNativeGitService(db).hasBinding(input.companyId, scope.agentId)
+          ? await resolveGitHubProjectCheckoutCredentials(db, { ...credentialInput, projectCheckoutSourceId: workspace.id })
+          : undefined;
+        if (boundResult?.status === "available" && boundResult.nativeGitGrantId) {
+          return transientGitToken(boundResult.env.PROPRIO_GIT_TOKEN);
+        }
+        if (!await projectRepositoryIsPrivate(db, input.companyId, workspace)) return null;
+        const result = boundResult ?? await resolveGitHubOperationCredentials(db, credentialInput);
         if (result.status !== "available") throw forbidden(result.reason ?? "Run GitHub authorization unavailable");
         return transientGitToken(result.env.PROPRIO_GIT_TOKEN);
       }
-      if (!isPrivate) return null;
+      if (!await projectRepositoryIsPrivate(db, input.companyId, workspace)) return null;
       if (!row.gitAuthorizationGrantId)
         throw forbidden("Authorize this project's GitHub connection before provisioning private repositories");
       const selected =
