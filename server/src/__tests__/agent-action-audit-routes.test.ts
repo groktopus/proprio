@@ -23,6 +23,7 @@ import {
   toolApplications,
   toolCatalogEntries,
   toolConnections,
+  type DbTransaction,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -219,7 +220,7 @@ describePostgres("agent action audit routes", () => {
 
       // Exercise the production lifecycle path that removes the run while
       // retaining its managed audit event and canonical privacy provenance.
-      await db.transaction(tx => deleteAgentDependencies(tx, company.id, agent.id));
+      await db.transaction((tx: DbTransaction) => deleteAgentDependencies(tx, company.id, agent.id));
       expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id))).toHaveLength(0);
       expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.id, capturedEvent!.id))).toHaveLength(1);
 

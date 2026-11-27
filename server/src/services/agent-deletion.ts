@@ -10,14 +10,14 @@ import { notifyInstructionCommit } from "./instruction-commit-notifications.js";
 import { notifyScheduledRetryCancellation } from "./scheduled-retry-cancellation-notifications.js";
 import { and, eq, or, sql } from "drizzle-orm";
 import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeupRequests, activityLog,
-  budgetReservations, costEvents, financeEvents, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments,
+  budgetReservations, costEvents, financeEvents, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments, type Db,
   caseHandoffs, principalPermissionGrants, type DbTransaction } from "@groktopus/db";
 import { conflict } from "../errors.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
 import { githubNativeGitService } from "./github-native-git.js";
 
-export async function deleteAgentDependencies(tx: DbTransaction, companyId: string, id: string) {
+export async function deleteAgentDependencies(tx: Db | DbTransaction, companyId: string, id: string) {
   // Lifecycle callers use READ COMMITTED. Fence admissions before inspecting
   // holds, so the next statement sees any admission that committed while waiting.
   await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, id))).for("update");
