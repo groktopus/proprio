@@ -17,6 +17,7 @@ const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
 const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
 const MAX_WAITING_COMPANIES = 3;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+const EXPIRED_SNAPSHOT_MARKER_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
   companyId: string;
@@ -192,6 +193,29 @@ function assertRetainedWindow(scope: ExportScope, from: Date) {
   }
 }
 
+async function cleanExpiredSnapshots(tx: DbTransaction, companyId: string, now: Date) {
+  const markerCutoff = new Date(now.getTime() - EXPIRED_SNAPSHOT_MARKER_TTL_MS);
+  const ordinals = [asc(managedAuditExports.expiresAt), asc(managedAuditExports.id)] as const;
+  const pastMarkerRetention = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+    .where(and(eq(managedAuditExports.companyId, companyId), lte(managedAuditExports.expiresAt, markerCutoff)))
+    .orderBy(...ordinals)
+    .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+  await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, pastMarkerRetention));
+
+  // Keep the owner, source epoch and expiration long enough to distinguish an
+  // ordinary expiry from a snapshot lost across restore. Release the membership.
+  const recentExpirations = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+    .where(and(
+      eq(managedAuditExports.companyId, companyId),
+      gt(managedAuditExports.expiresAt, markerCutoff),
+      lte(managedAuditExports.expiresAt, now),
+      sql`cardinality(${managedAuditExports.eventIds}) > 0`,
+    )).orderBy(...ordinals)
+    .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
+  await tx.update(managedAuditExports).set({ eventIds: [] })
+    .where(inArray(managedAuditExports.id, recentExpirations));
+}
+
 export async function createManagedAuditExport(
   db: Db,
   scope: ExportScope & { captureFrom: Date },
@@ -215,11 +239,7 @@ export async function createManagedAuditExport(
         reasonCode: "active_snapshot_limit",
       });
     }
-    const expired = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
-      .where(and(eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now)))
-      .orderBy(asc(managedAuditExports.expiresAt))
-      .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
-    await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, expired));
+    await cleanExpiredSnapshots(tx, scope.companyId, now);
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
