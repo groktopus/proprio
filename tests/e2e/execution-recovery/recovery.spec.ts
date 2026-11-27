@@ -1,13 +1,18 @@
 import { test, expect } from "@playwright/test";
-import { execFileSync, type ChildProcess } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { listenOnFetchAllowedPort } from "../fetch-allowed-port";
 import { launchTestDrive } from "../fixtures/test-drive-process";
+import { makeDirectoryTreeRemovable } from "../../runner-e2e/directory-cleanup";
+import { isBoundNativePrpEventRow } from "../../runner-e2e/native-event-envelope";
+import { createProcessTreeOwner, stopOwnedProcessTree } from "../../runner-e2e/process-tree-owner";
+import { collectRunEvents } from "../../runner-e2e/run-observations";
 
-// Each attempt starts the source CLI's test-drive without --data-dir. The model
-// and MCP provider are deterministic fixtures; authorization/cards/wakes are real.
+// The model and MCP providers are deterministic fixtures. The controller,
+// authorization, recovery actions, and wake delivery are exercised through product entry points.
 for (const journey of [
   "safe",
   "uncertain",
@@ -18,40 +23,54 @@ for (const journey of [
   test(`fresh execution recovery and current-request journey: ${journey}`, async ({
     page,
   }, info) => {
+    if (journey === "uncertain") test.setTimeout(180_000);
     const root = resolve(import.meta.dirname, "../../..");
-    let processHandle: ChildProcess | undefined;
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const branchName = execFileSync("git", ["branch", "--show-current"], { cwd: root, encoding: "utf8" }).trim() || null;
+    let drive: { child: ReturnType<typeof launchTestDrive>["child"]; owner: ReturnType<typeof createProcessTreeOwner> } | undefined;
+    let ownedDataDir: string | undefined;
     let logs = "";
     let diagnosticState = async () => ({});
+    const uncertaintyPath = info.outputPath("uncertain-effect-evidence.json");
+    const checkpoints: Array<{ phase: string; observedAt: string; details: Record<string, unknown> }> = [];
+    async function recordUncertainty(phase: string, details: Record<string, unknown>, verdict?: Record<string, unknown>) {
+      checkpoints.push({ phase, observedAt: new Date().toISOString(), details });
+      await writeFile(uncertaintyPath, JSON.stringify({
+        revision, profile: "native/codex-app-server fixture", journey, checkpoints, ...verdict,
+      }, null, 2));
+    }
     async function stopDrive() {
-      if (processHandle?.pid) {
-        const child = processHandle;
-        const stopped = new Promise<void>((done) =>
-          child.once("exit", () => done()),
-        );
-        try {
-          process.kill(-child.pid!, "SIGTERM");
-        } catch {}
-        if (child.exitCode === null && child.signalCode === null) {
-          let timeout: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            stopped,
-            new Promise<void>((done) => {
-              timeout = setTimeout(() => {
-                try {
-                  process.kill(-child.pid!, "SIGKILL");
-                } catch {}
-                done();
-              }, 15_000);
-            }),
-          ]);
-          clearTimeout(timeout);
-        }
+      const active = drive;
+      if (!active) return;
+      try {
+        await stopOwnedProcessTree(active.child, active.owner);
+        drive = undefined;
+      } finally {
+        active.owner.stopObserving();
       }
     }
 
     const calls: string[] = [];
+    const externalEffects: { operation: string; sequence: number }[] = [];
     let gmailReadCount = 0;
+    function readFixtureGmail() {
+      gmailReadCount += 1;
+      if (journey === "uncertain") return "RECOVERY-INJECT-UNKNOWN-WRITE";
+      if (gmailReadCount === 1 && journey !== "ceo_lineage") return "RECOVERY-INJECT-SAFE";
+      return "GMAIL-73: The launch email confirms Friday approval. Source: https://example.invalid/mail/gmail-73";
+    }
     const fixture = createServer(async (req, res) => {
+      if (req.method === "GET" && req.url === "/effects") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ effects: externalEffects }));
+        return;
+      }
+      if (journey === "uncertain" && req.method === "POST" && req.url === "/effects") {
+        externalEffects.push({ operation: "send_fixture_email", sequence: externalEffects.length + 1 });
+        res.writeHead(204, { "x-proprio-fixture-inject-failure": externalEffects.length === 1 ? "1" : "0" });
+        res.end();
+        return;
+      }
       const chunks: Buffer[] = [];
       for await (const part of req) chunks.push(Buffer.from(part));
       const message = JSON.parse(Buffer.concat(chunks).toString() || "{}");
@@ -95,11 +114,7 @@ for (const journey of [
                     {
                       type: "text",
                       text: gmail
-                        ? ++gmailReadCount === 1 && journey !== "ceo_lineage"
-                          ? journey !== "uncertain"
-                            ? "RECOVERY-INJECT-SAFE"
-                            : "RECOVERY-INJECT-UNKNOWN-WRITE"
-                          : "GMAIL-73: The launch email confirms Friday approval. Source: https://example.invalid/mail/gmail-73"
+                        ? readFixtureGmail()
                         : "HELIOTROPE-42: Launch in two stages; support handoff belongs to Mira. Source: https://example.invalid/launch/heliotrope-42",
                     },
                   ],
@@ -110,28 +125,47 @@ for (const journey of [
     });
     try {
       const port = await listenOnFetchAllowedPort(fixture);
+      const codexHome = info.outputPath("codex-home");
+      await mkdir(codexHome, { recursive: true });
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         PROPRIO_RECOVERY_CEO_LINEAGE: journey === "ceo_lineage" ? "1" : "0",
         IN_FEED_FIXTURE_KEY: "not-a-real-model-key",
+        CODEX_HOME: codexHome,
         NODE_ENV: "test",
         PATH: `${root}/tests/e2e/fixtures/recovery-bin:${process.env.PATH}`,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(root, "tests/e2e/fixtures/recovery-codex-loader.mjs")}`,
       };
       delete env.DATABASE_URL;
       delete env.DATABASE_MIGRATION_URL;
-      const drive = launchTestDrive({ cwd: root, env,
-        args: ["--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY",
-          "--company-name", "Execution recovery fixture", "--no-browser"],
-        onOutput: chunk => { logs += chunk; },
-      });
-      processHandle = drive.child;
-      let base = await drive.ready;
+      const instance = `execution-recovery-${process.pid}-${info.workerIndex}`;
+      if (journey === "uncertain") ownedDataDir = await mkdtemp(resolve(tmpdir(), "proprio-recovery-"));
+      async function startDrive(dataDir?: string) {
+        const args = ["--instance", instance, "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY",
+          "--company-name", "Execution recovery fixture", "--no-browser"];
+        if (dataDir) args.push("--data-dir", dataDir);
+        const launched = launchTestDrive({ cwd: root, env, args,
+          onOutput: chunk => { logs += chunk; },
+        });
+        drive = { child: launched.child, owner: createProcessTreeOwner(launched.child) };
+        return launched.ready;
+      }
+      async function restartDrive(dataDir: string) {
+        await stopDrive();
+        return startDrive(dataDir);
+      }
+      let base = await startDrive(ownedDataDir);
       const api = async (path: string, method = "GET", data?: unknown) => {
         const response = await page.request.fetch(`${base}/api${path}`, {
           method,
           data,
         });
         expect(response.ok(), await response.text()).toBeTruthy();
+        return response.json();
+      };
+      const fixtureEffects = async () => {
+        const response = await fetch(`http://127.0.0.1:${port}/effects`);
+        expect(response.ok).toBe(true);
         return response.json();
       };
       const isSettledRun = (run: { status: string; errorCode?: string }) =>
@@ -144,17 +178,12 @@ for (const journey of [
         deploymentMode: "local_trusted",
         bootstrapStatus: "ready",
         serverInfo: {
-          git: {
-            branchName: execFileSync("git", ["branch", "--show-current"], {
-              cwd: root,
-              encoding: "utf8",
-            }).trim(),
-          },
+          git: { available: true, fullSha: revision, branchName },
         },
       });
       const [company] = await api("/companies");
       let [agent] = await api(`/companies/${company.id}/agents`);
-      expect(agent.adapterType).toBe("codex_local");
+      expect(["codex_local", "proprio_runner"]).toContain(agent.adapterType);
       expect(await api(`/companies/${company.id}/issues`)).toEqual([]);
       expect(await api(`/companies/${company.id}/heartbeat-runs`)).toEqual([]);
       expect(
@@ -164,27 +193,36 @@ for (const journey of [
         base,
         companyId: company.id,
         agentId: agent.id,
-        tasks: (await api(`/companies/${company.id}/issues`)).map(
-          (task: Record<string, unknown>) => ({
-            id: task.id,
-            status: task.status,
-            assigneeAgentId: task.assigneeAgentId,
-          }),
-        ),
-        runs: (await api(`/companies/${company.id}/heartbeat-runs`)).map(
-          (run: Record<string, unknown>) => ({
+        agent: await api(`/agents/${agent.id}`).then((row: Record<string, unknown>) => ({
+          status: row.status,
+          adapterType: row.adapterType,
+          lifecycleHolds: row.lifecycleHolds,
+        })),
+        tasks: await Promise.all((await api(`/companies/${company.id}/issues`)).map(async (task: { id: string }) => {
+          const detail = await api(`/issues/${task.id}`);
+          return { id: detail.id, status: detail.status, assigneeAgentId: detail.assigneeAgentId,
+            recoveryCause: detail.activeRecoveryAction?.cause, recoveryEvidence: detail.activeRecoveryAction?.evidence };
+        })),
+        runs: await Promise.all((await api(`/companies/${company.id}/heartbeat-runs`)).map(async (run: Record<string, unknown>) => {
+          const detail = await api(`/heartbeat-runs/${run.id}`);
+          return {
             id: run.id,
             status: run.status,
-            runtimeMode: run.runtimeMode,
-            error: run.error,
-            errorCode: run.errorCode,
-          }),
-        ),
+            runtimeMode: detail.runtimeMode,
+            scheduledRetryReason: detail.scheduledRetryReason,
+            error: run.error ?? detail.error,
+            errorCode: run.errorCode ?? detail.errorCode,
+            stderrExcerpt: detail.stderrExcerpt,
+            stdoutExcerpt: detail.stdoutExcerpt,
+          };
+        })),
+        fixtureEffects: await fixtureEffects().catch((error: unknown) => ({ error: String(error) })),
       });
       const dataDir = logs
         .match(/Data directory: ([^\n\r]+)/)![1]!
         .replace(/\u001b\[[0-9;]*m/g, "")
         .trim();
+      if (ownedDataDir) expect(dataDir).toBe(ownedDataDir);
       await writeFile(
         info.outputPath("running-instance.json"),
         JSON.stringify(
@@ -248,38 +286,53 @@ for (const journey of [
             (await api("/instance/settings/experimental")).enableNativeRunner,
         )
         .toBe(true);
-      await page.goto(base + prefix + `/agents/${agent.id}/configuration`);
-      await page.getByRole("button", { name: "Codex", exact: true }).click();
-      await page.getByRole("button", { name: /Proprio Runner/ }).click();
-      await page
-        .getByRole("button", { name: /^Save(?: changes)?$/ })
-        .first()
-        .click();
-      await expect
-        .poll(async () => (await api(`/agents/${agent.id}`)).adapterType)
-        .toBe("proprio_runner");
+      if (agent.adapterType !== "proprio_runner") {
+        await page.goto(base + prefix + `/agents/${agent.id}/configuration`);
+        await page.getByRole("button", { name: "Codex", exact: true }).click();
+        await page.getByRole("button", { name: /Proprio Runner/ }).click();
+        await page
+          .getByRole("button", { name: /^Save(?: changes)?$/ })
+          .first()
+          .click();
+        await expect
+          .poll(async () => (await api(`/agents/${agent.id}`)).adapterType)
+          .toBe("proprio_runner");
+      }
       const nativeAgent = await api(`/agents/${agent.id}`);
       expect(nativeAgent.adapterConfig.env).toEqual(agent.adapterConfig.env);
       if (journey !== "ceo_lineage") {
-        const { instructionsFilePath: _instructions, ...executorConfig } =
-          nativeAgent.adapterConfig;
+        const runnerCwd = info.outputPath("runner-workspace");
+        await mkdir(runnerCwd, { recursive: true });
         agent = await api(`/companies/${company.id}/agents`, "POST", {
           name: "Executor",
           role: "engineer",
           adapterType: "proprio_runner",
-          adapterConfig: executorConfig,
+          adapterConfig: {
+            provider: "codex",
+            model: "gpt-6.1-sol",
+            cwd: runnerCwd,
+            lifecycleMode: "per_turn",
+            codexPermissionMode: "never",
+            timeoutSec: 50,
+            env: {
+              CODEX_HOME: codexHome,
+              OPENAI_API_KEY: "not-a-real-model-key",
+              ...(journey === "uncertain" ? { RECOVERY_FIXTURE_EFFECT_URL: `http://127.0.0.1:${port}/effects` } : {}),
+            },
+          },
         });
       }
-      const holder = await api(`/companies/${company.id}/agents`, "POST", {
-        name: "Archive holder",
-        role: "qa",
-        adapterType: "process",
-        adapterConfig: {
-          command: process.execPath,
-          args: ["-e", "process.exit(0)"],
-        },
-      });
-      const connections: Record<string, { id: string; name: string }> = {};
+      if (journey === "uncertain") {
+        const probeAgent = await api(`/agents/${agent.id}`);
+        const probeResponse = await page.request.post(
+          `${base}/api/companies/${company.id}/adapters/proprio_runner/test-environment`,
+          { data: { agentId: agent.id, adapterConfig: probeAgent.adapterConfig } },
+        );
+        const probeResult = await probeResponse.json();
+        expect(probeResponse.ok(), JSON.stringify(probeResult)).toBe(true);
+        expect(probeResult.status, JSON.stringify(probeResult.checks)).toBe("pass");
+      }
+      const connectionIds = new Set<string>();
       for (const service of ["notion", "gmail"]) {
         await page.goto(base + prefix + "/apps");
         const custom = page
@@ -298,10 +351,13 @@ for (const journey of [
         await page
           .getByRole("button", { name: "Continue", exact: true })
           .click();
-        await page.getByRole("button", { name: "Change", exact: true }).click();
+        const connectWizard = page.getByRole("main").filter({
+          has: page.getByRole("heading", { name: "Connect your own MCP server" }),
+        });
+        await connectWizard.getByRole("button", { name: "Change", exact: true }).nth(1).click();
         await page.getByRole("radio", { name: "Just agents I pick" }).click();
         await page.getByRole("button", { name: /Select agents/ }).click();
-        await page.getByRole("checkbox", { name: /Archive holder/ }).check();
+        await page.getByRole("checkbox", { name: new RegExp(agent.name) }).check();
         await page.keyboard.press("Escape");
         await page.getByRole("button", { name: /Check link/i }).click();
         await expect(
@@ -311,17 +367,13 @@ for (const journey of [
           await api(`/companies/${company.id}/tools/connections`)
         ).connections.find(
           (row: { id: string }) =>
-            !Object.values(connections).some(
-              (existing) => existing.id === row.id,
-            ),
+            !connectionIds.has(row.id),
         );
-        connections[service] = connection;
+        connectionIds.add(connection.id);
         const installs = (
           await api(`/tool-connections/${connection.id}/installs`)
         ).installs;
-        expect(installs).toEqual([
-          expect.objectContaining({ targetId: holder.id }),
-        ]);
+        expect(installs).toEqual([expect.objectContaining({ targetId: agent.id })]);
       }
       await page.getByRole("link", { name: "Tasks", exact: true }).click();
       await page
@@ -329,44 +381,20 @@ for (const journey of [
         .last()
         .click();
       await page
-        .getByPlaceholder("Task title")
+        .getByRole("textbox", { name: "editable markdown" })
         .fill(
           `${journey === "ceo_lineage" ? "CEO descendant fixture: " : ""}Find the heliotrope launch notes and summarize the decisions with a source link`,
         );
-      await page.getByRole("button", { name: "Assignee", exact: true }).click();
-      await page.getByRole("button", { name: agent.name, exact: true }).click();
+      await page.getByRole("button", { name: "Select assignee", exact: true }).click();
+      await page.getByRole("option").filter({ hasText: agent.name }).click();
       await page
-        .getByRole("button", { name: "Create Task", exact: true })
+        .getByRole("button", { name: "Create task", exact: true })
         .click();
       await page
         .getByRole("complementary")
         .getByRole("link", { name: /Find the heliotrope launch notes/ })
         .click();
       await expect(page).toHaveURL(/issues\/(?:[a-f0-9-]+|[A-Z]+-\d+)/);
-      const connectPending = async (service: "notion" | "gmail") => {
-        const connection = connections[service]!;
-        const card = page
-          .getByTestId("connection-intent-focus-target")
-          .filter({ hasText: connection.name });
-        await expect(
-          card.getByRole("button", { name: /Connect \/ Use existing/ }),
-        ).toBeVisible({ timeout: 60_000 });
-        await page.screenshot({
-          path: info.outputPath(`${service}-pending.png`),
-          fullPage: true,
-        });
-        await card
-          .getByRole("button", { name: /Connect \/ Use existing/ })
-          .click();
-        await expect(page.getByRole("dialog")).toBeVisible();
-        await page
-          .getByRole("dialog")
-          .getByRole("button", { name: new RegExp(connection.name) })
-          .click();
-        await expect(
-          card.getByText(`${connection.name} connected`, { exact: true }),
-        ).toBeVisible({ timeout: 30_000 });
-      };
       if (journey === "ceo_lineage")
         await expect(
           page
@@ -375,7 +403,6 @@ for (const journey of [
             })
             .first(),
         ).toBeVisible({ timeout: 60_000 });
-      await connectPending("notion");
       await expect(
         page.getByText(/HELIOTROPE-42: Launch in two stages/).first(),
       ).toBeVisible({ timeout: 60_000 });
@@ -390,14 +417,17 @@ for (const journey of [
         .toBe(true);
       const [task] = await api(`/companies/${company.id}/issues`);
       const originalTitle = task.title;
-      await page
-        .getByRole("textbox")
-        .last()
-        .fill(
-          "Now summarize my Gmail emails about launch decisions, with the source link.",
-        );
-      await page.getByRole("button", { name: "Send", exact: true }).click();
-      await connectPending("gmail");
+      const followup = "Now summarize my Gmail emails about launch decisions, with the source link.";
+      if (journey === "uncertain") {
+        await recordUncertainty("followup", { taskId: task.id });
+        await api(`/issues/${task.id}/comments`, "POST", { body: followup, reopen: true });
+      } else {
+        await page
+          .getByRole("textbox")
+          .last()
+          .fill(followup);
+        await page.getByRole("button", { name: "Send", exact: true }).click();
+      }
       if (journey === "safe_restart") {
         await expect
           .poll(
@@ -414,18 +444,12 @@ for (const journey of [
           path: info.outputPath("retry-before-restart.png"),
           fullPage: true,
         });
-        await stopDrive();
-        const restarted = launchTestDrive({ cwd: root, env,
-          args: ["--data-dir", dataDir, "--harness", "codex", "--api-key-env", "IN_FEED_FIXTURE_KEY", "--no-browser"],
-          onOutput: chunk => { logs += chunk; },
-        });
-        processHandle = restarted.child;
-        base = await restarted.ready;
+        base = await restartDrive(dataDir);
         expect((await api("/health")).serverInfo.git.branchName).toBe(
           health.serverInfo.git.branchName,
         );
         expect((await api("/companies"))[0].id).toBe(company.id);
-        await page.goto(base + prefix + `/issues/${task.id}`);
+        await page.goto(base + prefix + `/issues/${task.id}`, { waitUntil: "domcontentloaded" });
       }
       const composer = page.getByRole("textbox").last();
       await composer.fill("An unsent draft stays available during recovery.");
@@ -439,17 +463,91 @@ for (const journey of [
         expect(gmailReadCount).toBe(journey === "ceo_lineage" ? 1 : 2);
       } else {
         await expect.poll(async () => (await api(`/issues/${task.id}`)).status, { timeout: 100_000 }).toBe("blocked");
-        await expect(page.getByText("Blocked", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByRole("button", { name: "Change status (current: Blocked)", exact: true })).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByText(/Deterministic failed provider session after Gmail access/)).toBeVisible();
         expect(gmailReadCount).toBe(1);
+        expect(await fixtureEffects()).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
         await expect(page.getByText(/GMAIL-73/)).toHaveCount(0);
         await expect(page.getByRole("button", { name: /Reconcile and continue|Try again/ })).toHaveCount(0);
         await expect(page.getByRole("dialog", { name: "Reconcile execution" })).toHaveCount(0);
-        const recovery = (await api(`/issues/${task.id}`)).activeRecoveryAction;
-        expect(recovery).toBeNull();
         await page.screenshot({ path: info.outputPath("uncertain-automatic-no-replay.png"), fullPage: true });
-        // Past the retry delay, unknown effects still cannot be replayed.
-        await page.waitForTimeout(35_000);
+        const runsBeforeRestart = await api(`/companies/${company.id}/heartbeat-runs`);
+        const beforeRestartRunIds = runsBeforeRestart.map((run: { id: string }) => run.id).sort();
+        const uncertainRunId = runsBeforeRestart.find((run: { errorCode?: string }) => run.errorCode === "adapter_failed")?.id;
+        await recordUncertainty("failed_run", { runIds: beforeRestartRunIds, failedRunId: uncertainRunId ?? null });
+        expect(uncertainRunId).toBeTruthy();
+        const blockedStatus = page.getByRole("button", { name: "Change status (current: Blocked)", exact: true });
+        const failureExplanation = page.getByText(/Deterministic failed provider session after Gmail access/);
+        const retryControls = page.getByRole("button", { name: /Reconcile and continue|Try again/ });
+        const writeId = "uncertain-email-write";
+        async function observeHold(phase: string) {
+          const [health, issue, runs, events, effects] = await Promise.all([
+            api("/health"),
+            api(`/issues/${task.id}`),
+            api(`/companies/${company.id}/heartbeat-runs`),
+            collectRunEvents<Record<string, any>>((afterSeq, limit) =>
+              api(`/heartbeat-runs/${uncertainRunId}/events?afterSeq=${afterSeq}&limit=${limit}`)),
+            fixtureEffects(),
+          ]);
+          const binding = { runId: uncertainRunId, companyId: company.id, agentId: agent.id };
+          const writeEvents = events.filter(event => isBoundNativePrpEventRow(event, binding)
+            && event.payload.prpEvent.payload?.executionId === writeId);
+          const starts = writeEvents.filter(event => event.eventType === "tool.execution.started")
+            .map(event => ({ seq: event.seq, name: event.payload.prpEvent.payload.name,
+              readOnly: event.payload.prpEvent.payload.readOnly }));
+          const terminals = writeEvents.filter(event => event.eventType === "tool.execution.completed").map(event => event.seq);
+          const details = { controllerBoot: health.serverInfo.processStartedAt, status: issue.status,
+            cause: issue.activeRecoveryAction?.cause ?? null, runIds: runs.map((run: { id: string }) => run.id).sort(),
+            effectCount: effects.effects.length, starts, terminals, boardExplanationVisible: await failureExplanation.isVisible() };
+          await recordUncertainty(phase, details);
+          expect(details).toMatchObject({ status: "blocked", runIds: beforeRestartRunIds, effectCount: 1,
+            starts: [{ seq: expect.any(Number), name: "send_fixture_email", readOnly: false }], terminals: [] });
+          expect(effects).toEqual({ effects: [{ operation: "send_fixture_email", sequence: 1 }] });
+          return { details, git: health.serverInfo.git, recovery: issue.activeRecoveryAction };
+        }
+        const before = await observeHold("before_stop");
+        expect(before.recovery).toMatchObject({
+          ownerType: "board",
+          cause: "native_continuation_requires_reconciliation",
+          nextAction: expect.stringContaining("continues the task from its last saved work"),
+          evidence: {
+            runId: uncertainRunId,
+            originalFailureCode: "adapter_failed",
+            nativeFailureBlock: { runId: uncertainRunId },
+          },
+        });
+        base = await restartDrive(dataDir);
+        expect((await api("/companies"))[0].id).toBe(company.id);
+        await page.goto(base + prefix + `/issues/${task.id}`, { waitUntil: "domcontentloaded" });
+        try {
+          await expect(blockedStatus).toBeVisible({ timeout: 30_000 });
+          await expect(failureExplanation).toBeVisible({ timeout: 30_000 });
+          await expect(retryControls).toHaveCount(0);
+        } finally {
+          await recordUncertainty("board_after_restart", {
+            blockedVisible: await blockedStatus.isVisible(),
+            explanationVisible: await failureExplanation.isVisible(),
+            retryControls: await retryControls.count(),
+          });
+        }
+        const after = await observeHold("after_restart");
+        expect(after.git).toMatchObject({ available: true, fullSha: revision, branchName });
+        expect(before.details.controllerBoot).toEqual(expect.any(String));
+        expect(after.details.controllerBoot).toEqual(expect.any(String));
+        expect(after.details.controllerBoot).not.toBe(before.details.controllerBoot);
+        expect(after.recovery).toMatchObject(before.recovery);
+        expect(after.details.starts).toEqual(before.details.starts);
+        const observationMs = 35_000;
+        await page.waitForTimeout(observationMs);
+        const final = await observeHold("after_observation");
+        expect(final.recovery).toMatchObject(before.recovery);
+        expect(final.details.starts).toEqual(before.details.starts);
         expect(gmailReadCount).toBe(1);
+        await recordUncertainty("verified", { writeId }, {
+          taskId: task.id, disposition: "blocked", beforeBoot: before.details.controllerBoot,
+          afterBoot: after.details.controllerBoot, runIds: beforeRestartRunIds,
+          effectCount: final.details.effectCount, observationMs,
+        });
       }
       await expect(composer).toHaveText(
         "An unsent draft stays available during recovery.",
@@ -528,7 +626,7 @@ for (const journey of [
           companyId: company.id,
           agentId: agent.id,
           taskId: task.id,
-          connections,
+          connectionIds: [...connectionIds],
           runs: finalRuns.map((run: Record<string, unknown>) => ({
             id: run.id,
             runtimeMode: run.runtimeMode,
@@ -539,7 +637,7 @@ for (const journey of [
           })),
           dependency: "fixture",
           provider: "codex",
-          fixtureModel: "in-feed-fixture",
+          fixtureModel: agent.adapterConfig?.model ?? "in-feed-fixture",
           calls,
         },
         null,
@@ -556,8 +654,21 @@ for (const journey of [
         JSON.stringify(await diagnosticState().catch(() => ({})), null, 2),
       );
       await writeFile(info.outputPath("test-drive.log"), logs);
-      await stopDrive();
-      fixture.closeAllConnections();
-      await new Promise<void>((done) => fixture.close(() => done()));
+      try {
+        if (checkpoints.length) {
+          await info.attach("uncertain-effect-evidence", { path: uncertaintyPath, contentType: "application/json" });
+        }
+      } finally {
+        try {
+          await stopDrive();
+          if (ownedDataDir) {
+            await makeDirectoryTreeRemovable(ownedDataDir);
+            await rm(ownedDataDir, { recursive: true, force: true });
+          }
+        } finally {
+          fixture.closeAllConnections();
+          await new Promise<void>((done) => fixture.close(() => done()));
+        }
+      }
     }
   });
