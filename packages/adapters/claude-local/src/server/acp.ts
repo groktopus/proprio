@@ -763,6 +763,12 @@ export async function probeClaudeAcpSandboxLogin(input: {
     cwd = asString(config.cwd, process.cwd());
   }
 
+  // Match the model selected by the ACP runtime. Claude ACP reads this value
+  // at startup; probing the account's default model would not verify the
+  // configured agent model.
+  const model = resolveClaudeModel(config.model, env);
+  if (model) env.ANTHROPIC_MODEL = model;
+
   Object.assign(env, claudeSandboxPermissionEnv({
     dangerouslySkipPermissions: asBoolean(config.dangerouslySkipPermissions, true), targetIsSandbox,
   }));
@@ -962,10 +968,10 @@ export async function testClaudeAcpEnvironment(
     });
   }
 
-  // Run a real hello probe for every target when Bedrock and a config API key
-  // are both absent. A local target inherits the host environment, so the real
-  // ACP run authenticates with a host ANTHROPIC_API_KEY. The probe seeds the
-  // same host key below when the config sets none, so the probe uses the
+  // Run a real hello probe for every target except Bedrock, including a
+  // selected API key. A local target inherits the host environment, so the
+  // real ACP run authenticates with a host ANTHROPIC_API_KEY. The probe seeds
+  // the same host key below when the config sets none, so it uses the
   // credential the real run receives and does not report a false auth-required.
   // A remote target does not inherit the host env, so considerHostEnv is false
   // and the probe never reads the host key. The CLI lane already probes every
@@ -977,7 +983,7 @@ export async function testClaudeAcpEnvironment(
   // a sandbox target, and a distinct warn check when the probe cannot run. The
   // user interface reads the canonical signal to offer login on the sandbox ACP
   // path.
-  if (!hasBedrock && !isNonEmpty(configApiKey)) {
+  if (!hasBedrock) {
     const probeEnv: Record<string, string> = {};
     for (const [key, value] of Object.entries(envConfig)) {
       if (typeof value === "string") probeEnv[key] = value;

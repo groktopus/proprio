@@ -511,11 +511,14 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     expect(JSON.stringify(spawnedEnv)).not.toContain("caller-proxy");
   });
 
-  it("reports an explicitly selected API key as normal authentication on the ACP lane", async () => {
+  it("probes a selected API key using the configured model on the ACP lane", async () => {
+    probeResult.value = { exitCode: 0, stdout: helloStdout, stderr: "", timedOut: false };
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "acp", agentCommand: process.execPath, env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      config: { model: "claude-sonnet-4-5", engine: "acp", agentCommand: process.execPath,
+        managedAiConnection: { provider: "anthropic", method: "api_key" },
+        env: { ANTHROPIC_API_KEY: "selected-test-key" } },
       executionTarget: null,
       environmentName: null,
     });
@@ -527,6 +530,12 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
       message: "Using the selected Claude API connection.",
       hint: undefined,
     }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_hello_probe_passed", level: "info" }));
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
+    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
+    const probeOptions = call[4] as { env: Record<string, string> };
+    expect(probeOptions.env.ANTHROPIC_API_KEY).toBe("selected-test-key");
+    expect(probeOptions.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-5");
     expect(JSON.stringify(result.checks)).not.toContain("selected-test-key");
   });
 
