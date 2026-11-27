@@ -257,7 +257,6 @@ export type IssueThreadInteractionServiceOptions = {
   now?: () => Date;
 };
 
-type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type InteractionResolutionMutationOptions = {
   /** Confirmation accept/reject nested in an outer transaction must defer these
    * effects and flush them with the root database only after its commit. */
