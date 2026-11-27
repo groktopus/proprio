@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from "express";
 import type { Db } from "@groktopus/db";
-import { forbidden, notFound } from "../errors.js";
+import { conflict, forbidden, notFound } from "../errors.js";
 import { agentService } from "../services/agents.js";
 import type { heartbeatService } from "../services/heartbeat.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -22,6 +22,12 @@ export function onboardingChatRoutes(db: Db, heartbeat: Pick<ReturnType<typeof h
     if (!greeting) {
       res.json(await ensureOnboardingChat(db, { companyId, agentId: agent.id, agentName: agent.name, userId }));
       return;
+    }
+    if (agent.lifecycleState !== "ready" || agent.lifecycleHolds.includes("setup")) {
+      throw conflict("Finish verifying this agent before starting its welcome chat", {
+        code: "onboarding_agent_not_ready",
+        agentId: agent.id,
+      });
     }
     const issue = await issueService(db).getConversation(companyId, agent.id, userId);
     if (!issue) throw notFound("Conversation not found");

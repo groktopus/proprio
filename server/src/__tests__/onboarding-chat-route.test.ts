@@ -74,6 +74,25 @@ describeEmbeddedPostgres("onboarding chat", () => {
     }));
   });
 
+  it.each([
+    ["setup hold", { lifecycleHolds: ["setup"] as string[] }],
+    ["verification lifecycle", { lifecycleState: "verifying" as const }],
+  ])("does not queue the onboarding greeting for an unverified agent (%s)", async (_state, state) => {
+    const { agent, app, path, wakeup, companyId } = await setup();
+    await request(app).post(path);
+    await ctx.db.update(agents).set(state).where(eq(agents.id, agent.id));
+
+    const response = await request(app).post(`${path}/greeting`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: "onboarding_agent_not_ready",
+      error: "Finish verifying this agent before starting its welcome chat",
+    });
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(await ctx.db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+  });
+
   it("respects company access, keeps another person's chat private, and skips a welcome after a user reply", async () => {
     const { companyId, app, path, wakeup, actor } = await setup();
     const opened = await request(app).post(path);
