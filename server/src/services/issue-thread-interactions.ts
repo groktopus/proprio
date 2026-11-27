@@ -3207,7 +3207,8 @@ export function issueThreadInteractionService(
     ) => {
       const payload = connectionIntentPayloadSchema.parse(input.payload);
       const sameSavedSetup = (candidate: typeof payload) =>
-        candidate.agentSetup === payload.agentSetup
+        isDeepStrictEqual(candidate.githubGit, payload.githubGit)
+        && candidate.agentSetup === payload.agentSetup
         && candidate.agentSetupOperationId === payload.agentSetupOperationId
         && candidate.savedSetup?.endpointId === payload.savedSetup?.endpointId
         && candidate.savedSetup?.connectionId === payload.savedSetup?.connectionId
@@ -3263,8 +3264,7 @@ export function issueThreadInteractionService(
             eq(issueThreadInteractionIdempotencyKeys.idempotencyKey, input.idempotencyKey))).limit(1);
         if (qualityAlias) throw conflict("Interaction idempotency key already exists for a different request", { idempotencyKey: input.idempotencyKey });
 
-        // Generic requests share live cards across runs. Setup cards stay bound
-        // to the queued turn that their delivery can repair.
+        // Setup and terminal Git requests depend on the source turn's authority.
         const pending = await tx.select().from(issueThreadInteractions).where(and(
           eq(issueThreadInteractions.companyId, issue.companyId),
           eq(issueThreadInteractions.issueId, issue.id),
@@ -3274,7 +3274,7 @@ export function issueThreadInteractionService(
           eq(issueThreadInteractions.addresseeUserId, input.addresseeUserId),
         ));
         const reusable = pending.find((candidate) =>
-          (!payload.agentSetup || candidate.sourceRunId === input.sourceRunId)
+          (!(payload.agentSetup || payload.githubGit) || candidate.sourceRunId === input.sourceRunId)
           && connectionIntentPayloadSchema.parse(candidate.payload).serviceSlug === payload.serviceSlug && connectionIntentPayloadSchema.parse(candidate.payload).purpose === payload.purpose && sameSavedSetup(connectionIntentPayloadSchema.parse(candidate.payload)) && isDeepStrictEqual(connectionIntentPayloadSchema.parse(candidate.payload).accessRequest, payload.accessRequest));
         if (reusable) {
           await enqueueIssueInteractionChatPublications(tx as unknown as Db, hydrateInteraction(reusable));
@@ -3343,6 +3343,7 @@ export function issueThreadInteractionService(
             return (
               candidatePayload.success &&
               candidatePayload.data.serviceSlug === payload.serviceSlug && candidatePayload.data.purpose === payload.purpose
+              && candidatePayload.data.githubGit?.operation === payload.githubGit?.operation
             );
           })
           .map((candidate) => candidate.id);

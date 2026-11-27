@@ -77,10 +77,11 @@ function passiveResponse(alias: string, issue: string): string {
         -- Existing access can automatically retire a setup card. In its
         -- absence only the addressed human can finish this request. A broad
         -- purpose match deliberately keeps unfamiliar credential paths awake.
-        AND NOT EXISTS (SELECT 1 FROM tool_connections response_connection
+        AND (jsonb_typeof(${alias}.payload->'githubGit') = 'object'
+          OR NOT EXISTS (SELECT 1 FROM tool_connections response_connection
           WHERE response_connection.company_id = ${issue}.company_id
             AND response_connection.status = 'active' AND response_connection.enabled
-            AND response_connection.connection_purpose = COALESCE(${alias}.payload->>'purpose', 'tool'))))
+            AND response_connection.connection_purpose = COALESCE(${alias}.payload->>'purpose', 'tool')))))
     -- Merge confirmations can advance through GitHub polling, without a
     -- response. Its recognizer requires merge intent in these four fields;
     -- conservatively retain those cards until polling has a durable wake.

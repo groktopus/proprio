@@ -34,6 +34,7 @@ export { projectMemberships } from "./project_memberships.js";
 export { projectAccessMembers } from "./project_access_members.js";
 export { documentMemberships } from "./document_memberships.js";
 export { projectWorkspaces } from "./project_workspaces.js";
+export { githubNativeGrants } from "./github_native_grants.js";
 export { executionWorkspaces } from "./execution_workspaces.js";
 export { executionWorkspaceSnapshots } from "./execution_workspace_snapshots.js";
 export {
@@ -209,6 +210,7 @@ export {
   toolGatewayRateLimitCounters,
   toolAccessAuditEvents,
 } from "./tool_access.js";
+export { managedAuditEvents } from "./managed_audit_events.js";
 export {
   companySkills,
   companySkillMutationReceipts,

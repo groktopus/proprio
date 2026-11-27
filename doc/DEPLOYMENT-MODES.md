@@ -42,6 +42,9 @@ production retains its managed feature policy.
 
 ## 1. Purpose
 
+For authenticated self-hosting, use the [governance evidence guide](governance-evidence.md)
+to inventory the deployment and identify what reviewers can verify.
+
 Proprio supports two runtime modes:
 
 1. `local_trusted`

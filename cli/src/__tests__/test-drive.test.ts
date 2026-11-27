@@ -137,6 +137,15 @@ describe("test-drive data isolation", () => {
     expect(fs.readFileSync(marker, "utf8")).toBe("keep");
   });
 
+  it("reopens the explicitly named instance within its isolated data directory", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-test-drive-named-"));
+    cleanupDirectories.push(root);
+    process.env.PROPRIO_INSTANCE_ID = "host-default";
+    await prepareTestDriveEnvironment({ dataDir: root, instance: "case-restart" }, os.tmpdir());
+    expect(process.env.PROPRIO_INSTANCE_ID).toBe("case-restart");
+    expect(process.env.PROPRIO_CONFIG).toBe(path.join(root, "instances", "case-restart", "config.json"));
+  });
+
   it("discards inherited Proprio routing while preserving a custom key source", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "proprio-test-drive-env-"));
     cleanupDirectories.push(root);
@@ -565,7 +574,7 @@ describe("test-drive foreground lifecycle", () => {
       delete: vi.fn(),
     } as unknown as TestDriveApi;
 
-    await testDriveCommand({ dataDir: "/tmp/test-drive-reused", browser: false }, {
+    await testDriveCommand({ dataDir: "/tmp/test-drive-reused", instance: "case-restart", browser: false }, {
       run: async (options) => {
         runOptions = options;
         await options.afterStart?.(server);
@@ -575,6 +584,7 @@ describe("test-drive foreground lifecycle", () => {
     });
 
     expect(runOptions?.skipServiceManagerCheck).toBe(false);
+    expect(runOptions?.instance).toBe("case-restart");
   });
 
   it("uses the credential snapshot captured before downstream server initialization", async () => {

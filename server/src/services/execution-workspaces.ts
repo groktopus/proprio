@@ -1,4 +1,5 @@
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
+import { parseGitHubRepository } from "./github-repository.js";
 import { effectiveProjectWorkspacePolicy } from "./project-workspace-provider.js";
 import { readRemoteWorkspaceAuthority, readWorkspaceProviderBinding } from "@groktopus/shared";
 import { cleanupRemoteWorkspaceAllocation, inspectRemoteWorkspacePersistence, type DestroyRemoteWorkspaceLease } from "./remote-workspace-lifecycle.js";
@@ -406,13 +407,6 @@ export type ExecutionWorkspaceServiceOptions = {
   afterWorkspaceCompactionMove?: (workspace: ExecutionWorkspaceRow) => Promise<void>;
   inspectGitCloseReadiness?: typeof inspectGitCloseReadiness;
 };
-
-function parseGitHubRepository(repoUrl: string | null) {
-  if (!repoUrl) return null;
-  const match = /^(?:https?:\/\/(?:www\.)?github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec(repoUrl.trim());
-  if (!match) return null;
-  return { owner: match[1]!.toLowerCase(), repo: match[2]!.toLowerCase() };
-}
 
 function pullRequestMatchesWorkspaceRepository(
   reference: GitHubPullRequestReference,
@@ -1622,7 +1616,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     const [agent] = assigneeAgentId ? await reader.select({ adapterConfig: agents.adapterConfig, permissions: agents.permissions }).from(agents)
       .where(and(eq(agents.id, assigneeAgentId), eq(agents.companyId, input.companyId))) : [];
     const overrides = assigneeAgentId ? parseIssueAssigneeAdapterOverrides(task ? task.assigneeAdapterOverrides : input.assigneeAdapterOverrides) : null;
-    const experimental = await instanceSettingsService(db).getExperimental();
+    const settings = instanceSettingsService(db);
+    const experimental = reader === db
+      ? await settings.getExperimental()
+      : await settings.getExperimentalReadOnly(reader);
     const sourceId = input.sourceWorkspaceId ?? task?.projectWorkspaceId;
     const sourceProjectId = input.projectId ?? task?.projectId;
     const [source] = sourceId || sourceProjectId ? await reader.select({ repoUrl: projectWorkspaces.repoUrl }).from(projectWorkspaces).where(and(

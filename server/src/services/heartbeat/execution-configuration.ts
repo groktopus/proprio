@@ -1,3 +1,4 @@
+import { githubNativeGitService } from "../github-native-git.js";
 import { supportsProprioRunnerPreconfiguredHome } from "../native-runtime/provider-profile.js";
 import { agentHarnessType } from "@groktopus/shared";
 import { observabilitySecretValues } from "@groktopus/adapter-utils/agent-observability";
@@ -208,7 +209,10 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     !acceptedPlanWakeRoutingDecision?.suppressAcceptedContinuation
       ? [...eligibleMentionedSkillKeys, ACCEPTED_PLAN_CONVERSION_SKILL_KEY]
       : eligibleMentionedSkillKeys;
-  const githubSelection = githubIdentity.value;
+  const githubSelection = githubIdentity.value.configured
+    || !(await githubNativeGitService(db).hasBinding(agent.companyId, agent.id))
+    ? githubIdentity.value
+    : { ...githubIdentity.value, configured: true };
   const useHostGitHub =
     !githubSelection.configured &&
     trustPreset.kind === "standard" &&

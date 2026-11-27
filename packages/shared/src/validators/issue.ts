@@ -1,3 +1,4 @@
+import { githubNativeRequestSchema } from "../github-native-git.js";
 import { CHAT_PROVIDERS } from "../types/chat-channels.js";
 import { taskWorkspaceSelectionSchema } from "./task-workspace.js";
 import { z } from "zod";
@@ -471,19 +472,93 @@ export const issueExecutionMonitorPolicySchema = z.object({
     .default(null),
 });
 
+export const issueDocumentKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(
+    /^[a-z0-9][a-z0-9_-]*$/,
+    "Document key must be lowercase letters, numbers, _ or -",
+  );
+
+const confirmationDocumentIdentity = z.object({
+  type: z.literal("issue_document"),
+  key: issueDocumentKeySchema,
+  revisionId: z.string().guid(),
+});
+
+const confirmationAttachmentIdentity = z.object({
+  type: z.literal("issue_attachment"),
+  attachmentId: z.string().guid(),
+  assetId: z.string().guid(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/, "sha256 must identify the exact attachment bytes"),
+});
+
+const qualityReviewDeliverableSchema = z.object({
+  key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
+  label: z.string().trim().min(1).max(120),
+}).strict();
+
+function qualityReviewDeliverables<T extends { key: string }>(item: z.ZodType<T>) {
+  return z.array(item).min(1).max(10).refine(
+    (deliverables) => new Set(deliverables.map(({ key }) => key)).size === deliverables.length,
+    "Quality review deliverable keys must be unique",
+  );
+}
+
 export const requiredQualityReviewSchema = z.object({
   version: z.literal(1),
-  deliverables: z.array(z.object({
-    key: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
-    label: z.string().trim().min(1).max(120),
-  }).strict()).min(1).max(10),
-}).strict().superRefine((value, ctx) => {
-  if (new Set(value.deliverables.map(item => item.key)).size !== value.deliverables.length)
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Quality review deliverable keys must be unique", path: ["deliverables"] });
+  deliverables: qualityReviewDeliverables(qualityReviewDeliverableSchema),
+}).strict();
+
+const issueExecutionReviewTargetBindingPolicySchema = z.object({
+  source: z.literal("required_quality_review"),
+}).strict().describe("Requires requiredQualityReview on the same execution policy.");
+
+const issueExecutionReviewTargetReferenceSchema = z.discriminatedUnion("type", [
+  confirmationDocumentIdentity.strict(),
+  confirmationAttachmentIdentity.strict(),
+]);
+
+export const issueExecutionReviewTargetBindingSchema = z.object({
+  version: z.literal(1),
+  requirementHash: z.string().regex(/^[a-f0-9]{64}$/),
+  deliverables: qualityReviewDeliverables(qualityReviewDeliverableSchema.extend({ target: issueExecutionReviewTargetReferenceSchema })),
+}).strict();
+
+export const issueExecutionReviewEvidenceQuerySchema = z.object({
+  cursor: z.string().guid().optional(),
+});
+
+export const issueExecutionReviewEvidenceSchema = z.object({
+  submittedSignoff: z.object({ binding: issueExecutionReviewTargetBindingSchema.nullable(), stale: z.boolean() }).nullable(),
+  currentRequests: z.array(qualityReviewDeliverableSchema.extend({
+    interactionId: z.string().guid(),
+    target: issueExecutionReviewTargetReferenceSchema,
+    requirementHash: issueExecutionReviewTargetBindingSchema.shape.requirementHash,
+    outdated: z.boolean(),
+  })),
+  executionDecisions: z.array(z.object({
+    id: z.string().guid(),
+    stageType: z.enum(ISSUE_EXECUTION_STAGE_TYPES),
+    outcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES),
+    reviewTargetBinding: issueExecutionReviewTargetBindingSchema,
+  })),
+  nextCursor: z.string().guid().nullable(),
+  requiredQualityReviewState: z.object({
+    required: z.boolean(),
+    satisfied: z.boolean(),
+    missing: z.array(qualityReviewDeliverableSchema.extend({
+      reason: z.enum(["missing", "pending", "not_approved", "stale"]),
+      interactionId: z.string().guid().optional(),
+    })),
+  }),
 });
 
 export const issueExecutionPolicySchema = z.object({
   requiredQualityReview: requiredQualityReviewSchema.optional(),
+  reviewTargetBinding: issueExecutionReviewTargetBindingPolicySchema.optional(),
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
   stages: z.array(issueExecutionStageSchema).default([]),
@@ -498,6 +573,10 @@ export const issueExecutionPolicySchema = z.object({
     .optional()
     .nullable()
     .default(null),
+}).superRefine((value, ctx) => {
+  if (value.reviewTargetBinding && !value.requiredQualityReview) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Review target binding requires requiredQualityReview", path: ["reviewTargetBinding"] });
+  }
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -560,6 +639,7 @@ export const issueExecutionStateSchema = z.object({
   currentParticipant: issueExecutionStagePrincipalSchema.nullable(),
   returnAssignee: issueExecutionStagePrincipalSchema.nullable(),
   reviewRequest: issueReviewRequestSchema.nullable().optional().default(null),
+  reviewTargetBinding: issueExecutionReviewTargetBindingSchema.nullable().optional(),
   completedStageIds: z.array(z.string().guid()).default([]),
   lastDecisionId: z.string().guid().nullable(),
   lastDecisionOutcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES).nullable(),
@@ -643,6 +723,12 @@ export const retryWorkspaceExportSchema = z.object({
   runId: z.string().guid(),
   repairNote: z.string().trim().min(20).max(12000),
 }).strict();
+
+export const dependencyInvestigationSchema = z.object({
+  idempotencyKey: z.string().min(1).max(200),
+}).strict();
+
+export type DependencyInvestigationInput = z.infer<typeof dependencyInvestigationSchema>;
 
 export const taskRetrySchema = z.object({
   idempotencyKey: z.string().guid(),
@@ -1263,6 +1349,7 @@ const connectionIntentBrandAssetSchema = z
 
 export const connectionIntentPayloadSchema = z
   .object({
+    githubGit: githubNativeRequestSchema.optional(),
     agentSetup: z.literal(true).optional(),
     agentSetupOperationId: z.string().guid().optional(),
     setupAccess: z.object({
@@ -1296,6 +1383,9 @@ export const connectionIntentPayloadSchema = z
     phase: connectionIntentPhaseSchema,
   })
   .strict()
+  .refine(value => !value.githubGit || (value.serviceSlug === "github" && !value.purpose
+    && !value.accessRequest && !value.upstreamService && !value.savedSetup && !value.setupAccess),
+  "Terminal Git requests use only the native Git authorization path")
   .refine(value => !value.agentSetup || value.purpose === "ai", "Agent setup cards require AI authentication")
   .refine(value => !value.agentSetupOperationId || value.agentSetup === true, "A setup operation requires an agent setup card");
 
@@ -1305,16 +1395,17 @@ export const connectionIntentResultSchema = z
     instruction: z.string().max(4000).optional(),
     outcome: z.enum(["connected", "declined", "superseded", "expired"]),
     connectionId: z.string().guid().nullable().optional(),
+    nativeGitGrantId: z.string().guid().optional(),
     reason: z.string().trim().max(4000).nullable().optional(),
     supersededByInteractionId: z.string().guid().nullable().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.outcome === "connected" && !value.connectionId) {
+    if (value.outcome === "connected" && Boolean(value.connectionId) === Boolean(value.nativeGitGrantId)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["connectionId"],
-        message: "Connected intents require a connection id",
+        message: "Connected intents require one connection or terminal Git grant",
       });
     }
     if (value.outcome === "superseded" && !value.supersededByInteractionId) {
@@ -1325,16 +1416,6 @@ export const connectionIntentResultSchema = z
       });
     }
   });
-
-export const issueDocumentKeySchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(
-    /^[a-z0-9][a-z0-9_-]*$/,
-    "Document key must be lowercase letters, numbers, _ or -",
-  );
 
 export const issueDocumentBatchQuerySchema = z.object({
   key: z.string().trim().toLowerCase().pipe(issueDocumentKeySchema),
@@ -1676,11 +1757,11 @@ const requestConfirmationTargetBaseSchema = z.object({
 
 export const requestConfirmationIssueDocumentTargetSchema =
   requestConfirmationTargetBaseSchema.extend({
-    type: z.literal("issue_document"),
+    type: confirmationDocumentIdentity.shape.type,
     issueId: z.string().guid().nullable().optional(),
     documentId: z.string().guid().nullable().optional(),
-    key: issueDocumentKeySchema,
-    revisionId: z.string().guid(),
+    key: confirmationDocumentIdentity.shape.key,
+    revisionId: confirmationDocumentIdentity.shape.revisionId,
     revisionNumber: z.number().int().positive().nullable().optional(),
   });
 
@@ -1694,11 +1775,11 @@ export const requestConfirmationCustomTargetSchema =
 
 export const requestConfirmationIssueAttachmentTargetSchema =
   requestConfirmationTargetBaseSchema.extend({
-    type: z.literal("issue_attachment"),
+    type: confirmationAttachmentIdentity.shape.type,
     issueId: z.string().guid().nullable().optional(),
-    attachmentId: z.string().guid(),
-    assetId: z.string().guid(),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/, "sha256 must identify the exact attachment bytes"),
+    attachmentId: confirmationAttachmentIdentity.shape.attachmentId,
+    assetId: confirmationAttachmentIdentity.shape.assetId,
+    sha256: confirmationAttachmentIdentity.shape.sha256,
   });
 
 export const requestConfirmationTargetSchema = z.discriminatedUnion("type", [

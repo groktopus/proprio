@@ -115,6 +115,62 @@ describe("pi remote execution", () => {
     }
   });
 
+  it("stages explicit in-place SSH skill inventories into unique paths and removes each path", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "proprio-pi-remote-explicit-skills-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const skillDir = path.join(rootDir, "selected-skill");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, "SKILL.md"), "selected skill\n", "utf8");
+    const executionTarget = {
+      kind: "remote" as const,
+      transport: "ssh" as const,
+      remoteCwd: "/remote/workspace",
+      workspaceRealization: { mode: "in_place" as const, authoritativeRoot: "/remote/workspace", pathAliases: [], outboundRestorePaths: [] },
+      spec: {
+        host: "127.0.0.1", port: 2222, username: "fixture", remoteWorkspacePath: "/remote/workspace",
+        remoteCwd: "/remote/workspace", privateKey: "PRIVATE KEY", knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA", strictHostKeyChecking: true,
+      },
+    };
+    const run = async (runId: string, skills: Array<{ key: string; runtimeName: string; source: string }>) => execute({
+      runId,
+      executionTarget,
+      agent: { id: "agent-1", companyId: "company-1", name: "Pi Builder", adapterType: "pi_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: "pi", model: "openai/gpt-5.4-mini", proprioRuntimeSkills: skills, proprioSkillSync: { desiredSkills: skills.map(skill => skill.key) } },
+      context: { proprioWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      onLog: async () => {},
+    });
+
+    await run("run-with-skill", [{ key: "company/selected", runtimeName: "selected", source: skillDir }]);
+    const firstCall = runChildProcess.mock.calls.at(-1) as unknown as [string, string, string[]] | undefined;
+    const firstSkillDir = String(firstCall?.[2][firstCall?.[2].indexOf("--skill") + 1]);
+    await run("run-empty", []);
+    const secondCall = runChildProcess.mock.calls.at(-1) as unknown as [string, string, string[]] | undefined;
+    const secondSkillDir = String(secondCall?.[2][secondCall?.[2].indexOf("--skill") + 1]);
+    runChildProcess.mockRejectedValueOnce(new Error("fake Pi failure"));
+    await expect(run("run-failure", [])).rejects.toThrow("fake Pi failure");
+    const failureCall = runChildProcess.mock.calls.at(-1) as unknown as [string, string, string[]] | undefined;
+    const failureSkillDir = String(failureCall?.[2][failureCall?.[2].indexOf("--skill") + 1]);
+
+    expect(firstSkillDir).toMatch(/^\/remote\/workspace\/\.proprio-runtime\/pi\/skills-[0-9a-f-]+$/u);
+    expect(secondSkillDir).toMatch(/^\/remote\/workspace\/\.proprio-runtime\/pi\/skills-[0-9a-f-]+$/u);
+    expect(secondSkillDir).not.toBe(firstSkillDir);
+    expect(failureSkillDir).not.toBe(firstSkillDir);
+    expect(failureSkillDir).not.toBe(secondSkillDir);
+    expect(firstCall?.[2]).toContain("--no-skills");
+    expect(secondCall?.[2]).toContain("--no-skills");
+    const stagedSkillDirs = (syncDirectoryToSsh.mock.calls as unknown as Array<[{ remoteDir?: string }]> )
+      .map(call => String(call[0].remoteDir))
+      .filter(remoteDir => remoteDir.includes("/skills-"));
+    expect(stagedSkillDirs).toEqual([firstSkillDir, secondSkillDir, failureSkillDir]);
+    const cleanupCommands = (runSshCommand.mock.calls as unknown as Array<[unknown, string]>).map(call => call[1]);
+    expect(cleanupCommands).toContain(`rm -rf -- '${firstSkillDir}'`);
+    expect(cleanupCommands).toContain(`rm -rf -- '${secondSkillDir}'`);
+    expect(cleanupCommands).toContain(`rm -rf -- '${failureSkillDir}'`);
+  });
+
   it("prepares the workspace, syncs Pi skills, and restores workspace changes for remote SSH execution", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "proprio-pi-remote-"));
     cleanupDirs.push(rootDir);

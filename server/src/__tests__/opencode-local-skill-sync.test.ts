@@ -47,4 +47,32 @@ describe("opencode local skill sync", () => {
     expect(after.entries.find((entry) => entry.key === proprioKey)?.state).toBe("installed");
     expect((await fs.lstat(path.join(home, ".claude", "skills", "proprio"))).isSymbolicLink()).toBe(true);
   });
+
+  it("reports explicit assignments as run scoped without creating shared links", async () => {
+    const home = await makeTempDir("proprio-opencode-skill-sync-");
+    cleanupDirs.add(home);
+    const source = path.join(home, "managed", "proprio");
+    const operatorSkill = path.join(home, ".claude", "skills", "operator-skill");
+    await fs.mkdir(source, { recursive: true });
+    await fs.mkdir(operatorSkill, { recursive: true });
+    const ctx = {
+      agentId: "agent-1",
+      companyId: "company-1",
+      adapterType: "opencode_local",
+      config: {
+        env: { HOME: home },
+        proprioRuntimeSkills: [{ key: proprioKey, runtimeName: "proprio", source }],
+        proprioSkillSync: { desiredSkills: [proprioKey] },
+      },
+    } as const;
+
+    const before = await listOpenCodeSkills(ctx);
+    expect(before.mode).toBe("ephemeral");
+    expect(before.entries.find((entry) => entry.key === proprioKey)).toMatchObject({
+      state: "configured",
+      targetPath: null,
+    });
+    expect(await syncOpenCodeSkills(ctx, [proprioKey])).toEqual(before);
+    expect(await fs.readdir(path.dirname(operatorSkill))).toEqual(["operator-skill"]);
+  });
 });

@@ -286,6 +286,71 @@ A null scope or an empty object preserves the existing unrestricted grant
 behavior. Discovery and execution evaluate the current grant. A revoked grant
 cannot authorize a later call merely because discovery previously listed it.
 
+### Independent review of sensitive authority changes
+
+For a protected connector, give the requesting agent only the access it needs to
+run tasks and request changes. Remove its `tools:manage_profiles` and
+`tools:manage_connections` grants, and remove `agents:configure` where it
+could permit installation changes. A board permission manager can revoke
+individual grants with `proprio agent permission:revoke <agentId> <permissionKey>`.
+Check effective grants after onboarding and after creating agents: standard
+agents can receive connection-management grants by default, and root CEO grant
+reconciliation restores `agents:configure`. Do not use a root CEO as the
+requester when the protected posture depends on revoking that grant; use a
+non-root principal whose grants are not restored by that reconciliation.
+
+Agent hiring is a separate path to new authority. Require board approval for
+new agents in company settings so an agent with `agents:create` can submit only
+a pending hire; an authenticated board user must approve it before activation.
+If agents must not even submit hires, also remove their effective
+`agents:create` grant. Keep any bounded setup workflow on a separately
+authorized principal. Review alternate paths to the target, such as a separate
+connection, a standing token or a provider-native tool.
+
+The requester records the desired change on a task visible to the reviewers.
+Include the agent, connection or grant, exact catalog entry or selector scope,
+current scope, proposed scope, reason and expiry or revocation plan. A
+connection-scoped policy mutation requires both effective
+`tools:manage_profiles` and `tools:manage_connections`; `users:manage_permissions`
+is for administering grants and does not replace either right. Reading company
+activity and run decisions used to verify changes and calls also requires
+effective `tools:view_audit`. Use an authenticated deployment and a distinct,
+named reviewer account. In
+`local_trusted`, board actions share the implicit `local-board` actor and do
+not provide individual attribution. The reviewer's authenticated account must
+not be the agent or the requesting workflow.
+
+Policy PATCH requests have no revision precondition and can retain selectors
+when only the policy type changes. Serialize protected-scope changes through
+one controlled workflow: prevent other administrators from editing the rule
+between review and activation/revocation, read and record the selectors before
+each mutation, then read them again and confirm they still match the reviewed
+scope. Stop and restart review if the scope changed. Keep a reviewer-controlled
+receipt containing the exact request, prior selectors, applied selectors,
+policy ID, decision, reviewer and timestamps. Do not rely on the requester's
+comment or policy mutation activity to preserve selector values; the requester
+can delete their own comment and policy activity records the policy type but
+not its selectors.
+
+Use the company activity API to verify the policy mutation actor and times. Use
+the company run-decisions API to inspect each test call's invocation ID, agent,
+catalog entry, decision, outcome and matched policy IDs. Test with a synthetic
+connector before granting access to the real target: the reviewed tool should
+be denied before activation, return the expected synthetic result while active,
+and be denied after revocation with no additional target effect. Include a
+second tool on that connection and verify it remains denied while the reviewed
+tool's rule is active. Reconcile any call already in flight separately.
+
+This is an operational separation of duties, not enforced two-person control:
+the product does not require a second human approval from a principal who
+already has authority to edit the policy. The reviewer-controlled receipt and
+serialized procedure supply evidence for this workflow; deployments requiring
+enforced co-signing need an additional control. The fixture qualifies the
+authenticated update path and synthetic connection test endpoint for one
+catalog entry, while checking call events by invocation ID. It does not qualify
+other runners, root CEO requesters, `local_trusted` attribution or external
+provider paths.
+
 ## Policies
 
 Policies run after profile selection. A profile decides *can this agent see the tool*; a policy decides *is this exact call allowed right now*. Policy types:
@@ -387,7 +452,8 @@ Cloud reminder: in `authenticated/public`, local stdio slots fail closed unless 
 
 ## Audit and the call event log
 
-Every tool invocation lands in the **call event log** (`tool_call_events`). Each event records:
+The managed gateway records decisions and execution evidence in the **call event log**
+(`tool_call_events`). Depending on the event type, a record can include:
 
 - decision (`allow`, `deny`, `require_approval`, `rate_limited`),
 - matched policy IDs,
@@ -401,15 +467,21 @@ To pull recent audit:
 ```sh
 curl -fsS -H "Authorization: Bearer $BOARD_API_KEY" \
   "$PROPRIO_URL/api/tool-gateway/audit?companyId=$COMPANY_ID&limit=100" \
-  | jq '[.[] | {createdAt, action: .action, decision: .details.decision, tool: .details.tool, outcome: .details.outcome, reasonCode: .details.reasonCode}]'
+  | jq '{nextCursor, events: [.events[] | {
+      id, createdAt, action, runId, connectionId,
+      tool: .details.tool, invocationId: .details.invocationId,
+      actionRequestId: .details.actionRequestId, decision: .details.decision,
+      normalizedOutcome, reasonCode: .details.reasonCode
+    }]}'
 ```
 
 Two practical patterns:
 
-- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` returns every policy decision attached to a single agent run. Use this in QA to prove an agent never touched a denied tool.
-- **Approval audit:** the audit log itself is the approval-request ledger — filter the gateway audit response for `action == "tool_gateway.approval_requested"` to get the queue, and pair each row with the matching `tool_gateway.call_allowed` / `tool_gateway.call_denied` entry to see how the approval resolved. Approver identity lands on the action request itself; once approved, the action request body shows `resolvedByUserId` and `resolvedAt`.
+- **Per-run timeline:** `GET /api/companies/:companyId/tools/runs/:runId/decisions` joins invocations for a run to their action requests and call events. The gateway audit query includes some unlinked events. It omits standalone `policy_decision` and `trust_rule_used` events. Use `GET /api/tool-connections/:connectionId/activity` for recent evidence tied to a known connection.
+- **Approval audit:** Follow the linked action request to check its resolution and deciding principal. Use the invocation and call events to review execution.
 
-Audit is the source of truth for the security memo. It is intentionally append-only — there is no edit or delete route.
+See [governance evidence for authenticated self-hosted deployments](governance-evidence.md)
+for access, retention, missing evidence and independent verification of target effects.
 
 ## Local trusted deployment
 

@@ -29,8 +29,8 @@ import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { dotRunnerBroker } from "../services/dot-runner-broker.js";
 import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
-import { completeConnectionIntentSchema } from "@groktopus/shared";
-import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
+import { adoptAiConnectionIntentSchema } from "@groktopus/shared";
+import { DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@groktopus/shared";
@@ -55,6 +55,7 @@ import { assertAiConnectionCreateAccess, canInstallSharedAiConnectionForNewAgent
 import { isAiConnectionCompatible } from "@groktopus/shared";
 import { applyConnectorSkills, resolveConnectorAssignments, annotateConnectorSkills, isConnectorSkill } from "../services/connector-runtime.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { OPERATOR_RUN_STOP_REASON } from "../services/run-cancellation.js";
 import { canRetryStoppedRun } from "../services/cancelled-native-startup.js";
 import { rejectedModelRetryRefusal } from "../services/native-runtime/model-rejected-retry.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext, type NativeReviewAssignmentContext } from "../services/native-runtime/native-review-participant.js";
@@ -145,7 +146,7 @@ import {
 } from "../services/index.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PROPRIO_CORE_SKILL_KEYS } from "../services/company-skills.js";
-import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
+import { createRunSecretRedactionRegistry, omitHeartbeatRunAccountingFields } from "../services/run-secret-redaction.js";
 import { agentBudgetPage, assertAuthenticated, assertBoard, assertCompanyAccess, COMPANY_BUDGETS_PAGE, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
@@ -5539,7 +5540,7 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
-  router.post("/agents/:id/connection-intents/:interactionId/adopt", validate(completeConnectionIntentSchema), async (req, res) => {
+  router.post("/agents/:id/connection-intents/:interactionId/adopt", validate(adoptAiConnectionIntentSchema), async (req, res) => {
     assertBoard(req);
     const agent = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
     if (!agent) return;
@@ -6242,6 +6243,12 @@ export function agentRoutes(
     source: HeartbeatSource | undefined;
     skippedResponse: (agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>, payload: Record<string, unknown> | null) => unknown | Promise<unknown>;
   };
+  const assertPublicWakeKey = (key: unknown) => {
+    if (typeof key === "string" && key.startsWith(DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX)) {
+      throw badRequest("Use the dependency investigation endpoint for a diagnosis request.");
+    }
+  };
+
   const handleWakeupRoute = async (
     req: Request,
     res: Response,
@@ -6435,6 +6442,7 @@ export function agentRoutes(
         ),
       );
     }
+    assertPublicWakeKey(req.body.idempotencyKey);
     const run = await heartbeat.wakeup(id, {
       failedRunId: req.body.failedRunId ?? null,
       ...(req.actor.type === "board" && !req.body.failedRunId ? { manualUserWake: true } : {}),
@@ -6505,7 +6513,7 @@ export function agentRoutes(
       });
     }
 
-    res.status(202).json(run);
+    res.status(202).json(omitHeartbeatRunAccountingFields(run));
   };
 
   router.post("/agents/:id/wakeup", validate(wakeAgentSchema), async (req, res) => {
@@ -6591,6 +6599,7 @@ export function agentRoutes(
         : body.payload as Record<string, unknown>;
     }
     if (typeof body.idempotencyKey === "string" && body.idempotencyKey.length > 0) {
+      assertPublicWakeKey(body.idempotencyKey);
       wakeOpts.idempotencyKey = body.idempotencyKey;
     }
     const run = await heartbeat.wakeup(id, wakeOpts);
@@ -6630,7 +6639,7 @@ export function agentRoutes(
       });
     }
 
-    res.status(202).json(run);
+    res.status(202).json(omitHeartbeatRunAccountingFields(run));
   });
 
   router.post("/agents/:id/claude-login", async (req, res) => {
@@ -7381,11 +7390,12 @@ export function agentRoutes(
     // Stamp the cancellation as operator-initiated (this route is board-only).
     // Recovery reads this to stand down instead of classifying the cancelled
     // run as agent stranding and re-waking the agent the operator just stopped.
-    const run = await heartbeat.cancelRun(runId, "Cancelled by a board operator", {
+    const run = await heartbeat.cancelRun(runId, OPERATOR_RUN_STOP_REASON, {
       ...(requestId ? { cancellationRequestId: requestId, cancellationRequestedByUserId: req.actor.userId ?? null } : {}),
       resultJson: {
         cancelledByActorType: "user",
         cancelledByUserId: req.actor.userId ?? null,
+        operatorRunStop: true,
       },
     });
 

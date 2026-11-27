@@ -28,6 +28,7 @@ import {
   heartbeatRuns,
   issueThreadInteractions,
   issues,
+  managedAuditEvents,
   principalPermissionGrants,
   projects,
   toolAccessAuditEvents,
@@ -40,6 +41,7 @@ import {
   toolGatewayRateLimitCounters,
   toolGatewaySessions,
   toolInvocations,
+  toolRateLimitCounters,
   toolMcpGateways,
   toolMcpGatewayTokens,
   toolPolicies,
@@ -48,6 +50,7 @@ import {
   toolProfiles,
   toolStdioCommandTemplates,
   toolRuntimeSlots,
+  toolRuntimeMetricCounters,
   secretAccessEvents,
   userSecretDeclarations,
   userSecretDefinitions,
@@ -671,6 +674,78 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       const testEvents = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, testCall.invocationId));
       expect(testEvents.some(event => event.eventType === "call_failed")).toBe(true);
       expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("rolls back the initial rate charge when managed invocation capture fails and alerts", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0",
+      id: body?.id,
+      result: { content: [{ type: "text", text: "ok" }] },
+    } }));
+    try {
+      const { connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url,
+        toolName: "kv_set",
+        applicationKey: "audit-failure-app",
+      });
+      const toolName = expectedConnectedToolName({
+        applicationKey: "audit-failure-app",
+        connectionId: connection.id,
+        toolName: catalogEntry.toolName,
+      });
+      await allowToolsForAgent(db, company.id, agent.id, [toolName]);
+      await db.insert(toolPolicies).values({
+        companyId: company.id,
+        name: "Single audited call",
+        policyType: "rate_limit",
+        selectors: { connectionId: connection.id },
+        config: { limit: 1, windowSeconds: 60 },
+        priority: 1,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_audit_capture_fault_${suffix}`;
+      const triggerName = `managed_audit_capture_fault_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed audit capture fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}()`));
+      try {
+        await expect(gateway.executeTool({
+          sessionToken: session.token,
+          tool: toolName,
+          parameters: { key: "audit", value: "retry" },
+        })).rejects.toThrow(/managed_audit_events/);
+        expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(0);
+        expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id))).toHaveLength(0);
+        expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(0);
+        expect(await db.select().from(toolRateLimitCounters).where(eq(toolRateLimitCounters.companyId, company.id))).toHaveLength(0);
+        expect(remote.requests).toHaveLength(0);
+        expect(await db.select().from(toolRuntimeMetricCounters).where(and(
+          eq(toolRuntimeMetricCounters.companyId, company.id),
+          eq(toolRuntimeMetricCounters.metric, "audit_write_failed"),
+        ))).toHaveLength(1);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool: toolName,
+        parameters: { key: "audit", value: "retry" },
+      })).resolves.toMatchObject({ status: "completed" });
+      expect(remote.requests).toHaveLength(1);
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(1);
+      expect(await db.select().from(toolRateLimitCounters).where(eq(toolRateLimitCounters.companyId, company.id))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(1);
     } finally {
       await remote.close();
     }
@@ -2608,6 +2683,45 @@ rl.on("line", (line) => {
     } finally {
       await fake.close();
     }
+  });
+
+  it("uses the Organization GitHub PAT for an authorized MCP tool in a captured run", async () => {
+    const { seed } = githubCredentialsFixture(() => db);
+    const { companyId, agentId, runId, issueId } = await seed();
+    const value = "synthetic-organization-pat";
+    const secret = await secretService(db).create(companyId, {
+      name: "Organization GitHub PAT", key: "test_github_org_pat", provider: "local_encrypted", value,
+    });
+    const { connection, catalogEntry } = await createRemoteMcpTool(db, companyId, {
+      applicationKey: "github", toolName: "list_issues", riskLevel: "read",
+      url: "https://github-mcp-fixture.invalid/mcp",
+      connectionConfig: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" },
+      credentialRefs: [{ name: "authorization", secretId: secret.id, version: "latest", placement: "header", key: "Authorization", prefix: "Bearer " }],
+      credentialSecretRefs: [{ secretId: secret.id, versionSelector: "latest", configPath: "credentials.authorization" }],
+    });
+    await db.update(toolCatalogEntries).set({ inputSchema: { type: "object", properties: {} } })
+      .where(eq(toolCatalogEntries.id, catalogEntry.id));
+    await db.update(toolConnections).set({ authKind: "api_key", credentialPolicy: "shared" })
+      .where(eq(toolConnections.id, connection.id));
+    await allowAllToolsForAgent(db, companyId, agentId);
+    const remoteHttpRequest = vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      expect(request.params.name).toBe("list_issues");
+      expect(new Headers(init.headers).get("authorization")).toContain(value);
+      return Response.json({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: "found" }] } });
+    });
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest });
+    const session = await gateway.createSession({ companyId, agentId, runId, issueId });
+    const tool = (await gateway.listToolsForSession(session.token)).find(entry => entry.catalogEntryId === catalogEntry.id);
+    expect(tool).toBeDefined();
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} }))
+      .resolves.toMatchObject({ status: "completed" });
+    expect(remoteHttpRequest).toHaveBeenCalledOnce();
+
+    await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.connectionId, connection.id));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} }))
+      .rejects.toMatchObject({ reasonCode: "organization_authorization_required" });
+    expect(remoteHttpRequest).toHaveBeenCalledOnce();
   });
 
   it("finds the same GitHub account's tool on a different connection after credential failure", async () => {

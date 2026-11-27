@@ -15,6 +15,7 @@ import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeup
 import { conflict } from "../errors.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
+import { githubNativeGitService } from "./github-native-git.js";
 
 export async function deleteAgentDependencies(tx: Db, companyId: string, id: string) {
   // Lifecycle callers use READ COMMITTED. Fence admissions before inspecting
@@ -93,6 +94,7 @@ export async function deleteAgentDependencies(tx: Db, companyId: string, id: str
   await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));
   await tx.delete(agentApiKeys).where(eq(agentApiKeys.agentId, id));
   await tx.delete(agentRuntimeState).where(eq(agentRuntimeState.agentId, id));
+  await githubNativeGitService(tx).removeAgentBindings(companyId, id);
   await tx.delete(principalPermissionGrants).where(and(
     eq(principalPermissionGrants.companyId, companyId),
     eq(principalPermissionGrants.principalType, "agent"),

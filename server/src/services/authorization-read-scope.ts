@@ -42,6 +42,11 @@ export const authorizationReadScope: RequestHandler = (req, res, next) => {
   reads.run(scope, next);
 };
 
+/** Keep permission reads inside the caller's database snapshot. */
+export function withAuthorizationReadSnapshot<T>(read: () => T): T {
+  return reads.run({ open: true, entries: new Map() }, read);
+}
+
 export function readOncePerRequest<T>(key: string, read: () => Promise<T>): Promise<T> {
   const scope = reads.getStore();
   if (!scope?.open) return read();
