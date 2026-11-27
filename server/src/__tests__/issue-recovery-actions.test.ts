@@ -7,9 +7,11 @@ import express from "express";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { canActorReadCase, retainCaseAccessSource } from "../services/case-access.js";
 import { renderProprioWakePrompt } from "@groktopus/adapter-utils/server-utils";
 import {
   costEvents,
+  budgetPolicies,
   agents,
   agentRuntimeState,
   authUsers,
@@ -111,11 +113,23 @@ describe("issueRecoveryActionService", () => {
     expect(serialized).not.toContain("Confirm deployment access");
     expect(serialized).not.toContain("assessment-secret-id");
     expect(model.evidence).not.toHaveProperty("caseHandoffCompletion");
-    expect(model.evidence.completionRecovery).toEqual({ schema: "proprio.task-completion-recovery.v1",
-      prerequisiteChecklist: "review_in_case", unmetCriterionCount: 1, evidenceIssueCount: 1 });
+    expect(model.evidence).toEqual({ runId: "task-run", decisionId: "task-decision" });
     expect(model.nextAction).toContain("Review the prerequisite checklist in the authorized Case view");
     expect(model.nextAction).toContain("Complete 1 unmet task criterion");
     expect(model.nextAction).toContain("Add or correct evidence for 1 task criterion");
+  });
+
+  it("keeps an unknown Case recovery receipt and its stored guidance private", () => {
+    const row = makeRecoveryActionRow({
+      nextAction: "Read the private checklist",
+      evidence: {
+        runId: "task-run",
+        caseHandoffCompletion: { schema: "proprio.case-handoff-completion-recovery.v2", privateDetails: "Private evidence" },
+      },
+    });
+    const model = issueRecoveryActionReadModel(row as never);
+    expect(model.evidence).toEqual({ runId: "task-run" });
+    expect(model.nextAction).toBe("Review the task completion assessment.");
   });
 
   it.each(["unrelated unique constraint", "other SQLSTATE", "cyclic cause"])("does not retry %s errors", async kind => {
@@ -227,6 +241,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(costEvents);
+    await db.delete(budgetPolicies);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -589,6 +604,37 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       },
     });
     expect(replay).toEqual(exhausted);
+  });
+
+  it("keeps the board disposition and task-safe guidance after Case recovery exhausts its attempt budget", async () => {
+    const { companyId, managerId, sourceIssueId } = await seedCompany();
+    const svc = issueRecoveryActionService(db);
+    const caseHandoffCompletion = {
+      schema: "proprio.case-handoff-completion-recovery.v1",
+      caseHandoff: { prerequisiteCount: 1 },
+      assessment: { criteriaNeedingWork: [{ reasonCode: "criterion_evidence_missing", requirement: "Private criterion" }] },
+    };
+    const input = {
+      companyId, sourceIssueId, kind: "active_run_watchdog" as const, ownerType: "agent" as const,
+      ownerAgentId: managerId, cause: "completion_evidence_incomplete", fingerprint: "case-recovery-budget",
+      nextAction: "Review the private Case details.", evidence: { caseHandoffCompletion }, maxAttempts: 2,
+      wakePolicy: { type: "bounded_recovery_owner" },
+    };
+
+    const initial = await svc.upsertSourceScoped(input);
+    expect(initial.nextAction).toContain("then retry completion");
+    const exhausted = await svc.upsertSourceScoped(input);
+    expect(exhausted).toMatchObject({ status: "escalated", ownerType: "board", attemptCount: 2, wakePolicy: null });
+    expect(exhausted.nextAction).toContain("Completion recovery stopped after 2 attempts.");
+    expect(exhausted.nextAction).toContain("Review the assessment before assigning further work.");
+    expect(exhausted.nextAction).toContain("Review the prerequisite checklist in the authorized Case view.");
+    expect(exhausted.nextAction).toContain("Add or correct evidence for 1 task criterion.");
+    expect(exhausted.nextAction).not.toContain("then retry completion");
+    expect(JSON.stringify(exhausted)).not.toContain("Private criterion");
+    expect(exhausted.evidence).not.toHaveProperty("caseHandoffCompletion");
+    expect(await svc.getActiveForIssue(companyId, sourceIssueId)).toEqual(exhausted);
+    const [saved] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, exhausted.id));
+    expect(saved?.evidence.caseHandoffCompletion).toEqual(caseHandoffCompletion);
   });
 
   it("preserves legacy recovery ownership when new evidence is folded into an active action", async () => {
@@ -2054,6 +2100,29 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(list.body.actions).toHaveLength(1);
   });
 
+  it("looks up an earlier Case recovery attempt by source run without exposing the Case receipt", async () => {
+    const { companyId, sourceIssueId, coderId } = await seedCompany();
+    const earlierRunId = randomUUID(), latestRunId = randomUUID(), hiddenHandoffId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: earlierRunId, issueId: sourceIssueId });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "active_run_watchdog", cause: "completion_evidence_incomplete",
+      ownerType: "board", fingerprint: "shared-case-recovery", nextAction: "Inspect the assessment.",
+      evidence: { runId: latestRunId, caseHandoffCompletion: {
+        schema: "proprio.case-handoff-completion-recovery.v1", caseHandoff: { id: hiddenHandoffId },
+        attempts: [{ runId: earlierRunId }, { runId: latestRunId }],
+      } },
+    });
+    const app = createApp();
+    const url = `/api/issues/${sourceIssueId}/recovery-actions`;
+    for (const runId of [earlierRunId.toUpperCase(), latestRunId]) {
+      const inspected = await request(app).get(url).query({ inspectSourceRunId: runId, inspectSourceActionId: action.id }).expect(200);
+      expect(inspected.body.active).toMatchObject({ id: action.id, evidence: { runId: latestRunId } });
+      expect(inspected.text).not.toContain(hiddenHandoffId);
+      expect(inspected.text).not.toContain("caseHandoffCompletion");
+    }
+    await request(app).get(url).query({ inspectSourceRunId: randomUUID(), inspectSourceActionId: action.id }).expect(404);
+  });
+
   it("inspects the source-scoped board recovery action for a stopped legacy run", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
@@ -2184,6 +2253,81 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(prompt).not.toContain("Recovery contract:");
     expect(prompt).not.toContain(action.nextAction);
     expect(prompt).not.toContain("Do not produce the deliverable");
+  });
+
+  it.each([
+    "proprio.case-handoff-completion-recovery.v1", "proprio.case-handoff-completion-recovery.v2",
+  ])("preserves a %s receipt on writes and limits task reads and resolution", async (schema) => {
+    const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
+    const caseId = randomUUID(), privateIssueId = randomUUID();
+    await db.insert(issues).values({ id: privateIssueId, companyId, title: "Private Case work", status: "todo",
+      visibility: "private", assigneeAgentId: managerId });
+    await db.insert(cases).values({ id: caseId, companyId, caseNumber: 1, identifier: companyId + "-C1",
+      caseType: "task", title: "Private Case" });
+    await retainCaseAccessSource(db, { companyId, caseId, sourceKind: "issue", sourceId: privateIssueId });
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId });
+    const taskReader = { type: "agent" as const, source: "agent_jwt" as const, companyId, agentId: coderId, runId };
+    expect(await canActorReadCase(db, taskReader, caseId)).toBe(false);
+    const privateReceipt = { schema, caseHandoff: { id: caseId, prerequisiteCount: 1 } };
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "active_run_watchdog", ownerType: "agent", ownerAgentId: coderId,
+      cause: "completion_evidence_incomplete", fingerprint: "accepted-case-handoff-run",
+      nextAction: "Review the private Case details.", evidence: { caseHandoffCompletion: privateReceipt },
+    });
+    const updated = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "active_run_watchdog", ownerType: "agent", ownerAgentId: coderId,
+      cause: action.cause, fingerprint: action.fingerprint, nextAction: "Keep the current owner.",
+      preserveExistingOwner: true, evidence: { ownerWrite: true },
+    });
+    expect(updated.id).toBe(action.id);
+    const [stored] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(stored?.evidence).toMatchObject({ ownerWrite: true, caseHandoffCompletion: privateReceipt });
+
+    const reader = createApp(taskReader);
+    const url = `/api/issues/${sourceIssueId}`;
+    const task = await request(reader).get(url).expect(200);
+    const recovery = await request(reader).get(`${url}/recovery-actions`).expect(200);
+    expect(recovery.body.active.nextAction).toContain("Review the task completion assessment.");
+    for (const response of [task, recovery]) {
+      expect(response.text).not.toContain(caseId);
+      expect(response.text).not.toContain("caseHandoffCompletion");
+      expect(response.text).not.toContain("Review the private Case details.");
+    }
+
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const resolution = { actionId: action.id, outcome: "blocked", sourceIssueStatus: "blocked" };
+    const initial = await request(reader).post(`${url}/recovery-actions/resolve`).send(resolution).expect(200);
+    expect(initial.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", evidence: { ownerWrite: true } });
+    expect(initial.text).not.toContain("caseHandoffCompletion");
+    expect(initial.text).not.toContain("Review the private Case details.");
+    const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const replay = await request(reader).post(`${url}/recovery-actions/resolve`).send(resolution).expect(200);
+    expect(replay.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", evidence: { ownerWrite: true } });
+    expect(replay.text).not.toContain("caseHandoffCompletion");
+    expect(replay.text).not.toContain("Review the private Case details.");
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(settled);
+  });
+
+  it("retains the previous Case receipt when a new recovery identity supersedes it", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const base = { companyId, sourceIssueId, kind: "active_run_watchdog" as const,
+      ownerType: "agent" as const, ownerAgentId: coderId, cause: "completion_evidence_incomplete",
+      nextAction: "Review the completion assessment.", supersedeOnIdentityChange: true };
+    const service = issueRecoveryActionService(db);
+    const firstEvidence = { caseHandoffCompletion: { schema: "proprio.case-handoff-completion-recovery.v1", decision: "first" } };
+    const secondEvidence = { caseHandoffCompletion: { schema: "proprio.case-handoff-completion-recovery.v1", decision: "second" } };
+    const first = await service.upsertSourceScoped({ ...base, fingerprint: "first", evidence: firstEvidence });
+    const second = await service.upsertSourceScoped({ ...base, fingerprint: "second", evidence: secondEvidence });
+    const repeated = await service.upsertSourceScoped({ ...base, fingerprint: "second", evidence: secondEvidence });
+    expect(second.id).not.toBe(first.id);
+    expect(repeated.id).toBe(second.id);
+    const rows = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, status: "cancelled", resolvedAt: expect.any(Date), evidence: firstEvidence }),
+      expect.objectContaining({ id: second.id, status: "active", evidence: secondEvidence }),
+    ]));
   });
 
   it("accepts new verified evidence after an automatic no-replay disposition without reopening on duplicate requests", async () => {
@@ -3058,6 +3202,43 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
       }),
     );
+  });
+
+  it("keeps a private ancestor out of a child-only recovery hand-back refusal", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const [root] = await db.insert(issues).values({
+      companyId, title: "Private budget title", visibility: "private",
+    }).returning();
+    await db.update(issues).set({ status: "blocked", parentId: root.id }).where(eq(issues.id, sourceIssueId));
+    const [billed] = await db.insert(heartbeatRuns).values({ companyId, agentId: managerId, issueId: root.id,
+      status: "succeeded", taskLineageJson: { version: 1, pathIssueIds: [root.id] } }).returning();
+    await db.insert(costEvents).values({ companyId, agentId: managerId, issueId: root.id, heartbeatRunId: billed.id,
+      provider: "fixture", biller: "fixture", billingType: "metered_api", costStatus: "priced", model: "fixture",
+      costCents: 5, occurredAt: new Date() });
+    await db.insert(budgetPolicies).values({ companyId, scopeType: "task_tree", scopeId: root.id, amount: 1,
+      windowKind: "lifetime", hardStopEnabled: true });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "workspace_validation", ownerType: "agent", ownerAgentId: coderId,
+      returnOwnerAgentId: coderId, cause: "workspace_validation_failed", fingerprint: "private-tree-budget",
+      nextAction: "Repair the workspace and return the task.", wakePolicy: { type: "wake_owner" },
+    });
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, runId, agentId: coderId, issueId: sourceIssueId });
+    const app = createApp({ type: "agent", source: "agent_jwt", companyId, agentId: coderId, runId });
+    vi.stubEnv("PROPRIO_ISSUE_PRIVACY_MODE", "enforce");
+    try {
+      await request(app).get(`/api/issues/${root.id}`).expect(404);
+      await request(app).get(`/api/issues/${sourceIssueId}`).expect(200);
+      const refused = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+        actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      }).expect(409);
+      expect(refused.body.details).toMatchObject({ code: "recovery_safe_hand_back_budget_blocked",
+        budgetBlock: { scopeType: "task_tree", reason: expect.any(String) } });
+      expect(refused.text).not.toContain(root.id);
+      expect(refused.text).not.toContain(root.title);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {

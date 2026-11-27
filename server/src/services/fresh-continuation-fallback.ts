@@ -4,7 +4,7 @@ import {
   issueComments, issueRecoveryActions, issueThreadInteractions, issues, nativeRunFinalizations, toolInvocations, type Db,
 } from "@groktopus/db";
 import {
-  EXECUTION_RECONCILIATION_CAUSES, readRemoteWorkspaceAuthority, remoteWorkspaceRunReferenceSchema, type ExecutionReconciliation,
+  CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, readRemoteWorkspaceAuthority, remoteWorkspaceRunReferenceSchema, type ExecutionReconciliation,
 } from "@groktopus/shared";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
@@ -409,8 +409,13 @@ export async function continueFreshInTransaction(tx: Db, input: Input): Promise<
 
   const holds = await tx.select().from(issueRecoveryActions).where(and(eq(issueRecoveryActions.companyId, companyId),
     eq(issueRecoveryActions.sourceIssueId, issue.id),
-    or(sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`, sql`${issueRecoveryActions.evidence}->>'sourceRunId' = ${run.id}`)))
+    or(and(eq(issueRecoveryActions.cause, CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE),
+      inArray(issueRecoveryActions.status, ["active", "escalated"])),
+      sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`, sql`${issueRecoveryActions.evidence}->>'sourceRunId' = ${run.id}`)))
     .orderBy(asc(issueRecoveryActions.createdAt), asc(issueRecoveryActions.id)).for("update");
+  if (holds.some(hold => hold.cause === CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE && blocksExecution(hold))) {
+    return { kind: "person_owned", reason: CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE };
+  }
   const prior = holds.find(hold => object(hold.evidence.freshContinuation).sourceRunId === run.id);
   if (prior) {
     await settleLateHolds(tx, { companyId, issue, run, prior, holds: holds.filter(isOwnedReconciliationHold), now });

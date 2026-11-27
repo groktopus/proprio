@@ -57,12 +57,11 @@ describe("native persisted case handoff runtime", () => {
     await db.update(caseHandoffs).set({ state: "pending_dispatch", offerContract: {
       schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "Deliver the implementation", prerequisites: [],
       requirementRevision: { id: requirementRevisionId, revision: 1, canonicalSha256: "sha256:test" },
-      requirementsDigest, workflowTransition: null,
-      decisionOwner: { type: "agent", id: handoff!.toAgentId! }, accountableOwner: { type: "agent", id: handoff!.toAgentId! },
+      requirementsDigest, taskBrief: { title: "Build", description: null },
     }, recipientDecision: { outcome: "accepted", actorType: "agent", actorId: handoff!.toAgentId!, handoffVersion: handoff!.version,
       requirementRevisionId, requirementsDigest, decidedAt: new Date().toISOString() } }).where(eq(caseHandoffs.id, f.handoffId));
     const [issue] = await db.select().from(issues).where(eq(issues.id, f.issueId));
-    const bound = { companyId: f.companyId, issue: { id: f.issueId, assigneeAgentId: issue!.assigneeAgentId,
+    const bound = { companyId: f.companyId, runId: f.runId, issue: { id: f.issueId, assigneeAgentId: issue!.assigneeAgentId,
       assigneeUserId: issue!.assigneeUserId }, runAgentId: handoff!.toAgentId, contextSnapshot: { caseHandoffId: f.handoffId } };
     await expect(nativeCaseHandoffStatusAuthorityIsCurrent(db, { ...bound, runWakeupRequestId: handoff!.wakeupRequestId })).resolves.toBe(true);
     await expect(nativeCaseHandoffStatusAuthorityIsCurrent(db, { ...bound, runWakeupRequestId: randomUUID() })).resolves.toBe(false);

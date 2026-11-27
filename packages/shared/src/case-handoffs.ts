@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { issueDocumentKeySchema, upsertIssueDocumentSchema } from "./validators/issue.js";
+import { issueDocumentKeySchema, issueRecoveryActionReadModelSchema, upsertIssueDocumentSchema } from "./validators/issue.js";
 
 /** Preserve the author's workflow text; blank text cannot define a workflow. */
 export const caseWorkflowDocumentTextSchema = z.string().min(1).max(200_000).regex(/\S/, "Workflow document text must not be blank")
@@ -28,18 +28,23 @@ export const CASE_HANDOFF_STATES = ["offered", "awaiting_release", "pending_disp
 export type CaseHandoffState = typeof CASE_HANDOFF_STATES[number];
 export type CaseHandoffDestinationKind = "agent" | "done";
 
-export const caseHandoffOfferSchema = z.object({
-  expectedDeliverable: z.string().trim().min(1).max(8_000),
-  prerequisites: z.array(z.string().trim().min(1).max(2_000)).max(20).default([]),
+const wellFormedHandoffText = (value: string) => !value.includes("\u0000") && !/[\uD800-\uDFFF]/u.test(value);
+const handoffReceiptText = (maxLength: number) => z.string().trim().min(1).max(maxLength)
+  .refine(wellFormedHandoffText, "Text must use valid Unicode and contain no NUL characters");
+const handoffOfferText = (maxLength: number) => z.string().min(1)
+  .refine(value => [...value].length <= maxLength, `Text must contain at most ${maxLength} Unicode characters`)
+  .refine(wellFormedHandoffText, "Text must use valid Unicode and contain no NUL characters")
+  .pipe(z.string().trim().min(1));
+const caseHandoffOfferSchema = z.object({
+  expectedDeliverable: handoffOfferText(8_000),
+  prerequisites: z.array(handoffOfferText(2_000)).max(20).default([]),
 }).strict();
-export type CaseHandoffOfferInput = z.infer<typeof caseHandoffOfferSchema>;
+type CaseHandoffOfferInput = z.infer<typeof caseHandoffOfferSchema>;
 export interface CaseHandoffOfferContract extends CaseHandoffOfferInput {
   schema: "proprio.case-handoff-offer.v1";
   requirementRevision: { id: string; revision: number; canonicalSha256: string };
   requirementsDigest: string;
-  workflowTransition: CaseWorkflowTransition | null;
-  decisionOwner: { type: "agent"; id: string };
-  accountableOwner: { type: "agent"; id: string };
+  taskBrief: { title: string; description: string | null };
 }
 
 export interface CaseHandoffRecipientDecision {
@@ -53,6 +58,28 @@ export interface CaseHandoffRecipientDecision {
   reasonCode?: string;
   message?: string;
 }
+
+export const caseHandoffRecoveryHistorySchema = z.object({
+  entries: z.array(issueRecoveryActionReadModelSchema.pick({
+    id: true, status: true, ownerType: true, ownerAgentId: true, ownerUserId: true, nextAction: true,
+    attemptCount: true, maxAttempts: true, outcome: true, resolutionNote: true,
+  }).extend({
+    assessedRevision: z.number().int().positive(),
+    criteria: z.array(z.object({
+      criterionId: z.string(),
+      requirement: z.string().nullable(),
+      outcome: z.string().nullable(),
+      reasonCode: z.string().nullable(),
+      evidence: z.array(z.object({ outcome: z.string().nullable(), reasonCode: z.string().nullable() })),
+    })),
+    attempts: z.array(z.object({
+      runId: z.string().uuid(),
+      decisionId: z.string().uuid(),
+      reasonCode: z.string(),
+    })),
+  })),
+});
+export type CaseHandoffRecoveryHistory = z.infer<typeof caseHandoffRecoveryHistorySchema>;
 
 export const agentCaseHandoffSchema = z.object({
   to: z.never().optional(),
@@ -80,6 +107,9 @@ export const agentCaseHandoffSchema = z.object({
 }).strict().superRefine((input, ctx) => {
   if ("id" in input.case && input.expectedHandoffVersion === undefined) {
     ctx.addIssue({ code: "custom", path: ["expectedHandoffVersion"], message: "Required for an existing case" });
+  }
+  if (input.offer && "create" in input.case && !input.bindIssueId) {
+    ctx.addIssue({ code: "custom", path: ["bindIssueId"], message: "An offer must reuse the source run's task" });
   }
   if (input.bindIssueId && input.expectedIssueStatusVersion === undefined) {
     ctx.addIssue({ code: "custom", path: ["expectedIssueStatusVersion"], message: "Required when binding an existing task" });
@@ -118,8 +148,9 @@ export type HandoffCaseInput = z.input<typeof handoffCaseSchema>;
 
 const decisionTarget = {
   expectedHandoffVersion: z.number().int().positive(),
-  requirementRevisionId: z.string().guid(),
+  requirementRevisionId: z.string().guid().toLowerCase(),
 };
+const decisionMessage = { message: handoffReceiptText(4_000) };
 
 export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome", [
   z.object({
@@ -130,19 +161,19 @@ export const caseHandoffRecipientDecisionSchema = z.discriminatedUnion("outcome"
     ...decisionTarget,
     outcome: z.literal("clarification"),
     reasonCode: z.enum(["missing_prerequisite", "unclear_requirements", "missing_evidence", "other"]),
-    message: z.string().trim().min(1).max(4_000),
+    ...decisionMessage,
   }).strict(),
   z.object({
     ...decisionTarget,
     outcome: z.literal("declined"),
     reasonCode: z.enum(["unavailable", "missing_capability", "outside_scope", "other"]),
-    message: z.string().trim().min(1).max(4_000),
+    ...decisionMessage,
   }).strict(),
 ]);
 export type CaseHandoffRecipientDecisionInput = z.infer<typeof caseHandoffRecipientDecisionSchema>;
 
 export const caseHandoffWithdrawalSchema = z.object({
-  expectedHandoffVersion: z.number().int().positive(),
+  expectedHandoffVersion: decisionTarget.expectedHandoffVersion,
   stoppedRunId: z.string().guid(),
 }).strict();
 export type CaseHandoffWithdrawalInput = z.infer<typeof caseHandoffWithdrawalSchema>;

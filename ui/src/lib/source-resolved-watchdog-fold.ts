@@ -127,8 +127,3 @@ export function formatSilenceAgeMs(ms: number | null | undefined): string | null
   if (minutes === 0) return `${hours} hour${hours === 1 ? "" : "s"}`;
   return `${hours}h ${minutes}m`;
 }
-
-export function shortenEvidenceId(id: string): string {
-  if (id.length <= 12) return id;
-  return id.slice(0, 8);
-}

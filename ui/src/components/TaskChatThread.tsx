@@ -151,6 +151,8 @@ import {
   TaskChatBlockerLinks,
   TaskChatLiveWorkLinks,
 } from "@/components/task-chat/TaskChatBlockerLinks";
+import { DependencyDiagnosisNotice } from "@/components/DependencyDiagnosisNotice";
+import { StalledDependencyNotice } from "@/components/StalledDependencyNotice";
 import { buildDocumentAnnotationHash } from "@/lib/document-annotation-hash";
 import {
   documentDisplayTitle,
@@ -852,21 +854,31 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     ],
   );
 
-  const threadHeaderWithBlockers =
-    threadHeader || blockerLinks || liveWorkLinks ? (
-      <>
-        {threadHeader}
-        {liveWorkLinks ? (
-          <TaskChatLiveWorkLinks liveWork={liveWorkLinks} placement="top" companyId={companyId} />
-        ) : blockerLinks ? (
-          <TaskChatBlockerLinks
-            directBlocker={blockerLinks.directBlocker}
-            ultimateBlocker={blockerLinks.ultimateBlocker}
-            placement="top"
-          />
-        ) : null}
-      </>
-    ) : undefined;
+  const hasThreadHeader = Boolean(threadHeader || blockerLinks || liveWorkLinks || props.dependencyDiagnosis
+    || props.dependencyDiagnosisError || props.stalledDependencies?.length);
+  const threadHeaderWithBlockers = (
+    <>
+      {threadHeader}
+      <DependencyDiagnosisNotice
+        issueId={issueId ?? ""}
+        diagnosis={props.dependencyDiagnosis}
+        canRequest={props.showComposer ?? true}
+        blockerSummaries={blockedBy}
+        diagnosisError={props.dependencyDiagnosisError}
+        onRetryDiagnosis={props.onRetryDependencyDiagnosis}
+      />
+      {props.showComposer === false ? null : <StalledDependencyNotice stalled={props.stalledDependencies} />}
+      {liveWorkLinks ? (
+        <TaskChatLiveWorkLinks liveWork={liveWorkLinks} placement="top" companyId={companyId} />
+      ) : blockerLinks ? (
+        <TaskChatBlockerLinks
+          directBlocker={blockerLinks.directBlocker}
+          ultimateBlocker={blockerLinks.ultimateBlocker}
+          placement="top"
+        />
+      ) : null}
+    </>
+  );
 
   const linkedRunMetaById = useMemo(() => {
     const map = new Map<
@@ -3419,20 +3431,20 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                       <div
                         className="min-h-0 flex-1 overflow-y-auto"
                       >
-                        {threadHeaderWithBlockers || pendingQuestions.isError || decisionReceipts.isError || decisionReceipts.hasNextPage || taskHandoffs.isError || taskHandoffs.hasNextPage ? (
-                          <div
-                            className={cn(
-                              "mx-auto flex w-full max-w-(--tc-shell-max-w) flex-col gap-6 px-4",
-                              isMobile ? "pt-4" : "pt-3",
-                              streamlinedUiEnabled && "md:px-0",
-                            )}
-                            data-testid="task-chat-thread-header"
-                          >
-                            {threadHeaderWithBlockers}
-                            <CoordinatorChatQuestionStatus query={pendingQuestions} /><CoordinatorChatReceiptStatus query={decisionReceipts} scroll={!!scrollingHistory} />
-                            <CoordinatorChatHandoffStatus query={taskHandoffs} scroll={!!scrollingHistory} />
-                          </div>
-                        ) : null}
+                        <div
+                          className={cn(
+                            "mx-auto flex w-full max-w-(--tc-shell-max-w) flex-col gap-6 px-4 empty:hidden",
+                            isMobile ? "pt-4" : "pt-3",
+                            streamlinedUiEnabled && "md:px-0",
+                          )}
+                          data-testid={hasThreadHeader || pendingQuestions.isError || decisionReceipts.isError
+                            || decisionReceipts.hasNextPage || taskHandoffs.isError || taskHandoffs.hasNextPage
+                            ? "task-chat-thread-header" : undefined}
+                        >
+                          {threadHeaderWithBlockers}
+                          <CoordinatorChatQuestionStatus query={pendingQuestions} /><CoordinatorChatReceiptStatus query={decisionReceipts} scroll={!!scrollingHistory} />
+                          <CoordinatorChatHandoffStatus query={taskHandoffs} scroll={!!scrollingHistory} />
+                        </div>
                         <div role={historyPending ? "status" : undefined} className="px-3 py-10 text-center text-sm text-muted-foreground">
                           {historyPending ? "Loading task history…" : emptyMessage}
                         </div>

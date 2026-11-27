@@ -1,5 +1,6 @@
 export type { InboxMineSnapshot, InboxSourceError } from "./types/inbox-mine.js";
-export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffOfferSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferInput, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
+export { caseHandoffRecoveryHistorySchema, type CaseHandoffRecoveryHistory } from "./case-handoffs.js";
+export { CASE_HANDOFF_STATES, handoffCaseSchema, agentCaseHandoffSchema, doneCaseHandoffSchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, type CaseHandoffWithdrawalInput, type CaseHandoffRecipientDecisionInput, caseWorkflowDocumentTextSchema, caseInitialDocumentSchema, caseInitialDocumentsSchema, type CaseInitialDocument, type CaseHandoffOfferContract, type CaseHandoffRecipientDecision, type CaseHandoffState, type CaseHandoffDestinationKind, type AgentCaseHandoffInput, type DoneCaseHandoffInput, type HandoffCaseInput, type HandoffCaseResult, type CaseHandoff, type CaseWorkflowTransition } from "./case-handoffs.js";
 export * from "./slack-app-manifest.js";
 export * from "./analytics-consent.js";
 export * from "./routine-suggestions.js";
@@ -54,6 +55,17 @@ export {
   type NativeRuntimeMode,
   type NativeRunTerminalState,
 } from "./types/native-finalization.js";
+export {
+  nativeCompletionEvidenceKindSchema,
+  nativeCompletionEvidenceOutcomeSchema,
+  nativeCompletionHistorySchema,
+  type NativeCompletionCriterionAssessment,
+  type NativeCompletionEvidenceKind,
+  type NativeCompletionEvidenceOutcome,
+  type NativeCompletionEvidenceReference,
+  type NativeCompletionHistoryEntry,
+  type NativeCompletionVerificationAssessment,
+} from "./types/native-completion-history.js";
 export {
   decisionEffectStalenessSchema,
   decisionOptionStyleSchema,
@@ -480,6 +492,7 @@ export {
   ISSUE_RECOVERY_ACTION_STATUSES,
   ISSUE_RECOVERY_ACTION_OWNER_TYPES,
   ISSUE_BLOCKER_STALLED_WAKE_REASON,
+  DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX,
   ISSUE_BLOCKER_STALL_RELATIONS,
   ISSUE_RECOVERY_ACTION_OUTCOMES,
   pluginOperationIssueOriginKind,
@@ -567,6 +580,8 @@ export {
   FINANCE_UNITS,
   BUDGET_SCOPE_TYPES,
   BUDGET_METRICS,
+  BUDGET_AMOUNT_MAX_CENTS,
+  BUDGET_POLICY_EXISTS_ERROR_CODE,
   BUDGET_WINDOW_KINDS,
   BUDGET_THRESHOLD_TYPES,
   BUDGET_INCIDENT_STATUSES,
@@ -1237,6 +1252,7 @@ export type {
   IssueBlockedInboxState,
   IssueRecoveryAction,
   IssueBlockerStalledWakeContext,
+  DependencyDiagnosis,
   IssueWatchdog,
   IssueWatchdogStatus,
   IssueWatchdogSummary,
@@ -1256,6 +1272,11 @@ export type {
   IssueExecutionPolicy,
   RequiredQualityReview,
   QualityReviewBinding,
+  IssueExecutionReviewTargetBindingPolicy,
+  IssueExecutionReviewEvidence,
+  RequiredQualityReviewState,
+  IssueExecutionReviewTargetReference,
+  IssueExecutionReviewTargetBinding,
   IssueExecutionState,
   IssueExecutionStage,
   IssueExecutionStageParticipant,
@@ -2159,12 +2180,17 @@ export {
   stalledReviewDecisionSchema,
   issueExecutionPolicySchema,
   requiredQualityReviewSchema,
+  issueExecutionReviewTargetBindingSchema,
+  issueExecutionReviewEvidenceQuerySchema,
+  issueExecutionReviewEvidenceSchema,
   issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,
   resolveIssueRecoveryActionSchema,
   isValidExistingBranchName,
   retryWorkspaceExportSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
+  type DependencyInvestigationInput,
   taskRetrySchema,
   reconstructWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,
@@ -2589,6 +2615,7 @@ export {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateAgentPermissionGrantSchema,
   type UpdateAgentPermissionGrant,
@@ -3020,7 +3047,7 @@ export { ACCOUNT_HANDLE_MAX_LENGTH, toAccountHandle } from "./account-handle.js"
 export type { ExecutionContinuationEnvelope } from "./types/execution-continuation.js";
 export type { ExecutionAgentQueue, ExecutionProjection, ExecutionReconciliation, ExecutionBlocker, TaskInterruptionPresentation } from "./types/execution-projection.js";
 
-export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
+export { CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE, EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
 export * from "./types/voice-sessions.js";
 export * from "./validators/voice-sessions.js";
 

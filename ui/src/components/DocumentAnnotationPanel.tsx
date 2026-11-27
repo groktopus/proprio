@@ -333,9 +333,15 @@ export function ThreadCard(props: {
 
   return (
     <li>
+      {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- The named excerpt button supplies keyboard activation for the card's pointer shortcut. */}
       <article
         role="article"
         data-thread-id={thread.id}
+        onClick={(event) => {
+          if (!(event.target instanceof Element)) return;
+          if (event.target.closest("button, a, label, textarea, input, select, [role=button]")) return;
+          props.onFocus();
+        }}
         data-anchor-state={thread.anchorState}
         data-status={thread.status}
         data-focused={props.expanded || undefined}
@@ -345,8 +351,6 @@ export function ThreadCard(props: {
           props.expanded && "ring-2 ring-primary/80 ring-offset-1 ring-offset-popover",
           thread.status === "resolved" && "bg-muted",
         )}
-        tabIndex={0}
-        onClick={props.onFocus}
       >
         <blockquote
           id={`thread-quote-${thread.id}`}
@@ -355,7 +359,15 @@ export function ThreadCard(props: {
             (thread.anchorState === "stale" || thread.status === "resolved") && "bg-muted",
           )}
         >
-          {truncate(thread.selectedText, 120)}
+          <button
+            type="button"
+            className="block w-full text-left focus-visible:outline-2 focus-visible:outline-ring"
+            aria-label={`Open annotation thread: ${truncate(thread.selectedText, 120)}`}
+            aria-expanded={props.expanded}
+            onClick={props.onFocus}
+          >
+            {truncate(thread.selectedText, 120)}
+          </button>
         </blockquote>
         {props.expanded ? (
           <div className="space-y-2 px-3 py-2">

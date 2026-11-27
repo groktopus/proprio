@@ -104,7 +104,7 @@ describe("InlineEditor", () => {
     try {
       await act(async () => root.render(signedIn("user-1", <InlineEditor value="Original" onSave={onSave} onEditingChange={onEditingChange} />)));
       expect(onEditingChange).not.toHaveBeenCalled();
-      await act(async () => container.querySelector("span")!.click());
+      await act(async () => container.querySelector("button")!.click());
       expect(onEditingChange.mock.calls).toEqual([[true]]);
       const input = container.querySelector("textarea")!;
       if (exit === "save" || exit === "failure") act(() => setNativeTextareaValue(input, "Edited title"));
@@ -149,7 +149,7 @@ describe("InlineEditor", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<InlineEditor value="Original" onSave={onSave} onEditingChange={opened} />));
-      await act(async () => container.querySelector("span")!.click());
+      await act(async () => container.querySelector("button")!.click());
       await act(async () => root.render(<InlineEditor value="Original" onSave={onSave} onEditingChange={next} />));
       expect(opened.mock.calls).toEqual([[true]]);
       expect(next).not.toHaveBeenCalled();
@@ -167,7 +167,7 @@ describe("InlineEditor", () => {
       root.render(<InlineEditor value="hello" nullable onSave={onSave} />);
     });
 
-    const display = container.querySelector("span");
+    const display = container.querySelector("button");
     expect(display).not.toBeNull();
     expect(display?.textContent).toBe("hello");
 
@@ -203,7 +203,7 @@ describe("InlineEditor", () => {
       root.render(<InlineEditor value="hello" onSave={onSave} />);
     });
     act(() => {
-      container.querySelector("span")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     const textarea = container.querySelector("textarea")!;
     act(() => setNativeTextareaValue(textarea, "hello world"));
@@ -379,7 +379,7 @@ describe("InlineEditor", () => {
           <InlineEditor value="Original" draftKey="initial-session" onSave={onSave} />
         </QueryClientProvider>,
       ));
-      act(() => container.querySelector("span")!.click());
+      act(() => container.querySelector("button")!.click());
       const input = container.querySelector("textarea")!;
       act(() => setNativeTextareaValue(input, "Typing while session loads"));
       await act(async () => {
@@ -414,7 +414,7 @@ describe("InlineEditor", () => {
           <InlineEditor value="Original" draftKey="cancel-before-session" onSave={vi.fn()} />
         </QueryClientProvider>,
       ));
-      act(() => container.querySelector("span")!.click());
+      act(() => container.querySelector("button")!.click());
       act(() => setNativeTextareaValue(container.querySelector("textarea")!, "Cancelled private text"));
       act(() => container.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
       await act(async () => {
@@ -444,7 +444,7 @@ describe("InlineEditor", () => {
           <InlineEditor value="Original" multiline={multiline} defaultEditing={multiline} draftKey="private-switch" onSave={onSave} />
         </QueryClientProvider>,
       ));
-      if (!multiline) act(() => container.querySelector("span")!.click());
+      if (!multiline) act(() => container.querySelector("button")!.click());
       act(() => setNativeTextareaValue(container.querySelector("textarea")!, "Private account A draft"));
       const storedA = localStorage.getItem("proprio:inline-draft:v2:user-1:private-switch");
       expect(storedA).toContain("Private account A draft");
@@ -458,7 +458,7 @@ describe("InlineEditor", () => {
       expect(localStorage.getItem("proprio:inline-draft:v2:user-1:private-switch")).toBe(storedA);
       expect(localStorage.getItem("proprio:inline-draft:v2:user-2:private-switch")).toBeNull();
       expect(onSave).not.toHaveBeenCalled();
-      if (!multiline) act(() => container.querySelector("span")!.click());
+      if (!multiline) act(() => container.querySelector("button")!.click());
       act(() => setNativeTextareaValue(container.querySelector("textarea")!, "Account B edit"));
       expect(localStorage.getItem("proprio:inline-draft:v2:user-2:private-switch")).toContain("Account B edit");
       expect(localStorage.getItem("proprio:inline-draft:v2:user-2:private-switch")).not.toContain("Private account A draft");
@@ -478,7 +478,7 @@ describe("InlineEditor", () => {
       root.render(<InlineEditor value="hello" onSave={onSave} />);
     });
 
-    const display = container.querySelector("span");
+    const display = container.querySelector("button");
     expect(display).not.toBeNull();
 
     act(() => {

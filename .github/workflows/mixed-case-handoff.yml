@@ -1,0 +1,102 @@
+name: Mixed-runner Case handoff
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/mixed-case-handoff.yml
+      - tests/e2e/execution-recovery/mixed-case-handoff.spec.ts
+      - tests/e2e/execution-recovery/mixed-handoff-evidence.ts
+      - tests/e2e/execution-recovery/playwright.config.ts
+      - tests/e2e/execution-recovery/recovery.spec.ts
+      - server/src/modules/wake-queue/adapters/postgres.ts
+      - packages/proprio-runner/runner/crates/runner-core/src/provider_events.rs
+      - tests/e2e/fixtures/mixed-handoff-*.mjs
+      - tests/e2e/fixtures/codex-fixture-helpers.mjs
+      - tests/e2e/fixtures/codex-fixture-resolver.mjs
+      - tests/e2e/fixtures/recovery-codex-loader.mjs
+      - tests/e2e/fixtures/recovery-bin/codex
+      - tests/e2e/fixtures/in-feed-codex.mjs
+      - tests/e2e/fetch-allowed-port.ts
+      - tests/e2e/fixtures/test-drive-process.ts
+      - tests/runner-e2e/directory-cleanup.ts
+      - tests/runner-e2e/native-event-envelope.ts
+      - tests/runner-e2e/process-tree-owner.ts
+      - tests/runner-e2e/process-tree.ts
+      - tests/runner-e2e/run-observations.ts
+      - cli/src/commands/test-drive.ts
+      - cli/src/index.ts
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mixed-case-handoff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  mixed-case-handoff:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked source dependencies
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/proprio-runner build:typescript
+      - name: Build the local Runner
+        working-directory: packages/proprio-runner
+        run: |
+          rustc --version
+          cargo build --locked --manifest-path runner/Cargo.toml -p proprio-runner-core --bin proprio-runnerd
+          test -x runner/target/debug/proprio-runnerd
+          sha256sum runner/target/debug/proprio-runnerd
+      - name: Check the shared Codex fixture resolver
+        run: node --test tests/e2e/fixtures/composer-stop-codex-loader.test.mjs
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify mixed handoffs and the uncertain-effect restart
+        run: |
+          fixture_tmp=$(mktemp -d "$RUNNER_TEMP/mixed-case-handoff-fixture.XXXXXX")
+          cleanup() {
+            if [[ -n "$(find "$fixture_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'proprio-mixed-handoff-*' -o -name 'proprio-recovery-*' \) -print -quit)" ]]; then
+              echo "Instance data is retained for the disposable hosted job to clean up."
+              return
+            fi
+            chmod -R u+w -- "$fixture_tmp"
+            rm -rf -- "$fixture_tmp"
+          }
+          trap cleanup EXIT
+          TMPDIR="$fixture_tmp" pnpm exec playwright test \
+            --config tests/e2e/execution-recovery/playwright.config.ts mixed-case-handoff.spec.ts recovery.spec.ts \
+            --grep 'mixed-handoff grader|a legacy lead hands the same Case|journey: uncertain$' \
+            --output "$RUNNER_TEMP/mixed-case-handoff-results"
+      - name: Retain the structured handoff evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mixed-case-handoff-evidence
+          path: |
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-evidence.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-restart-checkpoints.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/mixed-handoff-board-diagnostic.json
+            ${{ runner.temp }}/mixed-case-handoff-results/**/uncertain-effect-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
