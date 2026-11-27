@@ -32,7 +32,7 @@ describe("headless onboarding effective deployment contract", () => {
       "PROPRIO_AGENT_JWT_SECRET", "PROPRIO_TOOL_ACTION_SIGNING_SECRET", "PROPRIO_SECRETS_MASTER_KEY",
       "PROPRIO_SECRETS_MASTER_KEY_FILE", "BETTER_AUTH_URL", "BETTER_AUTH_BASE_URL"]) vi.stubEnv(key, undefined);
     vi.stubEnv("PROPRIO_HOME", path.join(root, "home"));
-    createDb.mockClear();
+    createDb.mockReset().mockImplementation(() => { throw new Error("Any DB access is prohibited in this fixture"); });
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -44,6 +44,23 @@ describe("headless onboarding effective deployment contract", () => {
 
   function saved() {
     return JSON.parse(fs.readFileSync(config, "utf8")) as ProprioConfig;
+  }
+
+  function mockSuccessfulBootstrapDb() {
+    const inserted: Array<Record<string, unknown>> = [];
+    const close = vi.fn(async () => undefined);
+    createDb.mockReturnValueOnce({
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+      update: () => ({ set: () => ({ where: async () => undefined }) }),
+      insert: () => ({ values: (value: Record<string, unknown>) => ({
+        returning: async () => {
+          inserted.push(value);
+          return [{ expiresAt: new Date("2030-01-01T00:00:00.000Z") }];
+        },
+      }) }),
+      $client: { end: close },
+    } as never);
+    return { inserted, close };
   }
 
   it("persists the server's explicit authenticated mode without inferring LAN for unattended setup", async () => {
@@ -123,6 +140,7 @@ describe("headless onboarding effective deployment contract", () => {
     vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
     await onboard({ config, yes: true, invokedByRun: true });
     createDb.mockClear();
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "");
     const denial = vi.spyOn(prompts.log, "error").mockImplementation(() => {});
     await bootstrapCeoInvite({ config });
     expect(createDb).toHaveBeenCalledOnce();
@@ -136,15 +154,7 @@ describe("headless onboarding effective deployment contract", () => {
     vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "public");
     vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
     vi.stubEnv("PROPRIO_PUBLIC_URL", "https://proprio.example.invalid/");
-    const inserted: Array<Record<string, unknown>> = [];
-    createDb.mockReturnValue({
-      select: () => ({ from: () => ({ where: async () => [] }) }),
-      update: () => ({ set: () => ({ where: async () => undefined }) }),
-      insert: () => ({ values: (value: Record<string, unknown>) => ({
-        returning: async () => { inserted.push(value); return [{ expiresAt: new Date("2030-01-01T00:00:00.000Z") }]; },
-      }) }),
-      $client: { end: vi.fn(async () => undefined) },
-    } as never);
+    const { inserted, close } = mockSuccessfulBootstrapDb();
     const invite = vi.spyOn(prompts.log, "message").mockImplementation(() => {});
 
     await bootstrapCeoInvite({});
@@ -154,6 +164,7 @@ describe("headless onboarding effective deployment contract", () => {
     expect(inserted[0]).toMatchObject({ inviteType: "bootstrap_ceo", allowedJoinTypes: "human", invitedByUserId: "system" });
     expect(invite).toHaveBeenCalledWith(expect.stringContaining("https://proprio.example.invalid/invite/pcp_bootstrap_"));
     expect(invite.mock.calls.flat().join(" ")).not.toContain("compose-secret");
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("uses the first nonblank public URL source when the primary variable is blank", async () => {
@@ -162,17 +173,25 @@ describe("headless onboarding effective deployment contract", () => {
     vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
     vi.stubEnv("PROPRIO_PUBLIC_URL", "  ");
     vi.stubEnv("PROPRIO_AUTH_PUBLIC_BASE_URL", "https://fallback.example.invalid/");
-    createDb.mockReturnValue({
-      select: () => ({ from: () => ({ where: async () => [] }) }),
-      update: () => ({ set: () => ({ where: async () => undefined }) }),
-      insert: () => ({ values: () => ({ returning: async () => [{ expiresAt: new Date("2030-01-01T00:00:00.000Z") }] }) }),
-      $client: { end: vi.fn(async () => undefined) },
-    } as never);
+    mockSuccessfulBootstrapDb();
     const invite = vi.spyOn(prompts.log, "message").mockImplementation(() => {});
 
     await bootstrapCeoInvite({});
 
     expect(invite).toHaveBeenCalledWith(expect.stringContaining("https://fallback.example.invalid/invite/pcp_bootstrap_"));
+  });
+
+  it("uses the running listener port for a configless private invite", async () => {
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+    vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "private");
+    vi.stubEnv("PORT", "3200");
+    vi.stubEnv("DATABASE_URL", "postgres://db:5432/proprio");
+    mockSuccessfulBootstrapDb();
+    const invite = vi.spyOn(prompts.log, "message").mockImplementation(() => {});
+
+    await bootstrapCeoInvite({});
+
+    expect(invite).toHaveBeenCalledWith(expect.stringContaining("http://localhost:3200/invite/pcp_bootstrap_"));
   });
 
   it("fails nonzero when a configless bootstrap has no explicit deployment mode", async () => {
@@ -232,6 +251,55 @@ describe("headless onboarding effective deployment contract", () => {
     vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
     await expect(bootstrapCeoInvite({})).rejects.toThrow("HTTP or HTTPS URL without credentials");
     expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("rejects HTTP public invite URLs before opening the database", async () => {
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+    vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "public");
+    vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
+
+    await expect(bootstrapCeoInvite({ baseUrl: "http://proprio.example.invalid" }))
+      .rejects.toThrow("Public bootstrap invite URLs must use HTTPS");
+
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("rejects an HTTP public URL from Compose environment before opening the database", async () => {
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+    vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "public");
+    vi.stubEnv("PROPRIO_PUBLIC_URL", "http://proprio.example.invalid");
+    vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
+
+    await expect(bootstrapCeoInvite({}))
+      .rejects.toThrow("Public bootstrap invite URLs must use HTTPS");
+
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it.each(["https://proprio.example.invalid?", "https://proprio.example.invalid#"])(
+    "rejects public invite bases with an empty URL delimiter before database access (%s)",
+    async baseUrl => {
+      vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+      vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "public");
+      vi.stubEnv("DATABASE_URL", "postgres://compose-secret@db:5432/proprio");
+
+      await expect(bootstrapCeoInvite({ baseUrl }))
+        .rejects.toThrow("HTTP or HTTPS URL without credentials, query, or fragment");
+
+      expect(createDb).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows HTTP invite bases for authenticated private deployments", async () => {
+    vi.stubEnv("PROPRIO_DEPLOYMENT_MODE", "authenticated");
+    vi.stubEnv("PROPRIO_DEPLOYMENT_EXPOSURE", "private");
+    vi.stubEnv("DATABASE_URL", "postgres://db:5432/proprio");
+    mockSuccessfulBootstrapDb();
+    const invite = vi.spyOn(prompts.log, "message").mockImplementation(() => {});
+
+    await bootstrapCeoInvite({ baseUrl: "http://localhost:3200/" });
+
+    expect(invite).toHaveBeenCalledWith(expect.stringContaining("http://localhost:3200/invite/pcp_bootstrap_"));
   });
 
   it("reports a stale bootstrap configuration without creating or revoking invites", async () => {

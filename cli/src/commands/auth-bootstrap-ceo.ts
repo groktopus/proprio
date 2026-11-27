@@ -29,39 +29,52 @@ function resolveDbUrl(configPath?: string, explicitDbUrl?: string) {
   return null;
 }
 
-function resolveBaseUrl(configPath?: string, explicitBaseUrl?: string) {
+type BaseUrlResolution = { url: string; explicit: boolean };
+
+function resolveBaseUrl(configPath?: string, explicitBaseUrl?: string): BaseUrlResolution {
   const normalize = (value: string, source: string) => {
     let url: URL;
     try {
       url = new URL(value.trim());
     } catch {
-      throw new Error(`${source} must be an HTTP or HTTPS URL without credentials, query, or fragment`);
+      throw new Error(source + " must be an HTTP or HTTPS URL without credentials, query, or fragment");
     }
-    if (!(["http:", "https:"].includes(url.protocol)) || !url.hostname || url.username || url.password || url.search || url.hash) {
-      throw new Error(`${source} must be an HTTP or HTTPS URL without credentials, query, or fragment`);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      value.trim().includes("?") ||
+      value.trim().includes("#")
+    ) {
+      throw new Error(source + " must be an HTTP or HTTPS URL without credentials, query, or fragment");
     }
     return value.trim().replace(/\/+$/, "");
   };
-  if (explicitBaseUrl?.trim()) return normalize(explicitBaseUrl, "--base-url");
-  const fromEnv = [
-    process.env.PROPRIO_PUBLIC_URL,
-    process.env.PROPRIO_AUTH_PUBLIC_BASE_URL,
-    process.env.BETTER_AUTH_URL,
-    process.env.BETTER_AUTH_BASE_URL,
-  ].find(value => value?.trim());
-  if (fromEnv?.trim()) return normalize(fromEnv, "Configured public base URL");
+  const configured = explicitBaseUrl?.trim()
+    ? { value: explicitBaseUrl, source: "--base-url" }
+    : [
+        { value: process.env.PROPRIO_PUBLIC_URL, source: "Configured public base URL" },
+        { value: process.env.PROPRIO_AUTH_PUBLIC_BASE_URL, source: "Configured public base URL" },
+        { value: process.env.BETTER_AUTH_URL, source: "Configured public base URL" },
+        { value: process.env.BETTER_AUTH_BASE_URL, source: "Configured public base URL" },
+      ].find(candidate => candidate.value?.trim());
+  if (configured?.value?.trim()) {
+    return { url: normalize(configured.value, configured.source), explicit: true };
+  }
   const config = readConfig(configPath);
   if (config?.auth.baseUrlMode === "explicit" && config.auth.publicBaseUrl) {
-    return normalize(config.auth.publicBaseUrl, "Saved public base URL");
+    return { url: normalize(config.auth.publicBaseUrl, "Saved public base URL"), explicit: true };
   }
   const bind = config?.server.bind ?? inferBindModeFromHost(config?.server.host);
-  const host =
+  const host = process.env.HOST?.trim() || (
     bind === "custom"
       ? config?.server.customBindHost ?? config?.server.host ?? "localhost"
-      : config?.server.host ?? "localhost";
-  const port = config?.server.port ?? 3100;
+      : config?.server.host ?? "localhost"
+  );
+  const port = Number(process.env.PORT) || config?.server.port || 3100;
   const publicHost = host === "0.0.0.0" || bind === "lan" ? "localhost" : host;
-  return normalize(`http://${publicHost}:${port}`, "Resolved public base URL");
+  return { url: normalize("http://" + publicHost + ":" + port, "Resolved public base URL"), explicit: false };
 }
 
 export async function bootstrapCeoInvite(opts: {
@@ -73,11 +86,12 @@ export async function bootstrapCeoInvite(opts: {
 }) {
   const configPath = resolveConfigPath(opts.config);
   loadDeploymentEnv(configPath);
-  const deploymentExposure = parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE);
   const config = readConfig(configPath);
+  const deploymentExposure = parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE) ??
+    config?.server.exposure ?? "private";
   const configuredMode = config?.server.deploymentMode;
-  const modeFromEnv = process.env.PROPRIO_DEPLOYMENT_MODE;
-  if (modeFromEnv !== undefined && !(DEPLOYMENT_MODES as readonly string[]).includes(modeFromEnv)) {
+  const modeFromEnv = process.env.PROPRIO_DEPLOYMENT_MODE?.trim() || undefined;
+  if (modeFromEnv && !(DEPLOYMENT_MODES as readonly string[]).includes(modeFromEnv)) {
     throw new Error("PROPRIO_DEPLOYMENT_MODE must be authenticated or local_trusted");
   }
   if (!config && !modeFromEnv) {
@@ -100,18 +114,15 @@ export async function bootstrapCeoInvite(opts: {
     return;
   }
 
-  const hasEnvironmentBaseUrl = [
-    process.env.PROPRIO_PUBLIC_URL,
-    process.env.PROPRIO_AUTH_PUBLIC_BASE_URL,
-    process.env.BETTER_AUTH_URL,
-    process.env.BETTER_AUTH_BASE_URL,
-  ].some(value => value?.trim());
-  if (!config && deploymentExposure === "public" && !opts.baseUrl?.trim() && !hasEnvironmentBaseUrl) {
+  const baseUrl = resolveBaseUrl(configPath, opts.baseUrl);
+  if (!config && deploymentExposure === "public" && !baseUrl.explicit) {
     p.log.error("Could not resolve the public base URL for bootstrap. Set PROPRIO_PUBLIC_URL or pass --base-url.");
     process.exitCode = 1;
     return;
   }
-  const baseUrl = resolveBaseUrl(configPath, opts.baseUrl);
+  if (deploymentExposure === "public" && new URL(baseUrl.url).protocol !== "https:") {
+    throw new Error("Public bootstrap invite URLs must use HTTPS.");
+  }
 
   const dbUrl = resolveDbUrl(configPath, opts.dbUrl);
   if (!dbUrl) {
@@ -120,18 +131,10 @@ export async function bootstrapCeoInvite(opts: {
     return;
   }
 
-  let closableDb: {
-    $client?: {
-      end?: (options?: { timeout?: number }) => Promise<void>;
-    };
-  } | undefined;
+  let closableDb: ReturnType<typeof createDb> | undefined;
   try {
-    const db = createDb(dbUrl);
-    closableDb = db as typeof db & {
-      $client?: {
-        end?: (options?: { timeout?: number }) => Promise<void>;
-      };
-    };
+    closableDb = createDb(dbUrl);
+    const db = closableDb;
     const existingAdminCount = await db
       .select()
       .from(instanceUserRoles)
@@ -170,7 +173,7 @@ export async function bootstrapCeoInvite(opts: {
       .returning()
       .then((rows) => rows[0]);
 
-    const inviteUrl = `${baseUrl}/invite/${token}`;
+    const inviteUrl = baseUrl.url + "/invite/" + token;
     p.log.success("Created bootstrap CEO invite.");
     p.log.message(`Invite URL: ${pc.cyan(inviteUrl)}`);
     p.log.message(`Expires: ${pc.dim(created.expiresAt.toISOString())}`);
