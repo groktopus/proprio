@@ -23,7 +23,7 @@ vi.mock("../../realtime/runner-prp-outbound.js", () => ({ connectRunnerPrpIngres
 vi.mock("./native-codex-runner.js", () => ({ resolveProprioRunnerBinary: selectedRunner, resolveRemoteProprioRunnerBinary: selectedRemoteRunner }));
 vi.mock("../../vendor/proprio-runner/index.js", async original => ({ ...await original<typeof import("../../vendor/proprio-runner/index.js")>(), probeNativeRunnerEnvironment: nativeProbe }));
 vi.mock("./native-session-executor.js", async original => ({ ...await original<typeof import("./native-session-executor.js")>(), createRemoteNativeArtifactPreparation: nativeArtifacts, createRemoteRunnerProcessLauncher: remoteLauncher }));
-import { testNativeRunnerAuthentication } from "./setup-readiness.js";
+import { testNativeAcpxClaudeAuthentication, testNativeRunnerAuthentication } from "./setup-readiness.js";
 const context = {
   companyId: "company", adapterType: "proprio_runner", config: { externallySandboxed: false, env: { PROPRIO_RUNNER_EXTERNAL_SANDBOX: "false" } },
   executionTarget: { kind: "remote" as const, transport: "sandbox" as const, providerKey: "test", remoteCwd: "/workspace", runner: { execute: vi.fn() } },
@@ -563,5 +563,47 @@ describe("Codex selected native account verification", () => {
     expect(order).toEqual(["artifacts", "ingress", "connect"]);
     expect(nativeProbe.mock.calls[0][0].transportOptions.externallySandboxed).toBe(true);
     expect(connectionClose).toHaveBeenCalledOnce(); expect(registerPrp).not.toHaveBeenCalled();
+  });
+});
+
+describe("native Claude selected profile inference", () => {
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    for (const root of nativeProbeRuntimeDirectories) await rm(root, { recursive: true, force: true });
+  });
+
+  it("probes only the saved Claude credential, exact model, and pinned read-only ACP runtime", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "ambient-account-must-not-be-used");
+    vi.stubEnv("OPENAI_API_KEY", "ambient-codex-account-must-not-be-used");
+    nativeProbe.mockImplementation(async input => {
+      await input.onCleanupConfirmed();
+      return { provider: "acpx", providerDriver: "acpx_runtime", effectiveModel: "claude-sonnet-5", helloProbePassed: true };
+    });
+    const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner",
+      config: { env: { ANTHROPIC_API_KEY: "saved-claude-key", ANTHROPIC_BASE_URL: "https://claude.example.test" }, modelReasoningEffort: "high" } }, "claude-sonnet-5");
+
+    expect(result.status).toBe("pass");
+    expect(result.checks).toMatchObject([{ code: "claude_hello_probe_passed", level: "info", message: expect.stringContaining("claude-sonnet-5") }]);
+    const input = nativeProbe.mock.calls.at(-1)![0];
+    expect(input).toMatchObject({ provider: "acpx", model: "claude-sonnet-5", timeoutMs: 45_000,
+      environment: { ANTHROPIC_API_KEY: "saved-claude-key", ANTHROPIC_BASE_URL: "https://claude.example.test" },
+      transportOptions: { acpxAgent: "claude", acpxPermissionMode: "deny-all", acpxPermissionModePinned: true, sourceCodexHome: "", externallySandboxed: false } });
+    expect(input.environment.ANTHROPIC_API_KEY).not.toBe("ambient-account-must-not-be-used");
+    expect(input.environment.CODEX_API_KEY).toBeUndefined();
+    expect(input.environment.OPENAI_API_KEY).toBeUndefined();
+    expect(input.runtimeDirectory).toContain("proprio-native-claude-setup-");
+    expect(result.checks.map(check => check.message).join(" ")).not.toContain("saved-claude-key");
+  });
+
+  it("does not surface provider errors or assistant content", async () => {
+    nativeProbe.mockImplementation(async input => {
+      await input.onCleanupConfirmed();
+      throw new Error("private assistant response; invalid API key saved-secret");
+    });
+    const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner",
+      config: { env: { ANTHROPIC_API_KEY: "saved-secret" } } }, "selected-model");
+    expect(result.status).toBe("fail");
+    expect(result.checks[0]).toMatchObject({ code: "claude_hello_probe_auth_required", message: expect.not.stringContaining("private assistant response") });
+    expect(JSON.stringify(result)).not.toContain("saved-secret");
   });
 });

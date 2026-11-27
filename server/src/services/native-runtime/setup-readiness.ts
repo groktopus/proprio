@@ -6,7 +6,7 @@ import { CODEX_CHATGPT_MODEL_REJECTION_RE, codexChatGptRetirementHint } from "@g
 import { copyBackCodexAuth } from "@groktopus/adapter-codex-local/server";
 import type { AdapterEnvironmentTestContext, AdapterEnvironmentTestResult } from "@groktopus/adapter-utils";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@groktopus/shared";
-import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveSourceCodexHome } from "../../vendor/proprio-runner/index.js";
+import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveClaudeEffort, resolveSourceCodexHome } from "../../vendor/proprio-runner/index.js";
 import { resolveProprioRunnerBinary, resolveRemoteProprioRunnerBinary } from "./native-codex-runner.js";
 import { readLocalAiCredentialFile } from "../local-ai-credential-file.js";
 import { readRemoteUserHome } from "./remote-user-home.js";
@@ -273,5 +273,59 @@ export async function testNativeRunnerAuthentication(context: AdapterEnvironment
       ...(authentication && provider === "codex" ? [{ code: ADAPTER_AUTH_MISSING_CHECK_CODE, level: "error" as const,
         message: "The selected Codex account needs authentication.",
         hint: "Sign in to Codex or choose an authenticated account, then test again." }] : [])] };
+  }
+}
+
+/** Run the selected native Claude profile through its actual ACP runtime. */
+export async function testNativeAcpxClaudeAuthentication(context: AdapterEnvironmentTestContext, model: string | null): Promise<AdapterEnvironmentTestResult> {
+  const configured = context.config.env;
+  const environment: Record<string, string> = Object.fromEntries([
+    ...PROBE_TRANSPORT_ENV_KEYS.flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!]] : []),
+    ...Object.entries(configured && typeof configured === "object" && !Array.isArray(configured) ? configured : {})
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  ]);
+  // Never let the probe borrow the controller's Claude or Codex account.
+  const runtimeDirectory = await realpath(await mkdtemp(join(tmpdir(), "proprio-native-claude-setup-")));
+  try {
+    const effort = context.config.modelReasoningEffort ?? context.config.reasoningEffort ?? context.config.effort;
+    const receipt = await probePreparedNativeRuntime(runtimeDirectory, async () => ({
+      runtimeDirectory,
+      provider: "acpx",
+      model,
+      environment,
+      timeoutMs: 45_000,
+      onCleanupConfirmed: async () => { await rm(runtimeDirectory, { recursive: true, force: true }); },
+      transportOptions: {
+        runnerBinary: resolveProprioRunnerBinary(),
+        sourceCodexHome: "",
+        externallySandboxed: false,
+        acpxAgent: "claude",
+        acpxPermissionMode: "deny-all",
+        acpxPermissionModePinned: true,
+        claudeEffort: resolveClaudeEffort("claude", effort),
+      },
+    }));
+    if (receipt.helloProbePassed !== true || receipt.provider !== "acpx" || receipt.providerDriver !== "acpx_runtime"
+      || typeof receipt.effectiveModel !== "string" || !receipt.effectiveModel.trim() || receipt.effectiveModel === "unknown"
+      || (model !== null && receipt.effectiveModel !== model)) {
+      throw new Error("The selected native Claude runtime returned an incompatible account or model verification receipt.");
+    }
+    return { adapterType: "proprio_runner", status: "pass", testedAt: new Date().toISOString(), checks: [{
+      code: "claude_hello_probe_passed", level: "info",
+      message: `The native Claude runtime completed a read-only hello turn with the selected model ${receipt.effectiveModel}.`,
+    }] };
+  } catch (error) {
+    if (error instanceof NativeEnvironmentProbeCleanupError) throw error;
+    const raw = error instanceof Error ? error.message : "";
+    const authentication = /(?:invalid (?:api[- ]?key|auth(?:entication)? token)|authentication (?:failed|required)|unauthenticated|unauthorized|not authenticated|please (?:log|sign) in|not logged in|\b(?:401|403)\b)/i.test(raw);
+    const timeout = /timed out|timeout/i.test(raw);
+    return { adapterType: "proprio_runner", status: "fail", testedAt: new Date().toISOString(), checks: [{
+      code: `claude_hello_probe_${authentication ? "auth_required" : timeout ? "timeout" : "failed"}`,
+      level: "error",
+      message: authentication ? "The selected Claude account could not authenticate the native hello probe."
+        : timeout ? "The native Claude hello probe timed out before verification completed."
+          : "The selected native Claude account and model did not complete the hello probe.",
+      hint: "Check the saved account, selected model, and native Claude runtime, then retry.",
+    }] };
   }
 }
