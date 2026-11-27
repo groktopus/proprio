@@ -134,6 +134,38 @@ describe("LiveUpdatesProvider connection recovery", () => {
     expect(client.getQueryData(["company-1", "idle-run-fixture"])).toEqual(next);
   });
 
+  it("retires stale budget, task, project and board access data after a subscription gap", async () => {
+    vi.stubGlobal("WebSocket", Socket);
+    await renderPolling();
+    const socket = Socket.instances[0]!;
+    await act(async () => socket.onopen?.());
+    await act(async () => socket.onmessage?.({ data: JSON.stringify({ type: "live.capabilities", version: 1, capabilities: ["run-interests"] }) }));
+    const affected = [
+      queryKeys.budgets.overview("company-1"), queryKeys.issues.search("company-1", "old"),
+      queryKeys.projects.list("company-1"), [...queryKeys.access.currentBoardAccess, "viewer"],
+    ];
+    for (const key of affected) client.setQueryData(key, ["old company data"]);
+    const unrelated = queryKeys.budgets.overview("company-2");
+    client.setQueryData(unrelated, ["another company"]);
+    await act(async () => socket.onmessage?.({ data: JSON.stringify({ type: "live.resync", version: 1,
+      revision: socket.sent.at(-1)!.revision, reason: "delivery_overflow" }) }));
+    for (const key of affected) expect(client.getQueryData(key)).toBeUndefined();
+    expect(client.getQueryData(unrelated)).toEqual(["another company"]);
+  });
+
+  it("cancels a permission-filtered read that started before the first subscription", async () => {
+    vi.stubGlobal("WebSocket", Socket);
+    const key = queryKeys.budgets.overview("company-1");
+    let release!: (value: unknown) => void;
+    const pending = client.fetchQuery({ queryKey: key, queryFn: () => new Promise(resolve => { release = resolve; }) })
+      .catch(() => null);
+    await renderPolling();
+    await act(async () => Socket.instances[0]!.onopen?.());
+    release(["old private policy"]);
+    await pending;
+    expect(client.getQueryData(key)).toBeUndefined();
+  });
+
   it.each(["unmount", "disconnect", "company", "session", "hidden"])("discards a queued resync-ack refresh after %s", async change => {
     vi.stubGlobal("WebSocket", Socket);
     await renderPolling();

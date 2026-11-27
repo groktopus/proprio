@@ -10,7 +10,7 @@ import { readNativeStopExecutionEvidence } from "./native-stop-evidence-read.js"
 import { LEASE_RELEASE_DEFERRAL_KEY, nativeRunNeverLaunchedRunner, readLeaseReleaseDeferral,
   settleUnchangedNativeWorkspace, wakeStoppingAgentLifecycle, nextLeaseReleaseTriggers, nextLeaseReleaseBootIds, nextLeaseReleaseRetryAt,
   type LeaseReleaseDeferral } from "../environment-lease-release-deferral.js";
-import { hasRecordedStopAcknowledgement, pendingFailedNativeRetryCancellationCondition } from "../native-runtime/native-cancellation-request.js";
+import { pendingFailedNativeRetryCancellationCondition } from "../native-runtime/native-cancellation-request.js";
 import { readTaskRetryIntent, reconcileTaskChatRetryReceipts } from "../task-retry.js";
 import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED, readNativeLocalProcessStop, recordedLocalExecutionStopped } from "../native-local-process-stop.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
@@ -318,7 +318,7 @@ export type CancelRunOptions = {
 function runCancellationFenceSql(input: {
   cancellation: ReturnType<typeof requestedRunCancellation>;
   errorCode: string;
-  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId">;
+  attribution?: Pick<Record<string, unknown>, "cancelledByActorType" | "cancelledByUserId"> & { operatorRunStop?: true };
   reassignmentStopRequested?: boolean;
   preserveCancellation?: boolean;
   budgetEnforcement?: BudgetEnforcementScope;
@@ -1194,12 +1194,29 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           ),
         )
         .then((rows) => rows.map((row) => row.id));
-    } else {
+    } else if (scope.scopeType === "project") {
       wakeupIds = await listProjectScopedWakeupIds(
         scope.companyId,
         scope.scopeId,
         tx,
       );
+    } else {
+      const payload = agentWakeupRequests.payload;
+      const wakeTask = sql`lower(btrim(coalesce(
+        ${payload}->>'issueId', ${payload}->>'taskId', ${payload}->>'taskKey',
+        ${payload}->'_proprioWakeContext'->>'issueId', ${payload}->'_proprioWakeContext'->>'taskId',
+        ${payload}->'_proprioWakeContext'->>'taskKey'
+      )))`;
+      wakeupIds = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, scope.companyId),
+        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
+        isNull(agentWakeupRequests.runId),
+        sql`${wakeTask} in (with recursive task_tree(id, identifier) as (
+          select id, identifier from ${issues} where id = ${scope.scopeId}::uuid and company_id = ${scope.companyId}::uuid
+          union select child.id, child.identifier from ${issues} child join task_tree parent on child.parent_id = parent.id
+            where child.company_id = ${scope.companyId}::uuid)
+          select id::text from task_tree union all select lower(identifier) from task_tree where identifier is not null)`,
+      )).then(rows => rows.map(row => row.id));
     }
 
     if (wakeupIds.length === 0) return 0;
@@ -1258,6 +1275,16 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       throw conflict("Execution evidence changed before acknowledging budget Stop", { runId: run.id });
   }
 
+  function hasRecordedStopAcknowledgement(run: typeof heartbeatRuns.$inferSelect) {
+    if (parseObject(run.resultJson?.executionCancellation).state === "acknowledged") return true;
+    const intent = parseObject(run.resultJson?.nativeCancellation);
+    return intent.schema === "proprio.native-cancellation.v1" && intent.runId === run.id
+      && intent.companyId === run.companyId && intent.issueId === run.nativeIssueId
+      && intent.scope === "run" && intent.reasonCode === "cancellation_run_only"
+      && intent.dispatchState === "acknowledged" && intent.dispatched === true
+      && typeof intent.intentAuditId === "string" && typeof intent.acknowledgementAuditId === "string";
+  }
+
   async function completedRunTerminationProof(run: typeof heartbeatRuns.$inferSelect): Promise<string | null> {
     // Logical completion can win the race with queued Stop delivery. It does
     // not prove a provider exited, and an in-process owner must still settle.
@@ -1312,6 +1339,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const attribution = {
       cancelledByActorType: options.resultJson?.cancelledByActorType,
       cancelledByUserId: options.resultJson?.cancelledByUserId,
+      ...(options.resultJson?.operatorRunStop === true ? { operatorRunStop: true as const } : {}),
     };
     const handoffIssueId = run.nativeIssueId ?? run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
     const supersedesCaseHandoff = options.resultJson?.cancelledByActorType === "user" || options.errorCode === "issue_reassigned";
@@ -1892,6 +1920,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       inArray(browserUseSessions.status, ["starting", "running", "idle", "stopping"]),
       scope.scopeType === "agent" ? eq(browserUseSessions.agentId, scope.scopeId) : undefined,
       scope.scopeType === "project" ? sql`${project} = ${scope.scopeId}` : undefined,
+      scope.scopeType === "task_tree" ? sql`exists (select 1 from ${browserUseRuns} br
+        join ${heartbeatRuns} parent_run on parent_run.id = br.heartbeat_run_id and parent_run.company_id = br.company_id
+        where br.company_id = ${scope.companyId} and br.session_id = ${browserUseSessions.id}
+          and parent_run.task_lineage_json->'pathIssueIds' @> ${JSON.stringify([scope.scopeId])}::jsonb)` : undefined,
       scope.createdBefore ? lt(browserUseSessions.createdAt, scope.createdBefore) : undefined,
     )).for("update");
     if (!sessions.length) return;
@@ -1914,6 +1946,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         : await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
           eq(heartbeatRuns.companyId, scope.companyId),
           scope.scopeType === "agent" ? eq(heartbeatRuns.agentId, scope.scopeId) : undefined,
+          scope.scopeType === "task_tree" ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([scope.scopeId])}::jsonb` : undefined,
           scope.createdBefore ? lt(heartbeatRuns.createdAt, scope.createdBefore) : undefined,
           inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
         )).then((rows) => rows.map((row) => row.id));

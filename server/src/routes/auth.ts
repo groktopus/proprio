@@ -71,8 +71,9 @@ export function authRoutes(db: Db) {
       sentryDsn: resolveSentryDsns().frontend,
       // Match the server SDK's runtime environment, including in reused images.
       sentryEnvironment: process.env.SENTRY_ENVIRONMENT || null,
-      // Hosted Proprio Cloud only; null everywhere else. The ingest key is
-      // ingest-only by construction — see `server/src/browser-tracing-config.ts`.
+      // Managed instances or the explicit self-hosted opt-in; null by default.
+      // The ingest key is ingest-only by construction — see
+      // `server/src/browser-tracing-config.ts`.
       browserTracing: resolveBrowserTracingConfig(process.env, warnBrowserTracing),
       // Hosted Proprio Cloud with PROPRIO_POSTHOG_BROWSER_ENABLED=1 only;
       // null everywhere else. See `server/src/services/cloud-posthog-browser.ts`.

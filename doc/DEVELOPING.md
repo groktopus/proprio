@@ -24,7 +24,7 @@ running the [agent worktree preflight](#agent-worktree-preflight).
 Pull requests targeting `main` run the **Stability smoke** workflow for
 same-repository branches and forks. It installs the frozen workspace dependencies and
 runs onboarding, cost-summary, backup, chat, native replay, and settlement
-regressions. It also typechecks the server and compiles affected packages. The
+regressions. It also typechecks the server and board UI and compiles affected packages. The
 **Droid Auto Review** workflow reviews non-draft pull requests from
 same-repository branches. Neither workflow
 replaces the focused verification below or broader qualification required for
@@ -175,7 +175,9 @@ or `--no-browser` to suppress browser opening. Reused directories must use the
 embedded database: the command rejects database URL environment overrides and
 configs with `database.mode: postgres`, suppresses the invocation directory's
 `.env` when the server starts, and keeps the normal managed-service collision
-guard. The selected instance's own environment file still loads. The command
+guard. Use `--instance <id>` to select an instance inside the data directory
+and give a retained test drive its own service identity. Pass the same ID when
+reopening it. The selected instance's environment file still loads. The command
 selects the first available loopback port at or above `3100`.
 
 Source-checkout startup builds the shared and plugin SDK packages when needed
@@ -562,6 +564,31 @@ For normal issue work, start with the smallest targeted check that proves the ch
 Use the incremental command above and required final-revision CI for PR handoff.
 Run broad local checks when an unresolved risk or explicit qualification needs them.
 
+## Board browser accessibility
+
+The required Stability smoke check runs a focused board browser accessibility
+suite when source, styles, fixtures, or dependencies can affect the UI. The
+suite opens production components in Storybook with fixture data. It checks
+selected axe rules and keyboard interactions on Chromium. Run it after
+installing the locked workspace dependencies and Chromium:
+
+```sh
+pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+pnpm exec playwright install chromium
+pnpm exec playwright test --config tests/board-accessibility/playwright.config.ts
+```
+
+The tests start a local Storybook preview. To reuse an existing preview, set
+`STORYBOOK_TEST_BASE_URL` to its origin. CI builds Storybook before starting
+Chromium so the tests load compiled fixtures. To use the same path locally,
+run `pnpm build-storybook` and set `BOARD_A11Y_STORYBOOK_DIR=ui/storybook-static`
+when invoking Playwright from the repository root. GitHub Actions publishes
+the report and failure traces in its `board-accessibility-<attempt>` artifact.
+The aggregate smoke check reports when changes do not require the suite. If a
+PR predates the suite and CI asks for an update, bring its branch up to date
+with `main` before retrying. Manual keyboard and screen-reader review still
+applies to interactions outside these fixtures.
+
 ## Storybook
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
@@ -621,19 +648,12 @@ Accepted visual changes should update the manifest metadata and publish a new
 immutable archive with `pnpm storybook-visual:baseline pack` and
 `pnpm storybook-visual:baseline upload`; do not commit generated PNG snapshots.
 
-Known limitation: Storybook visual baselines are Linux/Ubuntu-only. The manifest
-pins the capture environment to `ubuntu-24.04` and the Playwright suite uses
-pixel-exact comparison, so local runs on macOS, Windows, or other non-matching
-platforms can report false-positive diffs from font rasterization and subpixel
-rendering. Use the `Storybook Visual` GitHub Actions workflow on `ubuntu-latest`
-as the source of truth, or run locally in a matching Linux environment before
-accepting or updating baselines.
-
-PR visual checks are opt-in while the suite stabilizes. Add the
-`storybook-visual` label to a PR, or run the `Storybook Visual` GitHub Actions
-workflow manually, to produce downloadable Playwright report/test-result
-artifacts. Normal PR visual runs use read-only repository permissions and do not
-upload or mutate baseline objects.
+The operator attention fixtures use the pinned Ubuntu 24.04 Chromium
+environment in **Operator attention visual**. Add the
+`operator-attention-visual` label to compare a PR against its retained test
+archive. Use `storybook-baseline-capture` only when an explicit reference
+capture is required. See [the visual test runbook](../tests/storybook-visual/README.md#operator-attention-test-baseline)
+for artifact retention and the local reproduction command.
 
 ## CLI Client Operations
 

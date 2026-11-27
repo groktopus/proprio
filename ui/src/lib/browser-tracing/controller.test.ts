@@ -63,6 +63,21 @@ describe("startBrowserTracingController", () => {
     }));
   }
 
+  it("does not load the SDK for an unsampled session", () => {
+    const loadSdk = vi.fn(async (): Promise<TracingSdkModule> => ({
+      startTracingSdk: () => ({ forceFlush: async () => {}, shutdown: async () => {} }),
+    }));
+    const controller = startBrowserTracingController({ ...config, sampleRate: 0.25 }, {
+      queryClient: new QueryClient(),
+      initialPathname: "/PAP/issues",
+      initialRouteTemplate: "/:companyPrefix/issues",
+      random: () => 0.99,
+      loadSdk,
+    });
+    expect(controller).toBeNull();
+    expect(loadSdk).not.toHaveBeenCalled();
+  });
+
   it("ends a hard load in a background tab as hidden instead of a 30 s timeout", async () => {
     setVisibility("hidden");
     const ended: PageLoadMeasurement[] = [];

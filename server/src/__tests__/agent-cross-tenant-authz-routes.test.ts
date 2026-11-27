@@ -470,7 +470,7 @@ describe("agent cross-tenant route authorization", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId, "user");
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       companyId,
       actorType: "user",
@@ -482,6 +482,52 @@ describe("agent cross-tenant route authorization", () => {
       entityType: "agent",
       entityId: agentId,
     }));
+  });
+
+  it("requires and forwards the import pause precondition for bulk resume", async () => {
+    const pausedAgent = { ...baseAgent, status: "paused", pauseReason: "import", pausedAt: new Date() };
+    mockAgentService.getById.mockResolvedValue(pausedAgent);
+    mockAgentService.resume.mockResolvedValue({ ...pausedAgent, status: "idle", pauseReason: null, pausedAt: null });
+    const app = await createApp({
+      type: "board", userId: "board-user", companyIds: [companyId], source: "local_implicit", isInstanceAdmin: true,
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/resume`).send({ expectedPauseReason: "import" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId, "import");
+  });
+
+  it("rejects an import retry when the pause reason changed", async () => {
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, status: "paused", pauseReason: "manual", pausedAt: new Date() });
+    const app = await createApp({
+      type: "board", userId: "board-user", companyIds: [companyId], source: "local_implicit", isInstanceAdmin: true,
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/resume`).send({ expectedPauseReason: "import" }),
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("Agent pause state changed; reload before retrying");
+    expect(mockAgentService.resume).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported resume preconditions before changing lifecycle state", async () => {
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, status: "paused", pauseReason: "import", pausedAt: new Date() });
+    const app = await createApp({
+      type: "board", userId: "board-user", companyIds: [companyId], source: "local_implicit", isInstanceAdmin: true,
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/resume`).send({ expectedPauseReason: "manual" }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Unsupported resume precondition");
+    expect(mockAgentService.resume).not.toHaveBeenCalled();
   });
 
   it("allows a same-company agent with a direct agents:configure grant to resume", async () => {
@@ -511,7 +557,7 @@ describe("agent cross-tenant route authorization", () => {
       resource: { type: "agent", companyId, agentId },
       scope: { requiresChangeGrant: true },
     }));
-    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId);
+    expect(mockAgentService.resume).toHaveBeenCalledWith(agentId, "user");
   });
 
   it.each([

@@ -1,0 +1,91 @@
+name: Board performance
+run-name: Board performance at ${{ github.event.pull_request.head.sha || github.sha }}
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ui/**"
+      - "server/src/**"
+      - "cli/**"
+      - "package.json"
+      - "patches/**"
+      - "packages/shared/**"
+      - "packages/db/**"
+      - "tests/perf/collections/**"
+      - "scripts/run-board-performance.sh"
+      - ".github/workflows/board-performance.yml"
+      - "pnpm-lock.yaml"
+      - ".nvmrc"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: board-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  performance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact subject
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked workspace dependencies and Chromium
+        env:
+          SUBJECT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SUBJECT"
+          printf 'Revision: `%s`\n\nRunner: Ubuntu 24.04 amd64 with locked Playwright Chromium.\n\nFixture: Collection performance fixture with 220 tasks, 110 approvals and eight recent tasks with 12 comments each.\n' "$SUBJECT" >> "$GITHUB_STEP_SUMMARY"
+          npm install --global --ignore-scripts pnpm@9.15.4
+          pnpm install --frozen-lockfile --ignore-scripts
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Check deterministic request and browser work
+        env:
+          PROPRIO_COLLECTION_PERF_LANE: work
+        run: scripts/run-board-performance.sh --grep-invert 'timing:'
+      - name: Retain diagnostic readiness timings
+        id: diagnostic-timings
+        continue-on-error: true
+        env:
+          PROPRIO_COLLECTION_PERF_LANE: timing
+        run: scripts/run-board-performance.sh --grep 'timing:'
+      - name: Record selected tests and outcomes
+        if: always()
+        env:
+          TIMING_OUTCOME: ${{ steps.diagnostic-timings.outcome }}
+        run: |
+          work=test-results/board-performance/work/results.json
+          timing=test-results/board-performance/timing/results.json
+          if [[ -f "$timing" ]]; then
+            jq -r '"Diagnostic timings: \(.stats.expected) passed, \(.stats.unexpected) failed, \(.stats.skipped) skipped, \(.stats.flaky) flaky."' "$timing" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Diagnostic timings: %s (no report).\n' "${TIMING_OUTCOME:-skipped}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ ! -f "$work" ]]; then
+            echo 'No deterministic Playwright result was produced.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          jq -r '"Deterministic work: \(.stats.expected) passed, \(.stats.unexpected) failed, \(.stats.skipped) skipped, \(.stats.flaky) flaky."' "$work" >> "$GITHUB_STEP_SUMMARY"
+          jq -e '.stats.expected > 0 and .stats.skipped == 0 and .stats.unexpected == 0 and .stats.flaky == 0' "$work"
+      - name: Retain test results, readiness samples and traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: board-performance-${{ github.run_attempt }}
+          path: test-results/board-performance/
+          if-no-files-found: ignore

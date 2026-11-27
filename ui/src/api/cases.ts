@@ -354,8 +354,8 @@ export const casesApi = {
     api.post<HandoffCaseResult>(`/companies/${companyId}/case-handoffs`, input),
   listHandoffs: (caseId: string, cursor?: string | null) =>
     api.get<CaseHandoffPage>(`/cases/${caseId}/handoffs?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
-  getHandoffRecoveryHistory: (caseId: string, handoffId: string) =>
-    api.get<CaseHandoffRecoveryHistory>(`/cases/${caseId}/handoffs/${handoffId}/recovery-history`),
+  getHandoffRecoveryHistory: (caseId: string, handoffId: string, signal?: AbortSignal) =>
+    api.get<CaseHandoffRecoveryHistory>(`/cases/${caseId}/handoffs/${handoffId}/recovery-history`, { signal, cache: "no-store" }),
   retryHandoff: (caseId: string, handoffId: string) =>
     api.post(`/cases/${caseId}/handoffs/${handoffId}/retry`, {}),
   cancelHandoff: (caseId: string, handoffId: string) =>
