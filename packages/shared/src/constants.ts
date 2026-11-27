@@ -481,6 +481,7 @@ export type IssueRecoveryActionOwnerType = (typeof ISSUE_RECOVERY_ACTION_OWNER_T
  * that needs the board. Woken once per stall (one recovery action).
  */
 export const ISSUE_BLOCKER_STALLED_WAKE_REASON = "issue_blocker_stalled" as const;
+export const DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX = `${ISSUE_BLOCKER_STALLED_WAKE_REASON}:diagnosis:`;
 export const ISSUE_BLOCKER_STALL_RELATIONS = ["child", "blocker"] as const;
 export type IssueBlockerStallRelation = (typeof ISSUE_BLOCKER_STALL_RELATIONS)[number];
 
@@ -1047,11 +1048,14 @@ export const FINANCE_UNITS = [
 ] as const;
 export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 
-export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
+export const BUDGET_SCOPE_TYPES = ["company", "agent", "project", "task_tree"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
 export const BUDGET_METRICS = ["billed_cents"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
+
+export const BUDGET_AMOUNT_MAX_CENTS = 2_147_483_647;
+export const BUDGET_POLICY_EXISTS_ERROR_CODE = "budget_policy_exists";
 
 export const BUDGET_WINDOW_KINDS = ["calendar_month_utc", "lifetime"] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
