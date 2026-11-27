@@ -1,3 +1,4 @@
+import { CASE_HANDOFF_OPEN_AGENT_STATES } from "../case-handoff-states.js";
 import { wakeWaitersOfStalledIssues, type BlockerStallWakeup } from "./blocker-stall-wakeups.js";
 import { INTERACTION_DELIVERY_DENIED, isInteractionDeliveryDeniedRun } from "../agent-interaction-delivery.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
@@ -4282,7 +4283,7 @@ export function recoveryService(
         eq(caseHandoffs.companyId, current.companyId),
         eq(caseHandoffs.issueId, current.id),
         eq(caseHandoffs.destinationKind, "agent"),
-        inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]),
+        inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES),
       )).limit(1).then((rows) => rows[0] ?? null);
       if (pendingHandoff) return null;
 
@@ -4844,7 +4845,7 @@ export function recoveryService(
             eq(caseHandoffs.companyId, issues.companyId),
             eq(caseHandoffs.issueId, issues.id),
             eq(caseHandoffs.destinationKind, "agent"),
-            inArray(caseHandoffs.state, ["awaiting_release", "pending_dispatch"]),
+            inArray(caseHandoffs.state, CASE_HANDOFF_OPEN_AGENT_STATES),
           ))),
         ),
       );

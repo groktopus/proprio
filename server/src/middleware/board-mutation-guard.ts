@@ -65,40 +65,30 @@ export function trustedBoardMutationOrigin(req: Request): string | null {
   });
 }
 
+/** Apply the trusted-origin rules when a route writes under a board identity. */
+export function boardMutationOriginAllowed(req: Request): boolean {
+  if (req.actor.type !== "board") return true;
+
+  // Explicit credentials and trusted server-to-server calls have no ambient browser authority.
+  if (
+    req.actor.source === "board_key"
+    || req.actor.source === "mcp_oauth"
+    || req.actor.source === "cloud_tenant"
+    || req.actor.source === "cloud_control"
+  ) return true;
+
+  if (req.actor.source === "local_implicit"
+    && ["origin", "referer", "sec-fetch-site"].every((name) => req.header(name) === undefined)) return true;
+
+  return Boolean(trustedBoardMutationOrigin(req));
+}
+
 export function boardMutationGuard(): RequestHandler {
   return (req, res, next) => {
-    if (SAFE_METHODS.has(req.method.toUpperCase())) {
+    if (SAFE_METHODS.has(req.method.toUpperCase()) || boardMutationOriginAllowed(req)) {
       next();
       return;
     }
-
-    if (req.actor.type !== "board") {
-      next();
-      return;
-    }
-
-    // Explicit credentials and trusted server-to-server calls have no ambient browser authority.
-    if (
-      req.actor.source === "board_key"
-      || req.actor.source === "mcp_oauth"
-      || req.actor.source === "cloud_tenant"
-      || req.actor.source === "cloud_control"
-    ) {
-      next();
-      return;
-    }
-
-    if (req.actor.source === "local_implicit"
-      && ["origin", "referer", "sec-fetch-site"].every((name) => req.header(name) === undefined)) {
-      next();
-      return;
-    }
-
-    if (!trustedBoardMutationOrigin(req)) {
-      res.status(403).json({ error: "Board mutation requires trusted browser origin" });
-      return;
-    }
-
-    next();
+    res.status(403).json({ error: "Board mutation requires trusted browser origin" });
   };
 }

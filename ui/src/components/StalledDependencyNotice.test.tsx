@@ -71,7 +71,7 @@ describe("StalledDependencyNotice", () => {
   });
 
   it("names the stalled child, its board action and a link, and offers the child's own Retry", async () => {
-    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", interruption: { canRetry: true, observedRunId: "run-1" } });
+    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", viewerCanRetry: true, interruption: { canRetry: true, observedRunId: "run-1" } });
     retryTask.mockResolvedValue({ accepted: true, presentation: null });
     const node = await render([stall()]);
     const notice = node.querySelector("[data-testid='stalled-dependency-notice']")!;
@@ -86,8 +86,17 @@ describe("StalledDependencyNotice", () => {
     expect(retryTask).toHaveBeenCalledWith("child-1", expect.objectContaining({ observedRunId: "run-1" }));
   });
 
+  it("withholds the child's Retry when the viewer only has read access", async () => {
+    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked",
+      interruption: { canRetry: true, observedRunId: "run-1" } });
+    const node = await render([stall()]);
+    await vi.waitFor(() => expect(getIssue).toHaveBeenCalledWith("CHA-8"));
+    expect(node.textContent).toContain("Automatic recovery stopped");
+    expect(node.querySelector("button[aria-label='Retry CHA-8']")).toBeNull();
+  });
+
   it("explains a refused Retry and lets the board try again", async () => {
-    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", interruption: { canRetry: true, observedRunId: "run-1" } });
+    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", viewerCanRetry: true, interruption: { canRetry: true, observedRunId: "run-1" } });
     retryTask.mockRejectedValue(new ApiError("Retry is not allowed while the run is still stopping", 409, {}));
     const node = await render([stall()]);
     const button = await waitFor(() => node.querySelector<HTMLButtonElement>("button[aria-label='Retry CHA-8']"));
@@ -98,7 +107,7 @@ describe("StalledDependencyNotice", () => {
   });
 
   it("shows a lost response as taking longer, with Retry still available", async () => {
-    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", interruption: { canRetry: true, observedRunId: "run-1" } });
+    getIssue.mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked", viewerCanRetry: true, interruption: { canRetry: true, observedRunId: "run-1" } });
     retryTask.mockRejectedValue(new Error("network down"));
     const node = await render([stall()]);
     const button = await waitFor(() => node.querySelector<HTMLButtonElement>("button[aria-label='Retry CHA-8']"));
@@ -110,7 +119,7 @@ describe("StalledDependencyNotice", () => {
 
   it("says when the child's state cannot be read and offers a reload", async () => {
     getIssue.mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "blocked",
-      interruption: { canRetry: true, observedRunId: "run-1" } });
+      viewerCanRetry: true, interruption: { canRetry: true, observedRunId: "run-1" } });
     const node = await render([stall()]);
     const alert = await waitFor(() => node.querySelector("[role='alert']"));
     expect(alert?.textContent).toContain("Could not load this task's state");
@@ -120,7 +129,7 @@ describe("StalledDependencyNotice", () => {
   });
 
   it("drops a stall once the child's refreshed state has moved on", async () => {
-    getIssue.mockResolvedValueOnce({ id: "child-1", identifier: "CHA-8", status: "blocked", interruption: { canRetry: true, observedRunId: "run-1" } })
+    getIssue.mockResolvedValueOnce({ id: "child-1", identifier: "CHA-8", status: "blocked", viewerCanRetry: true, interruption: { canRetry: true, observedRunId: "run-1" } })
       .mockResolvedValue({ id: "child-1", identifier: "CHA-8", status: "in_progress", interruption: { canRetry: false } });
     retryTask.mockResolvedValue({ accepted: true, presentation: { canRetry: false } });
     const node = await render([stall()]);

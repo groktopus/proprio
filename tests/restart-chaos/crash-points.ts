@@ -65,8 +65,10 @@ export function globToRegExp(glob: string): RegExp {
 /** Points matching any `--points` glob and any `--kinds` id, reachable in `env`. */
 export function selectPoints(registry: Record<string, CrashPointDefinition>, options: Pick<SuiteOptions, "points" | "kinds" | "env">): CrashPointName[] {
   const globs = options.points.length ? options.points.map(globToRegExp) : [/.*/];
+  const defaultSelection = !options.points.length && !options.kinds.length;
   return (Object.keys(registry) as CrashPointName[]).filter(name => {
     const definition = registry[name]!;
+    if (defaultSelection && definition.defaultSuite === false) return false;
     if (!globs.some(glob => glob.test(name))) return false;
     if (options.kinds.length && !definition.kinds.some(kind => options.kinds.includes(kind))) return false;
     return definition.environments.includes(options.env);
