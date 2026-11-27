@@ -64,6 +64,7 @@ jobs:
           postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
           test "${#postgres_package[@]}" = 1
           (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
           pnpm --filter @groktopus/proprio-runner build:typescript
       - name: Build the local Runner
         working-directory: packages/proprio-runner
