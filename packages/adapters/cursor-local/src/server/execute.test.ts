@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionTarget } from "@groktopus/adapter-utils/execution-target";
 import { runChildProcess } from "@groktopus/adapter-utils/server-utils";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
-import { execute } from "./execute.js";
+import { ensureCursorSkillsInjected, execute } from "./execute.js";
 import { createPromptContextFixture } from "@groktopus/adapter-utils/test-fixtures/prompt-context";
 
 type PrepareCursorSandboxCommandInput = {
@@ -77,6 +77,44 @@ function buildInstallSimulationCommand(commandPath: string, captureDir: string):
     `chmod +x ${JSON.stringify(commandPath)}`,
   ].join("\n");
 }
+
+describe("Cursor shared skill home reconciliation", () => {
+  it("keeps a selected skill installed when a later run selects a different skill", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-shared-skills-"));
+    try {
+      const skillsHome = path.join(root, "shared", "skills");
+      const firstSource = path.join(root, "sources", "first");
+      const secondSource = path.join(root, "sources", "second");
+      await fs.mkdir(firstSource, { recursive: true });
+      await fs.mkdir(secondSource, { recursive: true });
+      await fs.writeFile(path.join(firstSource, "SKILL.md"), "# first selected\n");
+      await fs.writeFile(path.join(secondSource, "SKILL.md"), "# second selected\n");
+      const entries = [
+        { key: "first", runtimeName: "first", source: firstSource },
+        { key: "second", runtimeName: "second", source: secondSource },
+      ];
+      const onLog = async () => {};
+
+      await ensureCursorSkillsInjected(onLog, {
+        skillsEntries: entries,
+        desiredSkillNames: ["first"],
+        skillsHome,
+      });
+      await ensureCursorSkillsInjected(onLog, {
+        skillsEntries: entries,
+        desiredSkillNames: ["second"],
+        skillsHome,
+      });
+
+      await expect(fs.readFile(path.join(skillsHome, "first", "SKILL.md"), "utf8"))
+        .resolves.toBe("# first selected\n");
+      await expect(fs.readFile(path.join(skillsHome, "second", "SKILL.md"), "utf8"))
+        .resolves.toBe("# second selected\n");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 function createFreshLeaseSandboxRunner(options: {
   homeDir: string;
