@@ -1,4 +1,5 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +17,8 @@ const {
   runChildProcess,
   ensureCommandResolvable,
   resolveCommandForLogs,
+  readProprioRuntimeSkillEntries,
+  bundledRuntimeSkillEntries,
   prepareAdapterExecutionTargetRuntime,
   startAdapterExecutionTargetProprioBridge,
 } = vi.hoisted(() => ({
@@ -30,6 +33,9 @@ const {
   })),
   ensureCommandResolvable: vi.fn(async () => undefined),
   resolveCommandForLogs: vi.fn(async () => "/usr/bin/codex"),
+  readProprioRuntimeSkillEntries: vi.fn(async (config: Record<string, unknown>) =>
+    Array.isArray(config.proprioRuntimeSkills) ? config.proprioRuntimeSkills : bundledRuntimeSkillEntries.entries),
+  bundledRuntimeSkillEntries: { entries: [] as Array<{ key: string; runtimeName: string; source: string }> },
   prepareAdapterExecutionTargetRuntime: vi.fn(),
   startAdapterExecutionTargetProprioBridge: vi.fn(async () => null),
 }));
@@ -42,6 +48,7 @@ vi.mock("@groktopus/adapter-utils/server-utils", async () => {
     ...actual,
     ensureCommandResolvable,
     resolveCommandForLogs,
+    readProprioRuntimeSkillEntries,
     runChildProcess,
   };
 });
@@ -143,16 +150,11 @@ prepareAdapterExecutionTargetRuntime.mockImplementation(async (input: { assets?:
 
 describe("codex execute — outbound auth copy-back restore contribution", () => {
   const cleanupDirs: string[] = [];
-  let savedCodexHomeEnv: string | undefined;
 
   afterEach(async () => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
-    if (savedCodexHomeEnv === undefined) {
-      delete process.env.CODEX_HOME;
-    } else {
-      process.env.CODEX_HOME = savedCodexHomeEnv;
-    }
+    bundledRuntimeSkillEntries.entries = [];
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
@@ -176,7 +178,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     );
   }
 
-  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean; env?: Record<string, string> }) {
+  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean; env?: Record<string, string>; config?: Record<string, unknown>; managedHome?: boolean; seedUnselectedPackagedSkill?: boolean }) {
     const rootDir = await mkdtemp(
       path.join(os.tmpdir(), "proprio-codex-copyback-e2e-"),
     );
@@ -185,14 +187,41 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     // The shared host home is what `resolveSharedCodexHomeDir` returns
     // (process.env.CODEX_HOME) — the copy-back target. Point it at a tmp dir so
     // the round-trip never touches the real host credential.
-    const sharedHostHome = path.join(rootDir, "shared-codex-home");
+    const sharedHostHome = input.managedHome
+      ? path.join(rootDir, "instances", "default", "companies", "company-1", "codex-home")
+      : path.join(rootDir, "shared-codex-home");
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(sharedHostHome, { recursive: true });
     const hostAuthPath = path.join(sharedHostHome, "auth.json");
     await writeFile(hostAuthPath, input.hostAuth, { mode: 0o600 });
 
-    savedCodexHomeEnv = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = sharedHostHome;
+    let seededSkillsHome: string | null = null;
+    if (input.seedUnselectedPackagedSkill) {
+      const source = path.join(rootDir, "runtime", "skills", "review");
+      const connectorSkillDigest = "a".repeat(64);
+      const selectedInventoryDigest = createHash("sha256").update(JSON.stringify({ connectorSkillDigest, skills: [] })).digest("hex");
+      const credentialIdentity = createHash("sha256").update(input.hostAuth).digest("hex");
+      const runtimeSkillDigest = createHash("sha256").update(JSON.stringify({
+        runtimeSkillDigest: selectedInventoryDigest,
+        credentialHome: sharedHostHome,
+        credentialIdentity,
+        selectedConfigDigest: null,
+        apiKey: input.env?.OPENAI_API_KEY ?? null,
+      })).digest("hex");
+      const generatedHome = path.join(rootDir, "instances", "default", "companies", "company-1", "codex-home",
+        "connector-runtimes", "agent-1", runtimeSkillDigest);
+      const skillsHome = path.join(generatedHome, "skills");
+      seededSkillsHome = skillsHome;
+      await mkdir(source, { recursive: true });
+      await writeFile(path.join(source, "SKILL.md"), "revoked packaged skill\n");
+      await mkdir(skillsHome, { recursive: true });
+      await symlink(source, path.join(skillsHome, "review"));
+      bundledRuntimeSkillEntries.entries = [{ key: "team/review", runtimeName: "review", source }];
+    }
+
+    vi.stubEnv("CODEX_HOME", sharedHostHome);
+    vi.stubEnv("PROPRIO_HOME", rootDir);
+    vi.stubEnv("PROPRIO_INSTANCE_ID", "default");
     sandboxAuthFixture.bytes = Buffer.from(input.sandboxAuth, "utf8");
 
     const commandArgs: string[] = [];
@@ -215,8 +244,10 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       config: {
         command: "codex",
         engine: "cli",
-        // External CODEX_HOME (outside the managed company tree) so no managed
-        // seeding rewrites auth.json before teardown; equals the shared host home.
+    // In managedHome cases, exercise reconciliation under the company root;
+    // otherwise keep the home external so auth seeding cannot rewrite the
+    // copy-back fixture before teardown.
+        ...input.config,
         env: { CODEX_HOME: sharedHostHome, ...input.env },
       },
       context: {
@@ -244,9 +275,38 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       commandArgs,
       finalHostAuth: await readFile(hostAuthPath, "utf8"),
       finalHostMode: (await lstat(hostAuthPath)).mode & 0o777,
+      seededSkillsHome,
       executionResult,
     };
   }
+
+  it("uses one packaged inventory read when the run has no explicit inventory", async () => {
+    await runTeardown({
+      sandboxAuth: "{}",
+      hostAuth: "{}",
+      managedHome: true,
+      env: { OPENAI_API_KEY: "provider-key" },
+      config: { proprioConnectorSkillDigest: "a".repeat(64) },
+    });
+    expect(readProprioRuntimeSkillEntries).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the discovered packaged inventory to remove a revoked skill from managed home", async () => {
+    readProprioRuntimeSkillEntries.mockClear();
+    const result = await runTeardown({
+      sandboxAuth: "{}",
+      hostAuth: "{}",
+      managedHome: true,
+      seedUnselectedPackagedSkill: true,
+      env: { OPENAI_API_KEY: "provider-key" },
+      config: { proprioConnectorSkillDigest: "a".repeat(64), proprioRuntimeSkills: [] },
+    });
+    const packagedInventoryReads = readProprioRuntimeSkillEntries.mock.calls.filter(([config]) =>
+      !Array.isArray(config.proprioRuntimeSkills));
+    expect(packagedInventoryReads).toHaveLength(1);
+    expect(result.seededSkillsHome).not.toBeNull();
+    await expect(lstat(path.join(result.seededSkillsHome!, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
 
   it.each([true, false])("delivers configured service tokens to CLI shells while isolating host and provider credentials (identity: %s)", async (withIdentity) => {
     vi.stubEnv("DATABASE_URL", "postgres://operator:host-password@host/private");
