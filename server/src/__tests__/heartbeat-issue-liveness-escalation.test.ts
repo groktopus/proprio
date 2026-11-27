@@ -1,5 +1,9 @@
 import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@groktopus/db";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -26,6 +30,9 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  routineRevisions,
+  routineRuns,
+  routines,
   toolActionDeliveries,
   toolActionRequests,
   toolInvocations,
@@ -126,6 +133,9 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     await db.delete(costEvents);
     await db.delete(workspaceOperations);
     await db.delete(issueComments);
+    await db.delete(routineRuns);
+    await db.delete(routineRevisions);
+    await db.delete(routines);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
     await db.delete(issueRelations);
@@ -957,6 +967,106 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       if (timer) clearTimeout(timer);
       await singleConnectionDb.$client.end({ timeout: 1 });
       await reconciliation.catch(() => {});
+    }
+  });
+
+  it("promotes routine-generated work from a real heartbeat completion with one connection", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const userId = randomUUID();
+    const ownerUserId = randomUUID();
+    const workspaceDir = await mkdtemp(join(tmpdir(), "routine-wakeup-promotion-"));
+    await writeFile(join(workspaceDir, "README.md"), "Routine task fixture\n");
+    execFileSync("git", ["init", "-b", "main"], { cwd: workspaceDir, stdio: "ignore" });
+    execFileSync("git", ["add", "README.md"], { cwd: workspaceDir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"], { cwd: workspaceDir, stdio: "ignore" });
+    const issuePrefix = `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db.insert(companies).values({ id: companyId, name: "Routine promotion", issuePrefix,
+      defaultResponsibleUserId: userId, requireBoardApprovalForNewAgents: false });
+    await db.insert(authUsers).values({ id: userId, name: "Default owner", email: `${userId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(authUsers).values({ id: ownerUserId, name: "Routine owner", email: `${ownerUserId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, membershipRole: "member", status: "active" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: ownerUserId, membershipRole: "member", status: "active" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Routine agent", role: "engineer", status: "idle",
+      adapterType: "test_adapter", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
+    const [executionWorkspace] = await db.insert(executionWorkspaces).values({ companyId, mode: "shared_workspace",
+      strategyType: "project_primary", name: "Routine test workspace", cwd: workspaceDir, providerType: "local_fs" }).returning();
+    const [routine] = await db.insert(routines).values({ companyId, title: "Routine task", assigneeAgentId: agentId,
+      responsibleUserId: userId, env: { ROUTINE_SOURCE: "current" } }).returning();
+    const [revision] = await db.insert(routineRevisions).values({ companyId, routineId: routine!.id, revisionNumber: 1,
+      title: "Routine task", snapshot: {
+        version: 1,
+        routine: {
+          id: routine!.id, companyId, projectId: null, goalId: null, parentIssueId: null,
+          title: "Routine task", description: null, assigneeAgentId: agentId, priority: "medium", status: "active",
+          concurrencyPolicy: "coalesce_if_active", catchUpPolicy: "skip_missed", activityGatePolicy: "always",
+          activityGateScope: "company", variables: [], env: { ROUTINE_SOURCE: "pinned" }, responsibleUserId: userId,
+        },
+        triggers: [],
+      } }).returning();
+    await db.update(routines).set({ latestRevisionId: revision!.id }).where(eq(routines.id, routine!.id));
+    const [routineRun] = await db.insert(routineRuns).values({ companyId, routineId: routine!.id, source: "schedule",
+      status: "issue_created", routineRevisionId: revision!.id, responsibleUserId: ownerUserId }).returning();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Routine task", status: "in_progress", priority: "medium",
+      assigneeAgentId: agentId, originKind: "routine_execution", originId: routine!.id, originRunId: routineRun!.id,
+      executionWorkspaceId: executionWorkspace!.id, executionWorkspacePreference: "reuse_existing",
+      issueNumber: 1, identifier: `${issuePrefix}-1` });
+
+    const singleConnectionDb = createDb(externalUrl ?? tempDb!.connectionString, { maxConnections: 1 });
+    const heartbeat = heartbeatService(singleConnectionDb);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let closed = false;
+    let releaseProvider!: () => void;
+    let startProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const providerEntered = new Promise<void>((resolve) => { startProvider = resolve; });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      startProvider();
+      await providerGate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Routine source completed.", provider: "test", model: "test-model" };
+    });
+    const withTimeout = <T>(promise: Promise<T>, message: string) => Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { timedOut = true; reject(new Error(message)); }, 5_000);
+      }),
+    ]).finally(() => { if (timer) clearTimeout(timer); timer = undefined; });
+    let drain: Promise<void> | null = null;
+    try {
+      const sourceRun = await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "routine_source",
+        requestedByActorType: "system", payload: { issueId }, contextSnapshot: { issueId } });
+      expect(sourceRun).not.toBeNull();
+      await withTimeout(providerEntered, "source heartbeat did not reach its adapter");
+      // Clear the source attribution so promotion must resolve the owner from the routine run.
+      await singleConnectionDb.update(heartbeatRuns).set({ responsibleUserId: null }).where(eq(heartbeatRuns.id, sourceRun!.id));
+      const [wake] = await singleConnectionDb.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation",
+        reason: "routine_execution_followup", status: "deferred_issue_execution", requestedByActorType: "system",
+        payload: { issueId } }).returning();
+      releaseProvider();
+      drain = heartbeat.drainActiveRunExecutions();
+      await withTimeout(drain, "routine wake was not promoted after source completion");
+      const [persistedWake] = await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
+      expect(persistedWake?.runId).toBeTruthy();
+      expect(["queued", "claimed", "completed"]).toContain(persistedWake?.status);
+      const [promotedRun] = await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, persistedWake!.runId!));
+      expect(promotedRun).toMatchObject({ wakeupRequestId: wake!.id, responsibleUserId: ownerUserId });
+    } catch (error) {
+      if (timedOut) {
+        releaseProvider();
+        await singleConnectionDb.$client.end({ timeout: 0 });
+        closed = true;
+        await drain?.catch(() => {});
+      }
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      releaseProvider();
+      await drain?.catch(() => {});
+      if (!closed) await singleConnectionDb.$client.end({ timeout: 1 });
+      await rm(workspaceDir, { recursive: true, force: true });
     }
   });
 
