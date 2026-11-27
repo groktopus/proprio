@@ -93,7 +93,6 @@ export async function runAcpProbeTurn(input: {
       bridge = await startAdapterExecutionTargetProcessSessionBridge({
         runId,
         target: input.target,
-        runtimeRootDir: path.posix.join(input.target.remoteCwd, ".proprio-runtime", input.agent),
         adapterKey: input.agent,
         command: "sh",
         args: [input.target.transport === "ssh" ? "-c" : "-lc", `exec ${input.command}`],

@@ -123,6 +123,7 @@ describe("ACP probe cleanup", () => {
       command: "sh", args: ["-lc", "exec claude-agent-acp --flag value"], cwd: expect.stringMatching(/^\/tmp\/proprio-acp-probe-/),
       streamOutputViaSession: true,
     }));
+    expect(fixture.bridgeOptions.mock.calls[0]?.[0].runtimeRootDir).toBeUndefined();
     const runtimeOptions = fixture.runtimeOptions.mock.calls.at(-1)?.[0] as { cwd: string; spawnCwd?: string };
     expect(runtimeOptions.cwd).toMatch(/^\/tmp\/proprio-acp-probe-/);
     expect(runtimeOptions.spawnCwd).toMatch(/^.*proprio-acp-probe-/);
