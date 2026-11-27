@@ -66,7 +66,9 @@ case " $* " in
   *" ls-remote "*)
     if [ "${sourcePrerelease}" = true ] && [ "${remoteTagMismatch}" = false ] && [ ! -f "${pushed}" ]; then exit 2; fi
     printf '%s\\trefs/tags/${tag}\\n' "${remoteTagCommit}"; exit 0 ;;
-  *" push "*) touch "${pushed}"; printf '%s\\n' "push $*" >> "$GH_LOG"; exit 0 ;;
+  *" push "*)
+    if [ -f "${bin}/notes-to-remove" ]; then rm -- "$(cat "${bin}/notes-to-remove")"; fi
+    touch "${pushed}"; printf '%s\\n' "push $*" >> "$GH_LOG"; exit 0 ;;
 esac
 exec "${realGit}" "$@"
 `;
@@ -104,7 +106,7 @@ if (args[0] === 'api') {
 } else if (args[0] === 'release' && ['create', 'edit', 'upload'].includes(args[1])) {
   if (args.includes('--notes-file')) {
     const notes = readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8');
-    writeFileSync(join('${bin}', 'notes'), notes);
+    writeFileSync(join('${bin}', 'notes-' + args[1]), notes);
   }
   if (args[1] === 'create' && ${interruptedRelease}) {
     writeFileSync(join('${bin}', 'draft'), '');
@@ -227,9 +229,12 @@ test("plain source version refuses absent Linux evidence on an unrelated diff", 
   assert.doesNotMatch(readFileSync(fixture.logPath, "utf8"), /(^push |release (?:create|edit|upload))/m);
 });
 
-test("plain source version tags the qualified candidate before creating a prerelease", () => {
+test("plain source version qualifies and snapshots the notes before publishing", () => {
   const fixture = createFixture({ sourcePrerelease: true });
-  const result = fixture.run();
+  const originalNotes = join(fixture.bin, "reviewed-notes.md");
+  writeFileSync(originalNotes, "source prerelease notes\n");
+  writeFileSync(join(fixture.bin, "notes-to-remove"), originalNotes);
+  const result = fixture.run(["0.0.2", "--previous-tag", "v0.0.1", "--notes-file", originalNotes]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const calls = readFileSync(fixture.logPath, "utf8").trim().split("\n");
   const evidence = calls.findIndex(line => line.includes("/actions/runs/55/artifacts"));
@@ -238,6 +243,7 @@ test("plain source version tags the qualified candidate before creating a prerel
   assert.ok(evidence >= 0 && evidence < push && push < publish, calls.join("\n"));
   assert.match(calls[push], new RegExp(`${fixture.sourceSha}:refs/tags/v0.0.2`));
   assert.match(calls[publish], /feature-catalog\.json .*--verify-tag --prerelease/);
+  assert.equal(readFileSync(join(fixture.bin, "notes-create"), "utf8"), "source prerelease notes\n");
 });
 
 test("source publication cannot skip a newer published source release", () => {
@@ -259,10 +265,9 @@ test("a source publication retry reuses the remote tag and safe draft", () => {
   const calls = readFileSync(fixture.logPath, "utf8");
   assert.equal((calls.match(/^push /gm) ?? []).length, 1);
   assert.match(calls, /release edit .*--draft=false --prerelease/);
-  const notes = readFileSync(join(fixture.bin, "notes"), "utf8");
-  assert.match(notes, /Verified source/);
-  assert.ok(notes.includes(fixture.sourceSha) && notes.includes(fixture.baseSha));
-  assert.match(notes, /actions\/runs\/55\/attempts\/1/);
+  const notes = readFileSync(join(fixture.bin, "notes-edit"), "utf8");
+  assert.equal(notes, "source prerelease notes\n");
+  assert.match(preview.stdout, /actions\/runs\/55\/attempts\/1/);
 });
 
 test("an interrupted draft with an unexpected asset fails closed in preview", () => {
