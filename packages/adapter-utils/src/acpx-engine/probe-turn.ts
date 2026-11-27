@@ -6,6 +6,7 @@ import { createAcpRuntime, createAgentRegistry, createRuntimeStore } from "acpx/
 import type { AcpRuntimeHandle, AcpRuntimeTurn } from "acpx/runtime";
 import type { AdapterExecutionTarget } from "../execution-target.js";
 import { runAdapterExecutionTargetShellCommand, startAdapterExecutionTargetProcessSessionBridge } from "../execution-target.js";
+import { withPromiseTimeout } from "../promise-timeout.js";
 import { assertNoHostAcpxAuthEnvironment, splitWindowsAgentCommand, stockAcpRuntimeOptions } from "./stock-runtime-options.js";
 
 const CLEANUP_TIMEOUT_MS = 10_000;
@@ -21,14 +22,10 @@ function isAcpAuthenticationFailure(error: unknown): boolean {
 }
 
 async function cleanupWithinBudget(cleanup: () => Promise<unknown>): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([cleanup(), new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("ACP probe cleanup timed out")), CLEANUP_TIMEOUT_MS);
-    })]);
+    await withPromiseTimeout(cleanup(), CLEANUP_TIMEOUT_MS, () => new Error("ACP probe cleanup timed out"));
     return true;
   } catch { return false; }
-  finally { clearTimeout(timer); }
 }
 
 function remainingProbeTime(deadline: number): number {
@@ -38,15 +35,8 @@ function remainingProbeTime(deadline: number): number {
 }
 
 async function awaitProbeStartup<T>(operation: Promise<T>, deadline: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), remainingProbeTime(deadline));
-      }),
-    ]);
-  } finally { clearTimeout(timer); }
+  return withPromiseTimeout(operation, remainingProbeTime(deadline), () =>
+    Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" }));
 }
 
 type AcpProbeTurnResult =
@@ -145,16 +135,11 @@ export async function runAcpProbeTurn(input: {
         } else if (event.type === "tool_call") response.toolCall = true;
       }
     })();
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    let outcome: Awaited<typeof turn.result>;
-    try {
-      outcome = await Promise.race([
-        turn.result,
-        new Promise<never>((_resolve, reject) => {
-          timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), input.timeoutMs + TURN_FINALIZATION_GRACE_MS);
-        }),
-      ]);
-    } finally { clearTimeout(timeoutTimer); }
+    const outcome = await withPromiseTimeout(
+      turn.result,
+      input.timeoutMs + TURN_FINALIZATION_GRACE_MS,
+      () => Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" }),
+    );
     // startTurn event streams do not emit terminal events. Close the stream
     // after the canonical result settles so the event consumer can finish.
     if (!(await cleanupWithinBudget(() => turn!.closeStream({ reason: "ACP probe turn complete" })))) {
