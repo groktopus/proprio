@@ -21,6 +21,8 @@ PROPRIO_DEPLOYMENT_EXPOSURE="${PROPRIO_DEPLOYMENT_EXPOSURE:-private}"
 # proves is that the artifact can finish onboarding when the provider accepts
 # the credential — the provider's actual verdict is not this artifact's code.
 SMOKE_PROVIDER_MOCK="${SMOKE_PROVIDER_MOCK:-true}"
+SMOKE_ONBOARDING_CODEX_FIXTURE="${SMOKE_ONBOARDING_CODEX_FIXTURE:-false}"
+SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-false}"
 PROPRIO_PUBLIC_URL="${PROPRIO_PUBLIC_URL:-http://localhost:${HOST_PORT}}"
 SMOKE_AUTO_BOOTSTRAP="${SMOKE_AUTO_BOOTSTRAP:-true}"
 # Seconds to wait for /api/health after the container starts. The container
@@ -303,17 +305,40 @@ auto_bootstrap_authenticated_smoke() {
   echo "    Smoke admin credentials: $SMOKE_ADMIN_EMAIL / $SMOKE_ADMIN_PASSWORD"
 }
 
-echo "==> Building onboard smoke image"
-docker build \
-  --build-arg PROPRIO_VERSION="$PROPRIO_VERSION" \
-  --build-arg HOST_UID="$HOST_UID" \
-  -f "$REPO_ROOT/docker/Dockerfile.onboard-smoke" \
-  -t "$IMAGE_NAME" \
-  "$REPO_ROOT"
+if [[ "$SMOKE_SKIP_BUILD" == "true" ]]; then
+  docker image inspect "$IMAGE_NAME" >/dev/null
+  echo "==> Using existing onboard smoke image $IMAGE_NAME"
+else
+  echo "==> Building onboard smoke image"
+  docker build \
+    --build-arg PROPRIO_VERSION="$PROPRIO_VERSION" \
+    --build-arg HOST_UID="$HOST_UID" \
+    -f "$REPO_ROOT/docker/Dockerfile.onboard-smoke" \
+    -t "$IMAGE_NAME" \
+    "$REPO_ROOT"
+fi
 
 # Extra `docker run` arguments for the app container when the provider mock is
 # on: the DNS override, the mock's CA, and the mount that carries it.
 PROVIDER_MOCK_RUN_ARGS=()
+CODEX_FIXTURE_RUN_ARGS=()
+
+if [[ "$SMOKE_ONBOARDING_CODEX_FIXTURE" == "true" ]]; then
+  for fixture_file in onboarding-codex onboarding-codex.mjs onboarding-codex-loader.mjs onboarding-codex-command.mjs; do
+    test -r "$REPO_ROOT/tests/e2e/fixtures/$fixture_file"
+  done
+  test -x "$REPO_ROOT/tests/e2e/fixtures/onboarding-codex"
+  CODEX_FIXTURE_RUN_ARGS=(
+    -v "$REPO_ROOT/tests/e2e/fixtures/onboarding-codex:/proprio-onboarding-fixture/codex:ro"
+    -v "$REPO_ROOT/tests/e2e/fixtures/onboarding-codex.mjs:/proprio-onboarding-fixture/codex.mjs:ro"
+    -v "$REPO_ROOT/tests/e2e/fixtures/onboarding-codex-loader.mjs:/proprio-onboarding-fixture/loader.mjs:ro"
+    -v "$REPO_ROOT/tests/e2e/fixtures/onboarding-codex-command.mjs:/proprio-onboarding-fixture/onboarding-codex-command.mjs:ro"
+    -e PROPRIO_ONBOARDING_CODEX_FIXTURE=1
+    -e PROPRIO_ONBOARDING_CODEX_COMMAND=/proprio-onboarding-fixture/codex
+    -e PROPRIO_ONBOARDING_CODEX_FIXTURE_LOG=/proprio/onboarding-codex-fixture.jsonl
+    -e NODE_OPTIONS="${NODE_OPTIONS:-} --import=/proprio-onboarding-fixture/loader.mjs"
+  )
+fi
 
 start_provider_mock() {
   rm -rf "$PROVIDER_MOCK_DIR"
@@ -421,6 +446,7 @@ docker run -d \
   -e PROPRIO_PUBLIC_URL="$PROPRIO_PUBLIC_URL" \
   -v "$DATA_DIR:/proprio" \
   ${PROVIDER_MOCK_RUN_ARGS[@]+"${PROVIDER_MOCK_RUN_ARGS[@]}"} \
+  ${CODEX_FIXTURE_RUN_ARGS[@]+"${CODEX_FIXTURE_RUN_ARGS[@]}"} \
   "$IMAGE_NAME" >/dev/null
 
 if [[ "$SMOKE_DETACH" != "true" ]]; then
