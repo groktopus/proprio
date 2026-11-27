@@ -728,6 +728,11 @@ export function issuePrivacySqlCondition(actor: AuthorizationActor): SQL<boolean
     and exists (select 1 from ${companyMemberships} m where m.company_id = ${issues.companyId}
       and m.principal_type = 'user' and m.principal_id = ${userId} and m.status = 'active'))`, own);
 }
+/** Apply both task ACLs and personal conversation ownership to retained evidence. */
+export function issueEvidenceReadSqlCondition(actor: AuthorizationActor): SQL<boolean> {
+  return sql<boolean>`(${dashboardConversationCondition(actor)} and ${issuePrivacySqlCondition(actor)})`;
+}
+
 export async function canActorReadIssuePrivacy(db: Db | DbTransaction, actor: AuthorizationActor, issue: IssuePrivacyRow) {
   return db.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId), issuePrivacySqlCondition(actor)))
