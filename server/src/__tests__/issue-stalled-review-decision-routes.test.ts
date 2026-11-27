@@ -529,6 +529,29 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     expect(rejected.body).toMatchObject({ id: rejectInteraction.id, status: "rejected" });
   });
 
+  it("requires fresh signoff when a bound review stalls", async () => {
+    const seeded = await seedCompany("SRS");
+    const stageId = randomUUID();
+    const issueId = await seedReview({ companyId: seeded.companyId, assigneeAgentId: seeded.assigneeAgentId, identifier: "SRS-1" });
+    await db.update(issues).set({
+      executionPolicy: { requiredQualityReview: { version: 1, deliverables: [{ key: "copy", label: "Copy" }] },
+        reviewTargetBinding: { source: "required_quality_review" },
+        stages: [{ id: stageId, type: "review", participants: [{ type: "agent", agentId: seeded.assigneeAgentId }] }] },
+      executionState: { status: "pending", currentStageId: stageId },
+    }).where(eq(issues.id, issueId));
+    const actor = app(boardActor(seeded.companyId, seeded.memberUserId));
+    const url = `/api/issues/${issueId}/stalled-review-decision`;
+    const rejected = await request(actor).post(url).send({ action: "approve", note: "Approve stale work" });
+    expect(rejected.status, JSON.stringify(rejected.body)).toBe(422);
+    expect(rejected.body.details).toMatchObject({ code: "required_quality_review_stale" });
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issueId))).toEqual([]);
+    expect(await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId))).toEqual([{ status: "in_review" }]);
+
+    const returned = await request(actor).post(url).send({ action: "request_changes", note: "Submit current work for signoff." });
+    expect(returned.status, JSON.stringify(returned.body)).toBe(200);
+    expect(returned.body.issue).toMatchObject({ status: "todo", executionState: null });
+  });
+
   it("persists request-changes notes as attributed comments and only wakes with a typed reference", async () => {
     const seeded = await seedCompany("SRC");
     const issueId = await seedReview({

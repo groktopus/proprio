@@ -75,7 +75,10 @@ export interface ExecutionProjection {
 }
 
 /** These incidents require an explicit reconciliation, never a generic Retry. */
+export const CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE = "case_handoff_withdrawal_hold";
+
 export const EXECUTION_RECONCILIATION_CAUSES = [
+  CASE_HANDOFF_WITHDRAWAL_HOLD_CAUSE,
   "uncertain_provider_action",
   "uncertain_external_action",
   "uncertain_control_plane_action",

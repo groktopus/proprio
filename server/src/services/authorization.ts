@@ -1,3 +1,4 @@
+import { approvalTaskTreeRootId } from "./approval-visibility.js";
 import { dashboardConversationCondition, dashboardConversationReadable } from "./responsibility-privacy.js";
 import { readOncePerRequest } from "./authorization-read-scope.js";
 import { and, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
@@ -3126,15 +3127,20 @@ export async function executionWorkspaceReadSqlCondition(db: Db | DbTransaction,
 
 /** An approval may contain task-derived payload; every linked task must be readable. */
 export async function approvalReadSqlCondition(db: Db | DbTransaction, actor: AuthorizationActor): Promise<SQL<boolean>> {
-  const readable = await issueReadSqlCondition(db, actor);
+  return approvalReadConditionForIssueRead(await issueReadSqlCondition(db, actor));
+}
+
+export function approvalReadConditionForIssueRead(readable: SQL<boolean>): SQL<boolean> {
+  const budgetRootId = approvalTaskTreeRootId();
   return sql<boolean>`not exists (
-    select 1 from (values (${approvals.payload}->>'issueId'), (${approvals.payload}->>'sourceIssueId')) claimed(id)
+    select 1 from (values (${approvals.payload}->>'issueId'), (${approvals.payload}->>'sourceIssueId'), (${budgetRootId})) claimed(id)
       where claimed.id is not null and not exists (
         select 1 from ${issues} where ${issues.id}::text = claimed.id and ${issues.companyId} = ${approvals.companyId})
   ) and not exists (
     select 1 from ${issues} where ${issues.companyId} = ${approvals.companyId}
       and (${issues.id}::text = ${approvals.payload}->>'issueId'
         or ${issues.id}::text = ${approvals.payload}->>'sourceIssueId'
+        or ${issues.id}::text = ${budgetRootId}
         or exists (select 1 from ${issueApprovals} ia where ia.approval_id = ${approvals.id}
           and ia.company_id = ${approvals.companyId} and ia.issue_id = ${issues.id}))
       and not (${readable})

@@ -234,23 +234,23 @@ export function registerIssueRecoveryWork(
     : scope.reload ? "reconnect" as const : scope.backstop ? "backstop" as const : scope.everyTask ? "every_task" as const
     : scope.agentId ? "agent" as const : scope.issueId || isGraph(scope) ? "hint" as const : "company" as const;
   const graphs = new Map<string, { at: number; ids: Promise<string[] | null> }>();
-  async function resolveGraph(scope: IssueRecoveryScope | undefined) {
+  async function resolveGraph(scope: IssueRecoveryScope | undefined, transitiveDependents: boolean) {
     if (!scope || (!isGraph(scope) && !scope.agentId)) return;
-    const key = scopeKey(scope);
+    const key = transitiveDependents && !scope.agentId ? `transitive:${scopeKey(scope)}` : scopeKey(scope);
     for (const [other, cached] of graphs) if (cached.at < Date.now() - 2_000) graphs.delete(other);
     let cached = graphs.get(key);
     if (!cached) {
       cached = { at: Date.now(), ids: scope.agentId ? resolveAgentIssues(db, { companyId: scope.companyId, agentId: scope.agentId })
-        : resolveIssueGraph(db, { companyId: scope.companyId, runId: scope.graphRunId, issueId: scope.graphIssueId }) };
+        : resolveIssueGraph(db, { companyId: scope.companyId, runId: scope.graphRunId, issueId: scope.graphIssueId, transitiveDependents }) };
       graphs.set(key, cached);
     }
     const ids = await cached.ids.catch(error => { graphs.delete(key); throw error; });
     scope.issueIds = ids ?? undefined;
     scope.wholeCompany = ids === null;
   }
-  async function toCompany(scope: IssueRecoveryScope | undefined, worker: { invalidate(hint?: string): void }) {
+  async function toCompany(scope: IssueRecoveryScope | undefined, worker: { invalidate(hint?: string): void }, transitiveDependents = false) {
     if (scope && isGraph(scope)) worker.invalidate(issueRecoveryBackstopHint(scope.companyId));
-    await resolveGraph(scope);
+    await resolveGraph(scope, transitiveDependents);
     if (!scope?.wholeCompany) return false;
     worker.invalidate(JSON.stringify({ companyId: scope.companyId, everyTask: true }));
     return true;
@@ -333,7 +333,7 @@ export function registerIssueRecoveryWork(
       load: async scope => {
         const key = scopeKey(scope);
         if (!enabled) { cursors.delete(key); passes.suppressed(); return []; }
-        if (await toCompany(scope, worker)) return { rows: null, complete: true };
+        if (await toCompany(scope, worker, true)) return { rows: null, complete: true };
         if (scope?.issueIds?.length === 0) return { rows: [], complete: true };
         const changed = await passes.filter(scope, key, !cursors.has(key));
         const rows = await sweep.listSuspects(scope && !scope.reload ? { companyId: scope.companyId, issueId: scope.issueId,
