@@ -61,7 +61,11 @@ Before promoting a versioned image:
    documented rollback/restore procedure using its retained digest,
    configuration, and backup. Record which path passed and the resulting
    version/storage migration outcome.
-5. Add the immutable digest, version tag, compatible Compose setup, required
+5. If release notes advertise authenticated/public Compose installs, verify
+   the fresh first-admin CLI invite flow from [#414](https://github.com/groktopus/proprio/issues/414)
+   on this exact image. Keep that profile source-only or unsupported until its
+   bootstrap check passes. Do not change private browser-claim behavior.
+6. Add the immutable digest, version tag, compatible Compose setup, required
    migration steps, previous known-good digest, qualification run, and
    upgrade or rollback evidence to the GitHub release notes. Leave the
    optional remote provider pack unadvertised until it passes separate
