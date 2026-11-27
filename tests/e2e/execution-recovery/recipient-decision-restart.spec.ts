@@ -123,7 +123,7 @@ test("recipient decisions survive a controller restart with their Case audit his
       const offer = await caseHandoffService(db).handoff(company.id, { type: "agent", companyId: company.id, agentId: source.id,
         runId, source: "agent_jwt" }, { case: { id: caseId }, idempotencyKey: randomUUID(), expectedHandoffVersion: 1,
         expectedIssueStatusVersion: 1, toAgentId: recipient.id, phase: "implementation", instructions: "Review the stated requirements.",
-        offer: { expectedDeliverable: "A verified result", prerequisites: ["Read the task brief"] } });
+        offer: { expectedDeliverable: "A verified result", prerequisites: ["Read the task brief"] } }, { enableVersionedOffers: true });
       expect(offer.state).toBe("offered");
       seeded.push({ caseId, taskId, handoffId: offer.handoffId, runId, requirementRevisionId: contract!.id, outcome: decision.outcome,
         ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}) });
@@ -154,7 +154,8 @@ test("recipient decisions survive a controller restart with their Case audit his
       const items = Array.isArray(history) ? history : history.items ?? history.handoffs;
       const handoff = items.find((item: { id: string }) => item.id === entry.handoffId);
       expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2 });
-      expect(handoff.recipientDecision).toEqual(recorded.get(entry.handoffId));
+      expect(handoff.recipientDecision).toMatchObject(recorded.get(entry.handoffId));
+      expect(handoff.recipientDecision.message).toBe(entry.reasonCode ? `Recorded ${entry.reasonCode}` : undefined);
       const events = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, entry.caseId), eq(caseEvents.kind, "handoff_decision_recorded")));
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ actorType: "agent", actorAgentId: recipient.id, payload: { handoffId: entry.handoffId,
