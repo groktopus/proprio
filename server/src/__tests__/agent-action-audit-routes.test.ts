@@ -125,6 +125,49 @@ describePostgres("agent action audit routes", () => {
     return { company, agent, otherAgent, issue, comment, issueDocument, run };
   }
 
+  it("keeps private binding loss private and isolates competing expired-snapshot cleanup", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const [privateTask] = await db.insert(issues).values({
+      companyId: company.id, title: "Private binding fixture", visibility: "private", responsibleUserId: randomUUID(),
+    }).returning();
+    const at = new Date("2026-07-17T00:00:01.000Z");
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    const epoch = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    try {
+      await db.insert(managedAuditEvents).values({
+        companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+        occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
+        decision: "allow", status: "authorized", taskId: privateTask.id, runId: randomUUID(), invocationId: randomUUID(),
+      });
+      const privateLoss = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
+      expect(privateLoss.status, privateLoss.text).toBe(201);
+      expect(privateLoss.body).toMatchObject({ eventCount: 0, sourceEpoch: epoch });
+
+      const expiredAt = new Date(Date.now() - 1_000);
+      await db.insert(managedAuditExports).values({
+        companyId: company.id, userId, sourceEpoch: epoch, from: new Date(window.from), to: new Date(window.to),
+        eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: expiredAt,
+      });
+      const creates = await Promise.all(Array.from({ length: 4 }, () =>
+        board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window)));
+      expect(creates.map(response => response.status)).toEqual([201, 201, 201, 201]);
+      expect(creates.map(response => response.body.eventCount)).toEqual([0, 0, 0, 0]);
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("exports a frozen managed audit window beyond the CSV cap and detects known missing bindings", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
