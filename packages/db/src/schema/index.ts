@@ -209,6 +209,7 @@ export {
   toolGatewayRateLimitCounters,
   toolAccessAuditEvents,
 } from "./tool_access.js";
+export { managedAuditEvents } from "./managed_audit_events.js";
 export {
   companySkills,
   companySkillMutationReceipts,

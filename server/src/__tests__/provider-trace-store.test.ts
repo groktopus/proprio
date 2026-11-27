@@ -14,6 +14,10 @@ vi.mock("node:fs/promises", () => ({
 vi.mock("../services/activity-log.js", () => ({
   logActivity: vi.fn(async () => undefined),
 }));
+vi.mock("../services/delivery-work-notifications.js", () => ({
+  DELIVERY_QUEUES: { providerTraceRetention: "provider-trace-retention" },
+  notifyDeliveryWork: vi.fn(async () => undefined),
+}));
 
 function frame(payload: unknown) {
   return {
@@ -310,6 +314,27 @@ describe("provider trace retention", () => {
       provider: "codex",
       requestedBy: "user-1",
     })).rejects.toThrow("provider_trace_unavailable");
+  });
+
+  it("reconciles a restored deletion before any trace read or recapture", async () => {
+    mockUnlink.mockReset();
+    mockUnlink.mockResolvedValue(undefined);
+    const { db, row } = statefulExpiredTraceDb();
+    (db as typeof db & { transaction: (callback: (tx: typeof db) => Promise<unknown>) => Promise<unknown> }).transaction =
+      async callback => callback(db);
+    const store = providerTraceStore(db as never);
+
+    await expect(store.reconcileDeletion({
+      traceId: "trace-1",
+      runId: "run-1",
+      companyId: "company-1",
+      deletedAt: new Date("2026-08-31T12:00:00.000Z"),
+    })).resolves.toEqual({ status: "cleaned" });
+    expect(row()).toMatchObject({ status: "deleted", deletedAt: expect.any(Date) });
+    expect(row().traceRef).toBe("00000000-0000-0000-0000-000000000000.ndjson");
+    await expect(store.inspect("run-1", "company-1")).resolves.toEqual({ trace: null, entries: [] });
+    await expect(store.prepare({ runId: "run-1", companyId: "company-1", provider: "codex", requestedBy: "user-1" }))
+      .rejects.toThrow("provider_trace_unavailable");
   });
 
   it("does not let concurrent finalization overwrite expiry or strand raw files", async () => {

@@ -71,6 +71,7 @@ import { badRequest, forbidden, HttpError, notFound, unprocessable } from "../er
 import { accessService, logActivity, toolAccessPolicyService, toolAccessService, vercelConnectIntegrationStatus } from "../services/index.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
 import { authorizationService } from "../services/authorization.js";
+import { filterReadableDecisionTasks } from "../services/tool-access/activity/service.js";
 import { mcpAppViewsService } from "../services/mcp-app-views.js";
 import { createConnectionContentDeletion } from "../services/tool-access/connections/content-deletion.js";
 import { getRunLogStore } from "../services/run-log-store.js";
@@ -2931,7 +2932,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const result = await svc.getRunDecisionLookup(companyId, req.params.runId as string);
-    res.json({ ...result, decisions: await filterConnectionManagementRows(db, req, "connections:audit", result.decisions, row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId })) });
+    const visible = await filterReadableDecisionTasks(db, req.actor, companyId, result.decisions);
+    res.json({ ...result, decisions: await filterConnectionManagementRows(db, req, "connections:audit", visible,
+      row => ({ connectionId: row.invocation.connectionId, issueId: row.invocation.issueId })) });
   });
 
   router.get("/companies/:companyId/tools/trust-rules", managementGuard("connections:profiles", "GET /companies/:companyId/tools/trust-rules", { personal: true }), async (req, res) => {
