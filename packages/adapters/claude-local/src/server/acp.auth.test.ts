@@ -251,6 +251,27 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     expect(probeAcpHello).not.toHaveBeenCalled();
   });
 
+  it.each([null, sandboxTarget])("does not pass setup when CLAUDE_CODE_EXECUTABLE is caller-configured but unauthorized (%s)", async (target) => {
+    const result = await testClaudeAcpEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: { engine: "acp", env: { ANTHROPIC_API_KEY: "selected-test-key", CLAUDE_CODE_EXECUTABLE: process.execPath } },
+      executionTarget: target,
+      environmentName: null,
+    });
+
+    expect(result.status).toBe("warn");
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      code: "claude_acp_login_probe_unavailable",
+      message: "The configured CLAUDE_CODE_EXECUTABLE cannot be authorized by a setup test.",
+      level: "warn",
+    }));
+    expect(result.checks.some((check) => check.code === "claude_hello_probe_passed")).toBe(false);
+    expect(probeAcpHello).not.toHaveBeenCalled();
+    expect(remoteHomeFixture.runtimeInput).toBeNull();
+    expect(remoteHomeFixture.shellCalls).toEqual([]);
+  });
+
   it("keeps the selected key unqualified when the ACP turn is not positive", async () => {
     probeAcpHello.mockResolvedValueOnce({ status: "failed" });
     const result = await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",

@@ -947,7 +947,17 @@ export async function testClaudeAcpEnvironment(
     if (isNonEmpty(hostConfigDir) && !isNonEmpty(probeEnv.CLAUDE_CONFIG_DIR)) {
       probeEnv.CLAUDE_CONFIG_DIR = hostConfigDir.trim();
     }
-    if (!targetIsRemote && customCommand) {
+    if (isNonEmpty(envConfig.CLAUDE_CODE_EXECUTABLE)) {
+      // This caller-configured executable controls which Claude binary the ACP
+      // server starts. Setup requests can be made with agents:create keys, and
+      // this adapter has no trusted host-command authorization boundary for an
+      // arbitrary executable path, so do not launch the probe with a different
+      // (or potentially caller-selected) binary.
+      checks.push(buildAcpLoginProbeUnavailableCheck(
+        "The configured CLAUDE_CODE_EXECUTABLE cannot be authorized by a setup test.",
+        targetIsSandbox,
+      ));
+    } else if (!targetIsRemote && customCommand) {
       // agents:create permits setup tests by agent keys, so a prospective
       // adapter command is not authority to execute an arbitrary host binary.
       // Until host-command authorization exists, only the resolved bundled
