@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
+import express, { type Request } from "express";
+import request from "supertest";
 import { activityLog, agents, approvals, authUsers, budgetIncidents, budgetPolicies, budgetReservations, companies, companyMemberships, costEvents, createDb, heartbeatRuns, issueAccessGrants, issues, type Db } from "@groktopus/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
+import { errorHandler } from "../middleware/index.js";
+import { costRoutes } from "../routes/costs.js";
 import { reserveRunBudget } from "./budget-reservations.js";
 import { computeObservedSpend } from "./budget-exposure.js";
 import { budgetService, flushBudgetEvaluationWork } from "./budgets.js";
@@ -50,23 +54,56 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     return { companyId, makeAgent, makeIssue, makeRun, makePolicy };
   }
 
-  it("serializes sibling reservations, leaves unrelated work eligible, and includes the held estimate", async () => {
+  it("serializes sibling reservations and lets the board resolve a settled task-tree hard stop", async () => {
     const f = await fixture();
     const firstAgent = await f.makeAgent("First worker"), secondAgent = await f.makeAgent("Second worker");
     const root = await f.makeIssue("Shared outcome");
     const siblingA = await f.makeIssue("Build", root.id), siblingB = await f.makeIssue("Review", root.id);
-    await f.makePolicy(root.id, { amount: 100, reservationCents: "80" });
+    const treePolicy = await f.makePolicy(root.id, { amount: 100, reservationCents: "80" });
     const firstRun = await f.makeRun(firstAgent.id, siblingA.id), secondRun = await f.makeRun(secondAgent.id, siblingB.id);
-
-    const results = await Promise.allSettled([
-      reserveRunBudget(db, f.companyId, firstRun.id, null),
-      reserveRunBudget(db, f.companyId, secondRun.id, null),
-    ]);
+    const firstAdmissionName = `tree-budget-a-${randomUUID().slice(0, 8)}`;
+    const secondAdmissionName = `tree-budget-b-${randomUUID().slice(0, 8)}`;
+    const firstAdmissionDb = createDb(database.connectionString, { applicationName: firstAdmissionName, maxConnections: 1 });
+    const secondAdmissionDb = createDb(database.connectionString, { applicationName: secondAdmissionName, maxConnections: 1 });
+    let releaseRootLock!: () => void;
+    let signalRootLock!: () => void;
+    const rootLockHeld = new Promise<void>(resolve => { signalRootLock = resolve; });
+    const rootLockReleased = new Promise<void>(resolve => { releaseRootLock = resolve; });
+    let rootLockPid = 0;
+    const rootLock = db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`task-tree-budget:${f.companyId}:${root.id}`}, 0))`);
+      const [backend] = await tx.execute(sql`select pg_backend_pid() as pid`);
+      rootLockPid = Number(backend.pid);
+      signalRootLock();
+      await rootLockReleased;
+    });
+    const admissionAttempts: Promise<unknown>[] = [];
+    const rootLockWaiters = async () => {
+      const [state] = await db.execute(sql`select count(*)::int as count from pg_stat_activity
+        where application_name in (${firstAdmissionName}, ${secondAdmissionName})
+          and wait_event = 'advisory' and ${rootLockPid} = any(pg_blocking_pids(pid))`);
+      return state?.count;
+    };
+    let results: PromiseSettledResult<unknown>[];
+    try {
+      await Promise.race([rootLockHeld, rootLock]);
+      admissionAttempts.push(
+        reserveRunBudget(firstAdmissionDb, f.companyId, firstRun.id, null),
+        reserveRunBudget(secondAdmissionDb, f.companyId, secondRun.id, null),
+      );
+      for (const attempt of admissionAttempts) void attempt.catch(() => undefined);
+      await expect.poll(rootLockWaiters).toBe(2);
+    } finally {
+      releaseRootLock();
+      await Promise.allSettled([rootLock, ...admissionAttempts]);
+      await Promise.all([firstAdmissionDb.$client.end(), secondAdmissionDb.$client.end()]);
+    }
+    results = await Promise.allSettled(admissionAttempts);
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     const blocked = results.find(result => result.status === "rejected") as PromiseRejectedResult;
     expect(blocked.reason).toMatchObject({ status: 409, message: "Available budget is reserved by unfinished runs" });
-    const treePolicy = (await db.select().from(budgetPolicies).where(eq(budgetPolicies.scopeId, root.id)))[0]!;
     const winningRun = results[0]!.status === "fulfilled" ? firstRun : secondRun;
+    const blockedRun = winningRun.id === firstRun.id ? secondRun : firstRun;
     await db.update(heartbeatRuns).set({ status: "running", costAccountingPending: true,
       usageJson: { provider: "unknown", billingType: "unknown", usageBasis: "per_run" } }).where(eq(heartbeatRuns.id, winningRun.id));
     const observed = await computeObservedSpend(db, treePolicy);
@@ -79,6 +116,52 @@ describe.skipIf(!support.supported)("task-tree budget admission", () => {
     const unrelatedTask = await f.makeIssue("Independent task", unrelatedRoot.id);
     const unrelatedRun = await f.makeRun(secondAgent.id, unrelatedTask.id);
     await expect(reserveRunBudget(db, f.companyId, unrelatedRun.id, null)).resolves.toMatchObject({ reused: false });
+
+    await db.insert(costEvents).values({ companyId: f.companyId, agentId: winningRun.agentId,
+      issueId: winningRun.issueId, heartbeatRunId: winningRun.id, provider: "test", biller: "test",
+      billingType: "metered_api", costStatus: "priced", model: "test-model", costCents: 120, occurredAt: new Date() });
+    await db.update(heartbeatRuns).set({ status: "succeeded", costAccountingPending: false, costAccountedAt: new Date() })
+      .where(eq(heartbeatRuns.id, winningRun.id));
+    await db.update(budgetReservations).set({ state: "settled", settledAt: new Date() })
+      .where(and(eq(budgetReservations.companyId, f.companyId), eq(budgetReservations.runId, winningRun.id)));
+    await budgetService(db).evaluateAffectedScopes(f.companyId, winningRun.agentId, null);
+    await flushBudgetEvaluationWork(db, { companyId: f.companyId });
+
+    const operator: Request["actor"] = { type: "board", userId: "board-budget-operator", source: "local_implicit",
+      companyIds: [f.companyId], isInstanceAdmin: true };
+    const app = express();
+    app.use(express.json(), (req, _res, next) => { req.actor = operator; next(); });
+    app.use("/api", costRoutes(db));
+    app.use(errorHandler);
+    const companyPath = `/api/companies/${f.companyId}`;
+    const overview = await request(app).get(`${companyPath}/budgets/overview`).expect(200);
+    expect(overview.body.policies).toContainEqual(expect.objectContaining({
+      policyId: treePolicy.id, scopeType: "task_tree", scopeId: root.id, scopeName: root.title, status: "hard_stop",
+    }));
+    const incident = overview.body.activeIncidents.find((item: { policyId: string }) => item.policyId === treePolicy.id);
+    expect(incident).toMatchObject({ scopeId: root.id, scopeName: root.title, amountLimit: 100, amountObserved: 120, status: "open" });
+    const anotherIndependentTask = await f.makeIssue("Another independent task", unrelatedRoot.id);
+    const unrelatedRunDuringHardStop = await f.makeRun(secondAgent.id, anotherIndependentTask.id);
+    await expect(reserveRunBudget(db, f.companyId, unrelatedRunDuringHardStop.id, null)).resolves.toMatchObject({ reused: false });
+    await expect(reserveRunBudget(db, f.companyId, blockedRun.id, null)).rejects.toMatchObject({
+      status: 409,
+      message: "Task tree cannot start work because its shared budget hard-stop was reached.",
+    });
+
+    const resolvePath = `${companyPath}/budget-incidents/${incident.id}/resolve`;
+    await request(app).post(resolvePath).send({ action: "raise_budget_and_resume", amount: 120 }).expect(422);
+    const resolution = await request(app).post(resolvePath).send({ action: "raise_budget_and_resume", amount: 250 }).expect(200);
+    expect(resolution.body).toMatchObject({ id: incident.id, policyId: treePolicy.id, status: "resolved" });
+    const [savedIncident] = await db.select().from(budgetIncidents)
+      .where(and(eq(budgetIncidents.companyId, f.companyId), eq(budgetIncidents.id, incident.id)));
+    expect(savedIncident).toMatchObject({ status: "resolved", resolvedAt: expect.any(Date) });
+    if (!incident.approvalId) throw new Error("Expected a linked hard-stop approval");
+    const [approval] = await db.select().from(approvals)
+      .where(and(eq(approvals.companyId, f.companyId), eq(approvals.id, incident.approvalId)));
+    expect(approval).toMatchObject({ status: "approved", decidedByUserId: operator.userId });
+    expect((await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, treePolicy.id)))[0])
+      .toMatchObject({ amount: 250, updatedByUserId: operator.userId });
+    await expect(reserveRunBudget(db, f.companyId, blockedRun.id, null)).resolves.toMatchObject({ reused: false });
   });
 
   it("enforces overlapping tree budgets and charges one hold to both scopes", async () => {

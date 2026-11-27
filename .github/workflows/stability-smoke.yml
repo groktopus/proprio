@@ -492,6 +492,19 @@ jobs:
             'retires the closed monthly incident with 125 cents spent this month',
           ] });
           JS
+      - name: Check task-tree budget sibling contention and resolution
+        run: |
+          test_file=server/src/services/task-tree-budget-enforcement.test.ts
+          pnpm exec vitest run --maxWorkers 1 --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/task-tree-budget-contention.json" "$test_file" -t 'serializes sibling reservations and lets the board resolve a settled task-tree hard stop'
+          node --input-type=module - "$test_file" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { assertRequiredVitestTests } from './scripts/ci/assert-required-vitest-tests.mjs';
+          const result = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'task-tree-budget-contention.json'), 'utf8'));
+          assertRequiredVitestTests(result, { [process.argv[2]]: [
+            'serializes sibling reservations and lets the board resolve a settled task-tree hard stop',
+          ] });
+          JS
       - name: Check atomic company import
         run: |
           test_file=server/src/__tests__/company-portability-import-batching.test.ts
