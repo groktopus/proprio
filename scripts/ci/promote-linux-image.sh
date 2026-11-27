@@ -23,8 +23,9 @@ reference="$image@$built_digest"
 # Resolve annotated Git tags to their commit rather than trusting the release's
 # target_commitish (which is not the tag's immutable target).
 source_tag="v${release_tag#linux-}"
-published_tag="$(gh release view "$source_tag" --repo "$repo" --json tagName --jq .tagName)"
-[[ "$published_tag" == "$source_tag" ]]
+release_metadata="$(gh release view "$source_tag" --repo "$repo" --json tagName,isDraft --jq '.tagName + " " + (.isDraft | tostring)')"
+read -r published_tag is_draft <<<"$release_metadata"
+[[ "$published_tag" == "$source_tag" && "$is_draft" == false ]]
 tag_object="$(gh api "repos/$repo/git/ref/tags/$source_tag" --jq '.object.sha + " " + .object.type')"
 read -r tag_sha tag_type <<<"$tag_object"
 tag_depth=0
