@@ -123,11 +123,11 @@ export async function runAcpProbeTurn(input: {
     else if (error instanceof Error && /(?:authentication|required|unauthorized|unauthenticated|\b(?:401|403)\b)/i.test(error.message)) failure = "auth_required";
   } finally {
     let cleanupFailed = false;
-    if (turn && !result) cleanupFailed ||= !(await cleanupWithinBudget(() => turn!.cancel({ reason: "ACP probe ended" })));
-    if (runtime && handle) cleanupFailed ||= !(await cleanupWithinBudget(() => runtime!.close({ handle: handle!, reason: "ACP probe complete", discardPersistentState: true })));
-    if (runtime) cleanupFailed ||= !(await cleanupWithinBudget(() => runtime!.shutdown()));
-    if (bridge) cleanupFailed ||= !(await cleanupWithinBudget(() => bridge!.stop()));
-    cleanupFailed ||= !(await cleanupWithinBudget(() => rm(root, { recursive: true, force: true })));
+    if (turn && !result && !(await cleanupWithinBudget(() => turn!.cancel({ reason: "ACP probe ended" })))) cleanupFailed = true;
+    if (runtime && handle && !(await cleanupWithinBudget(() => runtime!.close({ handle: handle!, reason: "ACP probe complete", discardPersistentState: true })))) cleanupFailed = true;
+    if (runtime && !(await cleanupWithinBudget(() => runtime!.shutdown()))) cleanupFailed = true;
+    if (bridge && !(await cleanupWithinBudget(() => bridge!.stop()))) cleanupFailed = true;
+    if (!(await cleanupWithinBudget(() => rm(root, { recursive: true, force: true })))) cleanupFailed = true;
     if (cleanupFailed) result = undefined;
   }
   return result ?? { status: failure, text: "", toolCall: false };
