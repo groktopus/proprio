@@ -1,3 +1,4 @@
+import type { NativeDeliverableTaskRemedy } from "./native-deliverable-feedback.js";
 import { COMPLETION_REVIEW_STAGE_REASON, COMPLETION_REVIEW_STAGE_REJECTED_REASON, type CompletionReviewStageEntry } from "../issue-execution-policy.js";
 import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
 import type { IssueUnblockDescriptor } from "@groktopus/shared";
@@ -64,6 +65,7 @@ export type NativeStatusEffect =
       kind: "record_finalization_error";
       cause: string;
       nextAction: string;
+      taskRemedy?: NativeDeliverableTaskRemedy;
       agentId: string;
     }
   | { kind: "release_run_resources" }
@@ -219,6 +221,7 @@ export function arbitrateNativeStatus(input: {
   completionClaimPolicyAccepted?: boolean;
   /** Canonical exact-output human verdicts, only for an explicitly opted-in requirement. */
   requiredQualityReviewSatisfied?: boolean;
+  deferredSignoffTargetCurrent?: boolean;
   allowIncompleteContinuation?: boolean;
   /**
    * True when the issue already has a durable unresolved dependency edge.
@@ -238,6 +241,7 @@ export function arbitrateNativeStatus(input: {
   planWaitAuthorized?: boolean;
   monitorWaitAuthorized?: boolean;
   caseHandoffAuthorized?: boolean;
+  caseHandoffAwaitingDecision?: boolean;
   /** The saved timer already admitted another run and this run no longer owns checkout. */
   monitorWaitDispatched?: boolean;
   monitorWaitPreserved?: boolean;
@@ -328,7 +332,8 @@ export function arbitrateNativeStatus(input: {
   if (input.caseHandoffAuthorized) return {
     policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
     statusAction: "preserve", toStatus: input.priorIssueStatus,
-    reasonCode: "case_handoff_waiting_for_release", unblockDescriptor: null,
+    reasonCode: input.caseHandoffAwaitingDecision ? "case_handoff_waiting_for_decision" : "case_handoff_waiting_for_release",
+    unblockDescriptor: null,
     effects: [{ kind: "release_checkout" }],
   };
   if (input.providerModelRejected && input.terminalState === "failed" &&
@@ -540,6 +545,15 @@ export function arbitrateNativeStatus(input: {
       // Dependency completion owns the wake. Do not immediately rerun the
       // blocked issue merely because the provider mislabeled its scope/status.
       effects: [],
+    };
+  }
+  if (input.deferredSignoffTargetCurrent === false && input.assessment.reportedDisposition === "done") {
+    return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "preserve", toStatus: input.priorIssueStatus,
+      reasonCode: "required_quality_review_stale", unblockDescriptor: null,
+      effects: [{ kind: "release_checkout" }, { kind: "record_recovery", cause: "required_quality_review_stale",
+        nextAction: "Return the task to In Progress and resubmit the current outputs to an available reviewer for signoff.", agentId: input.agentId }],
     };
   }
   if (input.requiredQualityReviewSatisfied === false && input.assessment.reportedDisposition === "done") {

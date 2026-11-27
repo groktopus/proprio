@@ -96,6 +96,9 @@ import { NATIVE_AGENT_BLOCKER_CONTINUATION_CODE, NATIVE_AGENT_BLOCKER_HANDOFF_CO
 import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
 import { NATIVE_TOOL_RECEIPT_LIMIT_CODE } from "./native-tool-receipt-limit.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
+import { readAcceptedCaseHandoffCompletionEvidence } from "./case-handoff-completion-evidence.js";
+import { CASE_HANDOFF_SUPERSEDED_REASON } from "../case-handoff-states.js";
+import { nativeCaseHandoffStatusAuthorityIsCurrent } from "./native-case-handoff.js";
 
 export class NativeStatusRaceError extends Error {
   readonly code = "native_status_race" as const;
@@ -953,31 +956,42 @@ async function materializeDecisionEffect(input: {
   }
   if (effect.kind === "record_finalization_error") {
     failAt("recovery_materialization", input.failpoint);
-    const recovery = await issueRecoveryActionService(
-      input.tx,
-    ).upsertSourceScoped({
+    const handoffCompletionEvidence = effect.cause === "completion_evidence_incomplete"
+      ? await readAcceptedCaseHandoffCompletionEvidence({
+        db: input.tx,
+        companyId: input.companyId,
+        issueId: input.issue.id,
+        runId: input.runId,
+        decisionId: input.decisionId,
+      })
+      : null;
+    const acceptedHandoff = handoffCompletionEvidence?.caseHandoff;
+    const fingerprint = acceptedHandoff
+      ? nativeSha256({ cause: effect.cause, handoffId: acceptedHandoff.id, version: acceptedHandoff.version,
+        requirementsDigest: acceptedHandoff.requirementsDigest })
+      : nativeSha256({ runId: input.runId, decisionId: input.decisionId, cause: effect.cause });
+    const recovery = await issueRecoveryActionService(input.tx).upsertSourceScoped({
       companyId: input.companyId,
       sourceIssueId: input.issue.id,
       kind: "active_run_watchdog",
       ownerType: "agent",
       ownerAgentId: effect.agentId,
       cause: effect.cause,
-      fingerprint: nativeSha256({
-        runId: input.runId,
-        decisionId: input.decisionId,
-        cause: effect.cause,
-      }),
+      fingerprint,
       evidence: { runId: input.runId, decisionId: input.decisionId },
+      ...(effect.cause === "completion_evidence_incomplete" ? {
+        caseCompletionAttempt: {
+          runId: input.runId,
+          decisionId: input.decisionId,
+          receipt: handoffCompletionEvidence && { ...handoffCompletionEvidence, taskRemedy: effect.taskRemedy },
+        },
+      } : {}),
       nextAction: effect.nextAction,
       wakePolicy: null,
       maxAttempts: 3,
     });
-    return {
-      effectKind: effect.kind,
-      targetType: "issue_recovery_action",
-      targetId: recovery.id,
-      payload: { cause: effect.cause, nextAction: effect.nextAction },
-    };
+    return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: recovery.id,
+      payload: { cause: effect.cause, nextAction: effect.nextAction } };
   }
   if (effect.kind === "release_run_resources") {
     failAt("recovery_materialization", input.failpoint);
@@ -1722,22 +1736,17 @@ export async function commitNativeStatusDecision(input: {
   if (input.decision.reasonCode === null) {
     throw new Error("native_status_reason_code_required");
   }
-  const reasonCode = input.decision.reasonCode;
-  if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
-    throw new Error("native_model_rejection_owner_required");
-  }
-  if ((reasonCode.startsWith("native_provider_overloaded") || reasonCode === "native_run_failed_continuation_exhausted"
-      || reasonCode === NATIVE_TOOL_RECEIPT_LIMIT_CODE || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_CODE
-      || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_EXHAUSTED_CODE || reasonCode === NATIVE_AGENT_BLOCKER_CONTINUATION_CODE
-      || reasonCode === NATIVE_AGENT_BLOCKER_HANDOFF_CODE) && !input.requireProviderFailureOwner) {
-    throw new Error("native_provider_failure_owner_required");
-  }
+  // This effective reason drives every locked validation branch and the
+  // decision/effect ledger below. A stale versioned handoff replaces it under
+  // the issue lock so no original status gate can still materialize effects.
+  let reasonCode = input.decision.reasonCode;
   let verifiedMergedPullRequests: ReadonlySet<string> | undefined;
+  let pullRequestVerificationFailed = false;
   if (input.decision.statusAction === "done") {
     try { verifiedMergedPullRequests = await verifyNativePullRequestCompletion(input.db, input); }
     catch (error) {
-      if (error instanceof NativePullRequestCompletionError) throw new NativeStatusRaceError();
-      throw error;
+      if (!(error instanceof NativePullRequestCompletionError)) throw error;
+      pullRequestVerificationFailed = true;
     }
   }
   const publications: ActivityPublication[] = [];
@@ -1780,8 +1789,35 @@ export async function commitNativeStatusDecision(input: {
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (!issue) throw new NativeStatusRaceError();
-    const [originRun] = await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
+    const [originRun] = await tx.select({ agentId: heartbeatRuns.agentId, contextSnapshot: heartbeatRuns.contextSnapshot,
+      wakeupRequestId: heartbeatRuns.wakeupRequestId }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
+    const caseHandoffAuthority = await nativeCaseHandoffStatusAuthorityIsCurrent(tx, {
+      companyId: input.companyId, issue, runId: input.runId, runAgentId: originRun?.agentId ?? null,
+      runWakeupRequestId: originRun?.wakeupRequestId ?? null, contextSnapshot: originRun?.contextSnapshot,
+    });
+    if (caseHandoffAuthority === false) {
+      reasonCode = CASE_HANDOFF_SUPERSEDED_REASON;
+      input = {
+        db: input.db, companyId: input.companyId, issueId: input.issueId, runId: input.runId,
+        assessmentId: input.assessmentId, priorStatus: input.priorStatus, priorStatusVersion: input.priorStatusVersion,
+        priorDecisionId: input.priorDecisionId, supersedesCommittedDecisionId: input.supersedesCommittedDecisionId,
+        requireReassessmentSource: input.requireReassessmentSource, failpoint: input.failpoint,
+        decision: { policyVersion: input.decision.policyVersion, statusAction: "preserve",
+          toStatus: issue.status as NativeStatusDecision["toStatus"], reasonCode, unblockDescriptor: null, effects: [] },
+      };
+    } else {
+      if (pullRequestVerificationFailed) throw new NativeStatusRaceError();
+      if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
+        throw new Error("native_model_rejection_owner_required");
+      }
+      if ((reasonCode.startsWith("native_provider_overloaded") || reasonCode === "native_run_failed_continuation_exhausted"
+          || reasonCode === NATIVE_TOOL_RECEIPT_LIMIT_CODE || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_CODE
+          || reasonCode === NATIVE_ENVIRONMENT_BLOCKER_EXHAUSTED_CODE || reasonCode === NATIVE_AGENT_BLOCKER_CONTINUATION_CODE
+          || reasonCode === NATIVE_AGENT_BLOCKER_HANDOFF_CODE) && !input.requireProviderFailureOwner) {
+        throw new Error("native_provider_failure_owner_required");
+      }
+    }
     if (input.requireReassessmentSource) {
       const expected = input.requireReassessmentSource;
       const now = Date.now();
@@ -1803,7 +1839,7 @@ export async function commitNativeStatusDecision(input: {
           (issue.executionRunId !== null && issue.executionRunId !== input.runId))) {
         throw new NativeStatusRaceError();
       }
-      if (expected.retiredAutomaticReview) {
+      if (caseHandoffAuthority !== false && expected.retiredAutomaticReview) {
         try {
           const [barrier] = await tx.select({ status: workspaceOperations.status }).from(workspaceOperations)
             .where(and(eq(workspaceOperations.companyId, input.companyId),
