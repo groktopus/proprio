@@ -34,7 +34,8 @@ export const DEFAULT_OPENCODE_RUNNER_MODEL =
   "openrouter/deepseek/deepseek-v4-flash-0731" as const;
 export const CLAUDE_MANAGED_BETA_VERSION = "managed-agents-2026-04-01" as const;
 
-export function resolveConfiguredClaudeEffort(config: { modelReasoningEffort?: unknown; reasoningEffort?: unknown; effort?: unknown }) {
+export function resolveConfiguredClaudeEffort(config: { modelReasoningEffort?: unknown; reasoningEffort?: unknown; effort?: unknown }):
+  "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   return resolveClaudeEffort("claude", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort);
 }
 
