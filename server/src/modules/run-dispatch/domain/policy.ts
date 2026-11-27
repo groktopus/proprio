@@ -16,7 +16,7 @@ export type RetryReasonKind =
 export type BudgetBlockFacts = {
   reason: string;
   scopeType: string;
-  scopeId: string;
+  scopeId?: string;
 };
 
 export type PauseHoldFacts = {
@@ -62,6 +62,7 @@ export type ScheduledRetryGateErrorCode =
   | "issue_review_participant_changed"
   | "issue_paused"
   | "issue_dependencies_blocked"
+  | "issue_dependency_diagnosis_superseded"
   | "issue_disposition_repair_superseded"
   | "issue_waiting_for_response";
 
@@ -106,12 +107,14 @@ export type ScheduledRetryFacts = {
   /** A conversation retry must wait for unresolved questions and approvals. */
   pendingResponse?: "interaction" | "approval" | null;
   continuesNoWorkRunOnBlockedTask?: boolean;
+  dependencyDiagnosisSuperseded?: boolean;
 };
 
 export type QueuedRunStalenessErrorCode =
   | "issue_waiting_for_response"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
+  | "issue_dependency_diagnosis_superseded"
   | "issue_not_found"
   | "issue_assignee_changed"
   | "issue_terminal_status"
@@ -136,6 +139,7 @@ export type StalenessDecision =
 export type QueuedRunFacts = {
   pendingResponse?: "interaction" | "approval" | null;
   continuesNoWorkRunOnBlockedTask?: boolean;
+  dependencyDiagnosisSuperseded?: boolean;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
   runId: string;
@@ -284,7 +288,7 @@ export function decideScheduledRetryGate(
       issueId: facts.issueId,
       details: {
         scopeType: facts.budgetBlock.scopeType,
-        scopeId: facts.budgetBlock.scopeId,
+        ...(facts.budgetBlock.scopeId ? { scopeId: facts.budgetBlock.scopeId } : {}),
       },
     };
   }
@@ -476,6 +480,16 @@ export function decideScheduledRetryGate(
     };
   }
 
+  if (facts.dependencyDiagnosisSuperseded) {
+    return {
+      allowed: false,
+      reason: "Scheduled diagnosis suppressed because the dependency or assignee changed",
+      errorCode: "issue_dependency_diagnosis_superseded",
+      issueId: facts.issueId,
+      details: { issueId: facts.issueId },
+    };
+  }
+
   if (facts.dependenciesBlocked) {
     return {
       allowed: false,
@@ -625,6 +639,15 @@ export function decideQueuedRunStaleness(
         previousAssigneeAgentId: facts.runAgentId,
         currentAssigneeAgentId: facts.issueAssigneeAgentId,
       },
+    };
+  }
+
+  if (facts.dependencyDiagnosisSuperseded) {
+    return {
+      stale: true,
+      errorCode: "issue_dependency_diagnosis_superseded",
+      reason: "Cancelled because the diagnosis dependency or assignee changed before dispatch",
+      details: { issueId: facts.issueId },
     };
   }
 

@@ -3322,7 +3322,10 @@ describe("remote provider pack manifest", () => {
         await writeFile(join(transport.stateDirectory!, "control-plane", "control-plane-state.json"), JSON.stringify(durableControlPlaneState(identity)));
         const next = structuredClone(manifest);
         next.payload.runnerSourceRevision = "b".repeat(40);
+        next.payload.contractDigest = "sha256:" + createHash("sha256").update("changed handoff tool schema").digest("hex");
         next.digest = "sha256:" + createHash("sha256").update(canonical(next.payload)).digest("hex");
+        expect(next.payload.contractDigest).not.toBe(admitted.payload.contractDigest);
+        expect(next.digest).not.toBe(admitted.digest);
         await writeFile(state.bundledPackManifestPath!, JSON.stringify(next));
         await writeFile(state.bundledRunnerBinary!, Buffer.concat([daemon, Buffer.from("new release")]));
         let recoveredRunnerStopped = false;
@@ -3415,6 +3418,7 @@ describe("remote provider pack manifest", () => {
         state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
         const recovered = state.createTransport.mock.calls.at(-1)![0];
         expect(recovered).toMatchObject({ providerPackAuthorityDigest: admitted.digest, runnerArtifact: artifact, adoptExistingRunner: { pid: 123 } });
+        expect(recovered).not.toMatchObject({ providerPackAuthorityDigest: next.digest });
         if (provider === "opencode") {
           const nativeIdentity = { ...remoteExecution.binding, sessionId: remoteExecution.session.normalizedSessionId! };
           const restored = { identity: () => nativeIdentity } as never;

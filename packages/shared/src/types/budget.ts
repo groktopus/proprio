@@ -7,6 +7,8 @@ import type {
   BudgetWindowKind,
   PauseReason,
 } from "../constants.js";
+import type { z } from "zod";
+import type { upsertBudgetPolicySchema } from "../validators/budget.js";
 
 export interface BudgetPolicy {
   id: string;
@@ -87,19 +89,7 @@ export interface BudgetOverview {
   pendingApprovalCount: number;
 }
 
-export interface BudgetPolicyUpsertInput {
-  scopeType: BudgetScopeType;
-  scopeId: string;
-  metric?: BudgetMetric;
-  windowKind?: BudgetWindowKind;
-  amount?: number;
-  reservationCents?: string | number;
-  warnPercent?: number;
-  hardStopEnabled?: boolean;
-  unpricedUsagePolicy?: "block" | "allow";
-  notifyEnabled?: boolean;
-  isActive?: boolean;
-}
+export type BudgetPolicyUpsertInput = z.input<typeof upsertBudgetPolicySchema>;
 
 export interface BudgetIncidentResolutionInput {
   action: BudgetIncidentResolutionAction;

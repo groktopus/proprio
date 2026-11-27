@@ -8,7 +8,6 @@ CREATE TABLE "managed_audit_exports" (
 	"event_ids" uuid[] NOT NULL,
 	"watermark" text NOT NULL,
 	"cursor_secret" uuid DEFAULT gen_random_uuid() NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint

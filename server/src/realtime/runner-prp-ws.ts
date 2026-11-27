@@ -1,3 +1,4 @@
+import { isStrictUuid } from "../uuid.js";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 
@@ -15,8 +16,6 @@ import { logger } from "../middleware/logger.js";
 import { registerLocalRuntimeApiServer, resolveLocalRuntimeApiUrl, runtimeApiInternals } from "../runtime-api.js";
 
 const CONNECT_PATH_PREFIX = "/api/runner/v1/connect/";
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface RegisteredAuthority {
   readonly companyId: string;
@@ -87,7 +86,7 @@ export function setupRunnerPrpWebSocketServer(server: Server): void {
       });
 
       const runId = url.pathname.slice(CONNECT_PATH_PREFIX.length);
-      if (!UUID_PATTERN.test(runId)) {
+      if (!isStrictUuid(runId)) {
         rejectUpgrade(socket, "400 Bad Request");
         return;
       }
@@ -111,7 +110,7 @@ export async function registerRunnerPrpAuthority(input: {
   const apiUrl = new URL(resolveLocalRuntimeApiUrl());
   apiUrl.protocol = "ws:";
   const loopbackOrigin = apiUrl.origin;
-  if (!UUID_PATTERN.test(input.runId) || input.companyId.length === 0) {
+  if (!isStrictUuid(input.runId) || input.companyId.length === 0) {
     throw new Error("runner_prp_authority_binding_invalid");
   }
   if (registrations.has(input.runId)) {
