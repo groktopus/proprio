@@ -388,8 +388,16 @@ on the setup screen. This browser claim is disabled for `authenticated/public`;
 public deployments should run the high-entropy CLI invite fallback instead:
 
 ```sh
-pnpm proprio auth bootstrap-ceo
+docker compose --env-file docker/.env -f docker/docker-compose.yml exec server \
+  pnpm proprio auth bootstrap-ceo
 ```
+
+Run this command from the repository root after the full stack is healthy. The
+CLI reads the deployment mode, database URL and public URL from the running
+container environment, so a fresh Compose volume does not need a CLI config
+file or a separate onboarding run. The CLI refuses configless bootstrap when
+`PROPRIO_DEPLOYMENT_MODE` or the database URL is missing, and it keeps saved
+config mode conflict checks when a config exists.
 
 Granular overrides remain available if needed (`PROPRIO_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `PROPRIO_ALLOWED_HOSTNAMES`).
 
