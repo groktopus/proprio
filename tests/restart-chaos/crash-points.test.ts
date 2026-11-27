@@ -28,6 +28,13 @@ describe("selectPoints", () => {
     expect(selectPoints(registry, { points: [], kinds: ["sandbox_creation_intent"], env: "local" })).toEqual([]);
   });
 
+  it("includes fixture-specific crash points when explicitly selected", () => {
+    const key = "issue.dependency_diagnosis.after_claim_before_wake";
+    const fixtures = { ...registry, [key]: { ...definition([]), defaultSuite: false as const } };
+    expect(selectPoints(fixtures, { points: [], kinds: [], env: "local" })).not.toContain(key);
+    expect(selectPoints(fixtures, { points: ["issue.dependency_diagnosis.*"], kinds: [], env: "local" })).toEqual([key]);
+  });
+
   it("matches globs literally apart from * and ?", () => {
     expect(globToRegExp("runner.*").test("runnerXstartup")).toBe(false);
     expect(globToRegExp("*.after_?pawn").test("runner.startup.after_spawn")).toBe(true);

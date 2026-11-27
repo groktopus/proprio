@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, companies, companyMemberships, createDb, environments, projectAccessMembers, projects } from "@groktopus/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -10,6 +10,14 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { projectRoutes } from "../routes/projects.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+
+const syncEnv = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../services/secrets.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../services/secrets.js")>();
+  return { ...actual, secretService: (...args: Parameters<typeof actual.secretService>) =>
+    ({ ...actual.secretService(...args), syncEnvBindingsForTarget: syncEnv }) };
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -138,6 +146,7 @@ describeEmbeddedPostgres("private project route visibility", { concurrent: false
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(companyMemberships);
     await db.delete(projects);
     await db.delete(companies);
@@ -194,5 +203,29 @@ describeEmbeddedPostgres("private project route visibility", { concurrent: false
     const memberList = await request(memberApp).get(`/api/companies/${companyId}/projects`);
     expect(memberList.body.map((project: { id: string }) => project.id)).toContain(privateProjectId);
     await request(memberApp).get(`/api/projects/${privateProjectId}`).expect(200);
+  });
+
+  it("publishes a committed privacy change even if later environment synchronization fails", async () => {
+    const companyId = randomUUID(), projectId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Project visibility", issuePrefix: "VISIBILITY",
+    });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Visibility transition" });
+    const events: Array<Record<string, unknown>> = [];
+    const unsubscribe = subscribeCompanyLiveEvents(companyId, event => events.push(event.payload));
+    syncEnv.mockRejectedValueOnce(new Error("environment sync failed"));
+    try {
+      await request(createApp(db, boardActor(companyId))).patch(`/api/projects/${projectId}`)
+        .send({ visibility: "private", env: {} }).expect(500);
+      const [stored] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
+        eq(activityLog.entityId, projectId), eq(activityLog.action, "project.updated")));
+      expect(stored?.details).toMatchObject({ becamePrivate: true });
+      expect(events).toContainEqual(expect.objectContaining({ entityId: projectId, action: "project.updated",
+        details: expect.objectContaining({ becamePrivate: true }) }));
+      const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+      expect(project?.visibility).toBe("private");
+    } finally {
+      unsubscribe();
+    }
   });
 });

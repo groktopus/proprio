@@ -2812,6 +2812,7 @@ export async function buildProprioWakePayload(input: {
     simplifiedEnglishInteractions: input.simplifiedEnglishInteractions === true,
     dependencyBlockedInteraction:
       input.contextSnapshot.dependencyBlockedInteraction === true,
+    dependencyDiagnosis: input.contextSnapshot.dependencyDiagnosis === true,
     treeHoldInteraction: input.contextSnapshot.treeHoldInteraction === true,
     activeTreeHold: parseObject(input.contextSnapshot.activeTreeHold),
     unresolvedBlockerIssueIds: Array.isArray(
