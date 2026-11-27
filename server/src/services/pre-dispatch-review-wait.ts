@@ -17,6 +17,7 @@ const staleDispatchReconciliationExemptions = {
   issue_waiting_for_response: true,
   issue_continuation_waiting_on_review: true,
   issue_dependencies_blocked: true,
+  issue_dependency_diagnosis_superseded: true,
   issue_blocked: true,
   issue_execution_lock_changed: true,
   issue_terminal_status: true,

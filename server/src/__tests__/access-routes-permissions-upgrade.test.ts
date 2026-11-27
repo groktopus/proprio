@@ -115,6 +115,15 @@ describeEmbeddedPostgres("access routes permissions upgrade compatibility", () =
     await tempDb?.cleanup();
   });
 
+  it("rejects malformed archive preview IDs and distinguishes a missing member", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const app = await createApp(db, company.id, owner.principalId);
+
+    await request(app).get(`/api/companies/${company.id}/members/invalid/archive-preview`).expect(400);
+    await request(app).get(`/api/companies/invalid/members/${owner.id}/archive-preview`).expect(400);
+    await request(app).get(`/api/companies/${company.id}/members/${randomUUID()}/archive-preview`).expect(404);
+  });
+
   it("rejects owner self-lockout through the member route after the permissions upgrade", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
 

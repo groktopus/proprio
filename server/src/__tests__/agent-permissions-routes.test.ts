@@ -924,6 +924,18 @@ describe("agent permission routes", () => {
     expect(res.status).toBe(403);
   });
 
+  it.each(["wakeup", "heartbeat/invoke"])("reserves diagnosis receipt keys at the %s ingress", async (route) => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({
+      type: "board", userId: "operator", source: "session", isInstanceAdmin: true, companyIds: [companyId],
+    });
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/${route}`)
+      .send({ idempotencyKey: "issue_blocker_stalled:diagnosis:reserved" }));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("dependency investigation endpoint");
+  });
+
   it("blocks agent-authenticated self-updates that set host-executed workspace commands", async () => {
     const app = await createApp({
       type: "agent",
