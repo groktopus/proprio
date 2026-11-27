@@ -1,5 +1,7 @@
+import type { Db } from "@groktopus/db";
+import { requestedRunCancellation } from "./run-cancellation.js";
 import { expect, it } from "vitest";
-import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "./acknowledged-native-stop.js";
+import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop, isAcknowledgedOperatorRunStop } from "./acknowledged-native-stop.js";
 const run = { id: "run", companyId: "company", nativeIssueId: "issue", status: "cancelled", resultJson: {
   cancelledByActorType: "user", cancelledByUserId: "board", nativeCancellation: {
     schema: "proprio.native-cancellation.v1", runId: "run", companyId: "company", issueId: "issue",
@@ -27,4 +29,21 @@ it.each([{ runId: "other" }, { companyId: "other" }, { issueId: "other" }, { dis
   { scope: "subtree" }, { acknowledgementAuditId: undefined }])("requires an audited handoff receipt %j", change => {
   expect(isAcknowledgedNativeReassignmentStop({ ...run, resultJson: { reassignmentStopRequested: true,
     nativeCancellation: { ...run.resultJson.nativeCancellation, ...change } } })).toBe(false);
+});
+
+it("requires a finished direct operator Stop and distinguishes interruption from acknowledgment", async () => {
+  const db = {} as Db;
+  const finishedAt = new Date();
+  const cancellation = requestedRunCancellation(run.resultJson, "Cancelled by a board operator");
+  const local = { ...run, agentId: "agent", runtimeMode: "legacy" as const, finishedAt, processPid: null,
+    processGroupId: null, driverKind: null, runnerProfileJson: null, nativeSessionId: null, runnerInstanceId: null,
+    resultJson: { ...run.resultJson, nativeCancellation: undefined, cancellation,
+      executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() } } };
+  await expect(isAcknowledgedOperatorRunStop(db, local)).resolves.toBe(true);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, finishedAt: null })).resolves.toBe(false);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, resultJson: { ...local.resultJson,
+    cancellation: { ...cancellation, reason: "Cancelled by a board operator's subtree pause" } } })).resolves.toBe(false);
+  await expect(isAcknowledgedOperatorRunStop(db, { ...local, runtimeMode: "native", resultJson: { ...local.resultJson,
+    nativeCancellation: run.resultJson.nativeCancellation,
+    executionCancellation: { state: "requested" } } })).resolves.toBe(false);
 });

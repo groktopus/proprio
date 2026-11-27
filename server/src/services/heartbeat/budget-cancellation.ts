@@ -55,7 +55,7 @@ export function pendingBudgetCancellationScopesQuery(db: Db, limit = 100) {
 export async function listPendingBudgetCancellationScopes(db: Db, limit = 100): Promise<BudgetEnforcementScope[]> {
   const rows = await pendingBudgetCancellationScopesQuery(db, limit);
   return rows.flatMap(({ companyId, intent }) => {
-    if (intent.companyId !== companyId || !["company", "agent", "project"].includes(String(intent.scopeType))
+    if (intent.companyId !== companyId || !["company", "agent", "project", "task_tree"].includes(String(intent.scopeType))
       || typeof intent.scopeId !== "string" || !isUuidLike(intent.scopeId)
       || typeof intent.policyId !== "string" || !isUuidLike(intent.policyId)
       || !Number.isSafeInteger(intent.version) || Number(intent.version) < 0) return [];

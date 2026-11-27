@@ -158,6 +158,13 @@ require an explicit paid selection and a recorded live result.
 
 The deployment-targeted [saved skill journey](../tests/runner-e2e/product-journeys/saved-skill-use.md) checks one company skill assigned by key, its exact admitted immutable version, a bound native source read/load, and a run-authored saved result from skill-only inputs. It uses the reusable Product journey target and remains unqualified until a real target run passes.
 
+The credential-free [mixed-runner Case handoff](../tests/e2e/execution-recovery/mixed-case-handoff.spec.ts)
+uses the dedicated execution-recovery browser config. It runs one legacy lead,
+one native Runner with a scripted Codex transport, and one legacy verifier
+against a disposable source-mode Board and database. The
+[mixed-runner CI lane](../.github/workflows/mixed-case-handoff.yml) builds runnerd
+and retains the graded immutable revision and release evidence.
+
 The explicit-only [case handoff workflow](../tests/runner-e2e/SUITES.md#persistent-case-handoffs-explicit-only)
 contains arithmetic and receipt smoke cells for a same-task round trip among three native agents using real case/task
 APIs, saved documents, handoff receipts, and browser readback. Receipt smoke has
@@ -325,6 +332,13 @@ extra-work turns fail. Source/read coverage and workflow outcome are
 separate: missing read provenance leaves the candidate/baseline pair
 uncomparable even if work succeeds. Baseline bundles and coder examples derive
 from their own source revision, without requiring candidate wording or length.
+
+The explicit-only [context compaction suite](../tests/runner-e2e/SUITES.md#suites-in-the-catalog)
+compares two native Codex tasks with the same revised requirements and pending
+prerequisite. It checks the manual compaction event against the continuing
+session and grades both saved artifacts against their active requirements.
+It provides separate API-key and isolated subscription-login cells with the
+same fixture and grading rules.
 
 The explicit-only `context-integrity` Product E2E suite covers ordered public
 comment continuation and explicit invocation of an assigned pinned skill across

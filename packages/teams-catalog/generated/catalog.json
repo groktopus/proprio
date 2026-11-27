@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@groktopus/teams-catalog",
   "packageVersion": "0.1.0",
-  "generatedAt": "2026-11-09T20:56:53.242Z",
+  "generatedAt": "2026-11-24T20:38:30.846Z",
   "teams": [
     {
       "id": "proprio:bundled:company-defaults:core-exec-team",
@@ -96,14 +96,14 @@
         {
           "path": "TEAM.md",
           "kind": "team",
-          "sizeBytes": 2014,
-          "sha256": "e0c38e9af1a5dd1888fb81a72feba75a9ab1be4c78d8ceb658e2e5cd621c5096"
+          "sizeBytes": 1986,
+          "sha256": "065089e1b1846a1e81e4b4f1fc8a92745cfd3348276e1c030cce8b59065b0947"
         },
         {
           "path": "agents/ceo/AGENTS.md",
           "kind": "agent",
-          "sizeBytes": 263,
-          "sha256": "75848c6f794646a93e23bc73b80d31ef0eb8b83c105423eb98ea29e7685d2fd0"
+          "sizeBytes": 261,
+          "sha256": "d9a3f9c375ebb4164624aa91685c10d6d5a13be66db3f32d9fd0911bd3c4c80a"
         },
         {
           "path": "agents/cto/AGENTS.md",
@@ -132,7 +132,7 @@
       ],
       "trustLevel": "markdown_only",
       "compatibility": "compatible",
-      "contentHash": "sha256:9d0416ebc0a81585dc51b73efb25decba9e1e3f3741940fc9fca74f3238f344d"
+      "contentHash": "sha256:454651341cdf0cc961102fa770a105fd817d88818293c036c1fbaa38a3aa1fdb"
     },
     {
       "id": "proprio:bundled:product:product-design",
@@ -212,8 +212,8 @@
         {
           "path": "TEAM.md",
           "kind": "team",
-          "sizeBytes": 2024,
-          "sha256": "358e1039e2ced32e8b40ecdb91e8be922451eac1283a81546030fdae1f0ac22c"
+          "sizeBytes": 2004,
+          "sha256": "7e947780eafb71fecd8489a839e2ef1cbc7cd5f2b4b4b255a577d22250025d6a"
         },
         {
           "path": "agents/ux-designer/AGENTS.md",
@@ -236,7 +236,7 @@
       ],
       "trustLevel": "markdown_only",
       "compatibility": "compatible",
-      "contentHash": "sha256:ce0c76ace4fe19fca6a1b3b59e63ea6717366e90d1c437f3a7215d5c1da1bcf1"
+      "contentHash": "sha256:cb206564f404fcf550f846447a60792a46d463e7663d18fbaeda9f40ae9b47f4"
     },
     {
       "id": "proprio:bundled:software-development:product-engineering",
@@ -331,14 +331,14 @@
         {
           "path": "TEAM.md",
           "kind": "team",
-          "sizeBytes": 2570,
-          "sha256": "36da9b22db9087340a5cf30c5bdf5072ea68bf14fd4d2a2ddd0486b4725f78fe"
+          "sizeBytes": 2546,
+          "sha256": "4e86a75151cc31529a111a473c028e7885ce039d0421791d56dc1d365fa0ab17"
         },
         {
           "path": ".proprio.yaml",
           "kind": "extension",
-          "sizeBytes": 81,
-          "sha256": "54babf05ba130ec54a143abf01581d99c0ac2936fd0d929bf0e0edd00e29d861"
+          "sizeBytes": 79,
+          "sha256": "3fdcae84ca5d8b5fd8c3bcb26105398fb55b92b0daa3c63a1b50eb509c11b16f"
         },
         {
           "path": "agents/cto/AGENTS.md",
@@ -373,7 +373,7 @@
       ],
       "trustLevel": "assets",
       "compatibility": "compatible",
-      "contentHash": "sha256:78aeac52e7052b74dd8a3770a0f3c8f3c19bf6e5201cf87e56428ad51d59af66"
+      "contentHash": "sha256:c8daf5a05c46f21d8bfed0cb4c8f129d183229f6add361a2be731f769cc64514"
     },
     {
       "id": "proprio:optional:communications:speko-company-phone-agent",
@@ -421,14 +421,14 @@
         {
           "path": "TEAM.md",
           "kind": "team",
-          "sizeBytes": 1097,
-          "sha256": "04c89ffaf7d8d778b1e18bae7cbea3c5740c359a61c42a139759eaad443b7f76"
+          "sizeBytes": 1089,
+          "sha256": "0531a0202bb0e3e430529d6d18f64c165c595d158015c3aa5b6618d893fd1226"
         },
         {
           "path": "agents/speko-company-phone-agent/AGENTS.md",
           "kind": "agent",
-          "sizeBytes": 3202,
-          "sha256": "76953ef1ab541a219d9835bd0a3461845e92a1861e90675a167734854f2647f2"
+          "sizeBytes": 3194,
+          "sha256": "bd83651788cbfe7f5ec9d97398a24a6fbd5787d855f003b882fe9cd9be9578f5"
         },
         {
           "path": "LICENSE",
@@ -439,13 +439,13 @@
         {
           "path": "README.md",
           "kind": "readme",
-          "sizeBytes": 1417,
-          "sha256": "445c4b7ec5a201b73123aba1ce5dbb5a52352ed488364eed62a041c30656c7d7"
+          "sizeBytes": 1405,
+          "sha256": "ee5e25810642d44a503b5abe9ba177353f6c43fefee21516a3e3bdb912a69276"
         }
       ],
       "trustLevel": "assets",
       "compatibility": "compatible",
-      "contentHash": "sha256:4a38efe38a407db87a6872880aa9c575f39b34dbb8c0c65dbac0d28aec69116c"
+      "contentHash": "sha256:976bd0f3534cfb98a0150c45d87ac47f30f4340c675396e9579a11870ada6676"
     },
     {
       "id": "proprio:optional:content:content-machine",
@@ -503,8 +503,8 @@
         {
           "path": "TEAM.md",
           "kind": "team",
-          "sizeBytes": 1032,
-          "sha256": "f7c272c8b0c183fc840d49eb4851b7cdd1a30a5aa8d6415d215110f3238f6f13"
+          "sizeBytes": 1028,
+          "sha256": "1ddfdc3399671d4b33672368729a134e74e10faadf91f518fd4a81fca22300ec"
         },
         {
           "path": "agents/content-lead/AGENTS.md",
@@ -533,7 +533,7 @@
       ],
       "trustLevel": "markdown_only",
       "compatibility": "compatible",
-      "contentHash": "sha256:06822cec5f2b6910cb37ba0ebd5e04ed5c7e34f77225564ddddc2470779cdaa6"
+      "contentHash": "sha256:0f3accddac12fd98155e8e6df5e69536bc4d96ecfae673e7e6f4baec86fef9cb"
     }
   ]
 }
