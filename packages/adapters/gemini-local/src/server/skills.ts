@@ -20,14 +20,23 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-export function resolveGeminiSkillsHome(config: Record<string, unknown>) {
+export function resolveGeminiSkillsHome(
+  config: Record<string, unknown>,
+  cwd = asString(config.cwd) ?? process.cwd(),
+) {
   const env =
     typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
       ? (config.env as Record<string, unknown>)
       : {};
-  const configuredHome = asString(env.HOME);
-  const home = configuredHome ? path.resolve(configuredHome) : os.homedir();
-  return path.join(home, ".gemini", "skills");
+  // The adapter env overlays process.env for the child, so mirror that
+  // precedence when deciding where Proprio mounts managed skills. An explicit
+  // empty value clears an inherited override and falls back to HOME.
+  const configuredGeminiHome = typeof env.GEMINI_CLI_HOME === "string"
+    ? env.GEMINI_CLI_HOME
+    : process.env.GEMINI_CLI_HOME;
+  const configuredHome = typeof env.HOME === "string" ? env.HOME : process.env.HOME;
+  const geminiHome = configuredGeminiHome || configuredHome || os.homedir();
+  return path.join(path.resolve(cwd, geminiHome), ".gemini", "skills");
 }
 
 async function buildGeminiSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
@@ -41,7 +50,7 @@ async function buildGeminiSkillSnapshot(config: Record<string, unknown>): Promis
     desiredSkills,
     installed,
     skillsHome,
-    locationLabel: "~/.gemini/skills",
+    locationLabel: skillsHome,
     missingDetail: "Configured but not currently linked into the Gemini skills home.",
     externalConflictDetail: "Skill name is occupied by an external installation.",
     externalDetail: "Installed outside Proprio management.",

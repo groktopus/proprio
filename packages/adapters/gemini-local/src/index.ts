@@ -68,6 +68,6 @@ Notes:
 - Runs use --prompt for non-interactive execution, not stdin.
 - The adapter sets a headless-safe terminal/browser environment for Gemini CLI child processes so unattended runs do not wait on browser auth or 256-color terminal prompts.
 - Sessions resume with --resume when stored session cwd matches the current cwd.
-- Proprio auto-injects local skills into \`~/.gemini/skills/\` via symlinks, so the CLI can discover both credentials and skills in their natural location.
+- Proprio auto-injects local skills into \`$GEMINI_CLI_HOME/.gemini/skills/\` via symlinks when \`GEMINI_CLI_HOME\` is configured in the agent env or inherited environment. By default it uses \`$HOME/.gemini/skills/\`. Gemini keeps credentials and session state in the same configured root. Use absolute, separate \`GEMINI_CLI_HOME\` roots when isolating provider state per agent.
 - Authentication can use GEMINI_API_KEY / GOOGLE_API_KEY or local Gemini CLI login.
 `;
