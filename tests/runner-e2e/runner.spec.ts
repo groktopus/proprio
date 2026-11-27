@@ -1428,9 +1428,11 @@ for (const execution of executions) {
           evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
           observe: (currentIssue, currentRuns) => { issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[]; },
         });
-        issue = pair.issue as IssueRecord; selectedRuns = pair.runs as RunRecord[];
+        issue = pair.issue as IssueRecord;
         matcherResults = pair.checks.map(check => ({ matcher: { kind: "json_path" as const, path: `contextCompaction.${check.id}`, expected: true }, passed: check.passed, detail: check.id }));
         expect(pair.checks.filter(check => !check.passed).map(check => check.id)).toEqual([]);
+        await captureApiState("final");
+        selectedRuns = pair.runs as RunRecord[];
       } else if (execution.task.flow === "context_integrity") {
         const contextIntegrity = await runContextIntegrityFlow({
           page, api, fixtures, execution, nonce, deadlineAt: startedAtMs + deadlineMs,
