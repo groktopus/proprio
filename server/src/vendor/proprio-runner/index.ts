@@ -135,6 +135,7 @@ export type SemanticInputAdmission = import("@groktopus/proprio-runner").Semanti
 export const ProprioSemanticDispatcher = runner.ProprioSemanticDispatcher;
 export const CAPABILITY_SEMANTIC_TOOL_CATALOG =
   runner.CAPABILITY_SEMANTIC_TOOL_CATALOG;
+export const HANDOFF_CASE_ORDINARY_DESCRIPTION = runner.HANDOFF_CASE_ORDINARY_DESCRIPTION;
 export const toolInputVariantError = runner.toolInputVariantError;
 export const providerToolSchemaShapeIssues = runner.providerToolSchemaShapeIssues;
 export const CAPABILITY_CANONICAL_OPERATIONS = runner.CAPABILITY_CANONICAL_OPERATIONS;
