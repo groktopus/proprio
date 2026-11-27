@@ -311,6 +311,8 @@ describe("LiveUpdatesProvider socket run notification scope", () => {
 
   it("disconnects while hidden and reconciles active queries once on return", async () => {
     await receiveStatus({ runId: "child-run", agentId: "child-agent", status: "running" });
+    const evidenceKey = queryKeys.issues.executionReviewEvidence("private-task");
+    queryClient.setQueryData(evidenceKey, { submittedSignoff: { label: "Private proof" } });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const visibility = vi.spyOn(document, "visibilityState", "get");
     await reactAct(async () => {
@@ -325,6 +327,7 @@ describe("LiveUpdatesProvider socket run notification scope", () => {
     });
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     expect(invalidate).toHaveBeenCalledExactlyOnceWith({ type: "active", predicate: isLiveReconciledQuery }, { cancelRefetch: false });
+    expect(queryClient.getQueryData(evidenceKey)).toBeUndefined();
   });
 
   it.each(["parent-agent", "child-agent"])("shows an unrelated retryable failure without issueId for %s", async (agentId) => {

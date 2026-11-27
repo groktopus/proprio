@@ -638,6 +638,73 @@ export function providerTraceStore(db: Db, options: { objectStore?: ProviderTrac
       .where(eq(providerTraceRecords.id, row.id)).returning().then(rows => rows[0] ?? null);
   }
 
+  async function reconcileDeletion(input: { traceId: string; runId: string; companyId: string; deletedAt: Date }) {
+    let row = await getByRun(input.runId, input.companyId);
+    if (!row) return { status: "missing" as const };
+    if (row.id !== input.traceId) return { status: "mismatch" as const };
+    if (row.deletedAt && row.traceRef === EXPIRED_PROVIDER_TRACE_REF) return { status: "cleaned" as const };
+
+    if (!row.deletedAt) {
+      await db.transaction(async tx => {
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerTraceRetention);
+        await tx.update(providerTraceRecords).set({
+          status: "deleted",
+          deletedAt: input.deletedAt,
+          updatedAt: input.deletedAt,
+        }).where(and(
+          eq(providerTraceRecords.id, input.traceId),
+          eq(providerTraceRecords.runId, input.runId),
+          eq(providerTraceRecords.companyId, input.companyId),
+          isNull(providerTraceRecords.deletedAt),
+        ));
+      });
+      row = await getByRun(input.runId, input.companyId);
+      if (!row?.deletedAt) throw new Error("run_evidence_deletion_tombstone_failed");
+      if (row.id !== input.traceId) return { status: "mismatch" as const };
+    }
+
+    // Each target remains tombstoned if cleanup fails; the caller reports that
+    // trace as pending and keeps the restore isolated for a scoped retry.
+    const recordedObjectRef = providerTraceCleanupRef(row.traceRef);
+    if (recordedObjectRef) {
+      const scope = objectProviderTraceRef(recordedObjectRef);
+      if (scope?.[1] !== input.companyId || scope?.[2] !== input.runId) return { status: "mismatch" as const };
+    }
+    const filename = path.basename(tracePath(row.traceRef));
+    const migratedObjectRef = !recordedObjectRef && (external || loadStorageConfig().storageProvider === "s3")
+      ? `s3-segments-v1:${input.companyId}/${input.runId}/${filename}`
+      : null;
+    const objectRef = recordedObjectRef ?? migratedObjectRef;
+    if (objectRef) {
+      try {
+        await objectStore().remove(objectRef);
+      } catch (error) {
+        if (error instanceof Error && error.message === "object_journal_cleanup_pending") {
+          return { status: "pending" as const, reason: "cleanup_grace_period" as const };
+        }
+        return { status: "pending" as const, reason: "object_cleanup_unconfirmed" as const };
+      }
+    }
+    await removeTraceFiles(filename);
+    const [cleaned] = await db.update(providerTraceRecords).set({
+      status: "deleted",
+      traceRef: EXPIRED_PROVIDER_TRACE_REF,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(providerTraceRecords.id, row.id),
+      eq(providerTraceRecords.traceRef, row.traceRef),
+      eq(providerTraceRecords.runId, input.runId),
+      eq(providerTraceRecords.companyId, input.companyId),
+    )).returning();
+    if (!cleaned) {
+      const latest = await getByRun(input.runId, input.companyId);
+      if (latest?.id !== input.traceId || !latest.deletedAt || latest.traceRef !== EXPIRED_PROVIDER_TRACE_REF) {
+        throw new Error("run_evidence_deletion_cleanup_unconfirmed");
+      }
+    }
+    return { status: "cleaned" as const };
+  }
+
   async function nextRetentionDeadline() {
     const [row] = await db.select({ at: providerTraceRecords.expiresAt, deletedAt: providerTraceRecords.deletedAt })
       .from(providerTraceRecords).where(and(ne(providerTraceRecords.traceRef, EXPIRED_PROVIDER_TRACE_REF),
@@ -655,6 +722,7 @@ export function providerTraceStore(db: Db, options: { objectStore?: ProviderTrac
     revealFrame,
     download,
     remove,
+    reconcileDeletion,
     getByRun,
     listMetadataForRuns,
     cleanupExpired,

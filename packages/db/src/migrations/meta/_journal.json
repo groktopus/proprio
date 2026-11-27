@@ -3536,6 +3536,34 @@
       "when": 1795475139103,
       "tag": "0506_cynical_power_man",
       "breakpoints": true
+    },
+    {
+      "idx": 507,
+      "version": "7",
+      "when": 1795534058840,
+      "tag": "0507_useful_leper_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 508,
+      "version": "7",
+      "when": 1795539524948,
+      "tag": "0508_silly_jack_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 509,
+      "version": "7",
+      "when": 1795542144755,
+      "tag": "0509_grey_logan",
+      "breakpoints": true
+    },
+    {
+      "idx": 510,
+      "version": "7",
+      "when": 1795784871727,
+      "tag": "0510_nervous_mentallo",
+      "breakpoints": true
     }
   ]
 }
