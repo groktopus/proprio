@@ -21,7 +21,8 @@ describeEmbeddedPostgres("onboarding chat", () => {
     const owner = await seedCompanyWithBoardAccess(ctx.db, "New company");
     await ctx.db.insert(authUsers).values({ id: owner.userId, name: "Owner", email: `${owner.userId}@example.test`,
       createdAt: new Date(), updatedAt: new Date() });
-    const [agent] = await ctx.db.insert(agents).values({ companyId: owner.companyId, name: "Ada", role: "ceo", status: "idle", adapterType: "process" }).returning();
+    const [agent] = await ctx.db.insert(agents).values({ companyId: owner.companyId, name: "Ada", role: "ceo", status: "idle",
+      adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" } }).returning();
     const wakeup = vi.fn(async (_agentId, options) => {
       await ctx.db.insert(agentWakeupRequests).values({ companyId: owner.companyId, agentId: agent.id,
         source: options.source, reason: options.reason, status: "pending", idempotencyKey: options.idempotencyKey });
@@ -54,6 +55,9 @@ describeEmbeddedPostgres("onboarding chat", () => {
 
   it("opens one owner-bound chat with signup context, zero execution tasks, zero projects, and no early wake", async () => {
     const { companyId, userId, agent, app, path, wakeup } = await setup();
+    expect(agent.lifecycleState).toBe("ready");
+    expect(agent.lifecycleHolds).not.toContain("setup");
+    expect(agent.adapterConfig).toMatchObject({ model: "gpt-5.4" });
     await ctx.db.insert(goals).values({ companyId, title: "Launch a robotics newsletter", level: "company", status: "active" });
     await ctx.db.insert(companyOnboardingSeeds).values({ companyId, revision: "one", firstTaskTitle: "Draft an editorial plan", firstTaskDetails: "One page" });
     const [first, retry] = await Promise.all([request(app).post(path), request(app).post(path)]);
