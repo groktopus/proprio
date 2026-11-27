@@ -2,6 +2,11 @@ import { and, eq, sql } from "drizzle-orm";
 import { issues, type Db } from "@groktopus/db";
 import { MAX_AGENT_TASK_HIERARCHY_DEPTH, type IssueParentAdjustment } from "@groktopus/shared";
 
+export function lockIssuePrivacyTree(db: Pick<Db, "execute">, companyId: string, mode: "shared" | "exclusive" = "exclusive") {
+  const lock = mode === "shared" ? sql`pg_advisory_xact_lock_shared` : sql`pg_advisory_xact_lock`;
+  return db.execute(sql`select ${lock}(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+}
+
 /**
  * `flatten` (the default) applies the agent hierarchy limit: a new parent edge
  * may not make the task deeper than MAX_AGENT_TASK_HIERARCHY_DEPTH. Board users
@@ -113,6 +118,11 @@ export async function loadParentChain(
     conversationAgentId: row.conversation_agent_id,
     executionPolicy: row.execution_policy,
   }));
+}
+
+/** Ids of the starting task and each company-scoped ancestor, ordered from task to root. */
+export async function loadAncestorIssueIds(db: Pick<Db, "execute">, companyId: string, startId: string | null | undefined): Promise<string[]> {
+  return startId ? (await loadParentChain(db, companyId, startId)).map(row => row.id) : [];
 }
 
 /** Loads an ancestor chain one issue at a time through a caller-supplied, company-scoped reader. */

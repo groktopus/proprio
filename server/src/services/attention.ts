@@ -74,7 +74,7 @@ import {
 import { attentionIssueCondition, executionIssueCondition } from "./issue-visibility.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isProspectiveBlockedTransition } from "./routable-blocked.js";
-import { authorizationService, canActorReadApproval, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { approvalReadConditionForIssueRead, authorizationService, canActorReadApproval, issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { humanCreatedIssueCondition } from "./issue-participation.js";
 import { attentionAlreadyClosedError } from "./attention-already-closed.js";
 import { inboxDismissalService } from "./inbox-dismissals.js";
@@ -1772,7 +1772,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             updatedAt: approvals.updatedAt,
           })
           .from(approvals)
-          .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending"), approvalExecutionIssueCondition()))
+          .where(and(eq(approvals.companyId, companyId), eq(approvals.status, "pending"), approvalExecutionIssueCondition(),
+            approvalReadConditionForIssueRead(readCondition)))
           .orderBy(desc(approvals.updatedAt), desc(approvals.id));
 
         const readableApprovalIssues = await loadIssues(pendingApprovals.map((row) => row.linkedIssueId));
@@ -2526,9 +2527,10 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
 
       // A count reads the open incidents of the budget overview without the
       // spend of every policy, which the overview also sums.
+      const budgetRead = { actor: options.actor };
       const openBudgetIncidents = summaryOnly
-        ? await budgetService(db).openIncidents(companyId)
-        : (await budgetService(db).overview(companyId)).activeIncidents;
+        ? await budgetService(db).openIncidents(companyId, budgetRead)
+        : (await budgetService(db).overview(companyId, budgetRead)).activeIncidents;
       for (const incident of openBudgetIncidents) {
         const observedPercent = budgetObservedPercent(incident.amountObserved, incident.amountLimit);
         if (incident.thresholdType !== "hard" && observedPercent < ATTENTION_BUDGET_WARNING_PERCENT) continue;

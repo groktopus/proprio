@@ -2,6 +2,7 @@ import type { heartbeatRuns } from "@groktopus/db";
 import { sql, type SQLWrapper } from "drizzle-orm";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect, "status" | "startedAt" | "finishedAt" | "runtimeMode" | "errorCode" | "error" | "resultJson">;
+export const OPERATOR_RUN_STOP_REASON = "Cancelled by a board operator";
 const SOURCES = ["operator", "queued_message", "shutdown", "provider", "transport", "control_plane", "controller_lease", "unknown"] as const;
 export type CancellationSource = typeof SOURCES[number];
 export interface RunCancellation {

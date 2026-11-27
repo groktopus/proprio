@@ -108,6 +108,7 @@ const TaskWorkspaceFilePanel = lazy(() =>
 
 export interface TaskSidePanelProps {
   issue: Issue;
+  showExecutionReviewEvidence?: boolean;
   documentEditor?: TaskDocumentEditorOptions;
   pluginPanels?: TaskPluginPanel[];
   pluginPanelsLoading?: boolean;
@@ -275,6 +276,7 @@ function TaskSidePanelForScope({
   openBrowserId,
   onBrowserOpened,
   issue,
+  showExecutionReviewEvidence,
   documentEditor,
   accountScope,
   childIssues = [],
@@ -834,6 +836,7 @@ function TaskSidePanelForScope({
     content = (
       <IssueProperties
         issue={issue}
+        showExecutionReviewEvidence={showExecutionReviewEvidence}
         childIssues={childIssues}
         issueLinkState={issueLinkState}
         onAddSubIssue={onAddSubIssue}

@@ -8,7 +8,7 @@ import { activityLog } from "@groktopus/db";
 import { projectToolContext } from "../services/project-tool-context.js";
 import { museExternalAgents, withExternalExecutionAdmission } from "../modules/external-agents/index.js";
 import { parseNativeExecutionInput } from "../vendor/proprio-runner/index.js";
-import { persistActivity, publishActivity } from "../services/activity-log.js";
+import { persistActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
 import { z } from "zod";
 import { normalizeProjectRepositoryUrl, resolveProjectRepositorySelection } from "../services/project-repositories.js";
 import { toolAccessService } from "../services/tool-access.js";
@@ -40,6 +40,7 @@ import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { ensureProjectAccessMember } from "../services/projects.js";
+import { lockIssuePrivacyTree } from "../services/issue-hierarchy.js";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,
@@ -527,7 +528,6 @@ export function projectRoutes(db: Db) {
     if (body.visibility !== undefined) {
       if (!(await assertCanManageProjectPrivacy(req, res, existing))) return;
     }
-    if (body.visibility === "private") await addActorAsPrivateProjectPrincipal(req, existing);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
@@ -544,11 +544,31 @@ export function projectRoutes(db: Db) {
     }
     const configurationWarnings = body.env !== undefined
       ? protectedEnvironmentKeyWarnings(await listProtectedEnvironmentKeyHolders(db), body.env, "env") : [];
-    const project = await svc.update(id, body);
+    const actor = getActorInfo(req);
+    const publications: ActivityPublication[] = [];
+    const project = await svc.update(id, body, async (tx, updated, becamePrivate) => {
+      if (body.visibility === "private") await addActorAsPrivateProjectPrincipal(req, updated, tx);
+      await logActivity(tx, {
+        companyId: updated.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "project.updated",
+        entityType: "project",
+        entityId: updated.id,
+        details: {
+          changedKeys: Object.keys(req.body).sort(),
+          becamePrivate,
+          envKeys: body.env && typeof body.env === "object" && !Array.isArray(body.env)
+            ? Object.keys(body.env as Record<string, unknown>).sort() : undefined,
+        },
+      }, publications);
+    });
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    for (const publication of publications) publishActivity(publication);
     if (body.env !== undefined) {
       await secretsSvc.syncEnvBindingsForTarget?.(
         project.companyId,
@@ -556,24 +576,6 @@ export function projectRoutes(db: Db) {
         project.env,
       );
     }
-
-    const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: project.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      action: "project.updated",
-      entityType: "project",
-      entityId: project.id,
-      details: {
-        changedKeys: Object.keys(req.body).sort(),
-        envKeys:
-          body.env && typeof body.env === "object" && !Array.isArray(body.env)
-            ? Object.keys(body.env as Record<string, unknown>).sort()
-            : undefined,
-      },
-    });
 
     res.json({ ...project, ...(configurationWarnings.length ? { configurationWarnings } : {}) });
   });
@@ -653,7 +655,15 @@ export function projectRoutes(db: Db) {
       res.status(422).json({ error: "The project privacy owner cannot be removed" });
       return;
     }
-    await db.delete(projectAccessMembers).where(eq(projectAccessMembers.id, member.id));
+    const [removed] = await db.transaction(async tx => {
+      await lockIssuePrivacyTree(tx, project.companyId);
+      return tx.delete(projectAccessMembers).where(and(eq(projectAccessMembers.id, member.id),
+        eq(projectAccessMembers.companyId, project.companyId), eq(projectAccessMembers.projectId, project.id))).returning();
+    });
+    if (!removed) {
+      res.status(404).json({ error: "Project access member not found" });
+      return;
+    }
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: project.companyId,
