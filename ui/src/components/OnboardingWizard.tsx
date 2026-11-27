@@ -165,17 +165,16 @@ function restoreOnboardingAdapterType(savedAdapterType: unknown, provider?: unkn
     : "claude_local";
 }
 
-/**
- * True when an adapter-test result blocks a hire. A `fail` status always
- * blocks. A `warn` or a `pass` status blocks too when a check reports
- * `ADAPTER_AUTH_MISSING_CHECK_CODE`. That check means the agent has no
- * working authentication, so it cannot run. A `warn` with no such check
- * still lets the hire proceed. The wizard widened the gate for missing
- * authentication only, not for every other warning.
- */
+/** True only when the selected setup produced a real, successful hello inference. */
+function hasSuccessfulInference(result: AdapterEnvironmentTestResult): boolean {
+  return result.status === "pass" && result.checks.some((check) =>
+    check.level === "info" && /^[a-z0-9]+_hello_probe_passed$/.test(check.code));
+}
+
+/** True when an adapter-test result is not sufficient to hire the first agent. */
 function blocksAgentCreate(result: AdapterEnvironmentTestResult): boolean {
-  if (result.status === "fail") return true;
-  return result.checks.some((check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE);
+  return !hasSuccessfulInference(result)
+    || result.checks.some((check) => check.code === ADAPTER_AUTH_MISSING_CHECK_CODE);
 }
 
 /** True when `value` is a plain object, so callers can spread it as env config. */
@@ -2481,9 +2480,9 @@ function OnboardingWizardInner({
           (await runAdapterEnvironmentTest(hireAdapterConfig, shouldApplyStoredClaudeLogin, isCurrent,
             (config, adapters, environmentId) => { hireAdapterConfig = config; qualifiedDiscovery = { adapters, environmentId }; }, existingAgent));
         if (!result || !isCurrent()) return;
-        // Block the hire on a failed environment test. Also block it on a
-        // pass or a warn result that reports missing authentication — the
-        // agent cannot run without one of those.
+        // A successful status alone can mean the CLI or credentials were
+        // detected without ever making an inference request. Require the
+        // adapter's positive hello-probe check for this exact tested config.
         if (blocksAgentCreate(result)) {
           const nativeCodexError = adapterType === "codex_local" && result.adapterType === "proprio_runner"
             ? result.checks.find(check => check.level === "error")?.message : undefined;
@@ -2492,7 +2491,7 @@ function OnboardingWizardInner({
               ? cloudInstance
                 ? "Proprio couldn't finish connecting this agent. Try connecting again."
                 : "The environment test failed. Fix the reported checks before you hire this agent."
-              : "No working authentication was found. Fix the reported checks before you hire this agent."),
+              : "Proprio couldn't verify that this setup can run the selected model. Sign in or add an API key, then retry the connection test."),
           );
           return;
         }
