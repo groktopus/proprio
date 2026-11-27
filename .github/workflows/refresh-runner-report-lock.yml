@@ -1,6 +1,7 @@
 name: Refresh Runner reporting lock proof
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths: [pnpm-lock.yaml]

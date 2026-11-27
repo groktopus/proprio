@@ -11,12 +11,13 @@ const step = (name) => {
   return body;
 };
 
-test('report proof workflow is main-only, scheduled/push-driven, and accepts no trust inputs', () => {
+test('report proof workflow is main-only and accepts no trust inputs', () => {
+  assert.match(workflow, /^  workflow_dispatch:\r?\n  push:/m);
   assert.match(workflow, /branches: \[main\]/);
-  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow, /if: github\.repository == 'groktopus\/proprio' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /environment: lockfile-refresh/);
   assert.match(workflow, /DEFAULT_BRANCH: main/);
-  assert.doesNotMatch(workflow, /workflow_dispatch|\$\{\{\s*inputs\.|--trusted-lock-sha256\s+\$\{\{/);
+  assert.doesNotMatch(workflow, /\$\{\{\s*inputs\.|--trusted-lock-sha256\s+\$\{\{/);
   const validate = step('Validate default-branch and App identity configuration');
   assert.match(validate, /\[\[ -n "\$LOCKFILE_REFRESH_APP_CLIENT_ID" \]\]/);
   assert.match(validate, /\[\[ -n "\$APP_PRIVATE_KEY" \]\]/);

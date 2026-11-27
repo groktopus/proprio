@@ -989,7 +989,15 @@ authorization and report jobs still apply only the reviewed offline correction.
 The original failed run remains failed when retained evidence gets a new presentation.
 
 The separate `Refresh Runner reporting lock proof` workflow opens the fixed
-`chore/refresh-lockfile` PR. The release agent merges it through the protected
+`chore/refresh-lockfile` PR. After configuring the App and environment, the
+release agent can run the first proof refresh on `main` without waiting for
+the daily schedule:
+
+```sh
+gh workflow run refresh-runner-report-lock.yml --ref main -R groktopus/proprio
+```
+
+The dispatch accepts no inputs. The release agent merges it through the protected
 checks, including the `proprio/lockfile-trust` status on the exact PR head and
 an up-to-date base once the repository ruleset requires that context. Until
 then, the workflow publishes the status but does not activate protection.
