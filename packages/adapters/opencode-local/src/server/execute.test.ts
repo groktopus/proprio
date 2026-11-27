@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 vi.mock("@groktopus/adapter-utils/execution-target", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -10,6 +11,7 @@ vi.mock("@groktopus/adapter-utils/execution-target", async (importOriginal) => {
 
 import { ensureRemoteOpenCodeModelConfiguredAndAvailable, execute } from "./execute.js";
 import { runAdapterExecutionTargetProcess } from "@groktopus/adapter-utils/execution-target";
+import { readProprioRuntimeSkillEntries } from "@groktopus/adapter-utils/server-utils";
 import { createPromptContextFixture } from "@groktopus/adapter-utils/test-fixtures/prompt-context";
 
 const runProcessMock = vi.mocked(runAdapterExecutionTargetProcess);
@@ -40,6 +42,7 @@ describe("OpenCode local skill injection", () => {
   beforeEach(async () => {
     configHome = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-opencode-test-config-"));
     vi.stubEnv("XDG_CONFIG_HOME", configHome);
+    vi.stubEnv("HOME", configHome);
   });
 
   afterEach(async () => {
@@ -107,27 +110,39 @@ describe("OpenCode local skill injection", () => {
     expect(prompts[1]).toContain("Connection tools:");
   });
 
-  it("injects runtime skills into the configured child HOME", async () => {
+  it("stages explicit runtime skills without writing into either shared child HOME", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-opencode-configured-home-"));
     const processHome = path.join(root, "process-home");
     const configuredHome = path.join(root, "configured-home");
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "opencode");
     const skillSource = await createSkillDir(path.join(root, "runtime-skills"), "proprio");
+    const operatorSkillSource = await createSkillDir(path.join(root, "operator-skills"), "operator-native");
     await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(path.join(configHome, "opencode"), { recursive: true });
+    await fs.writeFile(path.join(configHome, "opencode", "opencode.json"), JSON.stringify({
+      skills: { paths: [operatorSkillSource] },
+    }), "utf8");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
     await fs.chmod(commandPath, 0o755);
 
     const previousHome = process.env.HOME;
     process.env.HOME = processHome;
-    runProcessMock.mockReset();
-    runProcessMock.mockResolvedValueOnce(probeResult({
-      stdout: JSON.stringify({
-        type: "text",
-        sessionID: "session-configured-home",
-        part: { text: "done" },
-      }),
-    }));
+    let runtimeConfigHome = "";
+    runProcessMock.mockReset().mockImplementationOnce(async (...args) => {
+      runtimeConfigHome = args[4].env.XDG_CONFIG_HOME!;
+      expect(args[4].env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS).toBe("1");
+      expect(await fs.readdir(path.join(runtimeConfigHome, "opencode", "skills"))).toEqual([]);
+      expect(JSON.parse(await fs.readFile(path.join(runtimeConfigHome, "opencode", "opencode.json"), "utf8")))
+        .toMatchObject({ skills: { paths: [operatorSkillSource, skillSource] } });
+      return probeResult({
+        stdout: JSON.stringify({
+          type: "text",
+          sessionID: "session-configured-home",
+          part: { text: "done" },
+        }),
+      });
+    });
 
     try {
       const result = await execute({
@@ -158,6 +173,7 @@ describe("OpenCode local skill injection", () => {
             runtimeName: "proprio",
             source: skillSource,
           }],
+          proprioSkillSync: { desiredSkills: ["groktopus/proprio/proprio"] },
           promptTemplate: "Follow the proprio heartbeat.",
         },
         context: {},
@@ -167,12 +183,167 @@ describe("OpenCode local skill injection", () => {
 
       expect(result.exitCode).toBe(0);
       const installedSkill = path.join(configuredHome, ".claude", "skills", "proprio");
-      expect((await fs.lstat(installedSkill)).isSymbolicLink()).toBe(true);
-      expect(await fs.realpath(installedSkill)).toBe(await fs.realpath(skillSource));
+      await expect(fs.lstat(installedSkill)).rejects.toMatchObject({ code: "ENOENT" });
       await expect(fs.lstat(path.join(processHome, ".claude", "skills", "proprio"))).rejects.toThrow();
+      await expect(fs.stat(runtimeConfigHome)).rejects.toMatchObject({ code: "ENOENT" });
+
+      runProcessMock.mockReset();
+      await expect(execute({
+        runId: "run-configured-home-attach",
+        agent: { id: "agent-1", companyId: "company-1", name: "OpenCode Coder", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "openai/gpt-5",
+          env: { HOME: configuredHome, OPENCODE_ALLOW_ALL_MODELS: "1" },
+          extraArgs: ["--attach", "http://127.0.0.1:4096"],
+          proprioRuntimeSkills: [{ key: "groktopus/proprio/proprio", runtimeName: "proprio", source: skillSource }],
+        },
+        context: {},
+        onLog: async () => {},
+      })).rejects.toThrow("--attach cannot honor an explicit per-run Proprio skill inventory");
+      expect(runProcessMock).not.toHaveBeenCalled();
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates each explicit skill inventory in its run config and cleans it after success or failure", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "proprio-opencode-explicit-skills-"));
+    const sharedHome = path.join(root, "shared-home");
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "opencode");
+    const skillA = await createSkillDir(path.join(root, "sources"), "skill-a");
+    const skillB = await createSkillDir(path.join(root, "sources"), "skill-b");
+    await fs.writeFile(path.join(skillA, ".proprio-materialized-skill.json"), '{"version":1}\n', "utf8");
+    const bundledSkills = await readProprioRuntimeSkillEntries({}, path.dirname(fileURLToPath(import.meta.url)));
+    const bundledProprioSkill = bundledSkills[0];
+    expect(bundledProprioSkill).toBeDefined();
+    const sharedSkills = path.join(sharedHome, ".claude", "skills");
+    await fs.mkdir(sharedSkills, { recursive: true });
+    await fs.writeFile(path.join(sharedSkills, "operator-skill"), "keep", "utf8");
+    await fs.mkdir(path.join(workspace, ".claude", "skills"), { recursive: true });
+    await fs.writeFile(path.join(workspace, ".claude", "skills", "project-skill"), "keep", "utf8");
+    await fs.mkdir(path.join(configHome, "opencode"), { recursive: true });
+    const nativeSkills = path.join(root, "native-skills");
+    await createSkillDir(nativeSkills, "native-skill");
+    await fs.symlink(skillA, path.join(nativeSkills, "revoked-proprio-skill"), "dir");
+    await fs.symlink(bundledProprioSkill!.source, path.join(nativeSkills, "revoked-packaged-skill"), "dir");
+    await fs.chmod(nativeSkills, 0o555);
+    await fs.symlink(nativeSkills, path.join(configHome, "opencode", "skills"), "dir");
+    await fs.writeFile(path.join(configHome, "opencode", "opencode.json"), JSON.stringify({ model: "native/operator-model" }));
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(commandPath, 0o755);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = sharedHome;
+    const runtimeHomes: string[] = [];
+    const realConfigHome = path.join(root, "real-config");
+    const realSkillsHome = path.join(realConfigHome, "opencode", "skills");
+    try {
+      for (const [runId, skills] of [
+        ["run-a", [{ key: "custom/a", runtimeName: "skill-a", source: skillA }]],
+        ["run-b", [{ key: "custom/b", runtimeName: "skill-b", source: skillB }]],
+        ["run-empty", []],
+      ] as const) {
+        runProcessMock.mockReset().mockImplementationOnce(async (...args) => {
+          const runtimeEnv = args[4].env;
+          expect(runtimeEnv.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS).toBe("1");
+          expect(runtimeEnv.HOME).toBe(sharedHome);
+          expect(runtimeEnv.PROPRIO_API_KEY).toBe("inventory-test-token");
+          const runtimeHome = runtimeEnv.XDG_CONFIG_HOME!;
+          runtimeHomes.push(runtimeHome);
+          expect(JSON.parse(await fs.readFile(path.join(runtimeHome, "opencode", "opencode.json"), "utf8")))
+            .toMatchObject({ model: "native/operator-model" });
+          const staged = path.join(runtimeHome, "opencode", "skills");
+          const names = await fs.readdir(staged);
+          expect(names.sort()).toEqual(["native-skill"]);
+          expect((await fs.lstat(staged)).isSymbolicLink()).toBe(false);
+          expect((await fs.stat(staged)).mode & 0o777).toBe(0o700);
+          const stagedConfig = JSON.parse(await fs.readFile(path.join(runtimeHome, "opencode", "opencode.json"), "utf8"));
+          expect(stagedConfig.skills.paths).toEqual(skills.map((skill) => path.resolve(skill.source)));
+          return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: runId, part: { text: "done" } }) });
+        });
+        const result = await execute({
+          runId,
+          agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+          runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+          config: {
+            command: commandPath,
+            cwd: workspace,
+            model: "openai/gpt-5",
+            env: { HOME: sharedHome, XDG_CONFIG_HOME: configHome, OPENCODE_ALLOW_ALL_MODELS: "1" },
+            proprioRuntimeSkills: skills,
+            proprioSkillSync: { desiredSkills: skills.map((skill) => skill.key) },
+          },
+          context: {},
+          authToken: "inventory-test-token",
+          onLog: async () => {},
+        });
+        expect(result.exitCode).toBe(0);
+      }
+
+      await createSkillDir(realSkillsHome, "operator-native");
+      await fs.symlink(skillA, path.join(realSkillsHome, "revoked-proprio-skill"), "dir");
+      await fs.chmod(realSkillsHome, 0o555);
+      runProcessMock.mockReset().mockImplementationOnce(async (...args) => {
+        const runtimeHome = args[4].env.XDG_CONFIG_HOME!;
+        runtimeHomes.push(runtimeHome);
+        expect(await fs.readdir(path.join(runtimeHome, "opencode", "skills"))).toEqual(["operator-native"]);
+        expect(JSON.parse(await fs.readFile(path.join(runtimeHome, "opencode", "opencode.json"), "utf8")))
+          .toMatchObject({ skills: { paths: [] } });
+        return probeResult({ stdout: JSON.stringify({ type: "text", sessionID: "real-dir-empty", part: { text: "done" } }) });
+      });
+      const realDirResult = await execute({
+        runId: "run-real-dir-empty",
+        agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          model: "openai/gpt-5",
+          env: { HOME: sharedHome, XDG_CONFIG_HOME: realConfigHome, OPENCODE_ALLOW_ALL_MODELS: "1" },
+          proprioRuntimeSkills: [],
+          proprioSkillSync: { desiredSkills: [] },
+        },
+        context: {},
+        onLog: async () => {},
+      });
+      expect(realDirResult.exitCode).toBe(0);
+
+      runProcessMock.mockReset().mockImplementationOnce(async (...args) => {
+        runtimeHomes.push(args[4].env.XDG_CONFIG_HOME!);
+        throw new Error("spawn failure");
+      });
+      await expect(execute({
+        runId: "run-failure",
+        agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { command: commandPath, cwd: workspace, model: "openai/gpt-5", env: { HOME: sharedHome, XDG_CONFIG_HOME: configHome, OPENCODE_ALLOW_ALL_MODELS: "1" }, proprioRuntimeSkills: [], proprioSkillSync: { desiredSkills: [] } },
+        context: {},
+        onLog: async () => {},
+      })).rejects.toThrow("spawn failure");
+
+      expect(new Set(runtimeHomes).size).toBe(5);
+      for (const runtimeHome of runtimeHomes) {
+        await expect(fs.stat(runtimeHome)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      expect((await fs.readdir(nativeSkills)).sort()).toEqual(["native-skill", "revoked-packaged-skill", "revoked-proprio-skill"]);
+      expect(await fs.readdir(sharedSkills)).toEqual(["operator-skill"]);
+      expect(await fs.readFile(path.join(sharedSkills, "operator-skill"), "utf8")).toBe("keep");
+      expect(await fs.readFile(path.join(workspace, ".claude", "skills", "project-skill"), "utf8")).toBe("keep");
+      await expect(fs.lstat(path.join(sharedSkills, "skill-a"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.lstat(path.join(sharedSkills, "skill-b"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await fs.readdir(realSkillsHome)).sort()).toEqual(["operator-native", "revoked-proprio-skill"]);
+      expect((await fs.stat(realSkillsHome)).mode & 0o777).toBe(0o555);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.chmod(nativeSkills, 0o755).catch(() => {});
+      await fs.chmod(realSkillsHome, 0o755).catch(() => {});
       await fs.rm(root, { recursive: true, force: true });
     }
   });
