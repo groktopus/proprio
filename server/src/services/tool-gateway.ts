@@ -1766,16 +1766,22 @@ export function createToolGatewayService(
       await hasManagedMcpPhase(input.companyId, input.invocationId, "dispatch_intent");
   }
 
-  async function writeManagedMcpTerminalOutcome(input: {
-    companyId: string;
-    invocationId: string;
+  type ManagedMcpTerminalInvocationUpdate = {
     status: "succeeded" | "failed" | "timed_out" | "rate_limited";
     completedAt: Date;
-    reasonCode: string | null;
+    updatedAt: Date;
     resultHash?: string | null;
     resultSummary?: typeof toolInvocations.$inferSelect.resultSummary;
     resultSizeBytes?: number | null;
+    errorCode?: string | null;
     errorMessage?: string | null;
+  };
+
+  async function writeManagedMcpTerminalOutcome(input: {
+    companyId: string;
+    invocationId: string;
+    invocationUpdate: ManagedMcpTerminalInvocationUpdate;
+    reasonCode: string | null;
   }): Promise<void> {
     try {
       await db.transaction(async (tx) => {
@@ -1785,16 +1791,7 @@ export function createToolGatewayService(
           eq(managedAuditEvents.phase, "dispatch_intent"),
           eq(managedAuditEvents.invocationId, input.invocationId),
         )).limit(1);
-        const [updated] = await tx.update(toolInvocations).set({
-          status: input.status,
-          ...(input.resultHash !== undefined ? { resultHash: input.resultHash } : {}),
-          ...(input.resultSummary !== undefined ? { resultSummary: input.resultSummary } : {}),
-          ...(input.resultSizeBytes !== undefined ? { resultSizeBytes: input.resultSizeBytes } : {}),
-          ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
-          errorCode: input.status === "succeeded" ? null : input.reasonCode,
-          completedAt: input.completedAt,
-          updatedAt: input.completedAt,
-        }).where(and(
+        const [updated] = await tx.update(toolInvocations).set(input.invocationUpdate).where(and(
           eq(toolInvocations.id, input.invocationId),
           eq(toolInvocations.companyId, input.companyId),
         )).returning({ id: toolInvocations.id });
@@ -1813,7 +1810,7 @@ export function createToolGatewayService(
           schemaVersion: admission.schemaVersion,
           eventType: "gateway_terminal_outcome_recorded",
           phase: "terminal_outcome",
-          occurredAt: input.completedAt,
+          occurredAt: input.invocationUpdate.completedAt,
           runId: admission.runId,
           taskId: admission.taskId,
           invocationId: admission.invocationId,
@@ -1822,7 +1819,7 @@ export function createToolGatewayService(
           actorType: admission.actorType,
           actorId: admission.actorId,
           decision: admission.decision,
-          status: input.status,
+          status: input.invocationUpdate.status,
           reasonCode: input.reasonCode,
         }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
         if (!inserted) throw new Error("Managed MCP invocation already has a terminal receipt");
@@ -14225,31 +14222,26 @@ export function createToolGatewayService(
         }
         const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
           invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
+        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
+          status: "succeeded",
+          resultHash: resultValidation.summary.sha256 ?? null,
+          resultSummary: resultValidation.summary,
+          resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+          ...(capturedManagedDispatch ? { errorCode: null } : {}),
+          completedAt,
+          updatedAt: completedAt,
+        };
         if (capturedManagedDispatch) {
           await writeManagedMcpTerminalOutcome({
             companyId: session.companyId,
             invocationId,
-            status: "succeeded",
-            completedAt,
+            invocationUpdate,
             reasonCode: "tool_completed",
-            resultHash: resultValidation.summary.sha256 ?? null,
-            resultSummary: resultValidation.summary,
-            resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
           });
           managedTerminalCommitted = true;
           void emitConnectionInvoked(db, invocationId);
-        }
-        if (!capturedManagedDispatch) {
-          await db
-            .update(toolInvocations)
-            .set({
-              status: "succeeded",
-              resultHash: resultValidation.summary.sha256 ?? null,
-              resultSummary: resultValidation.summary,
-              resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-              completedAt,
-              updatedAt: completedAt,
-            })
+        } else {
+          await db.update(toolInvocations).set(invocationUpdate)
             .where(eq(toolInvocations.id, invocationId));
         }
         // A provider task's result is now recorded; only now is it delivered.
@@ -14387,21 +14379,19 @@ export function createToolGatewayService(
           : status === 429 ? "rate_limited" as const : "failed" as const;
         const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
           invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
+        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
+          status: terminalStatus,
+          errorCode: reasonCode,
+          errorMessage: message,
+          completedAt,
+          updatedAt: completedAt,
+        };
         if (capturedManagedDispatch && reasonCode !== "provider_task_pending") {
           await writeManagedMcpTerminalOutcome({
-            companyId: session.companyId, invocationId, status: terminalStatus,
-            completedAt, reasonCode, errorMessage: message,
+            companyId: session.companyId, invocationId, invocationUpdate, reasonCode,
           });
         } else {
-          await db
-            .update(toolInvocations)
-            .set({
-              status: terminalStatus,
-              errorCode: reasonCode,
-              errorMessage: message,
-              completedAt,
-              updatedAt: completedAt,
-            })
+          await db.update(toolInvocations).set(invocationUpdate)
             .where(eq(toolInvocations.id, invocationId));
         }
         void emitConnectionInvoked(db, invocationId);
