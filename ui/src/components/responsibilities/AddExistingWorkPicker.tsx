@@ -14,6 +14,7 @@ import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "@
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { companyProjectsQuery } from "@/lib/company-projects-query";
 import { queryKeys } from "@/lib/queryKeys";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 
 export type ResponsibilityWorkKind = "project" | "task" | "routine" | "skill";
 
@@ -44,15 +45,6 @@ function linkBody(kind: ResponsibilityWorkKind, id: string): LinkResponsibility 
   if (kind === "task") return { issueId: id };
   if (kind === "skill") return { skillId: id };
   return { routineId: id };
-}
-
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebounced(value), delayMs);
-    return () => window.clearTimeout(timer);
-  }, [value, delayMs]);
-  return debounced;
 }
 
 /**
@@ -93,7 +85,7 @@ export function AddExistingWorkPicker({
     onOpenChange?.(next);
   };
   const [query, setQuery] = useState("");
-  const taskQuery = useDebounced(query.trim(), TASK_SEARCH_DEBOUNCE_MS);
+  const taskQuery = useDebouncedValue(query.trim(), TASK_SEARCH_DEBOUNCE_MS);
 
   const projects = useQuery({ ...companyProjectsQuery(companyId), enabled: open && kind === "project" });
   const routines = useQuery({

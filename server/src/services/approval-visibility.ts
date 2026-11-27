@@ -2,6 +2,13 @@ import { sql, type SQL } from "drizzle-orm";
 import { approvals, issues } from "@groktopus/db";
 import { executionIssueCondition } from "./issue-visibility.js";
 
+/** Historical and current task-tree overrides both identify their root by budget scope. */
+export function approvalTaskTreeRootId(): SQL<string | null> {
+  return sql`case when ${approvals.type} = 'budget_override_required'
+    and ${approvals.payload}->>'scopeType' = 'task_tree'
+    then coalesce(${approvals.payload}->>'scopeId', '') end`;
+}
+
 export function firstApprovalIssueId(): SQL<string | null> {
   return sql`(select first_link.issue_id from issue_approvals first_link
     where first_link.company_id = ${approvals.companyId} and first_link.approval_id = ${approvals.id}

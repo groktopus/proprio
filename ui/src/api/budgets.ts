@@ -5,11 +5,11 @@ import type {
   BudgetPolicySummary,
   BudgetPolicyUpsertInput,
 } from "@groktopus/shared";
-import { api } from "./client";
+import { api, type RequestOptions } from "./client";
 
 export const budgetsApi = {
-  overview: (companyId: string) =>
-    api.get<BudgetOverview>(`/companies/${companyId}/budgets/overview`),
+  overview: (companyId: string, options?: RequestOptions) =>
+    api.get<BudgetOverview>(`/companies/${companyId}/budgets/overview`, { ...options, fresh: true, cache: "no-store" }),
   upsertPolicy: (companyId: string, data: BudgetPolicyUpsertInput) =>
     api.post<BudgetPolicySummary>(`/companies/${companyId}/budgets/policies`, data),
   resolveIncident: (companyId: string, incidentId: string, data: BudgetIncidentResolutionInput) =>
