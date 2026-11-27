@@ -801,7 +801,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     const otherRunId = await seedRun({ companyId, agentId: leadId, status: "succeeded", contextSnapshot: { issueId } });
     await seedIssue({
       companyId: scenario === "foreign_child" ? otherCompanyId : companyId,
-      identifier: "QA-2", parentId: scenario === "unrelated_child" ? otherIssueId : issueId,
+      identifier: "QA-2",
+      parentId: scenario === "foreign_child" ? foreignIssueId : scenario === "unrelated_child" ? otherIssueId : issueId,
       assigneeAgentId: scenario === "foreign_child" ? foreignAgentId : scenario === "other_child_assignee" ? leadId : workerId,
       status: scenario === "child_open" ? "in_progress" : scenario === "child_cancelled" ? "cancelled" : "done",
     });
@@ -835,8 +836,13 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       }).returning();
       commentIds.push(second.id);
     }
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const recorded = drizzle(db.$client, {
+      schema: db._.fullSchema,
+      logger: { logQuery: (sql, params) => queries.push({ sql, params }) },
+    }) as unknown as Db;
     let checked = false;
-    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    const adapter = createPostgresWakeQueueAdapter(recorded, stubDeps);
     await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async (_locked, ports) => {
       checked = true;
       const completed = await ports.transaction.isCompletedDelegationMention({
@@ -847,6 +853,12 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       return { outcome: { kind: "released" as const }, postCommitEffects: [] };
     });
     expect(checked).toBe(true);
+    if (scenario === "foreign_child") {
+      const childLookup = queries.find(({ sql }) => sql.startsWith('select "identifier", "status" from "issues"'));
+      const companyParameter = /"company_id" = \$(\d+)/.exec(childLookup?.sql ?? "");
+      expect(companyParameter, "The delegation child lookup must be company-scoped").not.toBeNull();
+      expect(childLookup?.params[Number(companyParameter?.[1]) - 1]).toBe(companyId);
+    }
   });
 
   it("skips malformed queued comment ids instead of failing the whole liveness batch", async () => {

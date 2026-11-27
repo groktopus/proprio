@@ -3375,11 +3375,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       ? (await instanceSettings.getExperimental()).enableIsolatedWorkspaces
       : false;
     let operatorResponsibleUserId: string | null = opts.manualUserWake ? opts.requestedByActorId! : null;
-    const resolveQueuedResponsibleUserId = async (issueContext: IssueAttributionSnapshot | null) => {
+    const resolveQueuedResponsibleUserId = async (
+      issueContext: IssueAttributionSnapshot | null,
+      reader: Pick<Db, "select"> = db,
+    ) => {
       if (operatorResponsibleUserId) return operatorResponsibleUserId;
       const queuedRoutineEnvContext = await getRoutineEnvForExecutionIssue(
         agent.companyId,
         issueContext,
+        reader,
       );
       const queuedResponsibleUserId =
         await resolveResponsibleUserIdForRunSeed({
@@ -3391,7 +3395,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           requestedByActorId: opts.requestedByActorId ?? null,
           source,
           triggerDetail,
-        });
+        }, reader);
       if (!queuedResponsibleUserId) {
         throw new HttpError(
           422,
@@ -5094,7 +5098,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             continuationAttempt,
             reconciledSourceRunId,
             reconciledRestoreRetryCount,
-            resolveResponsibleUserId: () => resolveQueuedResponsibleUserId(issue),
+            resolveResponsibleUserId: () => resolveQueuedResponsibleUserId(issue, tx),
             async recordContinuationDelivery(runId) {
               if (ownsReconstructionContinuation) {
                 await tx.update(issueRecoveryActions).set({ evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({
@@ -5322,7 +5326,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           invocationSource: source,
           triggerDetail,
           status: "queued",
-          responsibleUserId: await resolveQueuedResponsibleUserId(null),
+          responsibleUserId: await resolveQueuedResponsibleUserId(null, tx),
           wakeupRequestId: wakeupRequest.id,
           contextSnapshot: enrichedContextSnapshot,
           sessionIdBefore: await resolveSessionBefore(tx),
