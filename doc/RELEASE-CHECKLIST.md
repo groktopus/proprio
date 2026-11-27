@@ -13,9 +13,11 @@ Follow the [source release runbook](RELEASING.md) for Linux prereleases.
   cancellation, disk-pressure diagnostics, and browser task readback. When
   tracked migration SQL changes, check the active-run migration case against
   those same SHAs, elapsed recovery time, and zero observed data loss.
-- In the release notes, record the exact SHA and evidence links, installation
-  and upgrade steps, supported architecture and storage topology, skipped
-  or failed lanes, and any limits on the support claim.
+- In the qualification record, capture the exact SHA and evidence links,
+  supported architecture and storage topology, skipped or failed lanes, and
+  support limits. In the public notes, lead with user-visible changes, state
+  supported scope and required upgrade actions, and link the installation
+  guide and qualification record.
 - Run the publication dry run, then publish after the required evidence and
   authorization are in place. Verify the GitHub tag, prerelease, and catalog.
 

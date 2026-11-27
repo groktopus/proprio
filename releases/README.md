@@ -8,3 +8,6 @@ predates Proprio. See [provenance](../PROVENANCE.md) for the baseline.
 See the [0.0.3 qualification record](v0.0.3-qualification.md) for the source, image, and CI evidence.
 
 See the [0.0.4 qualification record](v0.0.4-qualification.md) for the milestone 03 source and operator-board evidence.
+
+See the [Milestone 04 rehearsal evidence](milestone-04-rehearsal.md) for the
+integration checkpoint and outstanding promotion gates.
