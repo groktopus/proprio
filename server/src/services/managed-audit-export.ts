@@ -325,6 +325,7 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
+  const publications: ActivityPublication[] = [];
   const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     const ownedSnapshot = and(
@@ -360,7 +361,20 @@ export async function readManagedAuditExportPage(
       if (available.eventCount !== snapshot.eventCount) {
         // Commit the invalidation before sending a conflict so any cursor for
         // this snapshot remains invalid after visibility or data is restored.
-        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] }).where(ownedSnapshot);
+        const [invalidated] = await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+          .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
+          .returning({ id: managedAuditExports.id });
+        if (invalidated) {
+          await logActivity(tx as unknown as Db, {
+            companyId: scope.companyId,
+            actorType: "user",
+            actorId: userId,
+            action: "audit.managed_export_invalidated",
+            entityType: "company",
+            entityId: scope.companyId,
+            details: { exportId: invalidated.id },
+          }, publications);
+        }
         return null;
       }
     }
@@ -417,6 +431,7 @@ export async function readManagedAuditExportPage(
       complete: deliveredThrough === snapshot.eventCount,
     };
   });
+  for (const publication of publications) publishActivity(publication);
   if (!page) {
     throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", {
       reasonCode: "snapshot_incomplete",

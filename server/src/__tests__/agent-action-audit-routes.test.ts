@@ -704,6 +704,17 @@ describePostgres("agent action audit routes", () => {
       expect(resumed.body).not.toHaveProperty("eventCount");
       expect(resumed.body).not.toHaveProperty("watermark");
       expect(resumed.body).not.toHaveProperty("events");
+      const invalidationActivity = (await db.select().from(activityLog))
+        .filter(row => row.action === "audit.managed_export_invalidated");
+      expect(invalidationActivity).toHaveLength(1);
+      expect(invalidationActivity[0]).toMatchObject({
+        companyId: company.id,
+        actorType: "user",
+        actorId: userId,
+        entityType: "company",
+        entityId: company.id,
+      });
+      expect(invalidationActivity[0]!.details).toEqual({ exportId: created.body.exportId });
       const [snapshot] = await db.select({
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
