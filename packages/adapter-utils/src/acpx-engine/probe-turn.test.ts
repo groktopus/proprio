@@ -11,6 +11,7 @@ const { fixture } = vi.hoisted(() => {
     runtimeOptions: vi.fn(),
     bridgeOptions: vi.fn(),
     sessionOptions: vi.fn(),
+    turnResult: { status: "failed", error: { message: "probe failed" } } as unknown,
   };
   return { fixture };
 });
@@ -24,7 +25,7 @@ vi.mock("acpx/runtime", () => ({
       return fixture.ensureSession();
     },
     startTurn: () => ({
-      result: Promise.resolve({ status: "failed", error: { message: "probe failed" } }),
+      result: Promise.resolve(fixture.turnResult),
       events: { async *[Symbol.asyncIterator]() {} },
       closeStream: async () => {},
       cancel: fixture.cancel,
@@ -59,7 +60,10 @@ vi.mock("./stock-runtime-options.js", async () => {
 
 import { runAcpProbeTurn } from "./probe-turn.js";
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  fixture.turnResult = { status: "failed", error: { message: "probe failed" } };
+});
 
 describe("ACP probe cleanup", () => {
   it("attempts runtime, bridge, and temp-store cleanup after cancellation fails", async () => {
@@ -133,5 +137,21 @@ describe("ACP probe cleanup", () => {
       sessionOptions: { allowedTools: [], maxTurns: 1, model: "gpt-5.6-sol" },
     }));
     expect(fixture.runtimeOptions.mock.calls.at(-1)?.[0]).toMatchObject({ agentEnvironment: expect.any(Function) });
+  });
+
+  it("uses structured auth evidence and does not classify arbitrary required parameters as auth", async () => {
+    fixture.turnResult = { status: "failed", error: { detailCode: "AUTH_REQUIRED", message: "Access denied" } };
+    await expect(runAcpProbeTurn({ agent: "claude", command: "fixture-agent", env: {}, timeoutMs: 100, prompt: "hello" }))
+      .resolves.toEqual({ status: "auth_required", text: "", toolCall: false });
+
+    fixture.turnResult = { status: "failed", error: { message: "missing required session parameter" } };
+    await expect(runAcpProbeTurn({ agent: "claude", command: "fixture-agent", env: {}, timeoutMs: 100, prompt: "hello" }))
+      .resolves.toEqual({ status: "failed", text: "", toolCall: false });
+  });
+
+  it("allows bounded transport finalization after the inference deadline", async () => {
+    fixture.turnResult = new Promise(resolve => setTimeout(() => resolve({ status: "completed", stopReason: "end_turn" }), 150));
+    await expect(runAcpProbeTurn({ agent: "claude", command: "fixture-agent", env: {}, timeoutMs: 100, prompt: "hello" }))
+      .resolves.toMatchObject({ status: "completed" });
   });
 });

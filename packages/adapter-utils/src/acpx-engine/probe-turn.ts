@@ -9,6 +9,16 @@ import { runAdapterExecutionTargetShellCommand, startAdapterExecutionTargetProce
 import { assertNoHostAcpxAuthEnvironment, splitWindowsAgentCommand, stockAcpRuntimeOptions } from "./stock-runtime-options.js";
 
 const CLEANUP_TIMEOUT_MS = 10_000;
+const TURN_FINALIZATION_GRACE_MS = 1_000;
+
+function isAcpAuthenticationFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const evidence = error as { detailCode?: unknown; code?: unknown; category?: unknown; message?: unknown };
+  if ([evidence.detailCode, evidence.code, evidence.category].some(value =>
+    typeof value === "string" && /^(?:AUTH_REQUIRED|ACPX_AUTH_REQUIRED|access)$/i.test(value))) return true;
+  return typeof evidence.message === "string" &&
+    /(?:authentication (?:failed|required)|login required|not authenticated|unauthorized|unauthenticated|invalid (?:api )?key|invalid bearer token|please (?:run|sign in))/i.test(evidence.message);
+}
 
 async function cleanupWithinBudget(cleanup: () => Promise<unknown>): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -127,7 +137,7 @@ export async function runAcpProbeTurn(input: {
       text: input.prompt,
       mode: "prompt",
       requestId: randomUUID(),
-      timeoutMs: remainingProbeTime(deadline),
+      timeoutMs: input.timeoutMs,
     });
     const consume = (async () => {
       for await (const event of turn!.events) {
@@ -142,8 +152,7 @@ export async function runAcpProbeTurn(input: {
       outcome = await Promise.race([
         turn.result,
         new Promise<never>((_resolve, reject) => {
-          const remaining = remainingProbeTime(deadline);
-          timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), remaining);
+          timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), input.timeoutMs + TURN_FINALIZATION_GRACE_MS);
         }),
       ]);
     } finally { clearTimeout(timeoutTimer); }
@@ -158,10 +167,11 @@ export async function runAcpProbeTurn(input: {
       ...response,
       ...(typeof outcome.stopReason === "string" ? { stopReason: outcome.stopReason } : {}),
     };
-    else if (outcome.status === "failed" && /(?:authentication|required|unauthorized|unauthenticated|\b(?:401|403)\b)/i.test(outcome.error.message)) failure = "auth_required";
+    else if (outcome.status === "failed" && isAcpAuthenticationFailure(outcome.error)) failure = "auth_required";
+    else if (outcome.status === "failed" && /\b(?:timed? ?out|timeout)\b/i.test(outcome.error.message)) failure = "timeout";
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "PROBE_TIMEOUT") failure = "timeout";
-    else if (error instanceof Error && /(?:authentication|required|unauthorized|unauthenticated|\b(?:401|403)\b)/i.test(error.message)) failure = "auth_required";
+    else if (isAcpAuthenticationFailure(error)) failure = "auth_required";
   } finally {
     let cleanupFailed = false;
     if (turn && !result && !(await cleanupWithinBudget(() => turn!.cancel({ reason: "ACP probe ended" })))) cleanupFailed = true;
