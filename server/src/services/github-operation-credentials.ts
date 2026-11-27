@@ -128,7 +128,7 @@ async function saveGitHubSummary(
 
 /** Check an App grant without minting a credential or changing task authority. */
 export async function githubNativeIntentEligibility(db: Db, input: {
-  companyId: string; agentId: string; issueId: string; sourceRunId: string | null;
+  companyId: string; agentId: string; issueId: string; sourceRunId?: string | null;
   request: GitHubNativeRequest; lockAuthority?: boolean; requireLauncher?: boolean;
   identityContextId?: string | null; responsibleUserId?: string | null;
 }): Promise<GitHubNativeEligibility> {

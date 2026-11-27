@@ -256,7 +256,16 @@ describe.skipIf(!support.supported)("self-hosted GitHub App for terminal Git", (
     expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({ status: "unavailable", env: {} });
     const managed = await f.fixture.grant(f, "managed", true);
     await secretService(db).rotate(managed.secretId, { value: "ghs_previous_managed" });
-    expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({ status: "available", grantId: managed.id });
+    const previousReceipt = {
+      status: "available" as const, source: "dedicated" as const, login: "managed",
+      connectionId: managed.connectionId, grantId: managed.id, authenticationMode: "managed" as const,
+    };
+    await db.update(runIdentityContexts).set({ github: previousReceipt }).where(eq(runIdentityContexts.runId, f.runId));
+    expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({
+      ...previousReceipt, env: { GH_TOKEN: "ghs_previous_managed" },
+    });
+    const [identity] = await db.select().from(runIdentityContexts).where(eq(runIdentityContexts.runId, f.runId));
+    expect(identity.github).toEqual(previousReceipt);
   });
 
   it("offers read-only private checkout before admission and isolates anonymous board recovery", async () => {
