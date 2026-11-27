@@ -6,6 +6,8 @@ import {
   issues, type Db,
 } from "@groktopus/db";
 import { ISSUE_BLOCKER_STALLED_WAKE_REASON } from "@groktopus/shared";
+import { executionProjectionForRun } from "../services/execution-projection.js";
+import { readParentDependencyDiagnosis } from "../services/recovery/parent-dependency-diagnosis.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { issueBlockerStalledWakeKey, listStalledDependencies, recoveryActionSweepCondition, wakeWaitersOfStalledIssues } from "../services/recovery/blocker-stall-wakeups.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -109,6 +111,39 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     const later = calls.filter(call => call.input.reason === ISSUE_BLOCKER_STALLED_WAKE_REASON);
     expect(later).toHaveLength(2);
     expect(later[1]!.input.contextSnapshot.blockerStall.recoveryAction.id).toBe(again.id);
+  });
+
+  it("shows the same safe Case exhaustion guidance in a waiting task and its wake", async () => {
+    const f = await fixture();
+    await db.insert(issueRelations).values({ companyId: f.companyId, issueId: f.child.id, relatedIssueId: f.parent.id, type: "blocks" });
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.childAgent,
+      issueId: f.child.id, nativeIssueId: f.child.id, runtimeMode: "native", status: "failed",
+      invocationSource: "assignment", triggerDetail: "system", finishedAt: new Date() }).returning();
+    await db.update(issueRecoveryActions).set({ cause: "completion_evidence_incomplete", attemptCount: 2,
+      evidence: {
+        runId: run!.id, recoveryBudget: { state: "exhausted", attemptsUsed: 2 },
+        caseHandoffCompletion: {
+          schema: "proprio.case-handoff-completion-recovery.v1",
+          caseHandoff: { id: "private-handoff-id", prerequisiteCount: 1 },
+          assessment: { criteriaNeedingWork: [{ reasonCode: "criterion_evidence_missing", requirement: "Private criterion" }] },
+        },
+      },
+    }).where(eq(issueRecoveryActions.id, f.action.id));
+
+    const [listed] = await listStalledDependencies(db, { companyId: f.companyId, issueId: f.parent.id });
+    expect(listed?.recoveryAction.nextAction).toContain("Completion recovery stopped after 2 attempts.");
+    expect(listed?.recoveryAction.nextAction).toContain("Review the assessment before assigning further work.");
+    expect(listed?.recoveryAction.nextAction).toContain("Review the prerequisite checklist in the authorized Case view.");
+    expect(listed?.recoveryAction.nextAction).toContain("Add or correct evidence for 1 task criterion.");
+    const diagnosis = await readParentDependencyDiagnosis(db, { companyId: f.companyId, issueId: f.parent.id });
+    expect(diagnosis?.nextAction).toBe(listed?.recoveryAction.nextAction);
+    const execution = await executionProjectionForRun(db, f.companyId, run!.id);
+    expect(execution?.nextAction).toBe(listed?.recoveryAction.nextAction);
+    const { calls, enqueueWakeup } = wakeRecorder();
+    await wakeWaitersOfStalledIssues(db, enqueueWakeup as never, { companyId: f.companyId });
+    const wake = calls.find(call => call.agentId === f.parentAgent);
+    expect(wake?.input.contextSnapshot.blockerStall).toEqual(listed);
+    expect(JSON.stringify([listed, wake])).not.toMatch(/private-handoff-id|Private criterion|caseHandoffCompletion/);
   });
 
   it("wakes the assignee of an issue the stalled one blocks", async () => {

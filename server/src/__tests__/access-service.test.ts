@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   applyPendingMigrations,
   agents,
   companySecretBindings,
@@ -71,6 +72,7 @@ describeEmbeddedPostgres("access service", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(toolAccessAuditEvents);
     await db.delete(userSecretDeclarations);
     await db.delete(companySecretBindings);

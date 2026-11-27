@@ -14,7 +14,7 @@ const record = (value: unknown): Input | null =>
 const positiveInteger = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 1;
 const list = (keys: readonly string[]) => keys.join(", ");
 const TASK_DOCUMENT_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const DONE_ONLY_FORBIDDEN = ["toAgentId", "bindIssueId", "workflowId", "workflow_document_text", "initialDocuments"] as const;
+const DONE_ONLY_FORBIDDEN = ["toAgentId", "bindIssueId", "workflowId", "workflow_document_text", "initialDocuments", "offer"] as const;
 
 function handoffCase(input: Input): string[] {
   const problems: string[] = [];
