@@ -522,6 +522,44 @@ describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, 
       .toMatchObject({ status: "failed", resultJson: null });
   });
 
+  it("keeps private ancestry and budget-stop identity out of run responses for a child-only reader", async () => {
+    const f = await seedFixture();
+    const [ancestor] = await db.insert(issues).values({
+      companyId: f.companyId, title: "Private former parent", visibility: "private", responsibleUserId: f.ownerUserId,
+    }).returning({ id: issues.id });
+    await db.insert(issueAccessGrants).values({
+      issueId: f.issueId, subjectType: "user", subjectId: f.otherUserId, source: "explicit",
+    });
+    const taskLineageJson = { version: 1 as const, pathIssueIds: [f.issueId, ancestor!.id] };
+    const budgetEnforcement = {
+      companyId: f.companyId, scopeType: "task_tree", scopeId: ancestor!.id, policyId: randomUUID(), version: 1,
+    };
+    const budgetAdmissionStop = { scopeType: "task_tree", scopeId: ancestor!.id, reason: "Task tree budget reached" };
+    const resultJson = {
+      startupCancellation: { requestedAt: new Date().toISOString(), budgetEnforcement },
+      budgetAdmissionStop,
+    };
+    await db.update(heartbeatRuns).set({ status: "cancelled", taskLineageJson, resultJson })
+      .where(eq(heartbeatRuns.id, f.privateRunId));
+
+    const app = createBoardApp(f.companyId, f.otherUserId);
+    const detail = await request(app).get(`/api/heartbeat-runs/${f.privateRunId}`).expect(200);
+    const list = await request(app).get(`/api/companies/${f.companyId}/heartbeat-runs`).expect(200);
+    const stopped = await request(app).post(`/api/heartbeat-runs/${f.privateRunId}/cancel`).send({}).expect(200);
+    expect(detail.body.id).toBe(f.privateRunId);
+    expect(list.body).toEqual(expect.arrayContaining([expect.objectContaining({ id: f.privateRunId })]));
+    expect(stopped.body).toMatchObject({ id: f.privateRunId, status: "cancelled" });
+    for (const response of [detail, list, stopped]) {
+      expect(response.text).not.toContain("taskLineageJson");
+      expect(response.text).not.toContain(ancestor!.id);
+      expect(response.text).not.toContain(budgetEnforcement.policyId);
+    }
+    const [saved] = await db.select({ taskLineageJson: heartbeatRuns.taskLineageJson, resultJson: heartbeatRuns.resultJson })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, f.privateRunId));
+    expect(saved?.taskLineageJson).toEqual(taskLineageJson);
+    expect(saved?.resultJson).toEqual(resultJson);
+  });
+
   it("Stop on a task waiting in line cancels its run and wake, frees the task, and logs both changes", async () => {
     const fixture = await seedFixture();
     await db.update(heartbeatRuns).set({ status: "queued", startedAt: null, finishedAt: null, resultJson: null,

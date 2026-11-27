@@ -41703,7 +41703,7 @@
           "issues"
         ],
         "summary": "List issues in a company",
-        "description": "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false.",
+        "description": "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false. Send Cache-Control: no-cache or no-store to bypass in-flight request coalescing and the compact response cache. These reads receive Cache-Control: private, no-store and still count toward the concurrency limit.",
         "responses": {
           "200": {
             "description": "Success",
@@ -41735,6 +41735,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many concurrent task-list reads.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "retryAfterSeconds": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "retryAfterSeconds"
+                  ]
                 }
               }
             }
@@ -42205,6 +42236,527 @@
         }
       }
     },
+    "/api/issues/{ref}/execution-review-evidence": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get execution review evidence for an issue",
+        "description": "For authorized board readers. Returns the submitted signoff target, current quality review requests and readiness, and one page of bound decisions in newest-first order. Send the returned nextCursor to read older decisions.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "submittedSignoff": {
+                      "type": "object",
+                      "properties": {
+                        "binding": {
+                          "type": "object",
+                          "properties": {
+                            "version": {
+                              "type": "number",
+                              "enum": [
+                                1
+                              ]
+                            },
+                            "requirementHash": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            "deliverables": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string",
+                                    "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                                  },
+                                  "label": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 120
+                                  },
+                                  "target": {
+                                    "oneOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "issue_document"
+                                            ]
+                                          },
+                                          "key": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 64,
+                                            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                          },
+                                          "revisionId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          }
+                                        },
+                                        "required": [
+                                          "type",
+                                          "key",
+                                          "revisionId"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "type": {
+                                            "type": "string",
+                                            "enum": [
+                                              "issue_attachment"
+                                            ]
+                                          },
+                                          "attachmentId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          },
+                                          "assetId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          },
+                                          "sha256": {
+                                            "type": "string",
+                                            "pattern": "^[a-f0-9]{64}$"
+                                          }
+                                        },
+                                        "required": [
+                                          "type",
+                                          "attachmentId",
+                                          "assetId",
+                                          "sha256"
+                                        ],
+                                        "additionalProperties": false
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "key",
+                                  "label",
+                                  "target"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "requirementHash",
+                            "deliverables"
+                          ],
+                          "additionalProperties": false,
+                          "nullable": true
+                        },
+                        "stale": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "binding",
+                        "stale"
+                      ],
+                      "nullable": true
+                    },
+                    "currentRequests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120
+                          },
+                          "interactionId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "target": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "issue_document"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 64,
+                                    "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                  },
+                                  "revisionId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "key",
+                                  "revisionId"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "issue_attachment"
+                                    ]
+                                  },
+                                  "attachmentId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "assetId": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "attachmentId",
+                                  "assetId",
+                                  "sha256"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "requirementHash": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "outdated": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "label",
+                          "interactionId",
+                          "target",
+                          "requirementHash",
+                          "outdated"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "executionDecisions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "stageType": {
+                            "type": "string",
+                            "enum": [
+                              "review",
+                              "approval"
+                            ]
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "approved",
+                              "changes_requested"
+                            ]
+                          },
+                          "reviewTargetBinding": {
+                            "type": "object",
+                            "properties": {
+                              "version": {
+                                "type": "number",
+                                "enum": [
+                                  1
+                                ]
+                              },
+                              "requirementHash": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              "deliverables": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "key": {
+                                      "type": "string",
+                                      "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                                    },
+                                    "label": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 120
+                                    },
+                                    "target": {
+                                      "oneOf": [
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "issue_document"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 64,
+                                              "pattern": "^[a-z0-9][a-z0-9_-]*$"
+                                            },
+                                            "revisionId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            }
+                                          },
+                                          "required": [
+                                            "type",
+                                            "key",
+                                            "revisionId"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "issue_attachment"
+                                              ]
+                                            },
+                                            "attachmentId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            },
+                                            "assetId": {
+                                              "type": "string",
+                                              "format": "uuid"
+                                            },
+                                            "sha256": {
+                                              "type": "string",
+                                              "pattern": "^[a-f0-9]{64}$"
+                                            }
+                                          },
+                                          "required": [
+                                            "type",
+                                            "attachmentId",
+                                            "assetId",
+                                            "sha256"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "key",
+                                    "label",
+                                    "target"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "version",
+                              "requirementHash",
+                              "deliverables"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "stageType",
+                          "outcome",
+                          "reviewTargetBinding"
+                        ]
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "format": "uuid",
+                      "nullable": true
+                    },
+                    "requiredQualityReviewState": {
+                      "type": "object",
+                      "properties": {
+                        "required": {
+                          "type": "boolean"
+                        },
+                        "satisfied": {
+                          "type": "boolean"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                              },
+                              "label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "missing",
+                                  "pending",
+                                  "not_approved",
+                                  "stale"
+                                ]
+                              },
+                              "interactionId": {
+                                "type": "string",
+                                "format": "uuid"
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "label",
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "required",
+                        "satisfied",
+                        "missing"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "submittedSignoff",
+                    "currentRequests",
+                    "executionDecisions",
+                    "nextCursor",
+                    "requiredQualityReviewState"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
+        }
+      }
+    },
     "/api/issues/{id}": {
       "get": {
         "tags": [
@@ -42295,7 +42847,7 @@
           "issues"
         ],
         "summary": "Update an issue",
-        "description": "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422.",
+        "description": "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422. An executionPolicy.reviewTargetBinding requires requiredQualityReview on the same policy. A stale or incomplete signoff returns 422.",
         "responses": {
           "200": {
             "description": "Success",
@@ -42597,6 +43149,21 @@
                         "required": [
                           "version",
                           "deliverables"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "reviewTargetBinding": {
+                        "type": "object",
+                        "properties": {
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "required_quality_review"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "source"
                         ],
                         "additionalProperties": false
                       },
@@ -43363,6 +43930,7 @@
           "issues"
         ],
         "summary": "Resolve a stalled issue review",
+        "description": "An immutable signoff requires resubmission to an available reviewer before approval. The approve action returns 422 for those tasks.",
         "responses": {
           "200": {
             "description": "Success",
@@ -43417,6 +43985,16 @@
           },
           "409": {
             "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
             "content": {
               "application/json": {
                 "schema": {
@@ -61655,6 +62233,7 @@
           "costs"
         ],
         "summary": "Create or update a budget policy",
+        "description": "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read. Set createOnly to reject an existing policy with the same scope, metric, and window.",
         "responses": {
           "200": {
             "description": "Success",
@@ -61706,6 +62285,31 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "A policy already exists for the requested scope, metric, and window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "budget_policy_exists"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "code"
+                  ]
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -61729,8 +62333,12 @@
                     "enum": [
                       "company",
                       "agent",
-                      "project"
+                      "project",
+                      "task_tree"
                     ]
+                  },
+                  "createOnly": {
+                    "type": "boolean"
                   },
                   "scopeId": {
                     "type": "string",
@@ -61815,7 +62423,7 @@
           "costs"
         ],
         "summary": "Resolve a budget incident",
-        "description": "Board only: agent credentials get 403, so an agent cannot raise a limit or resume a budget-stopped agent. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
+        "description": "Board only: agent credentials get 403, so an agent cannot raise a limit or resume budget-stopped work. Task-tree incidents can be resolved only by a board user who can read the root task. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
         "responses": {
           "200": {
             "description": "Success",
@@ -61860,6 +62468,16 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -61937,6 +62555,7 @@
           "costs"
         ],
         "summary": "Get budget overview",
+        "description": "Company-level budgets remain company-wide. Task-tree policies and incidents are included only when the caller can read their root task.",
         "responses": {
           "200": {
             "description": "Success",
@@ -62803,6 +63422,528 @@
             "name": "commentIds",
             "in": "query",
             "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
+    "/api/issues/{id}/completion-history": {
+      "get": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Read native completion criteria, evidence and status decisions for a task",
+        "description": "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "runId": {
+                        "type": "string"
+                      },
+                      "contract": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "revision": {
+                            "type": "number"
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "risk": {
+                            "type": "string"
+                          },
+                          "completionAuthority": {
+                            "type": "string"
+                          },
+                          "incompleteCriteriaPolicy": {
+                            "type": "string"
+                          },
+                          "criteria": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "requirement": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "id",
+                                "requirement"
+                              ]
+                            }
+                          },
+                          "supersedesContractId": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "revision",
+                          "policyVersion",
+                          "risk",
+                          "completionAuthority",
+                          "incompleteCriteriaPolicy",
+                          "criteria",
+                          "supersedesContractId"
+                        ],
+                        "nullable": true
+                      },
+                      "result": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "summary": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "schemaStatus": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "disposition",
+                          "summary",
+                          "schemaStatus",
+                          "createdAt"
+                        ],
+                        "nullable": true
+                      },
+                      "assessment": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "triggerKind": {
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "reportedDisposition": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "allCriteriaSatisfied": {
+                            "type": "boolean",
+                            "nullable": true
+                          },
+                          "verificationPassed": {
+                            "type": "boolean",
+                            "nullable": true
+                          },
+                          "criterionAssessments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "criterionId": {
+                                  "type": "string"
+                                },
+                                "claimStatus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "satisfied",
+                                    "not_satisfied",
+                                    "unknown",
+                                    null
+                                  ],
+                                  "nullable": true
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "accepted",
+                                    "missing",
+                                    "rejected",
+                                    "unverifiable"
+                                  ]
+                                },
+                                "reasonCode": {
+                                  "type": "string"
+                                },
+                                "evidence": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "kind": {
+                                        "type": "string",
+                                        "enum": [
+                                          "event",
+                                          "work_product",
+                                          "approval",
+                                          "interaction",
+                                          "attachment",
+                                          "case_handoff",
+                                          "unknown"
+                                        ]
+                                      },
+                                      "outcome": {
+                                        "type": "string",
+                                        "enum": [
+                                          "accepted",
+                                          "missing",
+                                          "rejected",
+                                          "unverifiable"
+                                        ]
+                                      },
+                                      "visibility": {
+                                        "type": "string",
+                                        "enum": [
+                                          "available",
+                                          "restricted",
+                                          "missing",
+                                          "unverifiable"
+                                        ]
+                                      },
+                                      "reasonCode": {
+                                        "type": "string"
+                                      },
+                                      "label": {
+                                        "type": "string"
+                                      },
+                                      "recordId": {
+                                        "type": "string"
+                                      },
+                                      "title": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "kind",
+                                      "outcome",
+                                      "visibility",
+                                      "reasonCode",
+                                      "label"
+                                    ]
+                                  }
+                                }
+                              },
+                              "required": [
+                                "criterionId",
+                                "claimStatus",
+                                "outcome",
+                                "reasonCode",
+                                "evidence"
+                              ]
+                            }
+                          },
+                          "verificationAssessments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "commandOrCheck": {
+                                  "type": "string"
+                                },
+                                "claimStatus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed",
+                                    "not_run"
+                                  ]
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "accepted",
+                                    "missing",
+                                    "rejected",
+                                    "unverifiable"
+                                  ]
+                                },
+                                "reasonCode": {
+                                  "type": "string"
+                                },
+                                "reportedReasonCode": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "detail": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "evidence": {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "enum": [
+                                        "event",
+                                        "work_product",
+                                        "approval",
+                                        "interaction",
+                                        "attachment",
+                                        "case_handoff",
+                                        "unknown"
+                                      ]
+                                    },
+                                    "outcome": {
+                                      "type": "string",
+                                      "enum": [
+                                        "accepted",
+                                        "missing",
+                                        "rejected",
+                                        "unverifiable"
+                                      ]
+                                    },
+                                    "visibility": {
+                                      "type": "string",
+                                      "enum": [
+                                        "available",
+                                        "restricted",
+                                        "missing",
+                                        "unverifiable"
+                                      ]
+                                    },
+                                    "reasonCode": {
+                                      "type": "string"
+                                    },
+                                    "label": {
+                                      "type": "string"
+                                    },
+                                    "recordId": {
+                                      "type": "string"
+                                    },
+                                    "title": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "outcome",
+                                    "visibility",
+                                    "reasonCode",
+                                    "label"
+                                  ],
+                                  "nullable": true
+                                }
+                              },
+                              "required": [
+                                "commandOrCheck",
+                                "claimStatus",
+                                "outcome",
+                                "reasonCode",
+                                "reportedReasonCode",
+                                "detail",
+                                "evidence"
+                              ]
+                            }
+                          },
+                          "priorDecisionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "supersedesAssessmentId": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "policyVersion",
+                          "triggerKind",
+                          "summary",
+                          "reportedDisposition",
+                          "allCriteriaSatisfied",
+                          "verificationPassed",
+                          "criterionAssessments",
+                          "verificationAssessments",
+                          "priorDecisionId",
+                          "supersedesAssessmentId"
+                        ],
+                        "nullable": true
+                      },
+                      "decision": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "applicationState": {
+                            "type": "string"
+                          },
+                          "fromStatus": {
+                            "type": "string"
+                          },
+                          "toStatus": {
+                            "type": "string"
+                          },
+                          "reasonCode": {
+                            "type": "string"
+                          },
+                          "statusAction": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "policyVersion": {
+                            "type": "string"
+                          },
+                          "supersedesDecisionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "appliedAt": {
+                            "type": "string",
+                            "format": "date-time",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "applicationState",
+                          "fromStatus",
+                          "toStatus",
+                          "reasonCode",
+                          "statusAction",
+                          "policyVersion",
+                          "supersedesDecisionId",
+                          "createdAt",
+                          "appliedAt"
+                        ],
+                        "nullable": true
+                      },
+                      "lineageGaps": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "contract",
+                            "result",
+                            "decision"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "createdAt",
+                      "runId",
+                      "contract",
+                      "result",
+                      "assessment",
+                      "decision",
+                      "lineageGaps"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -108799,6 +109940,215 @@
         }
       }
     },
+    "/api/issues/{id}/dependency-investigation": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get required dependency diagnosis and parent wake state",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      },
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Ask the current assignee to investigate a stalled dependency",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before the request may be retried",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "idempotencyKey"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
     "/api/issues/{id}/retry": {
       "post": {
         "tags": [
@@ -136909,6 +138259,677 @@
         }
       }
     },
+    "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history": {
+      "get": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "Read completion recovery for an accepted Case handoff revision",
+        "description": "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "active",
+                              "escalated",
+                              "resolved",
+                              "cancelled"
+                            ]
+                          },
+                          "ownerType": {
+                            "type": "string",
+                            "enum": [
+                              "agent",
+                              "user",
+                              "board",
+                              "system"
+                            ]
+                          },
+                          "ownerAgentId": {
+                            "type": "string",
+                            "format": "uuid",
+                            "nullable": true
+                          },
+                          "ownerUserId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "nextAction": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "attemptCount": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "maxAttempts": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true,
+                            "nullable": true
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "restored",
+                              "handed_back",
+                              "owner_completed",
+                              "delegated",
+                              "false_positive",
+                              "blocked",
+                              "escalated",
+                              "cancelled"
+                            ],
+                            "nullable": true
+                          },
+                          "resolutionNote": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "assessedRevision": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "exclusiveMinimum": true
+                          },
+                          "criteria": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "criterionId": {
+                                  "type": "string"
+                                },
+                                "requirement": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "reasonCode": {
+                                  "type": "string",
+                                  "nullable": true
+                                },
+                                "evidence": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "outcome": {
+                                        "type": "string",
+                                        "nullable": true
+                                      },
+                                      "reasonCode": {
+                                        "type": "string",
+                                        "nullable": true
+                                      }
+                                    },
+                                    "required": [
+                                      "outcome",
+                                      "reasonCode"
+                                    ]
+                                  }
+                                }
+                              },
+                              "required": [
+                                "criterionId",
+                                "requirement",
+                                "outcome",
+                                "reasonCode",
+                                "evidence"
+                              ]
+                            }
+                          },
+                          "attempts": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "runId": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "decisionId": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "reasonCode": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "runId",
+                                "decisionId",
+                                "reasonCode"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "status",
+                          "ownerType",
+                          "ownerAgentId",
+                          "ownerUserId",
+                          "nextAction",
+                          "attemptCount",
+                          "maxAttempts",
+                          "outcome",
+                          "resolutionNote",
+                          "assessedRevision",
+                          "criteria",
+                          "attempts"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "entries"
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "caseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "handoffId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          },
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board_or_agent"
+        }
+      }
+    },
+    "/api/companies/{companyId}/case-handoff-offers": {
+      "get": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "List your pending case handoff offers",
+        "description": "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "caseId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "handoffId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "handoffVersion": {
+                            "type": "integer"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "caseId",
+                          "handoffId",
+                          "handoffVersion",
+                          "createdAt"
+                        ]
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 400
+            }
+          }
+        ],
+        "security": [
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "agent"
+        }
+      }
+    },
+    "/api/cases/{caseId}/handoffs/{handoffId}/decision": {
+      "post": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "Record a recipient decision on a versioned handoff offer",
+        "description": "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The receipt contains decision metadata. Read the Case handoff history to see submitted messages. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before retrying",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "caseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "handoffId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "accepted"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "clarification"
+                        ]
+                      },
+                      "reasonCode": {
+                        "type": "string",
+                        "enum": [
+                          "missing_prerequisite",
+                          "unclear_requirements",
+                          "missing_evidence",
+                          "other"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome",
+                      "reasonCode",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedHandoffVersion": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMinimum": true
+                      },
+                      "requirementRevisionId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "declined"
+                        ]
+                      },
+                      "reasonCode": {
+                        "type": "string",
+                        "enum": [
+                          "unavailable",
+                          "missing_capability",
+                          "outside_scope",
+                          "other"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                      }
+                    },
+                    "required": [
+                      "expectedHandoffVersion",
+                      "requirementRevisionId",
+                      "outcome",
+                      "reasonCode",
+                      "message"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "AgentBearerAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "agent"
+        }
+      }
+    },
     "/api/cases/{caseId}/handoffs/{handoffId}/retry": {
       "post": {
         "tags": [
@@ -137118,6 +139139,135 @@
         ],
         "x-proprio-authorization": {
           "actor": "board_or_agent"
+        }
+      }
+    },
+    "/api/cases/{caseId}/handoffs/{handoffId}/withdraw": {
+      "post": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "Withdraw an accepted delivered handoff after a confirmed Stop",
+        "description": "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "caseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "handoffId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedHandoffVersion": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true
+                  },
+                  "stoppedRunId": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "expectedHandoffVersion",
+                  "stoppedRunId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
         }
       }
     },

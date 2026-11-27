@@ -184,6 +184,7 @@ function coalescedGet<T>(path: string, options?: RequestOptions): Promise<T> {
     const promise = request<T>(path, {
       method: "GET",
       signal: controller.signal,
+      ...(options?.fresh ? { headers: { "Cache-Control": "no-cache" } } : {}),
       ...(options?.cache ? { cache: options.cache } : {}),
     });
     const created: InflightGet = { promise, controller, refs: new Set() };
