@@ -963,7 +963,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const faultingDb = new Proxy(db, {
       get(target, property, receiver) {
         if (property === "transaction") {
-          return (callback: (tx: unknown) => unknown, ...args: unknown[]) =>
+          return (callback: (tx: unknown) => Promise<unknown>, ...args: unknown[]) =>
             realTransaction((tx) => callback(new Proxy(tx as object, {
               get(txTarget, txProperty, txReceiver) {
                 const value = Reflect.get(txTarget, txProperty, txReceiver);
