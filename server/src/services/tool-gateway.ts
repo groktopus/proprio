@@ -8423,13 +8423,17 @@ export function createToolGatewayService(
       let managedDispatchEligible = false;
       let managedDispatchIntentWritten = false;
       let managedRoutingHash = toolRequestIdentityHash({}, options.toolActionSigningSecret);
-      const dispatchRemote = async (target: string, init: RequestInit, toolCall = false) => {
+      const dispatchRemote = async (
+        target: string,
+        init: RequestInit,
+        toolCall = false,
+        providerRequestId?: string | number,
+      ) => {
         // Refresh can reduce consent. Recheck the selected grant after refreshing
         // credentials and before every dispatch (including an authorization retry).
         await assertWorkspaceGrantCurrent();
         if (managedDispatchEligible && !managedDispatchIntentWritten && toolCall) {
-          const message = typeof init.body === "string" ? JSON.parse(init.body) as { id?: unknown } : {};
-          if (typeof message.id !== "string" && typeof message.id !== "number") {
+          if (typeof providerRequestId !== "string" && typeof providerRequestId !== "number") {
             throw new Error("Managed MCP tools/call is missing its provider correlation id");
           }
           managedDispatchIntentWritten = await recordManagedMcpDispatchIntent({
@@ -8442,7 +8446,7 @@ export function createToolGatewayService(
             toolName: upstreamToolName,
             argumentsHash: toolRequestIdentityHash(parameters ?? {}, options.toolActionSigningSecret),
             routingHash: managedRoutingHash,
-            providerRequestId: String(message.id),
+            providerRequestId: String(providerRequestId),
             fenceEquivalentWrites: tool.risk !== "read",
           });
         }
@@ -8759,7 +8763,7 @@ export function createToolGatewayService(
         // endpoint changed): report it rather than start the work again.
         throw mcpTaskExpiredError();
       }
-      let response = await dispatchRemote(endpoint, toolCallInit(), true);
+      let response = await dispatchRemote(endpoint, toolCallInit(), true, callRequestId);
       // A stateless server rejects a request it cannot accept before running
       // anything (wrong version, or legacy request shape), so one retry with a
       // supported version is safe.
@@ -8805,7 +8809,7 @@ export function createToolGatewayService(
           }
           // Keep the same JSON-RPC id across the safe protocol negotiation retry.
           callRequestId = requestId;
-          response = await dispatchRemote(endpoint, toolCallInit(), true);
+          response = await dispatchRemote(endpoint, toolCallInit(), true, callRequestId);
         }
       }
       if (isInsufficientConnectionScope(response)) {
