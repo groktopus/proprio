@@ -82,19 +82,28 @@ connection budget, an interrupted lease, or database contention returns
 cursor. Advance the checkpoint only after the page arrives and the collector
 persists its membership and payloads.
 
-A company can retain up to 128 active snapshots across all operators and API
-replicas. Creation returns `429 active_snapshot_limit` at the limit. Resume
-an existing snapshot or retry after an active snapshot expires. A new
-snapshot cleans expired state in bounded batches. It discards expired
-membership and retains an owner-scoped expiry marker for 24 hours after expiry.
-During that period, a request in the same source epoch returns
-`409 snapshot_expired` even after cleanup. Later cleanup can remove the marker
-and the cursor returns `404 snapshot_missing`. Page access records follow
-their separate retention rules.
+A company can retain up to 128 active snapshots across all operators, with up
+to 32 per operator. Creation returns `429 principal_snapshot_limit` when the
+operator has reached the limit or `429 active_snapshot_limit` when the company
+has reached its limit. Resume a snapshot you own or retry after one expires.
+The limits take effect after every replica that creates exports is upgraded.
+
+Successful creation retires snapshot memberships from older epochs or windows
+before the configured cutoff in bounded batches. Those snapshots stop using
+active capacity. Their saved checkpoints return `source_epoch_changed` or
+`retention_window_expired` while the applicable boundary remains in force.
+Drain replicas with older settings before accepting export traffic after a
+source epoch or cutoff change.
+
+Successful creation removes expired membership in bounded batches. It keeps
+an owner-scoped marker for 24 hours after expiry. The marker returns
+`409 snapshot_expired` for the current epoch and retention window, including
+after cleanup. Later cleanup removes the marker and the cursor returns
+`404 snapshot_missing`. Page access records follow separate retention rules.
 
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
-after 24 hours. Starting a new export clears expired snapshots for its company.
+after 24 hours.
 
 Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.

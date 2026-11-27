@@ -6518,7 +6518,7 @@ registry.registerPath({
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start the window at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     413: { description: "Snapshot exceeds the 20,000-event limit. Use a narrower time window.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    429: { description: "Export admission is busy or the company has 128 active snapshots. Retry with backoff or resume a retained snapshot.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "For export_busy, retry with backoff. For principal_snapshot_limit or active_snapshot_limit, resume a snapshot you own or retry after one expires.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the request.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
@@ -6561,7 +6561,7 @@ registry.registerPath({
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. The owner receives snapshot_expired for at least 24 hours after expiry in the same source epoch. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export requires reconciliation. A snapshot_incomplete response permanently invalidates the snapshot. The owner receives snapshot_expired for at least 24 hours after expiry when the source epoch and retention window still apply. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     429: { description: "Export admission is busy. Retry the same cursor with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     500: { description: "Page access could not be recorded; no page is released", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the same cursor.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
