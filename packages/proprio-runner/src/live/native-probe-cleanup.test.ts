@@ -5,6 +5,31 @@ import { join, resolve } from "node:path";
 import { expect, it, vi } from "vitest";
 import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment } from "./runnerd-codex-transport.js";
 
+it("confirms owned directory cleanup when probe construction fails before transport admission", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-probe-construction-failure-"));
+  const cleanup = vi.fn(async () => { await rm(root, { recursive: true, force: true }); });
+  await expect(probeNativeRunnerEnvironment({ runtimeDirectory: root, provider: "acpx", model: "fixture-model",
+    environment: {}, workingDirectory: "/remote/probe-workspace", onCleanupConfirmed: cleanup,
+  })).rejects.toThrow("requires a remote runner filesystem");
+  expect(cleanup).toHaveBeenCalledOnce();
+  await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("retains an unconfirmed construction cleanup and exposes a retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-probe-construction-cleanup-retry-"));
+  const cleanup = vi.fn().mockRejectedValueOnce(new Error("temporary directory cleanup failed"))
+    .mockImplementationOnce(async () => { await rm(root, { recursive: true, force: true }); });
+  const failure = await probeNativeRunnerEnvironment({ runtimeDirectory: root, provider: "acpx", model: "fixture-model",
+    environment: {}, workingDirectory: "/remote/probe-workspace", onCleanupConfirmed: cleanup,
+  }).catch(error => error);
+  expect(failure).toBeInstanceOf(NativeEnvironmentProbeCleanupError);
+  const cleanupFailure = failure as NativeEnvironmentProbeCleanupError;
+  await expect(stat(root)).resolves.toBeDefined();
+  await expect(cleanupFailure.retryCleanup!()).resolves.toBeUndefined();
+  expect(cleanup).toHaveBeenCalledTimes(2);
+  await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 it.each(["eventual-exit", "bounded-retry", "windows-unconfirmed"] as const)("retains a timed-out probe home until physical proof and runs cleanup once (%s)", async mode => {
   const root = await mkdtemp(join(tmpdir(), "native-probe-retained-"));
   const home = join(root, "selected-home");
