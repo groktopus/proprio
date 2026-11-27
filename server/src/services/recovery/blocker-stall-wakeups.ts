@@ -34,11 +34,13 @@ import { agents, agentWakeupRequests, executionWorkspaces, heartbeatRuns, issueR
 import { ISSUE_BLOCKER_STALLED_WAKE_REASON, readRemoteWorkspaceAuthority, type IssueBlockerStalledWakeContext,
   type IssueBlockerStallRelation } from "@groktopus/shared";
 import { logActivity } from "../activity-log.js";
+import { caseCompletionRecoveryReadFields, projectCaseCompletionRecoveryAction } from "../issue-recovery-actions.js";
 import { parseHeartbeatPolicy } from "../heartbeat/timer-policy.js";
 import { authorizationService } from "../authorization.js";
 import { preparedStatements } from "../prepared-statements.js";
 import { readRemoteWorkspaceWriterHold, REMOTE_WORKSPACE_WRITER_PENDING_MESSAGE,
   remoteWorkspaceHoldRefusesStart } from "../remote-workspace-writer-hold.js";
+import { verifyParentDependencyDiagnosisWake } from "./parent-dependency-diagnosis.js";
 
 const TERMINAL_ISSUE_STATUSES = ["done", "cancelled"];
 /** Waiters that may be woken: not finished, and not parked in the backlog by the board. */
@@ -111,6 +113,7 @@ async function readStalls(db: Db, filter: StallFilter, limit = MAX_STALLS_PER_PA
     actionId: issueRecoveryActions.id, companyId: issueRecoveryActions.companyId,
     kind: issueRecoveryActions.kind, cause: issueRecoveryActions.cause, status: issueRecoveryActions.status,
     ownerType: issueRecoveryActions.ownerType, nextAction: issueRecoveryActions.nextAction,
+    ...caseCompletionRecoveryReadFields,
     issueId: issues.id, identifier: issues.identifier, title: issues.title, issueStatus: issues.status, parentId: issues.parentId,
     projectId: issues.projectId, assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId,
   }).from(issueRecoveryActions)
@@ -249,7 +252,7 @@ function stallContext(stall: StallRow, relation: IssueBlockerStallRelation): Iss
     stalledIssueStatus: stall.issueStatus,
     relation,
     recoveryAction: { id: stall.actionId, kind: stall.kind, cause: stall.cause, status: stall.status,
-      ownerType: stall.ownerType, nextAction: stall.nextAction },
+      ownerType: stall.ownerType, nextAction: projectCaseCompletionRecoveryAction(stall)?.nextAction ?? stall.nextAction },
   };
 }
 
@@ -433,8 +436,19 @@ export async function verifyBlockerStallWake(db: Db, input: {
   issueId: string;
   contextSnapshot: Record<string, unknown> | null | undefined;
   requestedByActorType: string | null | undefined;
+  runId?: string | null;
+  wakeupRequestId?: string | null;
 }): Promise<boolean> {
   const context = input.contextSnapshot;
+  // Parent diagnosis wakes have no child recovery action to reference. Their
+  // opaque key certifies the current required-blocker path and parent assignee;
+  // re-read it at queued-run claim and native preflight so resolved or replaced
+  // dependencies cannot inherit an old continuation.
+  if (context?.dependencyDiagnosis === true) {
+    const serverRetry = typeof context.retryOfRunId === "string" && context.retryOfRunId.length > 0;
+    if (!serverRetry && input.requestedByActorType !== "system" && input.requestedByActorType !== "user") return false;
+    return verifyParentDependencyDiagnosisWake(db, input);
+  }
   // A resource wait (AI connection busy, workspace busy) replaces the run with
   // a server-created retry that keeps the context but not the wake reason or
   // request. It carries the stall that admitted the original run.

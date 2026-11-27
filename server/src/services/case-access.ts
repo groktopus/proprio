@@ -1,5 +1,5 @@
 import { and, eq, inArray, or, sql, type SQL } from "drizzle-orm";
-import { agents, cases, caseAccessSources, caseDocuments, caseEvents, companyMemberships, documentRevisions, documents, heartbeatRuns, issues, projects, type Db } from "@groktopus/db";
+import { agents, cases, caseHandoffs, caseAccessSources, caseDocuments, caseEvents, companyMemberships, documentRevisions, documents, heartbeatRuns, issues, projects, type Db } from "@groktopus/db";
 import { isUuidLike } from "@groktopus/shared";
 import { forbidden, notFound } from "../errors.js";
 import { authorizationService, issueReadSqlCondition, projectReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -160,6 +160,21 @@ export async function filterCasesForActor<T extends { id: string }>(db: CaseDb, 
     for (const record of records) if (!allowedCompanies.has(record.companyId)) denied.add(record.id);
   }
   return rows.filter(row => !denied.has(row.id));
+}
+
+export async function readableCaseHandoffIds(db: CaseDb, actor: AuthorizationActor, scope: {
+  companyId: string; issueId: string; handoffIds: string[];
+}): Promise<Set<string>> {
+  if (scope.handoffIds.length === 0) return new Set();
+  const readCondition = await caseReadSqlCondition(db, actor);
+  const candidates = await db.select({ id: caseHandoffs.id, caseId: caseHandoffs.caseId }).from(caseHandoffs)
+    .innerJoin(cases, and(eq(cases.id, caseHandoffs.caseId), eq(cases.companyId, scope.companyId)))
+    .where(and(eq(caseHandoffs.companyId, scope.companyId), eq(caseHandoffs.issueId, scope.issueId),
+      inArray(caseHandoffs.id, scope.handoffIds), readCondition));
+  const candidateCases = [...new Set(candidates.map(({ caseId }) => caseId))].map(id => ({ id }));
+  const readableCases = await filterCasesForActor(db, actor, candidateCases);
+  const readableCaseIds = new Set(readableCases.map(({ id }) => id));
+  return new Set(candidates.filter(({ caseId }) => readableCaseIds.has(caseId)).map(({ id }) => id));
 }
 
 export async function assertActorCanReadCase(db: CaseDb, actor: AuthorizationActor, caseId: string | CaseIdentity) {

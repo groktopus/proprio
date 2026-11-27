@@ -1,0 +1,59 @@
+name: Dependency recovery browser
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/dependency-recovery-browser.yml
+      - tests/e2e/dependency-investigation-exhausted.spec.ts
+      - tests/e2e/playwright.config.ts
+      - tests/e2e/http.ts
+      - tests/e2e/server-database-url.ts
+      - server/src/routes/issue-dependency-diagnosis-view.ts
+      - server/src/services/recovery/parent-dependency-diagnosis.ts
+      - ui/src/components/DependencyDiagnosisNotice.tsx
+      - ui/src/components/IssueChatThread.tsx
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-recovery-browser-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-recovery:
+    if: github.repository == 'groktopus/proprio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install locked dependencies and Chromium
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          npm install --global --ignore-scripts "$(node -p 'require("./package.json").packageManager')"
+          pnpm install --frozen-lockfile --ignore-scripts
+          postgres_package=(node_modules/.pnpm/@embedded-postgres+linux-x64@*/node_modules/@embedded-postgres/linux-x64)
+          test "${#postgres_package[@]}" = 1
+          (cd "${postgres_package[0]}" && node scripts/hydrate-symlinks.js)
+          pnpm --filter @groktopus/plugin-sdk ensure-build-deps
+          pnpm exec playwright install --with-deps chromium
+      - name: Verify exhausted dependency diagnosis after reload
+        run: |
+          fixture_tmp="$(mktemp -d "$RUNNER_TEMP/dependency-recovery.XXXXXX")"
+          mkdir -p "$fixture_tmp/.git/info"
+          touch "$fixture_tmp/.git/info/exclude"
+          TMPDIR="$fixture_tmp" pnpm exec playwright test --config tests/e2e/playwright.config.ts \
+            tests/e2e/dependency-investigation-exhausted.spec.ts --project=chromium --workers=1 --reporter=list
