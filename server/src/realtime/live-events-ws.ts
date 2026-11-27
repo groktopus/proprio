@@ -9,7 +9,7 @@ import type { Duplex } from "node:stream";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@groktopus/db";
 import { agentApiKeys, authSessions, companyMemberships, instanceUserRoles, heartbeatRuns, issues, projects } from "@groktopus/db";
-import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@groktopus/shared";
+import { isUuidLike, issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@groktopus/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { createActivityToastIdentity } from "./activity-toast-identity.js";
@@ -330,21 +330,40 @@ export function setupLiveEventsWebSocketServer(
         }
         return event;
       }
+      const { sessionId, actorId } = context!;
+      if (sessionId && !(await sharedDeliveryRead(reads, "session", async () => {
+        const [activeSession] = await db.select({ id: authSessions.id }).from(authSessions)
+          .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, actorId),
+            gt(authSessions.expiresAt, new Date()))).limit(1);
+        return Boolean(activeSession);
+      }))) {
+        socket.close(1008, "session inactive");
+        return null;
+      }
+      const payload = event.payload;
+      const details = payload.details && typeof payload.details === "object" && !Array.isArray(payload.details)
+        ? payload.details as Record<string, unknown> : {};
+      const boardActivity = event.type === "activity.logged" && context!.actorType === "board";
+      const audienceChanged = () => ({ ...event, payload: { action: "resource_membership.changed" } });
+      // An access update can make the target ineligible for ordinary delivery.
+      // An already authenticated socket gets only a reset, without role or identity details.
+      const memberId = typeof payload.entityId === "string" && isUuidLike(payload.entityId) ? payload.entityId : null;
+      if (boardActivity && memberId && payload.entityType === "company_membership" && typeof payload.action === "string"
+        && payload.action.startsWith("company_member.")) {
+        const member = await sharedDeliveryRead(reads, `membership-change:${memberId}`, async () => {
+          const [row] = await db.select({ userId: companyMemberships.principalId }).from(companyMemberships)
+            .where(and(eq(companyMemberships.companyId, event.companyId), eq(companyMemberships.id, memberId),
+              eq(companyMemberships.principalType, "user"))).limit(1);
+          return row;
+        });
+        if (member?.userId === actorId) return { ...event, payload: { action: "company_membership.changed" } };
+      }
+
       const principalActive = await sharedDeliveryRead(reads, "principal", async () => {
         if (context!.apiKeyId) {
           const active = await db.select({ id: agentApiKeys.id }).from(agentApiKeys)
             .where(and(eq(agentApiKeys.id, context!.apiKeyId), isNull(agentApiKeys.revokedAt))).limit(1);
           return active.length > 0;
-        }
-        const { sessionId, actorId } = context!;
-        if (sessionId) {
-          const [activeSession] = await db.select({ id: authSessions.id }).from(authSessions)
-            .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, actorId),
-              gt(authSessions.expiresAt, new Date()))).limit(1);
-          if (!activeSession) {
-            socket.close(1008, "session inactive");
-            return false;
-          }
         }
         const membership = await db.select({ id: companyMemberships.id }).from(companyMemberships)
           .where(and(eq(companyMemberships.companyId, context!.companyId), eq(companyMemberships.principalType, "user"),
@@ -354,7 +373,14 @@ export function setupLiveEventsWebSocketServer(
         return membership.length > 0 || admin;
       });
       if (!principalActive) return null;
-      const payload = event.payload;
+      // Deleted tasks cannot pass object authorization. Tell the board to
+      // refresh without disclosing the removed task or its descendants.
+      if (boardActivity && payload.entityType === "issue" && payload.action === "issue.deleted") return audienceChanged();
+      // Reauthorize only the removed viewer without disclosing the now-hidden resource.
+      if (boardActivity && (
+        (payload.entityType === "project" && payload.action === "project.access_member_removed") ||
+        (payload.entityType === "issue_access_grant" && payload.action === "issue_access_grant.revoked")
+      ) && details.subjectType === "user" && details.subjectId === context!.actorId) return audienceChanged();
       const issueId = typeof payload.issueId === "string" ? payload.issueId
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
       const runId = typeof payload.runId === "string" ? payload.runId
@@ -384,7 +410,13 @@ export function setupLiveEventsWebSocketServer(
         if (run.issueId) navigationTask = { id: run.issueId, parentId: run.parentId };
       }
       if (!(await sharedDeliveryRead(reads, `read:${issueId ?? ""}:${runId ?? ""}`, async () =>
-        (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) return null;
+        (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) {
+        // A visibility or placement change can remove access to a task already open in the board.
+        const changes = details.changes && typeof details.changes === "object" ? details.changes : {};
+        const taskAudienceChanged = issueId && payload.action === "issue.updated" &&
+          ["visibility", "projectId", "parentId"].some(key => key in changes);
+        return boardActivity && taskAudienceChanged ? audienceChanged() : null;
+      }
       if (["company_skill", "company_skill_source"].includes(String(payload.entityType)) && typeof payload.entityId === "string") {
         try {
           const skills = skillAccessService(db, context!.actor);
@@ -396,7 +428,9 @@ export function setupLiveEventsWebSocketServer(
         const [project] = await db.select({ id: projects.id }).from(projects)
           .where(and(eq(projects.id, payload.entityId), eq(projects.companyId, event.companyId))).limit(1);
         if (!project || !(await access.decide({ actor: context!.actor, action: "project:read",
-          resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) return null;
+          resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) {
+          return boardActivity && payload.action === "project.updated" && details.becamePrivate === true ? audienceChanged() : null;
+        }
       }
       if (event.type.startsWith("heartbeat.run.")) {
         if (!runId) return null;

@@ -61,8 +61,9 @@ import { listIssueStatusBlockerAttention } from "../services/issue-status-presen
 import type { IssueBlockerAttention } from "@groktopus/shared";
 import { listCaseTaskDocuments } from "../services/case-task-documents.js";
 import { authorizeCaseCreation, authorizeCaseMutation } from "../services/case-mutation-authorization.js";
-import { assertCaseStatusWriteAuthority } from "../services/case-handoffs.js";
+import { assertCaseStatusWriteAuthority, cancelVersionedCaseHandoffs } from "../services/case-handoffs.js";
 import { logger } from "../middleware/logger.js";
+import { publishActivity, type ActivityPublication } from "../services/activity-log.js";
 import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 
 type CaseRouteTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -1594,6 +1595,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
     const body = patchCaseSchema.parse(req.body);
     const query = caseDetailQuerySchema.parse(req.query);
     const nextLabelIds = body.labelIds ?? body.labels;
+    const publications: ActivityPublication[] = [];
 
     const updated = await mutateCase(req, caseRow, async (tx, currentCase) => {
       await assertCaseStatusWriteAuthority(tx as unknown as Db, req.actor, currentCase, body.status);
@@ -1614,6 +1616,9 @@ export function caseRoutes(db: Db, storage: StorageService) {
 
       const now = new Date();
       const [row] = await tx.update(cases).set(buildCasePatchUpdateValues(body, currentCase, now)).where(eq(cases.id, caseRow.id)).returning();
+      if (body.status === "cancelled" && currentCase.status !== "cancelled") {
+        await cancelVersionedCaseHandoffs(tx as unknown as Db, currentCase, req.actor, publications);
+      }
 
       if (nextLabelIds) {
         await lockCaseLabels(tx, { companyId: caseRow.companyId, caseId: caseRow.id });
@@ -1678,6 +1683,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       await autoLinkRunIssue(tx, { companyId: caseRow.companyId, caseId: caseRow.id, actor, role: "work" });
       return row!;
     });
+    publications.forEach(publishActivity);
     res.json(await loadCaseDetail(db, updated, req.actor, { includeDocumentBodies: query.includeDocumentBodies === undefined || parseBooleanQuery(query.includeDocumentBodies) }));
   });
 

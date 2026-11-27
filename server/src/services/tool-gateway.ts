@@ -1619,7 +1619,7 @@ export function createToolGatewayService(
 
   async function decideInitialInvocation(
     input: ToolAccessDecisionInput,
-    policy: Pick<typeof basePolicyService, "decide" | "writeAudit"> = policyService,
+    policy: Pick<typeof basePolicyService, "decide" | "writeAudit"> = basePolicyService,
     database: Db = db,
   ): Promise<ToolAccessDecision> {
     let accessDecision = await decideWithLegacyPluginRules(input, {}, policy, database);
