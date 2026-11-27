@@ -52,7 +52,10 @@ Release engineering will select the final candidate from integrated main after
   passed on the rehearsal tree after the static fixture loader and Task
   Detail render fixes. A separate native uncertainty case counted one
   synthetic external effect and verified the hold and effect count again
-  after restart and the retry delay.
+  after restart and the retry delay. In an [earlier hosted attempt](https://github.com/groktopus/proprio/actions/runs/45896922526),
+  both #323 journeys delivered the handoff but timed out before Chromium saw
+  Done. The [passing rerun](https://github.com/groktopus/proprio/actions/runs/45898216252)
+  kept the Done assertion and increased its wait from five to 30 seconds.
   [Mixed handoff #319](https://github.com/groktopus/proprio/pull/319) · [Restart #323](https://github.com/groktopus/proprio/pull/323) · [Authority #332](https://github.com/groktopus/proprio/pull/332) · [Uncertain effect #341](https://github.com/groktopus/proprio/pull/341)
 - **Context compaction.** The separately authorized live Codex subscription
   campaign on the repaired #321 revision completed seven runs. Its 15/15
@@ -81,29 +84,35 @@ passed protected smoke and CodeQL before merge.
 [Exhausted diagnosis #367](https://github.com/groktopus/proprio/pull/367) ·
 [Budget resolution #372](https://github.com/groktopus/proprio/pull/372#issuecomment-7211566080)
 
-The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
-passed 4,429 selected tests with one skip, 13 additional Runner contract
-tests, layered server and UI typechecks, and OpenAPI verification. The next
-composition `b57a8c358f9a83a8c0802d2535a73487cabd0eef` passed 17 catalog and
-native Case tests after the catalog repair. The 40-draft rehearsal
-`463b9b6b278be8abeadeb8f89a1737641685af7d` passed
-both history scenarios in Chromium with embedded PostgreSQL. It also
-passed OpenAPI verification and all 17 tests of the source publication
-script with local fixtures.
+Local composed-snapshot observations, recorded during integration, include:
+`c9dcc4730de8f7429749f12e45088738da8b0e14` passed 4,429 selected tests with
+one skip, 13 additional Runner contract tests, layered server and UI
+typechecks, and OpenAPI verification. The next composition
+`b57a8c358f9a83a8c0802d2535a73487cabd0eef` passed 17 catalog and native Case
+tests after the catalog repair. The 40-draft rehearsal
+`463b9b6b278be8abeadeb8f89a1737641685af7d` passed both history scenarios in
+Chromium with embedded PostgreSQL, OpenAPI verification, and all 17 tests of
+the source publication script with local fixtures. These are local observations;
+there is no retained public report for these exact aggregate revisions. The
+linked PRs document narrower checks on their own revisions, not these batches.
 [Catalog repair #350](https://github.com/groktopus/proprio/pull/350) · [Browser evidence #355](https://github.com/groktopus/proprio/pull/355)
 
 ## Recovery and remaining gates
 
-- Local embedded PostgreSQL rehearsal applied migrations 0507–0509 to seeded
-  data: an existing pending handoff retained its owner and wake, the prior
-  schema client read the seeded row, and reapplication was idempotent.
-  Migration 0507 requires staging evidence because it adds unique indexes and
-  validated checks to existing tables. Migrations 0508 and 0509 add nullable
-  columns. The operating agent must record the staging upgrade, a restore or
-  roll-forward rehearsal, elapsed time, and any observed data loss. [Migration #310](https://github.com/groktopus/proprio/pull/310) · [Release checklist](../doc/RELEASE-CHECKLIST.md)
-- #409's infrastructure draft has green focused tests, protected smoke, and
-  CodeQL. Organization-side App activation is queued. The signed Runner report
-  proof remains pending. [Runner report writer #409](https://github.com/groktopus/proprio/pull/409#issuecomment-7208010648)
+- A local embedded PostgreSQL migration rehearsal used composed source
+  `6799cb4b8deb7f08ca94f4b9693d6804717ba485` and a database at the pre-migration
+  main baseline `9a280c0c8d0ab67e945f6ed3cbac94e916a3a85c`. It applied 0507–0509
+  to seeded data, preserved a pending handoff's owner and wake, and reapplied
+  the migrations as a no-op. This does not establish staging recovery. No prior-
+  schema client read is claimed here. Migration 0507 requires staging evidence
+  because it adds unique indexes and validated checks to existing tables;
+  0508 and 0509 add nullable columns. Record the staging upgrade, exercised
+  restore or roll-forward, elapsed time, and observed data loss. [#310 migration verification](https://github.com/groktopus/proprio/pull/310#issuecomment-7158763079) · [Release checklist](../doc/RELEASE-CHECKLIST.md)
+- #409's infrastructure draft passed its focused workflow and trust-policy
+  tests, protected smoke, and CodeQL, but four repository-artifact tests still
+  fail because the stored proof digest does not match the root lockfile. The
+  signed refresh must clear those failures. The signed Runner report proof is
+  pending, and organization-side App activation remains queued. [Runner report writer #409](https://github.com/groktopus/proprio/pull/409#issuecomment-7208010648)
 - Qualify the exact selected main candidate in Linux source CI after integration
   is complete. Keep the signed-off scope limited to tested runner and model
   combinations. Final-source qualification, staging migration recovery, and
