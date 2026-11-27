@@ -22,6 +22,10 @@ test("authenticated public onboarding keeps a signed-out Codex draft blocked", a
 
   const sessionResponse = await page.request.get(`${base}/api/auth/get-session`);
   expect(sessionResponse.ok()).toBeTruthy();
+  const chatFlagResponse = await page.request.patch(`${base}/api/instance/settings/experimental`, {
+    data: { enableAgentChat: true },
+  });
+  expect(chatFlagResponse.ok()).toBeTruthy();
   const companyResponse = await page.request.post(`${base}/api/companies`, { data: { name: `Compose inference ${Date.now()}` } });
   expect(companyResponse.ok()).toBeTruthy();
   const company = await companyResponse.json() as { id: string; issuePrefix: string };
@@ -43,6 +47,19 @@ test("authenticated public onboarding keeps a signed-out Codex draft blocked", a
   });
   expect(probe.status()).toBe(422);
   expect((await probe.json()).code).toBe("ai_connection_validation_failed");
+
+  // Opening a conversation is safe before verification. The greeting route
+  // must refuse to enqueue work while the setup hold is still present.
+  const conversationResponse = await page.request.post(`${base}/api/companies/${company.id}/chats/${draft.id}/onboarding`);
+  expect(conversationResponse.ok()).toBeTruthy();
+  const conversation = await conversationResponse.json() as { id: string };
+  const earlyGreeting = await page.request.post(`${base}/api/companies/${company.id}/chats/${draft.id}/onboarding/greeting`);
+  expect(earlyGreeting.status()).toBe(409);
+  expect(await earlyGreeting.json()).toMatchObject({ code: "onboarding_agent_not_ready" });
+  const earlyRuns = await page.request.get(`${base}/api/issues/${conversation.id}/runs`);
+  expect(await earlyRuns.json()).toEqual([]);
+  const earlyActivity = await page.request.get(`${base}/api/issues/${conversation.id}/activity`);
+  expect((await earlyActivity.json()).filter((event: { action: string }) => event.action === "issue.onboarding_welcome_started")).toHaveLength(0);
   const fixtureLogPath = path.join(process.env.SMOKE_DATA_DIR!, "onboarding-codex-fixture.jsonl");
   await expect.poll(() => {
     try { return readFileSync(fixtureLogPath, "utf8").trim().split("\n").map(line => JSON.parse(line)); }
@@ -90,9 +107,42 @@ test("authenticated public onboarding keeps a signed-out Codex draft blocked", a
     const state = await page.evaluate(() => JSON.parse(localStorage.getItem("proprio-onboarding-state") ?? "null"));
     return state?.setupAgentId;
   }).toBe(draft.id);
-
+  expect(repaired).toMatchObject({ id: draft.id, lifecycleState: "ready" });
   await page.reload();
-  expect(await (await page.request.get(`${base}/api/agents/${draft.id}?companyId=${company.id}`)).json()).toMatchObject({
-    id: draft.id, pauseReason: "setup", adapterConfig: { model: "gpt-5-codex" },
-  });
+  await expect(page.getByRole("button", { name: /Get started/ })).toBeVisible();
+  const afterReload = await (await page.request.get(`${base}/api/agents/${draft.id}?companyId=${company.id}`)).json();
+  expect(afterReload).toMatchObject({ id: draft.id, lifecycleState: "ready", adapterConfig: { model: "gpt-5-codex" } });
+
+  // Let the normal wizard/chat transition enqueue the first greeting. Repeated
+  // calls then model duplicate submit and reload retries; both must resolve to
+  // the same queued wake and one visible activity record.
+  await page.getByRole("button", { name: /Get started/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/${company.issuePrefix}/chats/${draft.id}$`), { timeout: 30_000 });
+  await expect(page.getByTestId("task-chat-composer-add")).toBeVisible({ timeout: 30_000 });
+  const readGreetingEvidence = async () => {
+    const activityResponse = await page.request.get(`${base}/api/issues/${conversation.id}/activity`);
+    const runResponse = await page.request.get(`${base}/api/issues/${conversation.id}/runs`);
+    expect(activityResponse.ok()).toBeTruthy();
+    expect(runResponse.ok()).toBeTruthy();
+    const activities = await activityResponse.json() as Array<{ action: string }>;
+    return {
+      greetings: activities.filter(event => event.action === "issue.onboarding_welcome_started").length,
+      runs: await runResponse.json() as unknown[],
+    };
+  };
+  await expect.poll(async () => (await readGreetingEvidence()).greetings, { timeout: 30_000 }).toBe(1);
+  await page.reload();
+  await expect(page.getByTestId("task-chat-composer-add")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await readGreetingEvidence()).greetings, { timeout: 30_000 }).toBe(1);
+  const duplicateGreetings = await Promise.all([
+    page.request.post(`${base}/api/companies/${company.id}/chats/${draft.id}/onboarding/greeting`),
+    page.request.post(`${base}/api/companies/${company.id}/chats/${draft.id}/onboarding/greeting`),
+  ]);
+  for (const response of duplicateGreetings) {
+    expect(response.ok()).toBeTruthy();
+    expect(await response.json()).toMatchObject({ started: true });
+  }
+  const finalGreetingEvidence = await readGreetingEvidence();
+  expect(finalGreetingEvidence.greetings).toBe(1);
+  expect(finalGreetingEvidence.runs).toHaveLength(1);
 });
