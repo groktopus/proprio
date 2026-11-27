@@ -1,9 +1,9 @@
 # Milestone 04 rehearsal evidence
 
-**Promotion remains on hold.** At this rehearsal checkpoint, 43 of 45 scoped
-PRs are merged on main `0ebc5c6d81ae36de6312453e13691ce976f4212f`.
-The budget recovery PR #372 is in hosted verification, followed by rehearsal
-record #356. The most recent published source prerelease is v0.0.4 at
+**Promotion remains on hold.** At this rehearsal checkpoint, 44 of 45 scoped
+PRs are merged on main `78e52bcfe7c7c9351983fae7f36f19e18e4a5973`.
+Rehearsal record #356 is the final integration PR. The previous published
+source prerelease is v0.0.4 at
 `9a280c0c8d0ab67e945f6ed3cbac94e916a3a85c`. @magnus919 is the sole human
 maintainer. Integration, independent QA, operations, documentation review, and
 release engineering agents own the milestone sign-offs under their authorized
@@ -18,7 +18,7 @@ On November 24, 2026, 44 draft heads composed on main
 `b089265c8dc80fcdf179b4e12b4a78c42ebc1dfc`. The linked pull requests
 identify the source revisions and test scope for their results.
 Release engineering will select the final candidate from integrated main after
-#372 and #356 land. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
+#356 lands. [Milestone 04](https://github.com/groktopus/proprio/milestone/5)
 
 - **Parent liveness, diagnosis, and restart.** PostgreSQL tests interrupted a
   claimed diagnostic wake and checked recovery after controller restart. A
@@ -58,25 +58,28 @@ Release engineering will select the final candidate from integrated main after
   campaign on the repaired #321 revision completed seven runs. Its 15/15
   behavior checks passed. The launcher reported two missing capture files,
   `final-state.png` and `snapshots/api-state.json`, so the original package
-  status is incomplete. The capture follow-up passed a full credential-free
-  offline package run with seven synthetic runs and 15 behavior checks.
+  status is incomplete. The capture-only code follow-up passed a full
+  credential-free offline package run with seven synthetic runs and 15 behavior
+  checks.
   The live evidence covers the repaired Codex subscription revision.
   ACPX Claude qualification remains pending.
   [Codex experiment #321](https://github.com/groktopus/proprio/pull/321) ·
   [Live and offline evidence](https://github.com/groktopus/proprio/pull/321#issuecomment-7207223985)
 
-The hosted Linux qualification for #365 tested
-`a6a88f3f89c4db8e322b92e51274d25958bf1076` from previous release
-v0.0.1 at `49611a24b54166eda41cde8a26706592cc394034`. Its artifact
-records five passing outcomes, including managed update and rollback, native
-restore to a fresh target, and active-run migration recovery.
-[Exact #365 Linux artifact](https://github.com/groktopus/proprio/actions/runs/45941147752/artifacts/15174531363)
+Hosted Linux qualification tested #365 at
+`a6a88f3f89c4db8e322b92e51274d25958bf1076` and #372 at
+`ea689f796f9becb1238f24defe8323bf840f8bbc` from previous release v0.0.1 at
+`49611a24b54166eda41cde8a26706592cc394034`. Each artifact records five
+passing outcomes, including managed update and rollback, native restore to a
+fresh target, and active-run migration recovery.
+[Exact #365 Linux artifact](https://github.com/groktopus/proprio/actions/runs/45941147752/artifacts/15174531363) ·
+[Exact #372 Linux artifact](https://github.com/groktopus/proprio/actions/runs/45952055385/artifacts/15178188065)
 
-#367 passed hosted Chromium, protected smoke, and CodeQL on its exact PR
-revision. #372 passed the exact local budget selector, all 13 tests in its
-affected file, and server typecheck. Its hosted qualification is underway.
+#367 passed hosted Chromium on its exact PR revision. #372 passed the hosted
+budget case, all 13 affected tests locally, and server typecheck. Both PRs
+passed protected smoke and CodeQL before merge.
 [Exhausted diagnosis #367](https://github.com/groktopus/proprio/pull/367) ·
-[Budget resolution #372](https://github.com/groktopus/proprio/pull/372)
+[Budget resolution #372](https://github.com/groktopus/proprio/pull/372#issuecomment-7211566080)
 
 The 38-draft composition `c9dcc4730de8f7429749f12e45088738da8b0e14`
 passed 4,429 selected tests with one skip, 13 additional Runner contract
