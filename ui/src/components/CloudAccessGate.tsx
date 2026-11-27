@@ -115,8 +115,6 @@ export function CloudAccessGate({ allowMembershipRequest = false }: { allowMembe
   const boardAccessQuery = useBootstrapQuery({
     ...boardAccessQueryOptions(
       sessionQuery.data?.user.id ?? null,
-      sessionQuery.data?.boardBootstrap,
-      sessionQuery.dataUpdatedAt,
       () => { void queryClient.invalidateQueries({ queryKey: queryKeys.auth.session }); },
     ),
     enabled: isAuthenticatedMode && !isBootstrapPending && !!sessionQuery.data,

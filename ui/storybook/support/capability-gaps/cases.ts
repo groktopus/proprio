@@ -70,20 +70,37 @@ const event: CaseEvent = {
   actorAgentName: "Codex Coder",
   issue: caseDetail.issueLinks[0].issue,
 };
-export function installCaseFixtures(state: FixtureState = "ready", workflow?: "waiting" | "blocked") {
+export type CaseFixtureWorkflow = "waiting" | "blocked" | "offer" | "clarification";
+
+export function installCaseFixtures(state: FixtureState = "ready", workflow?: CaseFixtureWorkflow) {
+  const hasOffer = workflow === "offer" || workflow === "clarification";
+  const requirementRevision = { id: "completion-contract-release", revision: 2, canonicalSha256: "a".repeat(64) };
+  const requirementsDigest = "b".repeat(64);
+  const clarification = workflow === "clarification";
   const handoff: CaseHandoffView = {
     id: "handoff-gap", companyId: caseItem.companyId, caseId: caseItem.id, issueId: "task-gap", version: 2,
     destinationKind: "agent", completedAt: null, workflowTransition: null,
+    offerContract: hasOffer ? {
+      schema: "proprio.case-handoff-offer.v1", expectedDeliverable: "A release checklist with links to the passing checks.",
+      prerequisites: ["Review the release notes.", "Confirm the staging approval."], requirementRevision, requirementsDigest,
+      taskBrief: { title: caseDetail.issueLinks[0].issue.title, description: null },
+    } : null,
+    recipientDecision: clarification ? {
+      outcome: "clarification", actorType: "agent", actorId: "agent-verifier", handoffVersion: 2,
+      requirementRevisionId: requirementRevision.id, requirementsDigest, decidedAt: caseItem.updatedAt,
+      reasonCode: "missing_prerequisite", message: "Please link the staging approval so I can finish verification.",
+    } : null,
     fromAgentId: "agent-coder", fromAgentName: "Codex Coder", toAgentId: "agent-verifier", toAgentName: "Release Verifier",
     phase: "verification", instructions: "Verify the saved release checklist and report any missing evidence on this task.",
     commentId: null, actorType: "agent", actorId: "agent-coder", sourceRunId: "run-gap", responsibleUserId: "user-storybook",
     expectedIssueStatusVersion: 1, appliedIssueStatusVersion: null, wakeupRequestId: "wake-gap", idempotencyKey: "storybook-handoff",
-    inputFingerprint: "fixture", state: "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
+    inputFingerprint: "fixture", state: clarification ? "cancelled" : hasOffer ? "offered" : "awaiting_release", attemptCount: 1, nextAttemptAt: caseItem.updatedAt,
     leaseExpiresAt: null, lastErrorCode: workflow === "blocked" ? "workspace_settlement" : null,
     lastError: workflow === "blocked" ? "Waiting for the outgoing workspace to finish saving." : null,
-    createdAt: caseItem.updatedAt, assignmentAppliedAt: null, deliveredAt: null, cancelledAt: null, updatedAt: caseItem.updatedAt,
+    createdAt: caseItem.updatedAt, assignmentAppliedAt: null, deliveredAt: null,
+    cancelledAt: clarification ? caseItem.updatedAt : null, updatedAt: caseItem.updatedAt,
   };
-  let pending = !!workflow;
+  let pending = !!workflow && !clarification;
   const detail = () => workflow ? { ...caseDetail, workIssueId: "task-gap", phase: "implementation", handoffVersion: 2,
     workIssue: { ...caseDetail.issueLinks[0].issue, statusVersion: 1, assigneeAgentId: "agent-coder", assigneeAgentName: "Codex Coder" },
     pendingHandoff: pending ? handoff : null } : caseDetail;
@@ -128,7 +145,7 @@ export function installCaseFixtures(state: FixtureState = "ready", workflow?: "w
                   id: "reverse-link-gap",
                   role: "work",
                   createdAt: caseItem.createdAt,
-                  case: caseItem,
+                  case: { ...caseItem, workIssueId: "task-gap", phase: "implementation" },
                 },
               ],
       },

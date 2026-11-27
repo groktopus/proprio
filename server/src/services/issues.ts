@@ -8,6 +8,7 @@ import { notifyStrandedAgentStatus, notifyActiveRunSilence } from "./live-run-re
 import { finishedIdleWake } from "./idle-work-proof.js";
 import { notifyDeferredExecutionEligibility } from "./deferred-execution-notifications.js";
 import { notifyIssueGraphRecovery } from "./issue-recovery-notifications.js";
+import { assertCaseHandoffWithdrawalHoldReleased } from "./case-handoff-states.js";
 import { notifyRunDispatch } from "./run-dispatch-notifications.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
 import { notifyIssueAttentionRetentionWork } from "./retention-work-notifications.js";
@@ -63,6 +64,8 @@ import type { ExecutionProjection } from "@groktopus/shared";
 import type { IssueParentAdjustment } from "@groktopus/shared";
 import {
   confirmPlacement,
+  loadAncestorIssueIds,
+  lockIssuePrivacyTree,
   planIssueParentChange,
   resolveNewTaskParent,
   withParentAdjustment,
@@ -199,7 +202,6 @@ import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import {
   buildIndependentTaskWorkspaceSettings,
   isAncestorExecutionWorkspace,
-  loadAncestorIssueIds,
   mergeExplicitWorkspaceSettings,
 } from "./task-workspace-lineage.js";
 import { hasChatRunOwnedProviderInteraction } from "./chat-interaction-arbitration.js";
@@ -218,7 +220,7 @@ import {
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
 } from "./issue-execution-policy.js";
-import { assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, requiredQualityReview } from "./required-quality-review.js";
+import { assertDeferredSignoffTargetCurrent, assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, bindPendingExecutionReviewTargets, requiredQualityReview } from "./required-quality-review.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -2653,7 +2655,7 @@ function pendingFinalizeBlockerCondition(companyId: string, issueId: SQL, worksp
   )`;
 }
 
-async function listPendingFinalizeBlockerIssueIds(
+export async function listPendingFinalizeBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
   blockerWorkspacePairs: Array<{ blockerIssueId: string; executionWorkspaceId: string }>,
@@ -10699,7 +10701,7 @@ export function issueService(db: Db) {
           resolvedTitle = `Chat with ${conversationAgent.name}`;
           issueData.title = resolvedTitle;
         }
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+        await lockIssuePrivacyTree(tx, companyId);
         await assertAgentInteraction(tx as unknown as Db, {
           companyId, actorAgentId: issueData.createdByAgentId,
           operation: "assign", targetAgentId: issueData.assigneeAgentId,
@@ -12055,7 +12057,7 @@ export function issueService(db: Db) {
 
       const runUpdate = async (tx: any) => {
         const changesPrivacy = issueData.visibility !== undefined || issueData.parentId !== undefined || issueData.projectId !== undefined;
-        if (changesPrivacy) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
+        if (changesPrivacy) await lockIssuePrivacyTree(tx, existing.companyId);
         if (issueData.parentId) await assertParentInCompany(tx, existing.companyId, issueData.parentId);
         if (lockedParentPlan && issueData.parentId !== undefined) {
           const relocked = await planIssueParentChange(tx, existing, lockedParentPlan.requestedParentId, lockedParentPlan.policy);
@@ -12076,6 +12078,13 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if ((actorAgentId || !actorUserId) && (
+          (patch.status !== undefined && patch.status !== receiptExisting.status) ||
+          (patch.assigneeAgentId !== undefined && patch.assigneeAgentId !== receiptExisting.assigneeAgentId) ||
+          (patch.assigneeUserId !== undefined && patch.assigneeUserId !== receiptExisting.assigneeUserId)
+        )) {
+          await assertCaseHandoffWithdrawalHoldReleased(tx, receiptExisting.companyId, id);
+        }
         if (Object.keys(issueData).length || nextLabelIds !== undefined || blockedByIssueIds !== undefined) await assertAgentInteraction(tx as unknown as Db, {
           companyId: receiptExisting.companyId, actorAgentId, operation: "edit", issueId: id,
           texts: [
@@ -12119,10 +12128,18 @@ export function issueService(db: Db) {
             code: "issue_execution_lock_changed",
           });
         }
-        if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
+        const nextReviewPolicy = issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy;
+        if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: nextReviewPolicy, actorAgentId, actorUserId });
+        if (patch.executionState && typeof patch.executionState === "object") {
+          patch.executionState = await bindPendingExecutionReviewTargets(tx as Db, {
+            issue: receiptExisting, nextPolicy: nextReviewPolicy, nextState: patch.executionState,
+          });
+        }
         if ((patch.status ?? receiptExisting.status) === "done" &&
             (receiptExisting.status !== "done" || issueData.executionPolicy !== undefined)) {
-          await assertRequiredQualityReviewComplete(tx as Db, { ...receiptExisting, executionPolicy: issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy }, true);
+          const issueForReview = { ...receiptExisting, executionPolicy: nextReviewPolicy };
+          await assertDeferredSignoffTargetCurrent(tx as Db, issueForReview);
+          await assertRequiredQualityReviewComplete(tx as Db, issueForReview, true);
         }
         if (actorRunId) await assertNoCaseHandoffMutation(tx, actorRunId, id);
         if (expectedStatusVersion !== undefined && (
@@ -12260,6 +12277,11 @@ export function issueService(db: Db) {
         patch.goalId = goalBinding.goalId;
         patch.goalOrigin = goalBinding.goalOrigin;
         patch.goalOriginGoalId = goalBinding.goalId;
+        if ((patch.title !== undefined && patch.title !== receiptExisting.title)
+          || (patch.description !== undefined && patch.description !== receiptExisting.description)) {
+          await cancelCaseHandoffsForIssue(tx, { companyId: receiptExisting.companyId, issueId: id,
+            reason: "Task brief changed", unansweredOffersOnly: true, publications: activityPublications });
+        }
         // Ownership changes invalidate observed handoff versions even if status
         // stays the same, including an A -> B -> A assignment race.
         if (issueData.status === "done" || issueData.status === "cancelled") {
@@ -12966,6 +12988,7 @@ export function issueService(db: Db) {
           companyId: issueCompany.companyId, actorAgentId: agentId, operation: "assign",
           issueId: id, targetAgentId: agentId, lock: true,
         });
+        await assertCaseHandoffWithdrawalHoldReleased(tx, issueCompany.companyId, id);
         await notifyStatusCardIssueChange(tx, issueCompany.companyId);
         await notifyIssueAttentionRetentionWork(tx, { companyId: issueCompany.companyId, issueId: id });
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
