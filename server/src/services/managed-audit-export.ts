@@ -69,18 +69,32 @@ async function acquireExport(companyId: string, signal?: AbortSignal) {
   });
 }
 
-async function runExportTransaction<T>(db: Db, { companyId, signal }: ExportScope, work: (tx: DbTransaction) => Promise<T>): Promise<T> {
+async function runExportTransaction<T>(
+  db: Db,
+  { companyId, signal }: ExportScope,
+  work: (tx: DbTransaction) => Promise<T>,
+  prepare?: (tx: DbTransaction) => Promise<void>,
+): Promise<T> {
   await acquireExport(companyId, signal);
   try {
     signal?.throwIfAborted();
     // Keep full snapshot validation off the ordinary request pool and retain
     // admission until the dedicated connection has settled or closed.
-    return await withDedicatedDbConnection(db, dedicated => dedicated.transaction(async tx => {
-      await tx.execute(sql`select set_config('statement_timeout',
+    return await withDedicatedDbConnection(db, async dedicated => {
+      const applyStatementTimeout = (tx: DbTransaction) => tx.execute(sql`select set_config('statement_timeout',
         least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
         true) from pg_settings where name = 'statement_timeout'`);
-      return work(tx);
-    }, repeatableRead), { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
+      if (prepare) {
+        await dedicated.transaction(async tx => {
+          await applyStatementTimeout(tx);
+          await prepare(tx);
+        });
+      }
+      return dedicated.transaction(async tx => {
+        await applyStatementTimeout(tx);
+        return work(tx);
+      }, repeatableRead);
+    }, { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
     if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
       || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
@@ -138,6 +152,8 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
   const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  // If a surviving binding proves the event belongs to evidence the caller
+  // cannot see, do not reveal whether another task/run binding is missing.
   const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
     .where(and(
       eq(issues.companyId, scope.companyId),
@@ -183,9 +199,6 @@ export async function createManagedAuditExport(
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
     const now = new Date();
-    await tx.delete(managedAuditExports).where(and(
-      eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
-    ));
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
@@ -220,6 +233,18 @@ export async function createManagedAuditExport(
       details: { exportId: saved.id, source: "tool_gateway" },
     }, publications);
     return saved;
+  }, async tx => {
+    // Commit expiry cleanup in read committed on the bounded dedicated lease.
+    // Competing creators cannot conflict inside the snapshot transaction.
+    await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
+    const now = new Date();
+    await tx.delete(managedAuditExports).where(and(
+      eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
+    ));
   });
   for (const publication of publications) publishActivity(publication);
   return exportReceipt(snapshot);
