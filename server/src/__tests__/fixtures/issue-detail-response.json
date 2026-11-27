@@ -9,6 +9,7 @@
   "projectId": "<id:2>",
   "projectWorkspaceId": null,
   "goalId": null,
+  "goalOrigin": "unknown",
   "parentId": "<id:3>",
   "visibility": "open",
   "privacyRootIssueId": null,

@@ -212,6 +212,7 @@ describe("runner API catalog", () => {
     expect(runnerApiOperation("POST /api/companies/{companyId}/agent-hires").dedicatedTools).toEqual(["hire_agent"]);
     expect(runnerApiOperation("POST /api/companies/{companyId}/agent-hires").dedicatedToolGuidance).toContain("inherits the caller's native runtime");
   });
+
   it.each(runnerApiCatalog().filter(operation => operation.transport === "rest"))("resolves the catalog route $operationId inside the bound origin", operation => {
     const pathParams = Object.fromEntries(operation.parameters.filter(parameter => parameter.in === "path").map(parameter => [parameter.name, parameter.name === "companyId" ? context.companyId : "fixture-id"]));
     const url = runnerApiUrl(operation, { operationId: operation.operationId, pathParams }, context, "https://proprio.test");
@@ -227,9 +228,9 @@ describe("runner API catalog", () => {
     const install = results.find(row => row.operationId === "POST /api/companies/{companyId}/teams/catalog/{catalogId}/install")!;
     const previewBody = preview.requestBody?.content["application/json"].schema;
     const installBody = install.requestBody?.content["application/json"].schema;
-    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object) } });
+    expect(previewBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), nameOverrides: expect.any(Object), adapterOverrides: expect.any(Object) } });
     expect(installBody).toMatchObject({ additionalProperties: false, properties: { targetManagerAgentId: expect.any(Object), adapterOverrides: expect.any(Object), secretValues: expect.any(Object) } });
-    expect(previewBody.properties).not.toHaveProperty("adapterOverrides");
+    expect(previewBody.properties).not.toHaveProperty("secretValues");
   });
 
   it("discovers proposal revision without confusing it with hiring, approval decisions, or reads", () => {

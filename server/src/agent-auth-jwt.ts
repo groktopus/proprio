@@ -62,6 +62,10 @@ function jwtConfig() {
   };
 }
 
+export function canSignLocalAgentJwt() {
+  return jwtConfig() !== null;
+}
+
 /**
  * Derive a per-instance, per-company signing key from the master JWT secret,
  * the control-plane instanceId, and a companyId.
