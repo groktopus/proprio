@@ -3,7 +3,7 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { createDb, instanceUserRoles, invites } from "@groktopus/db";
-import { inferBindModeFromHost, parseDeploymentExposure, resolveDeploymentMode } from "@groktopus/shared";
+import { DEPLOYMENT_MODES, inferBindModeFromHost, parseDeploymentExposure, resolveDeploymentMode } from "@groktopus/shared";
 import { loadDeploymentEnv } from "../config/env.js";
 import { readConfig, resolveConfigPath } from "../config/store.js";
 
@@ -29,26 +29,52 @@ function resolveDbUrl(configPath?: string, explicitDbUrl?: string) {
   return null;
 }
 
-function resolveBaseUrl(configPath?: string, explicitBaseUrl?: string) {
-  if (explicitBaseUrl) return explicitBaseUrl.replace(/\/+$/, "");
-  const fromEnv =
-    process.env.PROPRIO_PUBLIC_URL ??
-    process.env.PROPRIO_AUTH_PUBLIC_BASE_URL ??
-    process.env.BETTER_AUTH_URL ??
-    process.env.BETTER_AUTH_BASE_URL;
-  if (fromEnv?.trim()) return fromEnv.trim().replace(/\/+$/, "");
+type BaseUrlResolution = { url: string; explicit: boolean };
+
+function resolveBaseUrl(configPath?: string, explicitBaseUrl?: string): BaseUrlResolution {
+  const normalize = (value: string, source: string) => {
+    let url: URL;
+    try {
+      url = new URL(value.trim());
+    } catch {
+      throw new Error(source + " must be an HTTP or HTTPS URL without credentials, query, or fragment");
+    }
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      value.trim().includes("?") ||
+      value.trim().includes("#")
+    ) {
+      throw new Error(source + " must be an HTTP or HTTPS URL without credentials, query, or fragment");
+    }
+    return value.trim().replace(/\/+$/, "");
+  };
+  const configured = explicitBaseUrl?.trim()
+    ? { value: explicitBaseUrl, source: "--base-url" }
+    : [
+        { value: process.env.PROPRIO_PUBLIC_URL, source: "Configured public base URL" },
+        { value: process.env.PROPRIO_AUTH_PUBLIC_BASE_URL, source: "Configured public base URL" },
+        { value: process.env.BETTER_AUTH_URL, source: "Configured public base URL" },
+        { value: process.env.BETTER_AUTH_BASE_URL, source: "Configured public base URL" },
+      ].find(candidate => candidate.value?.trim());
+  if (configured?.value?.trim()) {
+    return { url: normalize(configured.value, configured.source), explicit: true };
+  }
   const config = readConfig(configPath);
   if (config?.auth.baseUrlMode === "explicit" && config.auth.publicBaseUrl) {
-    return config.auth.publicBaseUrl.replace(/\/+$/, "");
+    return { url: normalize(config.auth.publicBaseUrl, "Saved public base URL"), explicit: true };
   }
   const bind = config?.server.bind ?? inferBindModeFromHost(config?.server.host);
-  const host =
+  const host = process.env.HOST?.trim() || (
     bind === "custom"
       ? config?.server.customBindHost ?? config?.server.host ?? "localhost"
-      : config?.server.host ?? "localhost";
-  const port = config?.server.port ?? 3100;
+      : config?.server.host ?? "localhost"
+  );
+  const port = Number(process.env.PORT) || config?.server.port || 3100;
   const publicHost = host === "0.0.0.0" || bind === "lan" ? "localhost" : host;
-  return `http://${publicHost}:${port}`;
+  return { url: normalize("http://" + publicHost + ":" + port, "Resolved public base URL"), explicit: false };
 }
 
 export async function bootstrapCeoInvite(opts: {
@@ -60,18 +86,24 @@ export async function bootstrapCeoInvite(opts: {
 }) {
   const configPath = resolveConfigPath(opts.config);
   loadDeploymentEnv(configPath);
-  parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE);
   const config = readConfig(configPath);
-  if (!config) {
-    p.log.error(`No config found at ${configPath}. Run ${pc.cyan("proprio onboard")} first.`);
+  const deploymentExposure = parseDeploymentExposure(process.env.PROPRIO_DEPLOYMENT_EXPOSURE) ??
+    config?.server.exposure ?? "private";
+  const configuredMode = config?.server.deploymentMode;
+  const modeFromEnv = process.env.PROPRIO_DEPLOYMENT_MODE?.trim() || undefined;
+  if (modeFromEnv && !(DEPLOYMENT_MODES as readonly string[]).includes(modeFromEnv)) {
+    throw new Error("PROPRIO_DEPLOYMENT_MODE must be authenticated or local_trusted");
+  }
+  if (!config && !modeFromEnv) {
+    p.log.error(`No config found at ${configPath}. Set PROPRIO_DEPLOYMENT_MODE to match the running deployment.`);
+    process.exitCode = 1;
     return;
   }
 
-  const savedMode = config.server.deploymentMode;
-  const effectiveMode = resolveDeploymentMode(process.env.PROPRIO_DEPLOYMENT_MODE, savedMode);
-  if (savedMode !== effectiveMode) {
+  const effectiveMode = resolveDeploymentMode(modeFromEnv, configuredMode);
+  if (configuredMode && configuredMode !== effectiveMode) {
     p.log.error(
-      `Deployment mode differs: ${configPath} selects ${savedMode} but PROPRIO_DEPLOYMENT_MODE selects ${effectiveMode}. Match the saved setting to the running service and retry.`,
+      `Deployment mode differs: ${configPath} selects ${configuredMode} but PROPRIO_DEPLOYMENT_MODE selects ${effectiveMode}. Match the saved setting to the running service and retry.`,
     );
     process.exitCode = 1;
     return;
@@ -82,21 +114,27 @@ export async function bootstrapCeoInvite(opts: {
     return;
   }
 
+  const baseUrl = resolveBaseUrl(configPath, opts.baseUrl);
+  if (!config && deploymentExposure === "public" && !baseUrl.explicit) {
+    p.log.error("Could not resolve the public base URL for bootstrap. Set PROPRIO_PUBLIC_URL or pass --base-url.");
+    process.exitCode = 1;
+    return;
+  }
+  if (deploymentExposure === "public" && new URL(baseUrl.url).protocol !== "https:") {
+    throw new Error("Public bootstrap invite URLs must use HTTPS.");
+  }
+
   const dbUrl = resolveDbUrl(configPath, opts.dbUrl);
   if (!dbUrl) {
-    p.log.error(
-      "Could not resolve database connection for bootstrap.",
-    );
+    p.log.error("Could not resolve database connection for bootstrap. Set DATABASE_URL or configure a database with proprio onboard.");
+    process.exitCode = 1;
     return;
   }
 
-  const db = createDb(dbUrl);
-  const closableDb = db as typeof db & {
-    $client?: {
-      end?: (options?: { timeout?: number }) => Promise<void>;
-    };
-  };
+  let closableDb: ReturnType<typeof createDb> | undefined;
   try {
+    closableDb = createDb(dbUrl);
+    const db = closableDb;
     const existingAdminCount = await db
       .select()
       .from(instanceUserRoles)
@@ -135,15 +173,15 @@ export async function bootstrapCeoInvite(opts: {
       .returning()
       .then((rows) => rows[0]);
 
-    const baseUrl = resolveBaseUrl(configPath, opts.baseUrl);
-    const inviteUrl = `${baseUrl}/invite/${token}`;
+    const inviteUrl = baseUrl.url + "/invite/" + token;
     p.log.success("Created bootstrap CEO invite.");
     p.log.message(`Invite URL: ${pc.cyan(inviteUrl)}`);
     p.log.message(`Expires: ${pc.dim(created.expiresAt.toISOString())}`);
-  } catch (err) {
-    p.log.error(`Could not create bootstrap invite: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    p.log.error("Could not create bootstrap invite. Check the database connection and try again.");
     p.log.info("If using embedded-postgres, start the Proprio server and run this command again.");
+    process.exitCode = 1;
   } finally {
-    await closableDb.$client?.end?.({ timeout: 5 }).catch(() => undefined);
+    await closableDb?.$client?.end?.({ timeout: 5 }).catch(() => undefined);
   }
 }
