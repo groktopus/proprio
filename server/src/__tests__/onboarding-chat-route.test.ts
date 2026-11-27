@@ -21,7 +21,8 @@ describeEmbeddedPostgres("onboarding chat", () => {
     const owner = await seedCompanyWithBoardAccess(ctx.db, "New company");
     await ctx.db.insert(authUsers).values({ id: owner.userId, name: "Owner", email: `${owner.userId}@example.test`,
       createdAt: new Date(), updatedAt: new Date() });
-    const [agent] = await ctx.db.insert(agents).values({ companyId: owner.companyId, name: "Ada", role: "ceo", status: "idle", adapterType: "process" }).returning();
+    const [agent] = await ctx.db.insert(agents).values({ companyId: owner.companyId, name: "Ada", role: "ceo", status: "idle",
+      adapterType: "codex_local", adapterConfig: { model: "gpt-5.4" } }).returning();
     const wakeup = vi.fn(async (_agentId, options) => {
       await ctx.db.insert(agentWakeupRequests).values({ companyId: owner.companyId, agentId: agent.id,
         source: options.source, reason: options.reason, status: "pending", idempotencyKey: options.idempotencyKey });
@@ -54,6 +55,9 @@ describeEmbeddedPostgres("onboarding chat", () => {
 
   it("opens one owner-bound chat with signup context, zero execution tasks, zero projects, and no early wake", async () => {
     const { companyId, userId, agent, app, path, wakeup } = await setup();
+    expect(agent.lifecycleState).toBe("ready");
+    expect(agent.lifecycleHolds).not.toContain("setup");
+    expect(agent.adapterConfig).toMatchObject({ model: "gpt-5.4" });
     await ctx.db.insert(goals).values({ companyId, title: "Launch a robotics newsletter", level: "company", status: "active" });
     await ctx.db.insert(companyOnboardingSeeds).values({ companyId, revision: "one", firstTaskTitle: "Draft an editorial plan", firstTaskDetails: "One page" });
     const [first, retry] = await Promise.all([request(app).post(path), request(app).post(path)]);
@@ -72,6 +76,25 @@ describeEmbeddedPostgres("onboarding chat", () => {
       reason: ONBOARDING_CHAT_GREETING_REASON, requestedByActorId: userId, manualUserWake: true,
       contextSnapshot: expect.objectContaining({ issueId: first.body.id }),
     }));
+  });
+
+  it.each([
+    ["setup hold", { lifecycleHolds: ["setup"] as string[] }],
+    ["verification lifecycle", { lifecycleState: "verifying" as const }],
+  ])("does not queue the onboarding greeting for an unverified agent (%s)", async (_state, state) => {
+    const { agent, app, path, wakeup, companyId } = await setup();
+    await request(app).post(path);
+    await ctx.db.update(agents).set(state).where(eq(agents.id, agent.id));
+
+    const response = await request(app).post(`${path}/greeting`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: "onboarding_agent_not_ready",
+      error: "Finish verifying this agent before starting its welcome chat",
+    });
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(await ctx.db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
   });
 
   it("respects company access, keeps another person's chat private, and skips a welcome after a user reply", async () => {
