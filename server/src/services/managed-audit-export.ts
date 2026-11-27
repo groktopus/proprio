@@ -3,8 +3,8 @@ import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { authorizationService, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
-import { heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
+import { authorizationService, issueEvidenceReadSqlCondition, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
+import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -62,8 +62,17 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.id, managedAuditEvents.runId))))));
   const missingTask = and(isNotNull(managedAuditEvents.taskId), not(exists(tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
+  // If a surviving binding proves the event belongs to evidence the caller
+  // cannot see, do not reveal whether another task/run binding is missing.
+  const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
+    .where(and(
+      eq(issues.companyId, scope.companyId),
+      eq(issues.id, managedAuditEvents.taskId),
+      not(issueEvidenceReadSqlCondition(scope.actor)),
+    )));
+  const hiddenRunBinding = heartbeatRunIssueBindingDeniedSqlCondition(tx, scope.actor, scope.companyId, managedAuditEvents.runId);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
-    .where(and(sourceWindow, or(missingRun, missingTask))).limit(1);
+    .where(and(sourceWindow, or(missingRun, missingTask), not(hiddenTaskBinding), not(hiddenRunBinding))).limit(1);
   if (missing) throw conflict("Managed audit source has unavailable event bindings. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
 }
 
@@ -93,8 +102,11 @@ export async function createManagedAuditExport(
   window: { from: Date; to: Date },
 ) {
   const publications: ActivityPublication[] = [];
-  const snapshot = await db.transaction(async tx => {
-    const userId = await assertCurrentAuditAuthority(tx, scope);
+  // Expiry cleanup is best-effort maintenance. Commit it in a normal
+  // read-committed transaction so competing creators do not make the
+  // repeatable-read snapshot transaction fail on the same expired rows.
+  await db.transaction(async tx => {
+    await assertCurrentAuditAuthority(tx, scope);
     assertRetainedWindow(scope, window.from);
     if (window.from < scope.captureFrom) {
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
@@ -103,6 +115,14 @@ export async function createManagedAuditExport(
     await tx.delete(managedAuditExports).where(and(
       eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
     ));
+  });
+  const snapshot = await db.transaction(async tx => {
+    const userId = await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
+    const now = new Date();
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
