@@ -47,6 +47,7 @@ import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
 import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
+import { canReadBudgetTaskTreeRoot, readableTaskTreeBudgetCondition } from "./budget-scope-visibility.js";
 import { issueApprovalService } from "./issue-approvals.js";
 import { approvalService } from "./approvals.js";
 import { getStorageService } from "../storage/index.js";
@@ -86,7 +87,9 @@ import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
 import {
+  approvalReadSqlCondition,
   authorizationService,
+  canActorReadApproval,
   canActorReadIssuePrivacy,
   issuePrivacyMode,
   issueReadSqlCondition,
@@ -1401,6 +1404,7 @@ export function buildHostServices(
   };
 
   const getOpenBudgetIncidents = async (companyId: string) => {
+    const readCondition = await issueReadSqlCondition(db, pluginIssuePrivacyActor);
     const rows = await db
       .select({
         id: budgetIncidents.id,
@@ -1416,7 +1420,9 @@ export function buildHostServices(
         createdAt: budgetIncidents.createdAt,
       })
       .from(budgetIncidents)
-      .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.status, "open")))
+      .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.status, "open"),
+        readableTaskTreeBudgetCondition(readCondition, budgetIncidents.scopeType,
+          sql`${issuesTable.id} = ${budgetIncidents.scopeId} and ${issuesTable.companyId} = ${budgetIncidents.companyId}`)))
       .orderBy(desc(budgetIncidents.createdAt));
 
     return rows.map((row) => ({
@@ -2624,6 +2630,8 @@ export function buildHostServices(
                   issueId: issueRow.id,
                   projectId: issueRow.projectId,
                 });
+                if (block?.scopeType === "task_tree"
+                  && !await canReadBudgetTaskTreeRoot(db, companyId, block.scopeId, pluginIssuePrivacyActor)) return null;
                 return block
                   ? {
                     issueId: issueRow.id,
@@ -2932,7 +2940,7 @@ export function buildHostServices(
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        const rows = await approvalSvc.list(companyId, params.status ?? undefined);
+        const rows = await approvalSvc.list(companyId, params.status ?? undefined, await approvalReadSqlCondition(db, pluginIssuePrivacyActor));
         // Match the web app's approval read surface: payloads are redacted so
         // the chat bridge never receives secrets the web app itself hides.
         return rows.map((approval) => redactApprovalPayload(approval)) as any;
@@ -2941,14 +2949,14 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const approval = await approvalSvc.getById(params.approvalId);
-        if (!approval || approval.companyId !== companyId) return null;
+        if (!approval || approval.companyId !== companyId || !await canActorReadApproval(db, pluginIssuePrivacyActor, approval.id)) return null;
         return redactApprovalPayload(approval) as any;
       },
       async decide(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         const existing = await approvalSvc.getById(params.approvalId);
-        if (!existing || existing.companyId !== companyId) {
+        if (!existing || existing.companyId !== companyId || !await canActorReadApproval(db, pluginIssuePrivacyActor, existing.id)) {
           throw new Error(`Approval "${params.approvalId}" not found`);
         }
         // Deciding an approval is a board-user action (the web app's approval

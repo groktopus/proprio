@@ -1,3 +1,0 @@
-ALTER TABLE "managed_audit_events" ADD COLUMN IF NOT EXISTS "operation_fingerprint" text;--> statement-breakpoint
-ALTER TABLE "managed_audit_events" ADD COLUMN IF NOT EXISTS "provider_request_id" text;--> statement-breakpoint
-CREATE INDEX CONCURRENTLY IF NOT EXISTS "managed_audit_events_pending_operation_idx" ON "managed_audit_events" USING btree ("company_id","operation_fingerprint") WHERE "managed_audit_events"."source" = 'tool_gateway' and "managed_audit_events"."phase" = 'dispatch_intent' and "managed_audit_events"."operation_fingerprint" is not null;

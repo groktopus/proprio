@@ -3540,22 +3540,43 @@
     {
       "idx": 507,
       "version": "7",
-      "when": 1795553953150,
-      "tag": "0507_sturdy_rockslide",
+      "when": 1795534058840,
+      "tag": "0507_useful_leper_queen",
       "breakpoints": true
     },
     {
       "idx": 508,
       "version": "7",
-      "when": 1795554687389,
-      "tag": "0508_quick_nico_minoru",
+      "when": 1795539524948,
+      "tag": "0508_silly_jack_murdock",
       "breakpoints": true
     },
     {
       "idx": 509,
       "version": "7",
-      "when": 1795563860190,
-      "tag": "0509_friendly_shadowcat",
+      "when": 1795542144755,
+      "tag": "0509_grey_logan",
+      "breakpoints": true
+    },
+    {
+      "idx": 510,
+      "version": "7",
+      "when": 1795784871727,
+      "tag": "0510_nervous_mentallo",
+      "breakpoints": true
+    },
+    {
+      "idx": 511,
+      "version": "7",
+      "when": 1795785599925,
+      "tag": "0511_numerous_moondragon",
+      "breakpoints": true
+    },
+    {
+      "idx": 512,
+      "version": "7",
+      "when": 1795786853611,
+      "tag": "0512_late_madame_hydra",
       "breakpoints": true
     }
   ]

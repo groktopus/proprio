@@ -11,7 +11,6 @@ export const managedAuditExports = pgTable("managed_audit_exports", {
   eventIds: uuid("event_ids").array().notNull(),
   watermark: text("watermark").notNull(),
   cursorSecret: uuid("cursor_secret").notNull().defaultRandom(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 }, table => [
   index("managed_audit_exports_company_expiry_idx").on(table.companyId, table.expiresAt),

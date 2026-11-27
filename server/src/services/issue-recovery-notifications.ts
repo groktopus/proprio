@@ -96,10 +96,17 @@ export async function notifyIssueGraphRecovery(transaction: object,
   for (const queue of TASK_QUEUES) await notifyDeliveryWork(transaction, queue, graphHint);
 }
 
-export async function resolveIssueGraph(db: Db, scope: { companyId: string; runId?: string; issueId?: string }): Promise<string[] | null> {
+export async function resolveIssueGraph(db: Db, scope: {
+  companyId: string; runId?: string; issueId?: string; transitiveDependents?: boolean;
+}): Promise<string[] | null> {
   const company = sql`${scope.companyId}::uuid`;
   const run = scope.runId ? sql`${scope.runId}::uuid` : sql`null::uuid`;
-  const rows = await db.execute<{ id: string }>(sql`with seed(id) as (
+  const direct = sql`select related_issue_id from issue_relations where company_id = ${company} and type = 'blocks'
+    and issue_id in (select id from seed) limit ${ISSUE_RECOVERY_MAX_ISSUE_IDS + 1}`;
+  // Collect bounded transitive candidates without building all possible paths.
+  // UNION deduplicates an issue; the recursive CTE stops once the top-level
+  // limit is satisfied. Overflow uses the existing company-scope fallback.
+  const rows = await db.execute<{ id: string }>(sql`with recursive seed(id) as (
       select id from issues where company_id = ${company} and id = ${scope.issueId ?? null}::uuid
       union select issue_id from heartbeat_runs where company_id = ${company} and id = ${run} and issue_id is not null
       union select native_issue_id from heartbeat_runs where company_id = ${company} and id = ${run} and native_issue_id is not null
@@ -108,11 +115,16 @@ export async function resolveIssueGraph(db: Db, scope: { companyId: string; runI
         inner join issues issue on issue.company_id = run.company_id
           and issue.id = case when context.saved ~* ${UUID_PATTERN} then context.saved::uuid end
       where run.company_id = ${company} and run.id = ${run}
-    ), affected(id) as (
+    ), related(id) as (
       select id from seed
       union select parent_id from issues where company_id = ${company} and id in (select id from seed) and parent_id is not null
-      union (select related_issue_id from issue_relations where company_id = ${company} and type = 'blocks'
-        and issue_id in (select id from seed) limit ${ISSUE_RECOVERY_MAX_ISSUE_IDS + 1})
+    ), affected(id) as (
+      select id from related
+      union ${scope.transitiveDependents
+        ? sql`select relation.related_issue_id from affected
+            join issue_relations relation on relation.issue_id = affected.id
+              and relation.company_id = ${company} and relation.type = 'blocks'`
+        : sql`(${direct})`}
     ) select id::text as id from affected limit ${ISSUE_RECOVERY_MAX_ISSUE_IDS + 1}`);
   const issueIds = rows.map(row => row.id).sort();
   if (issueIds.length === 0) return scope.issueId ? null : [];
