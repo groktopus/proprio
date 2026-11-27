@@ -1,5 +1,5 @@
 import { addCents, normalizeCents, usdToUnits, unitsToCents } from "@groktopus/shared";
-import { and, eq, gte, inArray, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { budgetPolicies, budgetReservations, browserUseRuns, browserUseSessions, costEvents, heartbeatRuns, issues, type Db } from "@groktopus/db";
 import { withBudgetSpan } from "./budget-tracing.js";
 
@@ -20,6 +20,12 @@ export type ObservedSpend = BudgetExposure & {
    * contributes its bounded estimate to exposure and never gates admission. */
   pendingRunCount: number;
 };
+
+function taskTreeRunMatch(runId: SQLWrapper, companyId: SQLWrapper, rootIssueId: string) {
+  return sql`exists (select 1 from heartbeat_runs task_tree_run
+    where task_tree_run.id = ${runId} and task_tree_run.company_id = ${companyId}
+      and task_tree_run.task_lineage_json->'pathIssueIds' @> ${JSON.stringify([rootIssueId])}::jsonb)`;
+}
 
 export function budgetWindow(kind: string, now = new Date()) {
   return kind === "lifetime" ? { start: new Date(0), end: new Date(Date.UTC(9999, 0, 1)) }
@@ -82,10 +88,12 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
     const ledger = and(eq(costEvents.companyId, policy.companyId),
       policy.scopeType === "agent" ? eq(costEvents.agentId, policy.scopeId) : undefined,
       policy.scopeType === "project" ? eq(costEvents.projectId, policy.scopeId) : undefined,
+      policy.scopeType === "task_tree" ? taskTreeRunMatch(costEvents.heartbeatRunId, costEvents.companyId, policy.scopeId) : undefined,
       policy.windowKind === "calendar_month_utc" ? and(gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)) : undefined)!;
     const held = and(eq(budgetReservations.companyId, policy.companyId), eq(budgetReservations.state, "held"),
       policy.scopeType === "agent" ? eq(budgetReservations.agentId, policy.scopeId) : undefined,
-      policy.scopeType === "project" ? eq(budgetReservations.projectId, policy.scopeId) : undefined)!;
+      policy.scopeType === "project" ? eq(budgetReservations.projectId, policy.scopeId) : undefined,
+      policy.scopeType === "task_tree" ? taskTreeRunMatch(budgetReservations.runId, budgetReservations.companyId, policy.scopeId) : undefined)!;
     // Hosted browser work is a separate paid operation from its parent run.
     // Its durable hold survives unknown POST outcomes and monthly rollover.
     const browserHold = sql`${browserUseRuns.result}->'proprioBudgetHold'`;
@@ -98,6 +106,9 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
     const browser = and(eq(browserUseRuns.companyId, policy.companyId), eq(browserUseSessions.companyId, policy.companyId),
       sql`((${hasBrowserHold} and ${browserHold}->>'state' = 'held') or (${legacyBrowserPending}))`,
       policy.scopeType === "agent" ? eq(browserUseSessions.agentId, policy.scopeId) : undefined,
+      // Hosted browser operations have no immutable task lineage today. Do not
+      // attribute unrelated browser spend to a task tree by agent coincidence.
+      policy.scopeType === "task_tree" ? sql`false` : undefined,
       policy.scopeType === "project" ? sql`case when ${hasBrowserHold} then ${browserHold}->>'projectId'
         else ${issues.projectId}::text end = ${policy.scopeId}` : undefined)!;
     browserPredicates.push(browser);
@@ -118,7 +129,8 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
     const lateReceiptDebt = sql`coalesce(${usage}->>'accountingLateReceiptPending', 'false') = 'true'`;
     const run = and(eq(heartbeatRuns.companyId, policy.companyId), or(eq(heartbeatRuns.costAccountingPending, true), lateReceiptDebt),
       policy.scopeType === "agent" ? eq(heartbeatRuns.agentId, policy.scopeId) : undefined,
-      policy.scopeType === "project" ? sql`${usage}->'ledgerScope'->>'projectId' = ${policy.scopeId}` : undefined)!;
+      policy.scopeType === "project" ? sql`${usage}->'ledgerScope'->>'projectId' = ${policy.scopeId}` : undefined,
+      policy.scopeType === "task_tree" ? sql`${heartbeatRuns.taskLineageJson}->'pathIssueIds' @> ${JSON.stringify([policy.scopeId])}::jsonb` : undefined)!;
     const terminal = and(run, inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out", "cancelled", "interrupted"]), or(inWindow, lateReceiptDebt))!;
     // Keep correlated subqueries in nested SQL chunks. Drizzle strips column
     // qualifiers from a single-table selection's direct column chunks.

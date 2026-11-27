@@ -1,12 +1,14 @@
 import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, caseHandoffs, cases, heartbeatRuns, issues, type Db } from "@groktopus/db";
+import { CaseHandoffRequirementsSuperseded } from "./case-handoff-offer-authority.js";
 import { caseHandoffService, recordCaseHandoffEvent, type CaseHandoffRow } from "./case-handoffs.js";
 import { publishActivity, type ActivityPublication } from "./activity-log.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { isCaseHandoffSourceReleased } from "./heartbeat/case-handoff-lifecycle.js";
 import type { heartbeatService } from "./heartbeat.js";
 
-const PENDING = ["awaiting_release", "pending_dispatch"] as const;
+import { CASE_HANDOFF_OPEN_TRANSFER_STATES as PENDING } from "./case-handoff-states.js";
+const REQUIREMENTS_HOLD = "requirements_superseded";
 const ACCEPTED = ["queued", "claimed", "running", "succeeded", "completed", "retrying", "scheduled_retry"];
 type Heartbeat = Pick<ReturnType<typeof heartbeatService>, "wakeup"> & {
   requestCaseHandoffYield?: (input: { runId: string; issueId: string; handoffId: string }) => Promise<unknown>;
@@ -49,7 +51,7 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
     const at = now(), later = new Date(at.getTime() + delay);
     // Cleanup may have committed after our readiness read but before this retry.
     // Preserve its immediate deadline rather than overwriting it with backoff.
-    const nextAttemptAt = row.state === "awaiting_release" && row.sourceRunId ? sql<Date>`case when exists (
+    const nextAttemptAt = code === "awaiting_source_release" && row.state === "awaiting_release" && row.sourceRunId ? sql<Date>`case when exists (
       select 1 from ${heartbeatRuns} released where released.id = ${row.sourceRunId}::uuid
         and released.company_id = ${row.companyId}::uuid
         and released.result_json->'caseHandoffExecutionReleased'->>'schema' = 'proprio.case-handoff-release.v1'
@@ -85,7 +87,8 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
     if (await accepted(row)) { await settle(row, "delivered"); return; }
     const [issue] = await db.select().from(issues).where(and(eq(issues.id, row.issueId), eq(issues.companyId, row.companyId)));
     const [caseRow] = await db.select().from(cases).where(and(eq(cases.id, row.caseId), eq(cases.companyId, row.companyId)));
-    if (!issue || !caseRow || caseRow.workIssueId !== row.issueId || caseRow.handoffVersion !== row.version ||
+    if (!issue || !caseRow || (row.offerContract && caseRow.status === "cancelled")
+        || caseRow.workIssueId !== row.issueId || caseRow.handoffVersion !== row.version ||
         !["todo", "in_progress"].includes(issue.status)) { await settle(row, "cancelled"); return; }
     if (row.state === "pending_dispatch" && (issue.assigneeAgentId !== row.toAgentId || issue.assigneeUserId || issue.statusVersion !== row.appliedIssueStatusVersion)) {
       await settle(row, "cancelled"); return;
@@ -129,6 +132,7 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
       const candidates = await db.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(
         eq(caseHandoffs.destinationKind, "agent"),
         enabled ? inArray(caseHandoffs.state, PENDING) : eq(caseHandoffs.state, "awaiting_release"), lte(caseHandoffs.nextAttemptAt, at),
+        sql`${caseHandoffs.lastErrorCode} is distinct from ${REQUIREMENTS_HOLD}`,
         or(isNull(caseHandoffs.leaseExpiresAt), lte(caseHandoffs.leaseExpiresAt, at)),
       )).orderBy(asc(caseHandoffs.nextAttemptAt), asc(caseHandoffs.id)).limit(25);
       let examined = 0;
@@ -137,7 +141,8 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
         const [claimed] = await db.update(caseHandoffs).set({ leaseExpiresAt: new Date(now().getTime() + leaseMs),
           attemptCount: sql`${caseHandoffs.attemptCount} + 1`,
           updatedAt: now() }).where(and(eq(caseHandoffs.id, candidate.id), eq(caseHandoffs.destinationKind, "agent"), inArray(caseHandoffs.state, PENDING),
-          lte(caseHandoffs.nextAttemptAt, at), or(isNull(caseHandoffs.leaseExpiresAt), lte(caseHandoffs.leaseExpiresAt, at)))).returning();
+          lte(caseHandoffs.nextAttemptAt, at), sql`${caseHandoffs.lastErrorCode} is distinct from ${REQUIREMENTS_HOLD}`,
+          or(isNull(caseHandoffs.leaseExpiresAt), lte(caseHandoffs.leaseExpiresAt, at)))).returning();
         if (!claimed) continue;
         examined++;
         try {
@@ -153,7 +158,15 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
           const status = typeof error === "object" && error && "status" in error ? Number(error.status) : null;
           const details = typeof error === "object" && error && "details" in error && error.details && typeof error.details === "object"
             ? error.details as { code?: unknown; reason?: unknown } : null;
-          if (details?.code === "case_handoff_admission_wait") await retry(claimed,
+          if (error instanceof CaseHandoffRequirementsSuperseded) {
+            const [current] = await db.select({ state: caseHandoffs.state }).from(caseHandoffs).where(and(
+              eq(caseHandoffs.id, claimed.id), eq(caseHandoffs.leaseExpiresAt, claimed.leaseExpiresAt!),
+            ));
+            // Once assignment is applied, keep the wake fence until an operator
+            // supersedes it. Generic recovery must not start the changed work.
+            if (current?.state === "pending_dispatch") await retry(claimed, REQUIREMENTS_HOLD, error.message);
+            else await settle(claimed, "cancelled", error.message);
+          } else if (details?.code === "case_handoff_admission_wait") await retry(claimed,
             typeof details.reason === "string" ? details.reason : "wake_not_admitted", error instanceof Error ? error.message : "Waiting for normal admission");
           else if (status === 409 || status === 404) await settle(claimed, "cancelled", error instanceof Error ? error.message : "Superseded");
           else await retry(claimed, status === 403 ? "access_or_admission_blocked" : "delivery_failed", error instanceof Error ? error.message : String(error));
@@ -165,7 +178,7 @@ export function caseHandoffDeliveryService(db: Db, options: { heartbeat: Heartbe
       // Retain a small recovery sweep while disabled so enabling the flag picks
       // up already-persisted intent without requiring a process restart.
       return (await db.select({ id: caseHandoffs.id }).from(caseHandoffs).where(and(eq(caseHandoffs.destinationKind, "agent"),
-        inArray(caseHandoffs.state, PENDING))).limit(1)).length > 0;
+        inArray(caseHandoffs.state, PENDING), sql`${caseHandoffs.lastErrorCode} is distinct from ${REQUIREMENTS_HOLD}`)).limit(1)).length > 0;
     },
   };
 }

@@ -12,7 +12,6 @@ import {
   decisionTriage,
   decisionTriageEvents,
   heartbeatRuns,
-  issueApprovals,
   issueRecoveryActions,
   issueThreadInteractions,
   issueWorkProducts,
@@ -29,7 +28,11 @@ import type {
 } from "@groktopus/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { firstApprovalIssueId, approvalTaskTreeRootId } from "./approval-visibility.js";
+import { canReadBudgetTaskTreeRoot } from "./budget-scope-visibility.js";
+import { canonicalExecutionUuid } from "./execution-identity.js";
 import {
+  approvalReadSqlCondition,
   authorizationService,
   type AuthorizationActor,
   type AuthorizationResource,
@@ -212,18 +215,16 @@ async function sourceIssueId(
   companyId: string,
   sourceKind: AttentionSourceKind,
   sourceId: string,
-): Promise<{ exists: boolean; issueId: string | null; ownerAgentId?: string | null; agentId?: string | null }> {
+  actor: AuthorizationActor,
+): Promise<{ exists: boolean; issueId: string | null; budgetRootId?: string | null; ownerAgentId?: string | null; agentId?: string | null }> {
   switch (sourceKind) {
     case "approval": {
-      const row = await db.select({ id: approvals.id, issueId: issueApprovals.issueId })
+      const row = await db.select({ id: approvals.id, issueId: firstApprovalIssueId(),
+        budgetRootId: canonicalExecutionUuid(approvalTaskTreeRootId()) })
         .from(approvals)
-        .leftJoin(issueApprovals, and(
-          eq(issueApprovals.companyId, companyId),
-          eq(issueApprovals.approvalId, approvals.id),
-        ))
-        .where(and(eq(approvals.companyId, companyId), eq(approvals.id, sourceId)))
+        .where(and(eq(approvals.companyId, companyId), eq(approvals.id, sourceId), await approvalReadSqlCondition(db, actor)))
         .then((rows) => rows[0] ?? null);
-      return { exists: Boolean(row), issueId: row?.issueId ?? null };
+      return { exists: Boolean(row), issueId: row?.issueId ?? null, budgetRootId: row?.budgetRootId };
     }
     case "decision": {
       const row = await db.select({ issueId: decisions.originIssueId })
@@ -284,11 +285,11 @@ async function sourceIssueId(
       return { exists: Boolean(row), issueId: null };
     }
     case "budget_alert": {
-      const row = await db.select({ id: budgetIncidents.id })
+      const row = await db.select({ scopeType: budgetIncidents.scopeType, scopeId: budgetIncidents.scopeId })
         .from(budgetIncidents)
         .where(and(eq(budgetIncidents.companyId, companyId), eq(budgetIncidents.id, sourceId)))
         .then((rows) => rows[0] ?? null);
-      return { exists: Boolean(row), issueId: null };
+      return { exists: Boolean(row), issueId: null, budgetRootId: row?.scopeType === "task_tree" ? row.scopeId : null };
     }
   }
 }
@@ -300,9 +301,14 @@ export async function canReadDecisionSource(
   sourceKind: AttentionSourceKind,
   sourceId: string,
 ) {
-  const source = await sourceIssueId(db, companyId, sourceKind, sourceId);
+  const source = await sourceIssueId(db, companyId, sourceKind, sourceId, actor);
   if (!source.exists) return false;
   const authz = authorizationService(db);
+  if (source.budgetRootId) {
+    const companyRead = await authz.decide({ actor, action: "company_scope:read", resource: { type: "company", companyId } });
+    return actor.type === "board" && companyRead.allowed
+      && await canReadBudgetTaskTreeRoot(db, companyId, source.budgetRootId, actor);
+  }
   if (source.issueId) {
     const resource = await loadIssueResource(db, companyId, source.issueId);
     if (!resource) return false;

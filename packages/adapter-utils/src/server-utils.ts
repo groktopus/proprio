@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CONNECTION_INTENT_AGENT_GUIDANCE } from "@groktopus/shared";
+import { CONNECTION_INTENT_AGENT_GUIDANCE, ISSUE_BLOCKER_STALLED_WAKE_REASON } from "@groktopus/shared";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import {
   buildLocalProcessSandboxSpawnTarget,
@@ -832,6 +832,7 @@ type ProprioWakePayload = {
   // Technical English with brief decision context.
   simplifiedEnglishInteractions: boolean;
   dependencyBlockedInteraction: boolean;
+  dependencyDiagnosis: boolean;
   treeHoldInteraction: boolean;
   activeTreeHold: ProprioWakeTreeHoldSummary | null;
   unresolvedBlockerIssueIds: string[];
@@ -1929,6 +1930,7 @@ export function normalizeProprioWakePayload(
       payload.dependencyBlockedInteraction,
       false,
     ),
+    dependencyDiagnosis: payload.dependencyDiagnosis === true,
     treeHoldInteraction: asBoolean(payload.treeHoldInteraction, false),
     activeTreeHold,
     unresolvedBlockerIssueIds,
@@ -2743,7 +2745,9 @@ function renderProprioWakePromptBody(
   if (normalized.dependencyBlockedInteraction) {
     lines.push("- dependency-blocked interaction: yes");
     lines.push(
-      "- execution scope: respond or triage the human comment; do not treat blocker-dependent deliverable work as unblocked",
+      normalized.dependencyDiagnosis || normalized.reason === ISSUE_BLOCKER_STALLED_WAKE_REASON
+        ? "- execution scope: investigate the stalled dependency, continue independent work, or propose a replacement. Keep the dependent work blocked until its requirements are met."
+        : "- execution scope: respond or triage the human comment; do not treat blocker-dependent deliverable work as unblocked",
     );
     if (normalized.unresolvedBlockerSummaries.length > 0) {
       const blockers = normalized.unresolvedBlockerSummaries
