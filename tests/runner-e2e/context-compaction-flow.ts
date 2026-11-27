@@ -146,7 +146,8 @@ export async function runContextCompactionFlow(input: {
       compactionEvents, actions, prerequisite: resolved ? { receiptId: resolved.id, publishedAt: Date.parse(resolved.resolvedAt) } : null,
       artifact: latest ? { taskId, revisionId: latest.id, writtenByRunId: latest.createdByRunId, body: latest.body } : null });
     await checkpoint("final", lane, { finalRunId: finalRun.id, artifactRevisionId: latest?.id ?? null });
-    await input.capture(`${lane}-final`, `${lane} saved the release receipt`, `${lane}-final.png`);
+    const captureId = lane === "control" ? "control-final" : "final-state";
+    await input.capture(captureId, `${lane} saved the release receipt`, `${captureId}.png`);
   }
 
   await api.patch("/api/instance/settings/experimental", { enableClassicTaskInterface: false });
