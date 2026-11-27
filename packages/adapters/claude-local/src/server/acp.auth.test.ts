@@ -7,7 +7,7 @@ import type { AdapterExecutionTarget } from "@groktopus/adapter-utils/execution-
 
 // A shared handle so each test can set the stub Claude hello-probe output the
 // sandbox runner returns.
-const { runAdapterExecutionTargetProcess, probeResult } = vi.hoisted(() => {
+const { runAdapterExecutionTargetProcess, probeResult, remoteHomeFixture } = vi.hoisted(() => {
   const probeResult: {
     value: { exitCode: number; stdout: string; stderr: string; timedOut: boolean };
     throwError: Error | null;
@@ -17,6 +17,13 @@ const { runAdapterExecutionTargetProcess, probeResult } = vi.hoisted(() => {
   };
   return {
     probeResult,
+    remoteHomeFixture: {
+      runtimeInput: null as unknown,
+      shellCalls: [] as unknown[],
+      disposeRuntime: vi.fn(async () => {}),
+      restoreWorkspace: vi.fn(async () => ({ restored: true })),
+      shellError: null as Error | null,
+    },
     runAdapterExecutionTargetProcess: vi.fn(async () => {
       if (probeResult.throwError) throw probeResult.throwError;
       return {
@@ -42,6 +49,28 @@ vi.mock("@groktopus/adapter-utils/execution-target", async () => {
   return {
     ...actual,
     runAdapterExecutionTargetProcess,
+    ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
+    ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
+    prepareAdapterExecutionTargetRuntime: vi.fn(async (input: Record<string, unknown>) => {
+      remoteHomeFixture.runtimeInput = input;
+      const runtimeRootDir = input.runtimeRootDir as string;
+      return {
+        target: input.target,
+        workspaceRemoteDir: input.workspaceRemoteDir,
+        runtimeRootDir,
+        assetDirs: { "config-seed": `${runtimeRootDir}/config-seed` },
+        additionalSourceDirs: {},
+        additionalSourceFailures: [],
+        workspaceSyncSnapshot: null,
+        restoreWorkspace: remoteHomeFixture.restoreWorkspace,
+        disposeRuntime: remoteHomeFixture.disposeRuntime,
+      };
+    }),
+    runAdapterExecutionTargetShellCommand: vi.fn(async (...args: unknown[]) => {
+      remoteHomeFixture.shellCalls.push(args);
+      if (remoteHomeFixture.shellError) throw remoteHomeFixture.shellError;
+      return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: new Date().toISOString() };
+    }),
   };
 });
 vi.mock("./acp-hello-probe.js", () => ({ probeClaudeAcpHello: probeAcpHello }));
@@ -98,6 +127,9 @@ const invalidTokenStdout = [
 
 afterEach(() => {
   vi.clearAllMocks();
+  remoteHomeFixture.runtimeInput = null;
+  remoteHomeFixture.shellCalls.length = 0;
+  remoteHomeFixture.shellError = null;
   probeAcpHello.mockResolvedValue({ status: "passed" });
   probeResult.value = { exitCode: 1, stdout: "", stderr: "", timedOut: false };
   probeResult.throwError = null;
@@ -699,7 +731,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     expect(result.checks.some((check) => check.code === "claude_acp_login_probe_unavailable")).toBe(false);
   });
 
-  it("never seeds the host ANTHROPIC_AUTH_TOKEN or CLAUDE_CONFIG_DIR on a remote target", async () => {
+  it("never forwards host auth or config paths and stages an isolated remote config dir", async () => {
     // A remote target does not inherit the host environment, so the probe keeps
     // the deny-by-default env and never reads a host credential. The host token
     // and host config dir must never reach the remote probe env.
@@ -717,6 +749,90 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
 
     expect(probeAcpHello).toHaveBeenCalledTimes(1);
     expect(probeAcpHello.mock.calls[0]?.[0]?.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CONFIG_DIR).toMatch(
+      /^\/home\/user\/proprio-workspace\/\.proprio-runtime\/claude\/probes\/claude-acp-probe-home-[^/]+\/config$/,
+    );
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CONFIG_DIR).not.toBe("/host/claude/config");
+  });
+
+  it.each([sandboxTarget, sshTarget])("stages a private managed Claude home before a remote setup probe", async (target) => {
+    const managedHome = await mkdtemp(path.join(os.tmpdir(), "proprio-managed-claude-home-"));
+    try {
+      await writeFile(path.join(managedHome, "settings.json"), "{}");
+      probeAcpHello.mockImplementationOnce(async (probeInput) => {
+        expect(remoteHomeFixture.disposeRuntime).not.toHaveBeenCalled();
+        expect(probeInput.env.CLAUDE_CONFIG_DIR).toMatch(/\/\.proprio-runtime\/claude\/probes\/[^/]+\/config$/);
+        return { status: "passed" };
+      });
+      const result = await testClaudeAcpEnvironment({
+        companyId: "company-1",
+        adapterType: "claude_local",
+        config: {
+          engine: "acp",
+          managedAiConnection: { method: "api_key" },
+          env: { ANTHROPIC_API_KEY: "selected-test-key", CLAUDE_CONFIG_DIR: managedHome },
+        },
+        executionTarget: target,
+        environmentName: null,
+      });
+
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_hello_probe_passed", level: "info" }));
+      expect(remoteHomeFixture.runtimeInput).toMatchObject({
+        privateRuntime: true,
+        retainRuntime: false,
+        syncWorkspace: false,
+        target,
+      });
+      const stagedAssets = (remoteHomeFixture.runtimeInput as { assets: Array<{ key: string; localDir: string }> }).assets;
+      expect(stagedAssets).toEqual([expect.objectContaining({ key: "config-seed", localDir: managedHome })]);
+      const probeCall = probeAcpHello.mock.calls[0]?.[0];
+      expect(probeCall?.env.ANTHROPIC_API_KEY).toBe("selected-test-key");
+      expect(probeCall?.env.CLAUDE_CONFIG_DIR).toBe(`${target.remoteCwd}/.proprio-runtime/claude/probes/${(remoteHomeFixture.runtimeInput as { runId: string }).runId}/config`);
+      expect(remoteHomeFixture.shellCalls.length).toBeGreaterThan(0);
+      expect(JSON.stringify(remoteHomeFixture.shellCalls)).not.toContain("selected-test-key");
+      const shellOptions = remoteHomeFixture.shellCalls[0]?.[3] as { env: Record<string, string> };
+      expect(shellOptions.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(remoteHomeFixture.disposeRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await rm(managedHome, { recursive: true, force: true });
+    }
+  });
+
+  it("tears down staged managed home after a failed remote probe and withholds the positive check", async () => {
+    const managedHome = await mkdtemp(path.join(os.tmpdir(), "proprio-managed-claude-home-"));
+    try {
+      probeAcpHello.mockResolvedValueOnce({ status: "failed" });
+      const result = await testClaudeAcpEnvironment({
+        companyId: "company-1",
+        adapterType: "claude_local",
+        config: { engine: "acp", managedAiConnection: { method: "api_key" }, env: { ANTHROPIC_API_KEY: "selected-test-key", CLAUDE_CONFIG_DIR: managedHome } },
+        executionTarget: sshTarget,
+        environmentName: null,
+      });
+      expect(result.checks.some((check) => check.code === "claude_hello_probe_passed")).toBe(false);
+      expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_acp_login_probe_unavailable", level: "warn" }));
+      expect(remoteHomeFixture.disposeRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await rm(managedHome, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans the staged runtime when remote config materialization fails", async () => {
+    const managedHome = await mkdtemp(path.join(os.tmpdir(), "proprio-managed-claude-home-"));
+    try {
+      remoteHomeFixture.shellError = new Error("remote bootstrap failed");
+      const result = await testClaudeAcpEnvironment({
+        companyId: "company-1",
+        adapterType: "claude_local",
+        config: { engine: "acp", managedAiConnection: { method: "api_key" }, env: { ANTHROPIC_API_KEY: "selected-test-key", CLAUDE_CONFIG_DIR: managedHome } },
+        executionTarget: sshTarget,
+        environmentName: null,
+      });
+      expect(result.checks.some((check) => check.code === "claude_hello_probe_passed")).toBe(false);
+      expect(probeAcpHello).not.toHaveBeenCalled();
+      expect(remoteHomeFixture.disposeRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await rm(managedHome, { recursive: true, force: true });
+    }
   });
 });
