@@ -2449,7 +2449,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           id: "managed-connection", grantId: "managed-grant", companyId: "company-new",
           name: "My gateway.example.test", provider: "openai", method: "api_key", ownership: "personal",
           ownerUserId: "user-1", isDefault: false, status: "connected",
-          routing: { kind: "gateway", protocol: "responses", auth: "bearer", baseUrl: "https://gateway.example.test/v1", models: [{ id: "gpt-5.4-mini" }] },
+          routing: { kind: "gateway", protocol: "responses", auth: "bearer", baseUrl: "https://gateway.example.test/v1", models: [{ id: "gpt-5.4-mini" }, { id: "gpt-5.4" }] },
         }];
         lookupFails = failRefresh;
         return { connectionId: "managed-connection", grantId: "managed-grant" };
@@ -2471,14 +2471,14 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           setControlledValue(gatewayDialog.querySelector('input[aria-label="API key"]')!, "example-gateway-key");
         });
         await click("Change");
-        await act(async () => setControlledValue(document.querySelector('input[aria-label="Model IDs"]')!, "gpt-5.4-mini"));
+        await act(async () => setControlledValue(document.querySelector('input[aria-label="Model IDs"]')!, "gpt-5.4-mini, gpt-5.4"));
         await act(async () => gatewayDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })));
         expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
         expect(mockAgentsApi.hire).not.toHaveBeenCalled();
         await click("Save connection");
         expect(managedApi.create).toHaveBeenCalledExactlyOnceWith("company-new", expect.objectContaining({
           provider: "openai", method: "api_key", apiKey: "example-gateway-key", ownership: "personal",
-          agentIds: [expect.any(String)], routing: expect.objectContaining({ kind: "gateway", protocol: "responses", models: [{ id: "gpt-5.4-mini" }] }),
+          agentIds: [expect.any(String)], routing: expect.objectContaining({ kind: "gateway", protocol: "responses", models: [{ id: "gpt-5.4-mini" }, { id: "gpt-5.4" }] }),
         }));
         if (failRefresh) {
           await vi.waitFor(() => expect(document.body.textContent).toContain("Your saved gateway connection could not be loaded."));
@@ -2498,19 +2498,31 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         const connect = [...document.body.querySelectorAll("button")].find(entry => entry.textContent?.trim() === "Connect")!;
         expect(connect.disabled).toBe(true);
         const select = document.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
-        expect([...select.options].map(option => option.value)).toEqual(["", "gpt-5.4-mini"]);
+        expect([...select.options].map(option => option.value)).toEqual(["", "gpt-5.4", "gpt-5.4-mini"]);
         await act(async () => { select.value = "gpt-5.4-mini"; select.dispatchEvent(new Event("change", { bubbles: true })); });
         await flushReact();
         expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
         expect(mockAgentsApi.hire).not.toHaveBeenCalled();
         expect(JSON.stringify(window.localStorage)).not.toContain("example-gateway-key");
+        mockAgentsApi.hire.mockRejectedValueOnce(new Error("network went away"));
         await click("Connect");
         const binding = { provider: "openai", method: "api_key", mode: "delegated", connectionId: "managed-connection", grantId: "managed-grant" };
-        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledExactlyOnceWith("company-new", "codex_local", expect.objectContaining({
+        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
+        expect(mockAgentsApi.testEnvironment).toHaveBeenNthCalledWith(1, "company-new", "codex_local", expect.objectContaining({
           environmentId: "env-sandbox-1", aiConnection: binding, adapterConfig: expect.objectContaining({ model: "gpt-5.4-mini" }),
         }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
-        expect(mockAgentsApi.hire).toHaveBeenCalledExactlyOnceWith("company-new", expect.objectContaining({
-          runtimeConfig: expect.objectContaining({ aiConnection: binding }), adapterConfig: expect.objectContaining({ model: "gpt-5.4-mini" }),
+        await vi.waitFor(() => expect(document.body.textContent).toContain("network went away"));
+        const changedModel = document.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+        await act(async () => { changedModel.value = "gpt-5.4"; changedModel.dispatchEvent(new Event("change", { bubbles: true })); });
+        await flushReact();
+        await click("Connect");
+        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(2);
+        expect(mockAgentsApi.testEnvironment).toHaveBeenNthCalledWith(2, "company-new", "codex_local", expect.objectContaining({
+          environmentId: "env-sandbox-1", aiConnection: binding, adapterConfig: expect.objectContaining({ model: "gpt-5.4" }),
+        }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+        expect(mockAgentsApi.hire).toHaveBeenCalledTimes(2);
+        expect(mockAgentsApi.hire).toHaveBeenLastCalledWith("company-new", expect.objectContaining({
+          runtimeConfig: expect.objectContaining({ aiConnection: binding }), adapterConfig: expect.objectContaining({ model: "gpt-5.4" }),
         }));
         expect(JSON.stringify(mockAgentsApi.hire.mock.calls)).not.toContain("example-gateway-key");
       } finally {
