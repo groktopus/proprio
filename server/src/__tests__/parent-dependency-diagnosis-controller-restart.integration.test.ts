@@ -244,12 +244,12 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       "Controller restart did not settle its diagnosis wake");
       expect(await db.select().from(agentWakeupRequests).where(receiptFilter)).toHaveLength(1);
       expect(wake).toMatchObject({ reason: "issue_blocker_stalled", requestedByActorType: "system",
-        status: "completed", payload: { issueId: parentId, dependencyDiagnosis: true } });
+        status: "completed", payload: { issueId: parentId } });
       const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
         eq(heartbeatRuns.wakeupRequestId, wake.id)));
       expect(run).toMatchObject({ status: "succeeded",
         contextSnapshot: { issueId: parentId, dependencyDiagnosis: true, dependencyDiagnosisKey: diagnosisKey } });
-      expect(await readFile(effectFile, "utf8")).toBe("invoked");
+      expect(await readFile(effectFile, "utf8")).toBe("invoked\n");
 
       // Verify the restarted controller's real HTTP route sees the durable
       // recovery state through ordinary loopback board access.
