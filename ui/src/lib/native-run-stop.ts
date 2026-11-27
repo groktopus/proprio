@@ -11,7 +11,6 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 
 export async function stopFailedNativeRun(runId: string, companyId: string) {
   detachInflightGet(`/heartbeat-runs/${runId}`);
-  detachInflightGet("/cli-auth/me");
   const [run, access] = await Promise.all([heartbeatsApi.get(runId), accessApi.getCurrentBoardAccess()]);
   if (run.id !== runId || run.companyId !== companyId) throw new Error("Stop was not accepted because the run changed.");
   const actorUserId = access.userId;

@@ -1,4 +1,3 @@
--- proprio:migration-compat online_compatible: This creates a protected table that is only read and written by the new server implementation; no previous release accesses it.
 CREATE TABLE "managed_audit_transition_receipts" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"company_id" uuid NOT NULL,
@@ -16,16 +15,3 @@ CREATE TABLE "managed_audit_transition_receipts" (
 ALTER TABLE "managed_audit_transition_receipts" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "managed_audit_transition_receipts" ADD CONSTRAINT "managed_audit_transition_receipts_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "managed_audit_transition_receipts_company_created_idx" ON "managed_audit_transition_receipts" USING btree ("company_id","created_at");
---> statement-breakpoint
-REVOKE ALL ON TABLE "managed_audit_transition_receipts" FROM PUBLIC;
---> statement-breakpoint
-DO $$
-BEGIN
-	IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-		REVOKE ALL ON TABLE "managed_audit_transition_receipts" FROM anon;
-	END IF;
-	IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-		REVOKE ALL ON TABLE "managed_audit_transition_receipts" FROM authenticated;
-	END IF;
-END
-$$;
