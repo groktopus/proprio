@@ -1591,6 +1591,67 @@ describe("connection management with production default agents", () => {
     } finally { provider = null; }
   });
 
+  it("checks run visibility before returning managed decisions", async () => {
+    const f = await fixture();
+    const [privateIssue] = await server.db.insert(issues).values({
+      companyId: f.companyId,
+      title: "Private decision task",
+      visibility: "private",
+      responsibleUserId: randomUUID(),
+    }).returning();
+    const [run] = await server.db.insert(heartbeatRuns).values({
+      companyId: f.companyId,
+      agentId: f.agentId,
+      status: "succeeded",
+      issueId: privateIssue.id,
+    }).returning();
+    const [invocation] = await server.db.insert(toolInvocations).values({
+      companyId: f.companyId,
+      runId: run.id,
+      agentId: f.agentId,
+      toolName: "fixture_read",
+      policyDecision: "allow",
+    }).returning();
+    const cookie = await server.humanSession(f.userId);
+    const decisions = async (runId: string) => {
+      const response = await fetch(`${server.apiUrl}/api/companies/${f.companyId}/tools/runs/${runId}/decisions`, {
+        headers: { cookie },
+      });
+      return { status: response.status, body: await response.json() };
+    };
+
+    const hidden = await decisions(run.id);
+    expect(hidden, JSON.stringify(hidden)).toMatchObject({ status: 404 });
+    expect(await decisions(randomUUID())).toEqual(hidden);
+
+    const [companyRun] = await server.db.insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: f.agentId, status: "succeeded",
+    }).returning();
+    const [companyCall, privateCall, callWithPrivateEvidence] = await server.db.insert(toolInvocations)
+      .values([null, privateIssue.id, null].map(issueId => ({
+        companyId: f.companyId, runId: companyRun.id, issueId, toolName: "fixture_read",
+      }))).returning();
+    await server.db.insert(toolCallEvents).values({
+      companyId: f.companyId, runId: companyRun.id, issueId: privateIssue.id,
+      invocationId: callWithPrivateEvidence.id, eventType: "call_completed",
+    });
+    const visible = await decisions(companyRun.id);
+    expect(visible).toMatchObject({ status: 200, body: {
+      decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: companyCall.id }) })],
+    } });
+
+    await server.db.update(issues).set({ responsibleUserId: f.userId, assigneeAgentId: f.agentId })
+      .where(eq(issues.id, privateIssue.id));
+    expect(await decisions(run.id)).toMatchObject({
+      status: 200,
+      body: { decisions: [expect.objectContaining({ invocation: expect.objectContaining({ id: invocation.id }) })] },
+    });
+    const afterAccess = await decisions(companyRun.id);
+    expect(afterAccess.status).toBe(200);
+    expect(afterAccess.body.decisions.map((decision: { invocation: { id: string } }) => decision.invocation.id).sort())
+      .toEqual([companyCall.id, privateCall.id, callWithPrivateEvidence.id].sort());
+  });
+
   it("shares tool-activity authorization by task and reuses run identity within one page", async () => {
     const f = await fixture();
     const connection = await f.request("POST", `/companies/${f.companyId}/tools/connections`, { name: "Activity page", transport: "mcp_remote", authKind: "none", transportConfig: { url: "https://1.1.1.1/mcp" } });
