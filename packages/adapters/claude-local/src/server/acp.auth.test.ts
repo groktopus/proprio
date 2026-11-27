@@ -31,6 +31,7 @@ const { runAdapterExecutionTargetProcess, probeResult } = vi.hoisted(() => {
     }),
   };
 });
+const { probeAcpHello } = vi.hoisted(() => ({ probeAcpHello: vi.fn(async () => ({ status: "passed" as const })) }));
 
 vi.mock("@groktopus/adapter-utils/execution-target", async () => {
   const actual = await vi.importActual<typeof import("@groktopus/adapter-utils/execution-target")>(
@@ -41,6 +42,7 @@ vi.mock("@groktopus/adapter-utils/execution-target", async () => {
     runAdapterExecutionTargetProcess,
   };
 });
+vi.mock("./acp-hello-probe.js", () => ({ probeClaudeAcpHello: probeAcpHello }));
 
 import {
   mapClaudeAcpAuthErrorCode,
@@ -94,6 +96,7 @@ const invalidTokenStdout = [
 
 afterEach(() => {
   vi.clearAllMocks();
+  probeAcpHello.mockResolvedValue({ status: "passed" });
   probeResult.value = { exitCode: 1, stdout: "", stderr: "", timedOut: false };
   probeResult.throwError = null;
 });
@@ -413,6 +416,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_USE_BEDROCK",
     "ANTHROPIC_BEDROCK_BASE_URL",
@@ -511,7 +515,7 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     expect(JSON.stringify(spawnedEnv)).not.toContain("caller-proxy");
   });
 
-  it("reports an explicitly selected API key as normal authentication on the ACP lane", async () => {
+  it("probes an explicitly selected API key through the selected ACP server", async () => {
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
@@ -528,6 +532,32 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
       hint: undefined,
     }));
     expect(JSON.stringify(result.checks)).not.toContain("selected-test-key");
+    expect(probeAcpHello).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      command: process.execPath,
+      model: expect.any(String),
+      env: expect.objectContaining({ ANTHROPIC_API_KEY: "selected-test-key" }),
+      target: null,
+    }));
+  });
+
+  it("keeps the selected key unqualified when the ACP turn is not positive", async () => {
+    probeAcpHello.mockResolvedValueOnce({ status: "failed" });
+    const result = await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",
+      config: { engine: "acp", agentCommand: process.execPath, model: "claude-sonnet-5", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      executionTarget: null, environmentName: null });
+    expect(result.status).toBe("warn");
+    expect(result.checks.some(check => check.code === "claude_hello_probe_passed")).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_acp_login_probe_unavailable", level: "warn" }));
+  });
+
+  it("forwards the exact selected model to ACP even when the host has a model override", async () => {
+    process.env.ANTHROPIC_MODEL = "host-default-model";
+    const result = await testClaudeAcpEnvironment({ companyId: "company-1", adapterType: "claude_local",
+      config: { engine: "acp", agentCommand: process.execPath, model: "saved-agent-model", env: { ANTHROPIC_API_KEY: "selected-test-key" } },
+      executionTarget: null, environmentName: null });
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_hello_probe_passed", level: "info" }));
+    expect(probeAcpHello.mock.calls.at(-1)?.[0]?.model).toBe("saved-agent-model");
+    expect(probeAcpHello.mock.calls.at(-1)?.[0]?.env.ANTHROPIC_MODEL).toBe("saved-agent-model");
   });
 
   it("runs the host login probe with the host ANTHROPIC_API_KEY on a local target", async () => {
@@ -541,17 +571,15 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
     const result = await testClaudeAcpEnvironment({
       companyId: "company-1",
       adapterType: "claude_local",
-      config: { engine: "acp" },
+      config: { engine: "acp", agentCommand: process.execPath },
       executionTarget: null,
       environmentName: null,
     });
 
     // The probe runs once with the host key, so it authenticates and reports no
     // false auth-required and no probe-unavailable check.
-    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
-    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
-    const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
-    expect(spawnedEnv.ANTHROPIC_API_KEY).toBe("sk-ant-host-key");
+    expect(probeAcpHello).toHaveBeenCalledTimes(1);
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.ANTHROPIC_API_KEY).toBe("sk-ant-host-key");
     expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(false);
     expect(result.checks.some((check) => check.code === "claude_acp_login_probe_unavailable")).toBe(false);
     // The lane still reports that API-key auth is in use.
@@ -583,10 +611,8 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
 
     // The probe runs once with the host token, so it authenticates and reports
     // no false auth-required and no probe-unavailable check.
-    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
-    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
-    const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
-    expect(spawnedEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-host-token");
+    expect(probeAcpHello).toHaveBeenCalledTimes(1);
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-host-token");
     expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(false);
     expect(result.checks.some((check) => check.code === "claude_acp_login_probe_unavailable")).toBe(false);
     // The lane reports that the configured OAuth token is in use.
@@ -613,10 +639,8 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
 
     // The probe runs once with the host token, so it authenticates and reports
     // no false auth-required and no probe-unavailable check.
-    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
-    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
-    const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
-    expect(spawnedEnv.ANTHROPIC_AUTH_TOKEN).toBe("auth-host-token");
+    expect(probeAcpHello).toHaveBeenCalledTimes(1);
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.ANTHROPIC_AUTH_TOKEN).toBe("auth-host-token");
     expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(false);
     expect(result.checks.some((check) => check.code === "claude_acp_login_probe_unavailable")).toBe(false);
     // The host token value never enters a check.
@@ -641,10 +665,8 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
 
     // The probe runs once with the host config dir, so it reads the stored login
     // and reports no false auth-required and no probe-unavailable check.
-    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
-    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
-    const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
-    expect(spawnedEnv.CLAUDE_CONFIG_DIR).toBe("/host/claude/config");
+    expect(probeAcpHello).toHaveBeenCalledTimes(1);
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CONFIG_DIR).toBe("/host/claude/config");
     expect(result.checks.some((check) => check.code === "claude_hello_probe_auth_required")).toBe(false);
     expect(result.checks.some((check) => check.code === "claude_acp_login_probe_unavailable")).toBe(false);
   });
@@ -665,10 +687,8 @@ describe("Claude ACP hello probe on local and SSH targets", () => {
       environmentName: null,
     });
 
-    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(1);
-    const call = runAdapterExecutionTargetProcess.mock.calls[0] as unknown as unknown[];
-    const spawnedEnv = (call[4] as { env: Record<string, string> }).env;
-    expect(spawnedEnv.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(spawnedEnv.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(probeAcpHello).toHaveBeenCalledTimes(1);
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(probeAcpHello.mock.calls[0]?.[0]?.env.CLAUDE_CONFIG_DIR).toBeUndefined();
   });
 });

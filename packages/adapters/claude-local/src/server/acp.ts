@@ -44,7 +44,6 @@ import {
   materializeRemoteClaudeConfig,
   overrideRemoteClaudeLocalPermissionMode,
   prepareClaudeConfigSeed,
-  prepareSandboxClaudeProbeRuntime,
   resolveRemoteClaudeToolShellPrefixPath,
 } from "./claude-config.js";
 import {
@@ -58,12 +57,13 @@ import { buildLocalAdapterTestProbeEnv } from "./probe-env.js";
 import { detectClaudeLoginRequired, extractClaudeRetryNotBefore, isClaudeProviderQuotaError, parseClaudeStreamJson } from "./parse.js";
 import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
+import { probeClaudeAcpHello } from "./acp-hello-probe.js";
 import {
   claudeCliVersionAtLeast,
   minimumClaudeCliVersionForModel,
   readBundledClaudeCodeVersion,
 } from "./cli-capabilities.js";
-import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { resolveClaudeModel } from "../index.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -962,8 +962,8 @@ export async function testClaudeAcpEnvironment(
     });
   }
 
-  // Run a real hello probe for every target when Bedrock and a config API key
-  // are both absent. A local target inherits the host environment, so the real
+  // Run a real hello probe for every target when Bedrock is absent. A local
+  // target inherits the host environment, so the real
   // ACP run authenticates with a host ANTHROPIC_API_KEY. The probe seeds the
   // same host key below when the config sets none, so the probe uses the
   // credential the real run receives and does not report a false auth-required.
@@ -977,7 +977,7 @@ export async function testClaudeAcpEnvironment(
   // a sandbox target, and a distinct warn check when the probe cannot run. The
   // user interface reads the canonical signal to offer login on the sandbox ACP
   // path.
-  if (!hasBedrock && !isNonEmpty(configApiKey)) {
+  if (!hasBedrock) {
     const probeEnv: Record<string, string> = {};
     for (const [key, value] of Object.entries(envConfig)) {
       if (typeof value === "string") probeEnv[key] = value;
@@ -1008,31 +1008,39 @@ export async function testClaudeAcpEnvironment(
     if (isNonEmpty(hostConfigDir) && !isNonEmpty(probeEnv.CLAUDE_CONFIG_DIR)) {
       probeEnv.CLAUDE_CONFIG_DIR = hostConfigDir.trim();
     }
-    const runId = `claude-acp-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    let cleanupManagedProbe: (() => Promise<void>) | undefined;
     try {
-      checks.push(
-        ...(await prepareSandboxClaudeProbeRuntime({
-          registerCleanup: (cleanup) => { cleanupManagedProbe = cleanup; },
-          managedAiConnection: Boolean(config.managedAiConnection),
-          runId,
-          target,
-          cwd,
-          companyId: ctx.companyId,
-          env: probeEnv,
-          installCommand: SANDBOX_INSTALL_COMMAND,
-          detectCommand: "claude",
-          targetIsRemote,
+      const safeProbeEnv = (await buildLocalAdapterTestProbeEnv({
+        callerEnv: probeEnv,
+        trustedEnv: targetIsRemote ? {} : process.env,
+      })).env;
+      // The executable is resolved separately. Keep only trusted host PATH for
+      // the local ACP server's shebang; remote targets use their own PATH.
+      const selectedProbeEnv = targetIsRemote
+        ? safeProbeEnv
+        : { PATH: process.env.PATH ?? "", ...safeProbeEnv };
+      const selectedModel = resolveClaudeModel(config.model, selectedProbeEnv);
+      if (selectedModel) selectedProbeEnv.ANTHROPIC_MODEL = selectedModel;
+      const selectedCommand = await resolveClaudeAcpCommandForTarget(config, target);
+      const probe = await probeClaudeAcpHello({
+        command: selectedCommand,
+        cwd: targetIsRemote ? target!.remoteCwd : cwd,
+        env: selectedProbeEnv,
+        model: selectedModel || null,
+        target,
+        timeoutMs: Math.max(1, asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45)) * 1000,
+      });
+      if (probe.status === "passed") {
+        checks.push({ code: "claude_hello_probe_passed", level: "info", message: "Claude ACP completed a read-only hello turn with the selected model." });
+      } else if (probe.status === "auth_required") {
+        checks.push(...buildAcpAuthMissingChecks({ targetIsSandbox, loginUrl: null }));
+      } else {
+        checks.push(buildAcpLoginProbeUnavailableCheck(
+          probe.status === "timeout" ? "The Claude ACP hello probe timed out." : "The Claude ACP hello probe did not complete.",
           targetIsSandbox,
-          helloProbeTimeoutSec: asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45),
-        })),
-      );
-      const canProbe = !checks.some((check) => check.code === "claude_managed_config_dir_failed");
-      if (canProbe) {
-        checks.push(...(await probeClaudeAcpSandboxLogin({ config, target, env: probeEnv })));
+        ));
       }
-    } finally {
-      await cleanupManagedProbe?.();
+    } catch {
+      checks.push(buildAcpLoginProbeUnavailableCheck("The Claude ACP hello probe could not run.", targetIsSandbox));
     }
   }
 
