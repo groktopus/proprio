@@ -31,6 +31,7 @@ import { executionWorkspaceService } from "../services/execution-workspaces.js";
 import { buildExecutionWorkspaceAdapterConfig } from "../services/execution-workspace-policy.js";
 import { buildNativeExecutionInput } from "../services/native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../services/native-runtime/runtime-context.test-fixture.js";
+import { PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY, PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -354,7 +355,7 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     const resolvedInstanceSettings = await instanceSettingsService(db).get();
     const appendRunEvent = vi.fn();
     const environment = selectedEnvironmentForConfig ?? await environmentService(db).ensureLocalEnvironment();
-    return { run, appendRunEvent, prepare: () => prepareHeartbeatExecutionConfiguration(db, {
+    return { run, agent, appendRunEvent, prepare: () => prepareHeartbeatExecutionConfiguration(db, {
       run, agent,
       task: { issueId: f.issueId, context: { ...snapshot, issueId: f.issueId }, responsibleUserId: null, pinnedSkillTest, adoptingLiveRunner,
         acceptedPlanContinuationWake: false, acceptedPlanWakeRoutingDecision: null,
@@ -370,6 +371,26 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
       onFailureSecretsResolved: () => {}, onManagedAiRuntimeAcquired: () => {}, onIdentityRedactorPrepared: () => {},
     }) };
   }
+
+  it("pins commentary opt-in on admission and preserves it when resumed after agent settings change", async () => {
+    const f = await seed();
+    const optedInSkill = PROPRIO_FEEDBACK_SKILL_KEYS[0];
+    const opening = await configuration(f, { proprioSkillSync: { desiredSkills: [optedInSkill] } });
+    skillFailures.set(f.companyId, "stop after the durable opt-in snapshot");
+
+    await expect(opening.prepare()).rejects.toThrow("stop after the durable opt-in snapshot");
+    const [admitted] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, opening.run.id));
+    expect(admitted.contextSnapshot).toMatchObject({ [PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY]: [optedInSkill] });
+
+    const changedConfig = { proprioSkillSync: { desiredSkills: [] } };
+    await db.update(agents).set({ adapterConfig: changedConfig }).where(eq(agents.id, f.agentId));
+    opening.agent.adapterConfig = changedConfig;
+    opening.run.contextSnapshot = admitted.contextSnapshot;
+    await expect(opening.prepare()).rejects.toThrow("stop after the durable opt-in snapshot");
+
+    const [resumed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, opening.run.id));
+    expect(resumed.contextSnapshot).toMatchObject({ [PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY]: [optedInSkill] });
+  });
 
   it.each([undefined, true, false])("defaults existing SSH environments to remote authentication and honors the saved choice (saved=%s)", async useHostAuth => {
     const f = await seed(true);
