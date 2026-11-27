@@ -1,9 +1,10 @@
+import { BUDGET_POLICY_EXISTS_ERROR_CODE, nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import { LINK_PREVIEW_BATCH_LIMIT, ATTENTION_SOURCE_KINDS } from "@groktopus/shared";
-import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
+import { agentCaseHandoffSchema, caseHandoffRecoveryHistorySchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
 import {
   experimentalApiDocs,
   experimentalApiPaths,
@@ -87,6 +88,8 @@ import {
   createIssueSchema,
   setIssueTitleSchema,
   updateIssueSchema,
+  issueExecutionReviewEvidenceQuerySchema,
+  issueExecutionReviewEvidenceSchema,
   stalledReviewDecisionSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
@@ -253,6 +256,7 @@ import {
   updateCompanyMemberSchema,
   updateCompanyMemberWithPermissionsSchema,
   archiveCompanyMemberSchema,
+  archiveCompanyMemberPreviewParamsSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   // Instance settings
@@ -271,6 +275,7 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   recoverWorkspaceSchema,
+  dependencyInvestigationSchema,
   taskRetrySchema,
   retryWorkspaceExportSchema,
   reconstructWorkspaceSchema,
@@ -1361,6 +1366,7 @@ function registerCurrentRoute(input: {
 type OpenApiAuthLevel =
   | "public"
   | "agent_run"
+  | "agent"
   | "agent_heartbeat"
   | "runtime_tools"
   | "authenticated"
@@ -1486,6 +1492,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/approvals/{id}/reject",
   "GET /api/agents/{id}/project-access",
   "POST /api/agents/{id}/project-access",
+  "GET /api/issues/{ref}/execution-review-evidence",
   "GET /api/issues/{id}/pending-questions",
   "GET /api/issues/{id}/decision-receipts",
   "GET /api/issues/{id}/chat-handoffs",
@@ -1543,6 +1550,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/members/{memberId}",
   "PATCH /api/companies/{companyId}/members/{memberId}/role-and-grants",
   "POST /api/companies/{companyId}/members/{memberId}/archive",
+  "GET /api/companies/{companyId}/members/{memberId}/archive-preview",
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
   "GET /api/companies/{companyId}/managed-agent-profiles",
@@ -1758,6 +1766,9 @@ function resolveOperationAuthLevel(
   if (path === "/api/companies/{companyId}/grok-invitations"
       || /^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/grok-binding(?:\/(?:routine|verify|retry|stop|recover))?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/withdraw") return "board";
+  if (key === "POST /api/cases/{caseId}/handoffs/{handoffId}/decision"
+    || key === "GET /api/companies/{companyId}/case-handoff-offers") return "agent";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/agents/me/chat/messages") return "agent_heartbeat";
   // An approved connected-app skill's file: an agent in an active run only.
@@ -1835,7 +1846,7 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "agent_run") {
         operation.security = [securityRequirement(AGENT_RUN_AUTH_SCHEME)];
-      } else if (authLevel === "agent_heartbeat") {
+      } else if (authLevel === "agent_heartbeat" || authLevel === "agent") {
         operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
       } else if (authLevel === "runtime_tools") {
         operation.security = RUNTIME_TOOLS_SECURITY;
@@ -1854,6 +1865,8 @@ function applyDocumentFixups(document: any): any {
               ? { actor: "agent", heartbeatBound: true, taskBound: true }
             : authLevel === "agent_heartbeat"
               ? { actor: "agent", heartbeatBound: true }
+            : authLevel === "agent"
+              ? { actor: "agent" }
             : authLevel === "runtime_tools"
               ? { actor: "runtime_tools", heartbeatBound: true }
               : authLevel === "authenticated"
@@ -4483,7 +4496,8 @@ registry.registerPath({
   tags: ["issues"],
   summary: "List issues in a company",
   description:
-    "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false.",
+    "Use view=index for collection membership/order without task bodies or diagnostic enrichment; view=rows enriches visible rows without task bodies. These responses include listProjection and cannot stand in for a full issue. view=compact retains the board row compatibility contract. The default response remains the broad compatibility contract. All projections enforce company and task access. Results are paged: limit defaults to 500 (maximum 1000) and offset to 0. For actors who can read the whole company's task list, every page sets X-Proprio-Has-More (true when more results exist) and X-Proprio-Limit; a capped page also sets X-Proprio-Next-Offset, or X-Proprio-Next-After-Id for sortField=id&sortDir=asc cursor paging (not with oneChildPerParent). Actors whose rows are filtered by task access, such as low-trust agents, get no pagination headers. Agent call_api results carry these as pagination.hasMore/nextOffset/nextAfterId. A page whose hasMore is true is not the complete list: repeat the request with the same filters and the next offset or afterId until hasMore is false. " +
+    "Send Cache-Control: no-cache or no-store to bypass in-flight request coalescing and the compact response cache. These reads receive Cache-Control: private, no-store and still count toward the concurrency limit.",
   request: {
     params: z.object({ companyId: z.string() }),
     query: z.object({
@@ -4502,6 +4516,9 @@ registry.registerPath({
     200: r.ok(),
     304: { description: "Not Modified" },
     401: r.unauthorized,
+    429: { description: "Too many concurrent task-list reads.",
+      headers: { "Retry-After": { schema: { type: "integer", minimum: 1 } } },
+      content: { "application/json": { schema: z.object({ error: z.string(), retryAfterSeconds: z.number().int().min(1) }) } } },
   },
 });
 
@@ -4564,6 +4581,16 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/issues/{ref}/execution-review-evidence",
+  tags: ["issues"],
+  summary: "Get execution review evidence for an issue",
+  description: "For authorized board readers. Returns the submitted signoff target, current quality review requests and readiness, and one page of bound decisions in newest-first order. Send the returned nextCursor to read older decisions.",
+  request: { params: z.object({ ref: z.string() }), query: issueExecutionReviewEvidenceQuerySchema },
+  responses: { 200: r.ok(issueExecutionReviewEvidenceSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/issues/{id}",
   tags: ["issues"],
   summary: "Get an issue",
@@ -4587,7 +4614,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Update an issue",
   description:
-    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422.",
+    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422. An executionPolicy.reviewTargetBinding requires requiredQualityReview on the same policy. A stale or incomplete signoff returns 422.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(updateIssueSchema.partial()),
@@ -4607,6 +4634,7 @@ registry.registerPath({
   path: "/api/issues/{id}/stalled-review-decision",
   tags: ["issues"],
   summary: "Resolve a stalled issue review",
+  description: "An immutable signoff requires resubmission to an available reviewer before approval. The approve action returns 422 for those tasks.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(stalledReviewDecisionSchema),
@@ -4618,6 +4646,7 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
+    422: r.unprocessable,
   },
 });
 
@@ -6355,6 +6384,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budgets/policies",
   tags: ["costs"],
   summary: "Create or update a budget policy",
+  description: "Board-only. Company, agent, project, and task-tree scopes use the existing policy API. A task-tree scopeId is a readable root task in the same company; overview listings and resolution actions include only roots the caller can read. Set createOnly to reject an existing policy with the same scope, metric, and window.",
   request: {
     params: z.object({ companyId: z.string() }),
     body: jsonBody(upsertBudgetPolicySchema),
@@ -6363,7 +6393,12 @@ registry.registerPath({
     200: r.ok(),
     400: r.badRequest,
     401: r.unauthorized,
+    403: r.forbidden,
     404: r.notFound,
+    409: {
+      description: "A policy already exists for the requested scope, metric, and window.",
+      content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal(BUDGET_POLICY_EXISTS_ERROR_CODE) }) } },
+    },
   },
 });
 
@@ -6372,7 +6407,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budget-incidents/{incidentId}/resolve",
   tags: ["costs"],
   summary: "Resolve a budget incident",
-  description: "Board only: agent credentials get 403, so an agent cannot raise a limit or resume a budget-stopped agent. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
+  description: "Board only: agent credentials get 403, so an agent cannot raise a limit or resume budget-stopped work. Task-tree incidents can be resolved only by a board user who can read the root task. A board user chooses the new amount and resumes on the Budgets page: link [Open budgets](/<prefix>/activity/budgets) with this conversation's company prefix as <prefix>, and reply.",
   request: {
     params: z.object({ companyId: z.string(), incidentId: z.string() }),
     body: jsonBody(resolveBudgetIncidentSchema),
@@ -6381,7 +6416,9 @@ registry.registerPath({
     200: r.ok(),
     400: r.badRequest,
     401: r.unauthorized,
+    403: r.forbidden,
     404: r.notFound,
+    409: r.conflict,
   },
 });
 
@@ -6390,6 +6427,7 @@ registry.registerPath({
   path: "/api/companies/{companyId}/budgets/overview",
   tags: ["costs"],
   summary: "Get budget overview",
+  description: "Company-level budgets remain company-wide. Task-tree policies and incidents are included only when the caller can read their root task.",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
@@ -6523,6 +6561,17 @@ registry.registerPath({
     commentIds: z.string().optional().describe("For comment-inputs: up to 100 comma-separated comment UUIDs. Returns at most two original facts per comment."),
   }) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/completion-history",
+  tags: ["activity"],
+  summary: "Read native completion criteria, evidence and status decisions for a task",
+  description: "Returns native completion and linked attention assessments newest first. The reader must have task and run telemetry access. Contract revisions, results, assessments and status decisions remain linked across superseding records. Inaccessible supporting records omit identifiers and record-specific verdicts. Older or incomplete histories report null records and lineageGaps.",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(nativeCompletionHistorySchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } },
 });
 
 registry.registerPath({
@@ -7800,6 +7849,21 @@ registry.registerPath({
   },
   responses: {
     200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/members/{memberId}/archive-preview",
+  tags: ["access"],
+  summary: "Preview task reassignment before archiving a company member",
+  description: "Board-only. Requires permission to manage company membership and authority to archive the selected member. Returns the number of open tasks assigned to that member.",
+  request: { params: archiveCompanyMemberPreviewParamsSchema },
+  responses: {
+    200: r.ok(z.object({ reassignmentIssueCount: z.number().int().nonnegative() })),
     400: r.badRequest,
     401: r.unauthorized,
     404: r.notFound,
@@ -11683,6 +11747,29 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Get required dependency diagnosis and parent wake state",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/dependency-investigation",
+  tags: ["issues"],
+  summary: "Ask the current assignee to investigate a stalled dependency",
+  body: dependencyInvestigationSchema,
+  responses: {
+    200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    429: {
+      ...r.tooManyRequests,
+      headers: { "Retry-After": { description: "Seconds before the request may be retried", schema: { type: "integer", minimum: 1 } } },
+    },
+  },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/issues/{id}/retry",
   tags: ["issues"],
@@ -13976,10 +14063,12 @@ registerCurrentRoute({
 // OpenAPI 3.0 cannot represent the shared validator's conditional refinement.
 // Derive separate creation/existing branches so discovery marks workflow text
 // required for case.create without requiring it for ordinary phase transfers.
+const { offer: _offer, ...caseHandoffTransferShape } = agentCaseHandoffSchema.shape;
+const caseHandoffTransferSchema = z.strictObject(caseHandoffTransferShape);
 const caseHandoffApiBodySchema = z.union([
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
-  agentCaseHandoffSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflow_document_text: caseWorkflowDocumentTextSchema }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[1], workflowId: z.string().uuid() }),
+  caseHandoffTransferSchema.safeExtend({ case: agentCaseHandoffSchema.shape.case.options[0] }),
   doneCaseHandoffSchema,
 ]);
 registry.registerPath({ method: "post", path: "/api/companies/{companyId}/case-handoffs", tags: ["Cases"],
@@ -13992,10 +14081,37 @@ registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs", tag
   summary: "Read a standalone case's handoff history", description: "Requires enableCases and access to all retained case permission sources.",
   request: { params: z.object({ caseId: z.string().uuid() }), query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional(),
     before: z.iso.datetime().optional(), cursor: z.string().max(400).optional() }) }, responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
+registry.registerPath({ method: "get", path: "/api/cases/{caseId}/handoffs/{handoffId}/recovery-history", tags: ["Cases"],
+  summary: "Read completion recovery for an accepted Case handoff revision",
+  description: "Requires enableCases, company activity read permission, Case access, and read access to the original handoff task. Returns the latest three retained recovery records for this accepted revision, including superseded records and bounded attempt history. Rate limit: 30 reads per actor per minute.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: { ...r.ok(caseHandoffRecoveryHistorySchema), headers: { "Cache-Control": { schema: { enum: ["private, no-store"] } } } },
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 429: r.tooManyRequests } });
+registry.registerPath({ method: "get", path: "/api/companies/{companyId}/case-handoff-offers", tags: ["Cases"],
+  summary: "List your pending case handoff offers",
+  description: "Requires enableCases and an agent identity. Returns pending offers addressed to you for Cases you can read. Each item contains caseId, handoffId, handoffVersion and createdAt. Use the Case handoff history to read the requirements and record your decision. Follow nextCursor until it is null, including when a page contains no readable items.",
+  request: { params: z.object({ companyId: z.string().uuid() }), query: z.object({
+    limit: z.coerce.number().int().min(1).max(100).optional(), cursor: z.string().max(400).optional(),
+  }) },
+  responses: { 200: r.ok(z.object({ items: z.array(z.object({
+    caseId: z.string().uuid(), handoffId: z.string().uuid(), handoffVersion: z.number().int(), createdAt: z.iso.datetime(),
+  })), nextCursor: z.string().nullable() })), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable,
+    429: r.tooManyRequests } });
+registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/decision", tags: ["Cases"],
+  summary: "Record a recipient decision on a versioned handoff offer",
+  description: "Requires enableCases and the named recipient agent. Send the handoff version and requirement revision from the offer. Acceptance schedules the existing release and dispatch checks. Clarification and decline record a reason and leave the current task owner in place. A repeat of the same decision returns the saved receipt. The receipt contains decision metadata. Read the Case handoff history to see submitted messages. The server trims clarification and decline messages. They must contain 1 to 4000 UTF-16 code units of well-formed Unicode without NUL characters.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffRecipientDecisionSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable,
+    429: { ...r.tooManyRequests, headers: { "Retry-After": { description: "Seconds before retrying", schema: { type: "integer", minimum: 1 } } } } } });
 for (const action of ["retry", "cancel"] as const) registry.registerPath({ method: "post", path: `/api/cases/{caseId}/handoffs/{handoffId}/${action}`,
   tags: ["Cases"], summary: `${action === "retry" ? "Retry" : "Cancel"} pending case handoff`,
   description: "Requires case access and ordinary task-control authority. Retry preserves the existing handoff/task identity. Cancellation remains available when enableCases is disabled; it prevents delivery and does not undo an applied assignment.",
   request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
+registry.registerPath({ method: "post", path: "/api/cases/{caseId}/handoffs/{handoffId}/withdraw", tags: ["Cases"],
+  summary: "Withdraw an accepted delivered handoff after a confirmed Stop",
+  description: "Board operators supply the current handoff version and the current recipient run with its acknowledged Stop receipt. The history retains the original acceptance and the withdrawal. The board inspects workspace and external effects before choosing the next assignment.",
+  request: { params: z.object({ caseId: z.string().uuid(), handoffId: z.string().uuid() }), body: jsonBody(caseHandoffWithdrawalSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 
 for (const [method, path, body, summary] of [

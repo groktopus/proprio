@@ -1,12 +1,13 @@
 import { resolveExternalTestDatabaseUrl } from "../../__tests__/helpers/external-test-database.js";
 import { randomBytes } from "node:crypto";
 import type { Db } from "@groktopus/db";
-import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues, subscribeDatabaseWork } from "@groktopus/db";
+import { agents, agentWakeupRequests, budgetPolicies, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues, subscribeDatabaseWork } from "@groktopus/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import type { CurrentUserRedactionOptions } from "../../log-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
+import { budgetService } from "../budgets.js";
 import { getHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { heartbeatService } from "../heartbeat.js";
@@ -31,7 +32,7 @@ function callbacks(db: Db) {
     },
     recovery: { escalateStrandedAssignedIssue: vi.fn<HeartbeatLifecycleDependencies["recovery"]["escalateStrandedAssignedIssue"]>() },
     companySkills: { completeTestRunForIssue: vi.fn<HeartbeatLifecycleDependencies["companySkills"]["completeTestRunForIssue"]>() },
-    budgets: { getInvocationBlock: vi.fn(async () => null) },
+    budgets: { getInvocationBlock: vi.fn<HeartbeatLifecycleDependencies["budgets"]["getInvocationBlock"]>(async () => null) },
     treeControlSvc: { getActivePauseHoldGate: vi.fn(async () => null) },
     enqueueWakeup: vi.fn<HeartbeatLifecycleDependencies["enqueueWakeup"]>(),
     getCurrentUserRedactionOptions: vi.fn(async (): Promise<CurrentUserRedactionOptions> => ({})),
@@ -153,6 +154,33 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, wakeupRequestId: wake.id, status: "running", runtimeMode: "native", ...patch }).returning();
     return { company, agent, wake, run };
   }
+
+  it("starts a liveness successor in current ancestry after moving out of an exhausted tree", async () => {
+    const { company, agent, run } = await fixture({ status: "succeeded", runtimeMode: "legacy", livenessState: "empty_response" });
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agent.id));
+    const [oldRoot, newRoot] = await db.insert(issues).values([
+      { companyId: company.id, title: "Previous tree" }, { companyId: company.id, title: "New tree" },
+    ]).returning();
+    const [task] = await db.insert(issues).values({ companyId: company.id, title: "Moved task", status: "todo",
+      assigneeAgentId: agent.id, parentId: newRoot.id }).returning();
+    const [completed] = await db.update(heartbeatRuns).set({
+      issueId: task.id, contextSnapshot: { issueId: task.id },
+      taskLineageJson: { version: 1, pathIssueIds: [task.id, oldRoot.id] },
+    }).where(eq(heartbeatRuns.id, run.id)).returning();
+    await db.insert(budgetPolicies).values({ companyId: company.id, scopeType: "task_tree", scopeId: oldRoot.id,
+      amount: 1, windowKind: "lifetime", hardStopEnabled: true });
+    await db.insert(costEvents).values({ companyId: company.id, agentId: agent.id, issueId: task.id, heartbeatRunId: run.id,
+      provider: "fixture", biller: "fixture", billingType: "metered_api", costStatus: "priced",
+      model: "fixture", costCents: 5, occurredAt: new Date() });
+    const deps = callbacks(db);
+    deps.budgets.getInvocationBlock.mockImplementation(budgetService(db).getInvocationBlock);
+    await expect(budgetService(db).getInvocationBlock(company.id, agent.id, { runId: run.id }))
+      .resolves.toMatchObject({ scopeType: "task_tree", scopeId: oldRoot.id });
+
+    await createHeartbeatLifecycle(db, deps).handleRunLivenessContinuation(completed);
+    expect(deps.enqueueWakeup).toHaveBeenCalledWith(agent.id,
+      expect.objectContaining({ contextSnapshot: expect.objectContaining({ issueId: task.id, parentRunId: run.id }) }));
+  });
 
   it.each(["succeeded", "failed", "cancelled", "timed_out", "interrupted", "deleted"])(
     "rechecks progress after a run becomes %s without reading its large payloads",
