@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { evidenceHistoryRateLimit } from "../middleware/evidence-history-rate-limit.js";
 import { z } from "zod";
 import type { Db } from "@groktopus/db";
 import { normalizeIssueIdentifier } from "@groktopus/shared";
@@ -17,6 +18,7 @@ import { issueReadSqlCondition } from "../services/authorization.js";
 import { createManagedAuditExport, readManagedAuditExportPage } from "../services/managed-audit-export.js";
 import { managedAuditExportPageQuerySchema, managedAuditExportParamsSchema, managedAuditExportWindowSchema, managedAuditTimestampSchema } from "./managed-audit-export-contract.js";
 import { caseActivityReadSqlCondition } from "../services/case-activity-access.js";
+import { readNativeCompletionHistory } from "../services/native-runtime/native-completion-history.js";
 
 /** Max rows a single CSV export will stream (guards against runaway exports). */
 const AUDIT_CSV_EXPORT_MAX_ROWS = 10_000;
@@ -222,7 +224,7 @@ export function activityRoutes(db: Db) {
     assigneeAgentId: string | null;
     assigneeUserId: string | null;
     status: string;
-  }) {
+  }, { hideExistence = false } = {}) {
     const decision = await access.decide({
       actor: req.actor,
       action: "issue:read",
@@ -238,7 +240,8 @@ export function activityRoutes(db: Db) {
       },
     });
     if (decision.allowed) return true;
-    res.status(403).json({ error: "Issue activity is outside this actor's authorization boundary" });
+    if (hideExistence) res.status(404).json({ error: "Issue not found" });
+    else res.status(403).json({ error: "Issue activity is outside this actor's authorization boundary" });
     return false;
   }
 
@@ -291,7 +294,8 @@ export function activityRoutes(db: Db) {
     if (parsedQuery.data.actorScope === "agents") {
       const result = await agentAudit.list({ companyId, ...parsedQuery.data,
         dashboardUserId: req.actor.type === "board" ? req.actor.userId : null,
-        caseReadCondition: await caseActivityReadSqlCondition(db, req.actor) });
+        caseReadCondition: await caseActivityReadSqlCondition(db, req.actor),
+        issueReadCondition: await issueReadSqlCondition(db, req.actor) });
       res.json({ ...result, accessTier: "full" });
       return;
     }
@@ -302,7 +306,8 @@ export function activityRoutes(db: Db) {
     }
     const result = await agentAudit.list({ companyId, ...parsedQuery.data,
       dashboardUserId: req.actor.type === "board" ? req.actor.userId : null,
-      caseReadCondition: await caseActivityReadSqlCondition(db, req.actor) });
+      caseReadCondition: await caseActivityReadSqlCondition(db, req.actor),
+      issueReadCondition: await issueReadSqlCondition(db, req.actor) });
     res.json({
       ...(canViewAttribution ? result : stripAuditAttribution(result)),
       accessTier: canViewAttribution ? "full" : "basic",
@@ -356,10 +361,11 @@ export function activityRoutes(db: Db) {
     // would silently truncate the export, so ignore them.
     const { cursor: _cursor, limit: _limit, ...filters } = parsedQuery.data;
     const caseReadCondition = await caseActivityReadSqlCondition(db, req.actor);
+    const issueReadCondition = await issueReadSqlCondition(db, req.actor);
     const rows: Awaited<ReturnType<typeof agentAudit.list>>["items"] = [];
     let cursor: string | undefined;
     do {
-      const page = await agentAudit.list({ companyId, ...filters, cursor, limit: AUDIT_CSV_PAGE_SIZE, dashboardUserId: req.actor.userId, caseReadCondition });
+      const page = await agentAudit.list({ companyId, ...filters, cursor, limit: AUDIT_CSV_PAGE_SIZE, dashboardUserId: req.actor.userId, caseReadCondition, issueReadCondition });
       for (const item of page.items) {
         if (rows.length >= AUDIT_CSV_EXPORT_MAX_ROWS) break;
         rows.push(item);
@@ -428,6 +434,20 @@ export function activityRoutes(db: Db) {
     }
     const result = await (req.query.view === "recent" ? svc.forIssue(issue.id, 50) : svc.forIssue(issue.id));
     res.json(await svc.withActorNames(result));
+  });
+
+  const completionHistoryRateLimit = evidenceHistoryRateLimit("Completion history request limit exceeded");
+  router.get("/issues/:id/completion-history", completionHistoryRateLimit, async (req, res) => {
+    assertAuthenticated(req);
+    const rawId = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue, { hideExistence: true }))) return;
+    if (!(await assertCompanyScopeReadAllowed(req, res, issue.companyId))) return;
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(await readNativeCompletionHistory(db, {
+      companyId: issue.companyId, issueId: issue.id, actor: req.actor,
+    }));
   });
 
   router.get("/issues/:id/runs", async (req, res) => {

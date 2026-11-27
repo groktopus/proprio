@@ -110,6 +110,7 @@ program.hook("preAction", async (_thisCommand, actionCommand) => {
     const prepared = await prepareTestDriveEnvironment({
       dataDir: options.dataDir,
       apiKeyEnv: options.apiKeyEnv,
+      instance: options.instance,
     });
     dataDirOptions = { ...options, dataDir: prepared.dataDir };
   }

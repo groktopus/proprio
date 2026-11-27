@@ -44,3 +44,21 @@ export function queuedRunStalledSql(run: StalledRunColumns, at: Date) {
 
 export const aliasedRun = (alias: string): StalledRunColumns => ({ id: sql.raw(`${alias}.id`), companyId: sql.raw(`${alias}.company_id`),
   agentId: sql.raw(`${alias}.agent_id`), status: sql.raw(`${alias}.status`), createdAt: sql.raw(`${alias}.created_at`) });
+
+type WakeColumns = { companyId: SQLWrapper; status: SQLWrapper; createdAt: SQLWrapper;
+  claimedAt: SQLWrapper; runId: SQLWrapper };
+
+export const aliasedWake = (alias: string): WakeColumns => ({
+  companyId: sql.raw(`${alias}.company_id`), status: sql.raw(`${alias}.status`),
+  createdAt: sql.raw(`${alias}.created_at`), claimedAt: sql.raw(`${alias}.claimed_at`), runId: sql.raw(`${alias}.run_id`),
+});
+
+export function pendingWakeSql(wake: WakeColumns, at: Date) {
+  const freshAfter = new Date(at.getTime() - 5 * 60_000).toISOString();
+  return sql<boolean>`(${wake.status} = 'queued'
+    or (${wake.status} = 'deferred_issue_execution' and ${wake.createdAt} > ${freshAfter}::timestamptz)
+    or (${wake.status} = 'claimed' and (${wake.runId} is not null
+      or coalesce(${wake.claimedAt}, ${wake.createdAt}) > ${freshAfter}::timestamptz)))
+    and not exists (select 1 from heartbeat_runs wake_run where wake_run.id = ${wake.runId}
+      and wake_run.company_id = ${wake.companyId} and ${queuedRunStalledSql(aliasedRun("wake_run"), at)})`;
+}
