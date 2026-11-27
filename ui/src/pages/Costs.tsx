@@ -2,7 +2,7 @@ import { FastResponseHistory } from "../components/fast-responses/FastResponseHi
 import { DecisionHistory } from "../components/decision-models/DecisionHistory";
 import { SubscriptionCostCard, SubscriptionTokenUsage } from "../components/SubscriptionCostCard";
 import { subscriptionsApi } from "../api/subscriptions";
-import { useSearchParams } from "@/lib/router";
+import { Link, useSearchParams } from "@/lib/router";
 import { CostEstimateLabel } from "../components/CostEstimateLabel";
 import { CostAmount } from "../components/CostAmount";
 import { CostByUserTable } from "../components/CostByUserTable";
@@ -11,6 +11,8 @@ import { AgentIdentity } from "@/components/AgentIdentity";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  BudgetIncident,
+  BudgetIncidentResolutionInput,
   BudgetPolicySummary,
   CostByAgentModel,
   CostByBiller,
@@ -21,12 +23,18 @@ import type {
   ProviderQuotaResult,
 } from "@groktopus/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
+import { BUDGET_POLICY_EXISTS_ERROR_CODE } from "@groktopus/shared";
+import { ApiError } from "../api/client";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
+import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
 import { budgetsApi } from "../api/budgets";
+import { accessApi } from "../api/access";
 import { costsApi } from "../api/costs";
 import { agentsApi } from "../api/agents";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { TaskTreeBudgetCreate } from "../components/TaskTreeBudgetCreate";
 import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
@@ -47,6 +55,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const NO_COMPANY = "__none__";
+const TASK_BUDGET_PAGE_SIZE = 12;
+
+function isBudgetCreationConflict(error: unknown) {
+  return error instanceof ApiError && error.status === 409
+    && (error.body as { code?: string } | null)?.code === BUDGET_POLICY_EXISTS_ERROR_CODE;
+}
+
 export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "finance" | "decisions" | "fast-responses";
 
 export interface CostsProps {
@@ -258,41 +273,78 @@ export function Costs({
     discoverSubscriptions.mutate(selectedCompanyId);
   }, [selectedCompanyId, showSummaryChrome, subscriptions?.canRefresh, discoverSubscriptions.mutate]);
 
-  const { data: budgetData, isLoading: budgetLoading, error: budgetError } = useQuery({
+  const { data: cachedBudgetData, isLoading: budgetLoading, error: budgetError } = useQuery({
     queryKey: queryKeys.budgets.overview(companyId),
-    queryFn: () => budgetsApi.overview(companyId),
-    enabled: !!selectedCompanyId && customReady,
+    queryFn: ({ signal }) => budgetsApi.overview(companyId, { signal }),
+    enabled: Boolean(selectedCompanyId),
     refetchInterval: 30_000,
     staleTime: 5_000,
   });
+  const budgetData = budgetError instanceof ApiError && (budgetError.status === 401 || budgetError.status === 403)
+    ? undefined : cachedBudgetData;
+  const { data: boardAccess, error: boardAccessError, isFetching: boardAccessFetching, refetch: refetchBoardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: ({ signal }) => accessApi.getCurrentBoardAccess({ signal }),
+    enabled: Boolean(selectedCompanyId),
+    staleTime: 60_000,
+  });
+  const canManageTaskTreeBudgets = Boolean(selectedCompanyId && boardAccess && !boardAccessError &&
+    (boardAccess.source === "local_implicit" || (boardAccess.source !== "cloud_tenant" && boardAccess.isInstanceAdmin)
+      || boardAccess.memberships?.some(item => item.companyId === selectedCompanyId && item.status === "active" && item.membershipRole !== "viewer")));
 
-  const invalidateBudgetViews = () => {
-    if (!selectedCompanyId) return;
-    queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.projects.all(selectedCompanyId) });
+  const invalidateBudgetViews = (budgetCompanyId: string) => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(budgetCompanyId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.projects.all(budgetCompanyId) });
   };
 
   const policyMutation = useMutation({
     mutationFn: ({ summary, changes }: {
       summary: BudgetPolicySummary;
       changes: Partial<Pick<BudgetPolicySummary, "amount" | "reservationCents" | "unpricedUsagePolicy">>;
-    }) => budgetsApi.upsertPolicy(companyId, {
+    }) => budgetsApi.upsertPolicy(summary.companyId, {
       scopeType: summary.scopeType,
       scopeId: summary.scopeId,
       metric: summary.metric,
       windowKind: summary.windowKind,
       ...changes,
     }),
-    onSuccess: invalidateBudgetViews,
+    onSuccess: (_result, { summary }) => {
+      if (summary.scopeType === "task_tree") {
+        setTaskBudgetPagination({ companyId: summary.companyId, page: 0, policyId: summary.policyId });
+      }
+      invalidateBudgetViews(summary.companyId);
+    },
   });
+  const createTaskTreeBudgetMutation = useMutation({
+    mutationFn: ({ companyId: budgetCompanyId, rootTaskId, amount }: { companyId: string; rootTaskId: string; amount: number }) =>
+      budgetsApi.upsertPolicy(budgetCompanyId, {
+        scopeType: "task_tree", scopeId: rootTaskId, windowKind: "lifetime", amount, createOnly: true,
+      }),
+    onSuccess: (_result, variables) => invalidateBudgetViews(variables.companyId),
+    onError: (error, variables) => {
+      if (isBudgetCreationConflict(error)) invalidateBudgetViews(variables.companyId);
+    },
+  });
+  const currentTaskTreeBudgetMutation = createTaskTreeBudgetMutation.variables?.companyId === companyId;
 
   const incidentMutation = useMutation({
-    mutationFn: (input: { incidentId: string; action: "keep_paused" | "raise_budget_and_resume"; amount?: number }) =>
-      budgetsApi.resolveIncident(companyId, input.incidentId, input),
-    onSuccess: invalidateBudgetViews,
+    mutationFn: ({ incident, resolution }: { incident: BudgetIncident; resolution: BudgetIncidentResolutionInput }) =>
+      budgetsApi.resolveIncident(incident.companyId, incident.id, resolution),
+    onSuccess: (_result, { incident }) => invalidateBudgetViews(incident.companyId),
   });
+  const renderBudgetIncident = (incident: BudgetIncident) => (
+    <BudgetIncidentCard
+      key={incident.id}
+      incident={incident}
+      isMutating={incidentMutation.isPending && incidentMutation.variables?.incident.companyId === incident.companyId}
+      canResolve={incident.scopeType !== "task_tree" || canManageTaskTreeBudgets}
+      onKeepPaused={() => incidentMutation.mutate({ incident, resolution: { action: "keep_paused" } })}
+      onRaiseAndResume={(amount) => incidentMutation.mutate({ incident, resolution: { action: "raise_budget_and_resume", amount } })}
+    />
+  );
+  const [taskBudgetPagination, setTaskBudgetPagination] = useState<{ companyId: string; page: number; policyId?: string }>();
 
   const { data: spendData, isLoading: spendLoading, error: spendError } = useQuery({
     queryKey: queryKeys.costs(companyId, reportQueryFrom, reportQueryTo),
@@ -592,10 +644,27 @@ export function Costs({
   const budgetPolicies = budgetData?.policies ?? [];
   const activeBudgetIncidents = budgetData?.activeIncidents ?? [];
   const budgetPoliciesByScope = useMemo(() => ({
-    company: budgetPolicies.filter((policy) => policy.scopeType === "company"),
-    agent: budgetPolicies.filter((policy) => policy.scopeType === "agent"),
-    project: budgetPolicies.filter((policy) => policy.scopeType === "project"),
-  }), [budgetPolicies]);
+    company: budgetData?.policies.filter((policy) => policy.scopeType === "company") ?? [],
+    agent: budgetData?.policies.filter((policy) => policy.scopeType === "agent") ?? [],
+    project: budgetData?.policies.filter((policy) => policy.scopeType === "project") ?? [],
+    task_tree: budgetData?.policies.filter((policy) => policy.scopeType === "task_tree") ?? [],
+  }), [budgetData?.policies]);
+  const lifetimeBudgetRoots = useMemo(() => budgetPoliciesByScope.task_tree
+    .filter(policy => policy.windowKind === "lifetime").map(policy => policy.scopeId), [budgetPoliciesByScope.task_tree]);
+  const taskTreePolicies = budgetPoliciesByScope.task_tree;
+  const totalTaskBudgetPages = Math.ceil(taskTreePolicies.length / TASK_BUDGET_PAGE_SIZE);
+  const taskBudgetSavedIndex = taskBudgetPagination?.companyId === companyId && taskBudgetPagination.policyId
+    ? taskTreePolicies.findIndex(policy => policy.policyId === taskBudgetPagination.policyId) : -1;
+  const taskBudgetPage = taskBudgetSavedIndex >= 0 ? Math.floor(taskBudgetSavedIndex / TASK_BUDGET_PAGE_SIZE)
+    : taskBudgetPagination?.companyId === companyId
+      ? Math.min(taskBudgetPagination.page, Math.max(0, totalTaskBudgetPages - 1)) : 0;
+  const conflictingRootId = currentTaskTreeBudgetMutation && isBudgetCreationConflict(createTaskTreeBudgetMutation.error)
+    ? createTaskTreeBudgetMutation.variables?.rootTaskId : null;
+  const conflictingPage = conflictingRootId ? Math.floor(taskTreePolicies.findIndex(
+    policy => policy.scopeId === conflictingRootId && policy.windowKind === "lifetime") / TASK_BUDGET_PAGE_SIZE) : -1;
+  const shownTaskBudgetPage = conflictingPage >= 0 ? conflictingPage : taskBudgetPage;
+  const visibleTaskTreePolicies = taskTreePolicies.slice(shownTaskBudgetPage * TASK_BUDGET_PAGE_SIZE,
+    (shownTaskBudgetPage + 1) * TASK_BUDGET_PAGE_SIZE);
 
   if (!selectedCompanyId) {
     return <EmptyState icon={DollarSign} message="Select an organization to view costs." />;
@@ -888,20 +957,7 @@ export function Costs({
 
               {activeBudgetIncidents.length > 0 ? (
                 <div className="grid gap-4 xl:grid-cols-2">
-                  {activeBudgetIncidents.slice(0, 2).map((incident) => (
-                    <BudgetIncidentCard
-                      key={incident.id}
-                      incident={incident}
-                      isMutating={incidentMutation.isPending}
-                      onKeepPaused={() => incidentMutation.mutate({ incidentId: incident.id, action: "keep_paused" })}
-                      onRaiseAndResume={(amount) =>
-                        incidentMutation.mutate({
-                          incidentId: incident.id,
-                          action: "raise_budget_and_resume",
-                          amount,
-                        })}
-                    />
-                  ))}
+                  {activeBudgetIncidents.slice(0, 2).map(renderBudgetIncident)}
                 </div>
               ) : null}
 
@@ -923,7 +979,9 @@ export function Costs({
         </TabsContent>
 
         <TabsContent value="budgets" className="mt-4 space-y-4">
-          {policyMutation.error && <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>}
+          {(policyMutation.error || (currentTaskTreeBudgetMutation && createTaskTreeBudgetMutation.error && !conflictingRootId)) && (
+            <p role="alert" className="text-sm text-destructive">Could not update the budget policy. Review your settings and try again.</p>
+          )}
           {budgetLoading ? (
             <PageSkeleton variant="costs" />
           ) : budgetError && !budgetData ? null : (
@@ -972,20 +1030,7 @@ export function Costs({
                     </p>
                   </div>
                   <div className="grid gap-4 xl:grid-cols-2">
-                    {activeBudgetIncidents.map((incident) => (
-                      <BudgetIncidentCard
-                        key={incident.id}
-                        incident={incident}
-                        isMutating={incidentMutation.isPending}
-                        onKeepPaused={() => incidentMutation.mutate({ incidentId: incident.id, action: "keep_paused" })}
-                        onRaiseAndResume={(amount) =>
-                          incidentMutation.mutate({
-                            incidentId: incident.id,
-                            action: "raise_budget_and_resume",
-                            amount,
-                          })}
-                      />
-                    ))}
+                    {activeBudgetIncidents.map(renderBudgetIncident)}
                   </div>
                 </div>
               ) : null}
@@ -1023,15 +1068,72 @@ export function Costs({
                   );
                 })}
 
-                {budgetPolicies.length === 0 ? (
-                  <Card>
-                    <CardContent className="px-5 py-8 text-sm text-muted-foreground">
-                      No budget policies yet. Set agent and project budgets from their detail pages, or use the existing organization monthly budget control.
-                    </CardContent>
-                  </Card>
-                ) : null}
               </div>
             </>
+          )}
+
+          <section className="space-y-3">
+            <div>
+              <h2 className="text-lg font-semibold">Task budgets</h2>
+              <p className="text-sm text-muted-foreground">A lifetime limit is shared by the root task and its descendants.</p>
+            </div>
+            {conflictingRootId && (
+              <p role="alert" className="text-sm text-destructive">This task already has a lifetime budget. Review its current policy below.</p>
+            )}
+            {boardAccessError && (
+              <div className="flex flex-wrap items-center gap-2">
+                <p role="alert" className="text-sm text-destructive">Could not verify your access to manage task budgets.</p>
+                <Button type="button" variant="outline" size="sm" disabled={boardAccessFetching}
+                  onClick={() => { void refetchBoardAccess(); }}>Retry access check</Button>
+              </div>
+            )}
+            <TaskTreeBudgetCreate
+              key={companyId}
+              companyId={companyId}
+              existingRootIds={lifetimeBudgetRoots}
+              disabled={!canManageTaskTreeBudgets || !budgetData || Boolean(budgetError)}
+              isSaving={currentTaskTreeBudgetMutation && createTaskTreeBudgetMutation.isPending}
+              onCreate={(rootTaskId, amount) => createTaskTreeBudgetMutation.mutateAsync({ companyId, rootTaskId, amount })}
+            />
+            {visibleTaskTreePolicies.length > 0 && (
+              <div className="grid gap-4 xl:grid-cols-2">
+                {visibleTaskTreePolicies.map(summary => (
+                  <div key={summary.policyId}>
+                    <Link to={createIssueDetailPath(summary.scopeId)} disableIssueQuicklook className={cn("mb-2 inline-block text-sm font-medium text-primary hover:underline", ANALYTICS_MASK_CLASS)}>
+                      Open root task: {summary.scopeName}
+                    </Link>
+                    <BudgetPolicyCard
+                      summary={summary}
+                      onReservationChange={canManageTaskTreeBudgets ? (reservationCents) => policyMutation.mutate({ summary, changes: { reservationCents } }) : undefined}
+                      onUnpricedUsagePolicyChange={canManageTaskTreeBudgets ? (unpricedUsagePolicy) => policyMutation.mutate({ summary, changes: { unpricedUsagePolicy } }) : undefined}
+                      isSaving={policyMutation.isPending}
+                      onSave={canManageTaskTreeBudgets ? (amount) => policyMutation.mutate({ summary, changes: { amount } }) : undefined}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            {totalTaskBudgetPages > 1 && (
+              <div className="flex flex-wrap items-center gap-2" aria-label="Task budget pages">
+                <Button type="button" variant="outline" size="sm" disabled={shownTaskBudgetPage === 0} onClick={() => {
+                  if (conflictingRootId) createTaskTreeBudgetMutation.reset();
+                  setTaskBudgetPagination({ companyId, page: shownTaskBudgetPage - 1 });
+                }}>Previous budgets</Button>
+                <output className="text-sm text-muted-foreground">Page {shownTaskBudgetPage + 1} of {totalTaskBudgetPages}</output>
+                <Button type="button" variant="outline" size="sm" disabled={shownTaskBudgetPage + 1 >= totalTaskBudgetPages} onClick={() => {
+                  if (conflictingRootId) createTaskTreeBudgetMutation.reset();
+                  setTaskBudgetPagination({ companyId, page: shownTaskBudgetPage + 1 });
+                }}>Next budgets</Button>
+              </div>
+            )}
+          </section>
+
+          {budgetData && !budgetPolicies.length && (
+            <Card>
+              <CardContent className="px-5 py-8 text-sm text-muted-foreground">
+                No budget policies yet. Set an agent or project budget from its detail page, set a task budget above, or use the organization monthly budget control.
+              </CardContent>
+            </Card>
           )}
         </TabsContent>
 

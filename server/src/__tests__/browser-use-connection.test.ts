@@ -1493,6 +1493,61 @@ const actor = { actorType: "user" as const, actorId: "browser-reviewer" };
       if (phase === "initial") expect(rows).toHaveLength(0);
       else expect(rows[0]).toMatchObject({ status: "failed", eventsDrained: 1, result: { proprioBudgetHold: { state: "released" } } });
     });
+    async function exhaustBrowserTree(f: Awaited<ReturnType<typeof fixture>>, rootId: string) {
+      const [billed] = await db.insert(heartbeatRuns).values({
+        companyId: f.company.id, agentId: f.agent.id, issueId: rootId, status: "succeeded",
+        taskLineageJson: { version: 1, pathIssueIds: [rootId] },
+      }).returning();
+      await db.insert(costEvents).values({ companyId: f.company.id, agentId: f.agent.id, issueId: rootId, heartbeatRunId: billed.id,
+        provider: "fixture", biller: "fixture", billingType: "metered_api", costStatus: "priced",
+        model: "fixture", costCents: 5, occurredAt: new Date() });
+      await db.insert(budgetPolicies).values({ companyId: f.company.id, scopeType: "task_tree", scopeId: rootId,
+        amount: 1, windowKind: "lifetime", hardStopEnabled: true });
+    }
+
+    it("checks the owning run's saved tree again before the Browser Use provider call", async () => {
+      const f = await fixture();
+      const [root] = await db.insert(issues).values({ companyId: f.company.id, title: "Previous browser tree" }).returning();
+      await db.update(heartbeatRuns).set({ taskLineageJson: { version: 1, pathIssueIds: [f.issue.id, root.id] } })
+        .where(eq(heartbeatRuns.id, f.run.id));
+      const invocationId = randomUUID();
+      const transaction = db.transaction.bind(db);
+      let charged = false;
+      const barrier = vi.spyOn(db, "transaction").mockImplementation(async (callback, config) => {
+        const result = await transaction(callback, config);
+        const [pending] = await db.select().from(browserUseRuns).where(eq(browserUseRuns.invocationId, invocationId));
+        if (!charged && pending?.status === "creating") {
+          charged = true;
+          await exhaustBrowserTree(f, root.id);
+        }
+        return result;
+      });
+      try {
+        await expect(f.service.execute(f.binding, f.grant, invocationId, "browser_start", { task: "Check the captured budget" }))
+          .rejects.toThrow("Task tree cannot start work");
+      } finally {
+        barrier.mockRestore();
+      }
+      expect(charged).toBe(true);
+      expect(f.request.mock.calls.filter(([url, init]) => url.endsWith("/runs") && init.method === "POST")).toHaveLength(0);
+    });
+
+    it("keeps polling Browser Use after the task moves into a different exhausted tree", async () => {
+      const f = await fixture();
+      const [root] = await db.insert(issues).values({ companyId: f.company.id, title: "New browser tree" }).returning();
+      await db.update(heartbeatRuns).set({ taskLineageJson: { version: 1, pathIssueIds: [f.issue.id] } })
+        .where(eq(heartbeatRuns.id, f.run.id));
+      const invocationId = randomUUID();
+      await expect(f.service.execute(f.binding, f.grant, invocationId, "browser_start", { task: "Continue under the owning run" }))
+        .resolves.toMatchObject({ status: "running" });
+      await db.update(issues).set({ parentId: root.id }).where(eq(issues.id, f.issue.id));
+      await exhaustBrowserTree(f, root.id);
+      await f.tick();
+      expect(f.request.mock.calls.filter(([url]) => url.endsWith("/cancel"))).toHaveLength(0);
+      const [operation] = await db.select().from(browserUseRuns).where(eq(browserUseRuns.invocationId, invocationId));
+      expect(operation).toMatchObject({ status: "running", heartbeatRunId: f.run.id });
+    });
+
     it.each(["reduction", "new_policy", "config", "charge", "cancel", "session_end", "policy_deny"])("rechecks %s at the actual provider handoff", async race => {
       const f = await fixture();
       if (race === "reduction" || race === "charge") await budgetService(db).upsertPolicy(f.company.id,
