@@ -11,6 +11,11 @@ export const managedAuditEvents = pgTable("managed_audit_events", {
   phase: text("phase").notNull(),
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
   runId: uuid("run_id"),
+  // Null for events without a run and for historical or unavailable bindings.
+  // These fields are captured with the event; readers must never infer them
+  // from current run/task rows after the fact.
+  runScopeKind: text("run_scope_kind").$type<"company" | "issue">(),
+  runIssueId: uuid("run_issue_id"),
   taskId: uuid("task_id"),
   invocationId: uuid("invocation_id").notNull(),
   requestId: uuid("request_id"),
