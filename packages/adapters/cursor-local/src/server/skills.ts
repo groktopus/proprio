@@ -11,6 +11,7 @@ import {
   ensureProprioSkillSymlink,
   readProprioRuntimeSkillEntries,
   readInstalledSkillTargets,
+  removeUnselectedProprioSkillSymlinks,
   resolveLegacyProprioDesiredSkillNames,
 } from "@groktopus/adapter-utils/server-utils";
 
@@ -63,22 +64,18 @@ export async function syncCursorSkills(
   ]);
   const skillsHome = resolveCursorSkillsHome(ctx.config);
   await fs.mkdir(skillsHome, { recursive: true });
-  const installed = await readInstalledSkillTargets(skillsHome);
-  const availableByRuntimeName = new Map(availableEntries.map((entry) => [entry.runtimeName, entry]));
+  const selectedEntries = availableEntries.filter((entry) => desiredSet.has(entry.key));
 
-  for (const available of availableEntries) {
-    if (!desiredSet.has(available.key)) continue;
+  for (const available of selectedEntries) {
     const target = path.join(skillsHome, available.runtimeName);
     await ensureProprioSkillSymlink(available.source, target);
   }
 
-  for (const [name, installedEntry] of installed.entries()) {
-    const available = availableByRuntimeName.get(name);
-    if (!available) continue;
-    if (desiredSet.has(available.key)) continue;
-    if (installedEntry.targetPath !== available.source) continue;
-    await fs.unlink(path.join(skillsHome, name)).catch(() => {});
-  }
+  await removeUnselectedProprioSkillSymlinks(
+    skillsHome,
+    availableEntries,
+    selectedEntries.map((entry) => entry.runtimeName),
+  );
 
   return buildCursorSkillSnapshot(ctx.config);
 }

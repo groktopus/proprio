@@ -4780,6 +4780,39 @@ export async function removeMaintainerOnlySkillSymlinks(
   }
 }
 
+/** Remove only symlinks that still point at known Proprio skill sources. */
+export async function removeUnselectedProprioSkillSymlinks(
+  skillsHome: string,
+  availableEntries: Array<{ runtimeName: string; source: string }>,
+  selectedSkillNames: Iterable<string>,
+): Promise<string[]> {
+  const selected = new Set(selectedSkillNames);
+  const sources = new Map<string, Set<string>>();
+  for (const entry of availableEntries) {
+    const paths = sources.get(entry.runtimeName) ?? new Set<string>();
+    paths.add(path.resolve(entry.source));
+    sources.set(entry.runtimeName, paths);
+  }
+  const entries = await fs.readdir(skillsHome, { withFileTypes: true }).catch(() => []);
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (selected.has(entry.name) || !entry.isSymbolicLink()) continue;
+    const target = path.join(skillsHome, entry.name);
+    const linkedPath = await fs.readlink(target).catch(() => null);
+    if (!linkedPath || !sources.get(entry.name)?.has(path.resolve(path.dirname(target), linkedPath))) continue;
+    try {
+      await fs.unlink(target);
+    } catch (error) {
+      // A competing cleanup may have removed this link after readdir/readlink.
+      // ENOENT means the requested state already holds; report only actual removals.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    removed.push(entry.name);
+  }
+  return removed;
+}
+
 export async function ensureCommandResolvable(
   command: string,
   cwd: string,
