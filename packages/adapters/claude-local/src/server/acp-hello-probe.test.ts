@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function probe(mode: string, text?: string) {
+async function probe(mode: string, text?: string, timeoutMs = 5_000) {
   const root = await mkdtemp(path.join(os.tmpdir(), "proprio-acp-hello-test-"));
   roots.push(root);
   const observed = path.join(root, "observed.json");
@@ -27,7 +27,7 @@ async function probe(mode: string, text?: string) {
     },
     model: "claude-test-model",
     target: null,
-    timeoutMs: 800,
+    timeoutMs,
   });
   return { result, observed };
 }
@@ -48,7 +48,7 @@ describe("Claude ACP hello probe", () => {
   });
 
   it("bounds a hung ACP turn and reports timeout", async () => {
-    const { result } = await probe("hang");
+    const { result } = await probe("hang", undefined, 800);
     expect(result).toEqual({ status: "timeout" });
   });
 });

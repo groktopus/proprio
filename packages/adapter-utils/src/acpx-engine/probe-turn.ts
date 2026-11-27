@@ -73,6 +73,8 @@ export async function runAcpProbeTurn(input: {
       agentEnvironment: () => ({ PATH: process.env.PATH ?? "", ...probeEnv }),
       permissionMode: "deny-all",
       nonInteractivePermissions: "deny",
+      fs: false,
+      terminal: false,
       timeoutMs: input.timeoutMs,
     }));
     handle = await runtime.ensureSession({
@@ -102,12 +104,18 @@ export async function runAcpProbeTurn(input: {
     let outcome: Awaited<typeof turn.result>;
     try {
       outcome = await Promise.race([
-        Promise.all([consume, turn.result]).then(([, turnResult]) => turnResult),
+        turn.result,
         new Promise<never>((_resolve, reject) => {
           timeoutTimer = setTimeout(() => reject(Object.assign(new Error("probe_timeout"), { code: "PROBE_TIMEOUT" })), input.timeoutMs);
         }),
       ]);
     } finally { clearTimeout(timeoutTimer); }
+    // startTurn event streams do not emit terminal events. Close the stream
+    // after the canonical result settles so the event consumer can finish.
+    if (!(await cleanupWithinBudget(() => turn!.closeStream({ reason: "ACP probe turn complete" })))) {
+      throw new Error("ACP probe event stream did not close");
+    }
+    if (!(await cleanupWithinBudget(() => consume))) throw new Error("ACP probe event consumer did not finish");
     if (outcome.status === "completed") result = { status: "completed", ...response };
     else if (outcome.status === "failed" && /(?:authentication|required|unauthorized|unauthenticated|\b(?:401|403)\b)/i.test(outcome.error.message)) failure = "auth_required";
   } catch (error) {
