@@ -39,7 +39,7 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import type { Db } from "@groktopus/db";
+import type { Db, DbTransaction } from "@groktopus/db";
 import type { IssueGoalOrigin } from "@groktopus/shared";
 import {
   agents,
@@ -2444,9 +2444,12 @@ function claimIdMatches(claimId: string) {
 }
 
 export function issueThreadInteractionService(
-  db: Db,
+  executor: Db | DbTransaction,
   opts: IssueThreadInteractionServiceOptions = {},
 ) {
+  // The lifecycle deletion path supplies its outer transaction. Both Drizzle
+  // executors support the query and nested-transaction API used by this service.
+  const db = executor as Db;
   const pullRequestStateCache = new Map<
     string,
     { state: PullRequestMergeState; checkedAt: number }

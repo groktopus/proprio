@@ -17,7 +17,12 @@ import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
 import { githubNativeGitService } from "./github-native-git.js";
 
+function assertAgentDeletionTransaction(tx: Db | DbTransaction): asserts tx is DbTransaction {
+  if (!("nestedIndex" in tx)) throw new Error("Agent dependency deletion requires a database transaction");
+}
+
 export async function deleteAgentDependencies(tx: Db | DbTransaction, companyId: string, id: string) {
+  assertAgentDeletionTransaction(tx);
   // Lifecycle callers use READ COMMITTED. Fence admissions before inspecting
   // holds, so the next statement sees any admission that committed while waiting.
   await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, id))).for("update");

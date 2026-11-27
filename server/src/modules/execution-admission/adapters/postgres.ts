@@ -5,13 +5,14 @@ import {
   projectTaskExecutionPolicies as policies,
   projects,
   type Db,
+  type DbTransaction,
 } from "@groktopus/db";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { TaskExecutionPolicyStore } from "../application/policy.js";
 import { decideSettlement, sameAdmissionRecord, type AdmissionRecord, type AdmittedProjectSet } from "../domain/admission.js";
 import { ABSENT_TASK_EXECUTION_POLICY, type TaskExecutionPolicy } from "../domain/policy.js";
 
-function assertTransaction(tx: Db) {
+function assertTransaction(tx: Db | DbTransaction) {
   if (!("nestedIndex" in tx)) throw new Error("Execution admission storage requires a database transaction");
 }
 
@@ -165,7 +166,7 @@ export async function hasUnsettledProjectCharges(db: Db, scope: { companyId: str
 }
 
 /** Removes settled history of an agent's runs before they are deleted; refuses while any admission is unsettled. */
-export async function deleteAgentAdmissionHistory(tx: Db, scope: { companyId: string; agentId: string }) {
+export async function deleteAgentAdmissionHistory(tx: DbTransaction, scope: { companyId: string; agentId: string }) {
   assertTransaction(tx);
   const agentRuns = tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.companyId, scope.companyId), eq(heartbeatRuns.agentId, scope.agentId)));
