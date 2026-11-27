@@ -17,6 +17,7 @@ try {
   const auth = JSON.parse(readFileSync(authPath, 'utf8'));
   credentialPresent = Boolean(auth.OPENAI_API_KEY || auth.tokens?.access_token);
 } catch {}
+credentialPresent ||= Boolean(process.env.OPENAI_API_KEY?.trim() || process.env.PROPRIO_AI_PROVIDER_KEY?.trim());
 const modelFlag = Math.max(process.argv.indexOf('--model'), process.argv.indexOf('-m'));
 const model = modelFlag >= 0 ? process.argv[modelFlag + 1] : null;
 appendFileSync(logPath, `${JSON.stringify({ event: 'probe', credentialPresent, model, fixture: true })}\n`, { mode: 0o600 });
