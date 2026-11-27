@@ -6,6 +6,12 @@ export const githubNativeRepositorySchema = z.string().trim().max(140)
   .transform(value => value.toLowerCase());
 
 export const githubNativeOperationSchema = z.enum(["read", "push", "create_pull_request"]);
+export const githubNativeRequestSchema = z.object({
+  repository: githubNativeRepositorySchema,
+  operation: githubNativeOperationSchema,
+}).strict();
+export type GitHubNativeRequest = z.infer<typeof githubNativeRequestSchema>;
+
 export type GitHubNativeOperation = z.infer<typeof githubNativeOperationSchema>;
 
 export const githubNativeSetupSchema = z.object({
@@ -28,3 +34,7 @@ export interface GitHubNativeGrantSummary {
   verifiedAt: string;
   revokedAt: string | null;
 }
+
+export type GitHubNativeEligibility =
+  | { status: "available"; grant: GitHubNativeGrantSummary }
+  | { status: "unavailable"; reason: string; code: "no_identity" | "ambiguous" | "repository_denied" | "action_denied" | "runtime_denied" | "workspace_mismatch" | "managed_identity" | "managed_repository_denied" | "revoked" | "fresh_turn_required" };

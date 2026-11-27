@@ -1,9 +1,14 @@
+import express from "express";
+import request from "supertest";
 import { generateKeyPairSync } from "node:crypto";
-import { agents, authUsers, connectionGrants, createDb, executionWorkspaces, githubNativeGrants, heartbeatRuns, issues, projectAccessMembers, projects, projectWorkspaces, runIdentityContexts, toolApplications, toolConnectionInstalls, toolConnections } from "@groktopus/db";
+import { agents, agentWakeupRequests, authUsers, connectionGrants, connectionIntentDeliveries, createDb, executionWorkspaces, githubNativeGrants, heartbeatRuns, issues, projectAccessMembers, projects, projectWorkspaces, runIdentityContexts, toolApplications, toolConnectionInstalls, toolConnections } from "@groktopus/db";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { githubNativeGitService } from "../services/github-native-git.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
+import { connectionIntentBoardRoutes } from "../routes/connection-intents.js";
+import { errorHandler } from "../middleware/error-handler.js";
+import { connectionIntentService } from "../services/connection-intents.js";
 import { createGitRemoteAuthProvider } from "../services/git-credentials.js";
 import { projectGitAuthorizationService } from "../services/project-git-authorization.js";
 import { secretService } from "../services/secrets.js";
@@ -69,17 +74,22 @@ describe.skipIf(!support.supported)("self-hosted GitHub App for terminal Git", (
     return { ...context, fixture, fetchImpl, workspace, execution, input: { agentId, repository, appId: "123", privateKey: key, push, pullRequests } };
   }
 
-  it("admits the scoped token alongside the MCP PAT and rejects a different repository, agent or revoked grant", async () => {
-    const f = await seed();
-    const [application] = await db.insert(toolApplications).values({ companyId: f.companyId,
+  async function installOrganizationPat(companyId: string) {
+    const [application] = await db.insert(toolApplications).values({ companyId: companyId,
       name: "GitHub MCP", type: "mcp_http" }).returning();
-    const [connection] = await db.insert(toolConnections).values({ companyId: f.companyId, applicationId: application.id,
+    const [connection] = await db.insert(toolConnections).values({ companyId: companyId, applicationId: application.id,
       name: "GitHub MCP", uid: "mcp-pat", transport: "mcp_remote", authKind: "api_key", credentialPolicy: "shared",
       config: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" }, status: "active", enabled: true }).returning();
-    await db.insert(connectionGrants).values({ companyId: f.companyId,
+    await db.insert(connectionGrants).values({ companyId: companyId,
       connectionId: connection.id, kind: "organization", status: "active" });
-    await db.insert(toolConnectionInstalls).values({ companyId: f.companyId, connectionId: connection.id,
-      targetType: "company", targetId: f.companyId });
+    await db.insert(toolConnectionInstalls).values({ companyId: companyId, connectionId: connection.id,
+      targetType: "company", targetId: companyId });
+    return connection;
+  }
+
+  it("admits the scoped token alongside the MCP PAT and rejects a different repository, agent or revoked grant", async () => {
+    const f = await seed();
+    await installOrganizationPat(f.companyId);
     const service = githubNativeGitService(db);
     const grant = await service.configure(f.companyId, "A", f.input);
     expect(grant).toMatchObject({ agentId: f.agentId, repository, appSlug: "fixture-app" });
@@ -119,6 +129,110 @@ describe.skipIf(!support.supported)("self-hosted GitHub App for terminal Git", (
     expect(f.fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("uses the same repository and operation checks in native setup options and completion", async () => {
+    const f = await seed();
+    const mcp = await installOrganizationPat(f.companyId);
+    const before = await db.select().from(connectionGrants).where(eq(connectionGrants.companyId, f.companyId));
+    const intents = connectionIntentService(db);
+    const claims = { sub: f.agentId, company_id: f.companyId, run_id: f.runId, responsible_user_id: "A" };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", source: "local_implicit", userId: "A" };
+      next();
+    });
+    app.use(connectionIntentBoardRoutes(db, { wakeup: vi.fn() } as never));
+    app.use(errorHandler);
+    const runRequest = await intents.request(claims, "github", { githubGit: { repository, operation: "push" } });
+    const card = `/connection-intents/${runRequest.interactionId}`;
+    await expect(intents.request(claims, "github", { githubGit: { repository: "acme/different", operation: "push" } }))
+      .rejects.toMatchObject({ status: 422, details: { code: "workspace_mismatch" } });
+    const options = await request(app).get(`${card}/setup-options`).expect(200);
+    expect(options.body).toMatchObject({ existingConnections: [], githubGit: { status: "unavailable", code: "no_identity" } });
+    await request(app).post(`${card}/phase`).send({ phase: "authorizing", setupAccess: {
+      connectionId: mcp.id, access: "all_agents",
+    } }).expect(422);
+    expect((await intents.loadIntent(runRequest.interactionId!)).interaction.payload).not.toHaveProperty("setupAccess");
+    await request(app).post(`${card}/complete`).send({ connectionId: mcp.id }).expect(409);
+    expect((await intents.loadIntent(runRequest.interactionId!)).interaction.status).toBe("pending");
+    expect(await db.select().from(connectionGrants).where(eq(connectionGrants.companyId, f.companyId))).toEqual(before);
+
+    const native = githubNativeGitService(db);
+    f.fetchImpl.mockImplementationOnce(async () => Response.json({ id: 123, slug: "fixture-app" }))
+      .mockImplementationOnce(async () => Response.json({ id: 456, app_id: 123 }))
+      .mockImplementationOnce(async () => Response.json({
+        token: "ghs_fixture", expires_at: new Date(Date.now() + 60000).toISOString(),
+        permissions: { contents: "read" }, repositories: [{ id: 789, full_name: repository }],
+      }));
+    const readGrant = await native.configure(f.companyId, "A", { ...f.input, push: false, pullRequests: false });
+    expect((await request(app).get(`${card}/setup-options`).expect(200)).body.githubGit)
+      .toMatchObject({ status: "unavailable", code: "action_denied" });
+    await request(app).post(`${card}/complete`).send({ connectionId: readGrant.id, nativeGitVerifiedAt: readGrant.verifiedAt }).expect(409);
+    expect((await intents.loadIntent(runRequest.interactionId!)).interaction.status).toBe("pending");
+
+    const grant = await native.configure(f.companyId, "A", f.input);
+    expect((await request(app).get(`${card}/setup-options`).expect(200)).body.githubGit)
+      .toMatchObject({ status: "available", grant: { id: grant.id } });
+    await request(app).post(`${card}/complete`).send({
+      connectionId: grant.id, nativeGitVerifiedAt: readGrant.verifiedAt,
+    }).expect(409);
+    expect((await intents.loadIntent(runRequest.interactionId!)).interaction.status).toBe("pending");
+    expect((await request(app).post(`${card}/complete`).send({
+      connectionId: grant.id, nativeGitVerifiedAt: grant.verifiedAt,
+    }).expect(200)).body).toMatchObject({ status: "accepted", result: { nativeGitGrantId: grant.id } });
+  });
+
+  it("continues an App-only approval in a fresh turn without a GitHub MCP connection", async () => {
+    const f = await seed();
+    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, f.issueId));
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: f.issueId, githubAuthenticationMode: "host" } })
+      .where(eq(heartbeatRuns.id, f.runId));
+    const grant = await githubNativeGitService(db).configure(f.companyId, "A", f.input);
+    const intents = connectionIntentService(db);
+    const claims = { sub: f.agentId, company_id: f.companyId, run_id: f.runId, responsible_user_id: "A" };
+    const gitRequest = { githubGit: { repository, operation: "push" as const } };
+    const pending = await intents.request(claims, "github", gitRequest);
+    expect(pending).toMatchObject({ state: "needs_user_action", instruction: expect.stringContaining("fresh task turn") });
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, f.runId));
+    const wakeup = vi.fn(async (_agentId: string, input: { idempotencyKey: string }) => {
+      await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId, source: "automation",
+        status: "queued", idempotencyKey: input.idempotencyKey });
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.actor = { type: "board", source: "local_implicit", userId: "A" };
+      next();
+    });
+    app.use(connectionIntentBoardRoutes(db, { wakeup } as never));
+    app.use(errorHandler);
+    await request(app).post(`/connection-intents/${pending.interactionId}/complete`).send({
+      connectionId: grant.id, nativeGitVerifiedAt: grant.verifiedAt,
+    }).expect(200);
+    expect(wakeup).toHaveBeenCalledWith(f.agentId, expect.objectContaining({
+      contextSnapshot: expect.objectContaining({ forceFreshSession: true }),
+    }));
+    const [delivery] = await db.select().from(connectionIntentDeliveries)
+      .where(eq(connectionIntentDeliveries.interactionId, pending.interactionId!));
+    expect(delivery?.deliveredAt).toBeInstanceOf(Date);
+  });
+
+  it("reports a genuinely ambiguous native identity set to both the picker and completion route", async () => {
+    const f = await seed();
+    const first = await f.fixture.grant(f, "first", true);
+    await f.fixture.grant(f, "second", true);
+    const intents = connectionIntentService(db);
+    const result = await intents.request({ sub: f.agentId, company_id: f.companyId, run_id: f.runId, responsible_user_id: "A" }, "github", {
+      githubGit: { repository, operation: "create_pull_request" },
+    });
+    expect(await intents.setupOptions(result.interactionId!)).toMatchObject({
+      existingConnections: [], githubGit: { status: "unavailable", code: "ambiguous" },
+    });
+    await expect(intents.complete(result.interactionId!, first.connectionId, "A"))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("More than one") });
+    expect((await intents.loadIntent(result.interactionId!)).interaction.status).toBe("pending");
+  });
+
   it("denies issuance when the current workspace points to a different granted repository", async () => {
     const f = await seed();
     const service = githubNativeGitService(db);
@@ -142,7 +256,16 @@ describe.skipIf(!support.supported)("self-hosted GitHub App for terminal Git", (
     expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({ status: "unavailable", env: {} });
     const managed = await f.fixture.grant(f, "managed", true);
     await secretService(db).rotate(managed.secretId, { value: "ghs_previous_managed" });
-    expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({ status: "available", grantId: managed.id });
+    const previousReceipt = {
+      status: "available" as const, source: "dedicated" as const, login: "managed",
+      connectionId: managed.connectionId, grantId: managed.id, authenticationMode: "managed" as const,
+    };
+    await db.update(runIdentityContexts).set({ github: previousReceipt }).where(eq(runIdentityContexts.runId, f.runId));
+    expect(await resolveGitHubOperationCredentials(db, f)).toMatchObject({
+      ...previousReceipt, env: { GH_TOKEN: "ghs_previous_managed" },
+    });
+    const [identity] = await db.select().from(runIdentityContexts).where(eq(runIdentityContexts.runId, f.runId));
+    expect(identity.github).toEqual(previousReceipt);
   });
 
   it("offers read-only private checkout before admission and isolates anonymous board recovery", async () => {

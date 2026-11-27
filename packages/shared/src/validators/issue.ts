@@ -1,3 +1,4 @@
+import { githubNativeRequestSchema } from "../github-native-git.js";
 import { CHAT_PROVIDERS } from "../types/chat-channels.js";
 import { taskWorkspaceSelectionSchema } from "./task-workspace.js";
 import { z } from "zod";
@@ -1348,6 +1349,7 @@ const connectionIntentBrandAssetSchema = z
 
 export const connectionIntentPayloadSchema = z
   .object({
+    githubGit: githubNativeRequestSchema.optional(),
     agentSetup: z.literal(true).optional(),
     agentSetupOperationId: z.string().guid().optional(),
     setupAccess: z.object({
@@ -1381,6 +1383,9 @@ export const connectionIntentPayloadSchema = z
     phase: connectionIntentPhaseSchema,
   })
   .strict()
+  .refine(value => !value.githubGit || (value.serviceSlug === "github" && !value.purpose
+    && !value.accessRequest && !value.upstreamService && !value.savedSetup && !value.setupAccess),
+  "Terminal Git requests use only the native Git authorization path")
   .refine(value => !value.agentSetup || value.purpose === "ai", "Agent setup cards require AI authentication")
   .refine(value => !value.agentSetupOperationId || value.agentSetup === true, "A setup operation requires an agent setup card");
 
@@ -1390,16 +1395,17 @@ export const connectionIntentResultSchema = z
     instruction: z.string().max(4000).optional(),
     outcome: z.enum(["connected", "declined", "superseded", "expired"]),
     connectionId: z.string().guid().nullable().optional(),
+    nativeGitGrantId: z.string().guid().optional(),
     reason: z.string().trim().max(4000).nullable().optional(),
     supersededByInteractionId: z.string().guid().nullable().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.outcome === "connected" && !value.connectionId) {
+    if (value.outcome === "connected" && Boolean(value.connectionId) === Boolean(value.nativeGitGrantId)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["connectionId"],
-        message: "Connected intents require a connection id",
+        message: "Connected intents require one connection or terminal Git grant",
       });
     }
     if (value.outcome === "superseded" && !value.supersededByInteractionId) {

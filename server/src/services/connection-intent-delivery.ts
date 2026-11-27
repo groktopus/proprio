@@ -2,6 +2,8 @@ import { isAgentAwaitingSetup, requestAgentLifecycleRecheckInTransaction } from 
 import { agents, companies } from "@groktopus/db";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { connectionIntentService } from "./connection-intents.js";
+import { githubNativeIntentEligibility } from "./github-operation-credentials.js";
+import { connectionIntentPayloadSchema } from "@groktopus/shared";
 import { connectionContinuationPendingResponse, findSatisfiedToolConnection, satisfiedConnectionIntentService } from "./satisfied-connection-intents.js";
 import { isAiConnectionConfigurationFailure } from "./ai-auth-failure.js";
 import { and, eq, isNull, lte, asc, inArray, notInArray, desc, sql } from "drizzle-orm";
@@ -34,6 +36,7 @@ export async function wakeConnectionIntentAfterResolution(
   // It never creates an additional provider turn through the generic wake route.
   if (payload !== null && typeof payload === "object" && "agentSetup" in payload && payload.agentSetup === true) return;
   const repairsProviderAuthentication = payload !== null && typeof payload === "object" && "purpose" in payload && payload.purpose === "ai";
+  const terminalGit = payload !== null && typeof payload === "object" && "githubGit" in payload && Boolean(payload.githubGit);
   await heartbeat.wakeup(agentId, {
     source: "automation",
     triggerDetail: "system",
@@ -67,7 +70,8 @@ export async function wakeConnectionIntentAfterResolution(
         : {}),
       // Provider authentication repair retains its existing restart fence.
       // Tool access alone asks the harness to refresh tools on recovery.
-      ...(repairsProviderAuthentication ? { forceFreshSession: true } : { refreshTools: true }),
+      ...(repairsProviderAuthentication || (terminalGit && input.status === "accepted")
+        ? { forceFreshSession: true } : terminalGit ? {} : { refreshTools: true }),
     },
     issueStateGuard: {
       statuses: ["in_progress", "in_review"],
@@ -161,10 +165,21 @@ export function connectionIntentDeliveryService(db: Db, heartbeat: Pick<Heartbea
       }
     }
     if (interaction.status === "accepted" && payload?.agentSetup !== true) {
-      const ready = await connectionIntentService(db).usableConnectionForAgent({ companyId: claimed.companyId,
-        agentId: payload!.requestingAgentId!, responsibleUserId: userId!, serviceSlug: payload!.serviceSlug!, purpose: payload!.purpose, sourceRunId: interaction.sourceRunId,
-        agentSetup: payload!.agentSetup, agentSetupOperationId: payload!.agentSetupOperationId });
-      if (!ready) return;
+      const parsed = connectionIntentPayloadSchema.safeParse(interaction.payload);
+      if (parsed.success && parsed.data.githubGit) {
+        const eligible = await githubNativeIntentEligibility(db, {
+          companyId: claimed.companyId, agentId: parsed.data.requestingAgentId, issueId: loaded.issue.id,
+          sourceRunId: interaction.sourceRunId, identityContextId: interaction.sourceIdentityContextId,
+          responsibleUserId: userId, request: parsed.data.githubGit,
+        });
+        if (eligible.status !== "available" || !interaction.result
+          || !("nativeGitGrantId" in interaction.result) || interaction.result.nativeGitGrantId !== eligible.grant.id) return;
+      } else {
+        const ready = await connectionIntentService(db).usableConnectionForAgent({ companyId: claimed.companyId,
+          agentId: payload!.requestingAgentId!, responsibleUserId: userId!, serviceSlug: payload!.serviceSlug!, purpose: payload!.purpose, sourceRunId: interaction.sourceRunId,
+          agentSetup: payload!.agentSetup, agentSetupOperationId: payload!.agentSetupOperationId });
+        if (!ready) return;
+      }
     }
     if (payload?.agentSetup === true && payload.purpose === "ai") {
       await db.transaction(async tx => {

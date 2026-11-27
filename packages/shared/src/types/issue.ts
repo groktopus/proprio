@@ -1675,6 +1675,7 @@ export type ConnectionIntentPhase = "requested" | "authorizing" | "needs_retry";
  * authorization URLs are returned solely from addressed board endpoints.
  */
 export interface ConnectionIntentPayload {
+  githubGit?: import("../github-native-git.js").GitHubNativeRequest;
   /** Controller-created repair for a queued turn awaiting agent verification. */
   agentSetup?: true;
   /** Server-owned lifecycle operation whose selected account this card repairs. */
@@ -1712,6 +1713,7 @@ export interface ConnectionIntentResult {
   /** Server-authored next steps for the resumed agent. */
   instruction?: string;
   outcome: "connected" | "declined" | "superseded" | "expired";
+  nativeGitGrantId?: string;
   connectionId?: string | null;
   reason?: string | null;
   supersededByInteractionId?: string | null;

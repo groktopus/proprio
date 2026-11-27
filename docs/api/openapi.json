@@ -113458,6 +113458,29 @@
                     "type": "string",
                     "format": "uuid"
                   },
+                  "githubGit": {
+                    "type": "object",
+                    "properties": {
+                      "repository": {
+                        "type": "string",
+                        "maxLength": 140,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*\\/[A-Za-z0-9_.-]+$"
+                      },
+                      "operation": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "push",
+                          "create_pull_request"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "repository",
+                      "operation"
+                    ],
+                    "additionalProperties": false
+                  },
                   "targetService": {
                     "type": "string",
                     "pattern": "^[a-z0-9][a-z0-9-]{0,79}$"
@@ -113729,7 +113752,7 @@
           "connection-intents"
         ],
         "summary": "Complete an addressed connection request",
-        "description": "Person-only: a connection request card is addressed to one person, its addresseeUserId. Only that person, signed in to their own browser, can open its setup, connect their account or decline it. The server refuses every other member, board user and agent, so nobody can finish it for them. When someone else offers to finish it, tell them the addressee must connect their own account from the card on its task, linked as [<identifier>](/<prefix>/issues/<identifier>). Do not create another request for the addressee and do not search for another route.",
+        "description": "Person-only: a connection request card is addressed to one person, its addresseeUserId. Only that person, signed in to their own browser, can open its setup, connect their account or decline it. The server refuses every other member, board user and agent, so nobody can finish it for them. When someone else offers to finish it, tell them the addressee must connect their own account from the card on its task, linked as [<identifier>](/<prefix>/issues/<identifier>). Do not create another request for the addressee and do not search for another route. For terminal Git, submit the grant ID and exact verifiedAt from setup-options. A change to the grant requires a fresh selection.",
         "responses": {
           "200": {
             "description": "Success",
@@ -113781,6 +113804,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -113802,6 +113835,9 @@
                   "connectionId": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "nativeGitVerifiedAt": {
+                    "type": "string"
                   }
                 },
                 "required": [

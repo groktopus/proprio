@@ -105,6 +105,7 @@ export {
   connectionsSearchInputSchema,
   connectionRequestInputSchema,
   completeConnectionIntentSchema,
+  adoptAiConnectionIntentSchema,
   declineConnectionIntentSchema,
   type ConnectionsSearchInput,
   type ConnectionRequestInput,
@@ -3161,5 +3162,5 @@ export * from "./tool-call-progress.js";
 export * from "./mcp-skills.js";
 export type { TailscaleConnection, TailscaleDeviceLogin } from "./types/tailscale.js";
 
-export { githubNativeRepositorySchema, githubNativeOperationSchema, githubNativeSetupSchema } from "./github-native-git.js";
-export type { GitHubNativeGrantSummary, GitHubNativeOperation, GitHubNativeSetupInput } from "./github-native-git.js";
+export { githubNativeRepositorySchema, githubNativeOperationSchema, githubNativeRequestSchema, githubNativeSetupSchema } from "./github-native-git.js";
+export type { GitHubNativeEligibility, GitHubNativeGrantSummary, GitHubNativeOperation, GitHubNativeRequest, GitHubNativeSetupInput } from "./github-native-git.js";

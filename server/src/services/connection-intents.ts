@@ -1,3 +1,4 @@
+import { githubNativeIntentEligibility } from "./github-operation-credentials.js";
 import { canActorReadIssuePrivacy } from "./authorization.js";
 import { isAgentAwaitingSetup } from "../modules/agent-lifecycle/index.js";
 import { readAiConnectionConfigurationFailure } from "./ai-connection-configuration-failure.js";
@@ -52,6 +53,7 @@ import {
   type ConnectionIntentInteraction,
   type ConnectionIntentSetupOptions,
   type ConnectionRequestResult,
+  type GitHubNativeRequest,
   type ConnectionsSearchResult,
   type ToolApplication,
   type ToolConnection,
@@ -807,6 +809,8 @@ export function connectionIntentService(db: Db) {
         ? results[0]!.state === "ready"
           ? "An active AgentMail inbox is assigned to you. Use agentmail_inboxes to read its address. Do not request another connection."
           : "Call connection_request with service agentmail to show the inline API-key card. Do not send a setup link or ask for the key in chat. The card creates an inbox for this agent; wait for completion before claiming an email address."
+      : results[0]!.service === "github" && results[0]!.state === "ready"
+        ? "Use the installed connection for GitHub MCP tools. For terminal Git or gh, call connection_request with service github and githubGit for the workspace repository and operation."
       : results[0]!.methods.every(method => method.purpose && method.purpose !== "tool")
         ? "Choose the method relevant to the task using its purpose and label. If method.management.allowed, configure through search_api/call_api using nextApiOperation. Hand off only required human authentication or consent at the saved setupPath. These methods do not use the tool connection_request card. Do not claim tools or an inbox are ready before setup finishes."
       : results[0]!.state === "ready" ? "Use the installed connection. Do not create another connection request."
@@ -892,7 +896,7 @@ export function connectionIntentService(db: Db) {
   async function request(
     claims: ConnectionRunClaims,
     serviceSlug: string,
-    options: { purpose?: "ai" | "channel"; selectionInteractionId?: string; targetService?: string; connectionId?: string; toolNames?: string[] } = {},
+    options: { purpose?: "ai" | "channel"; githubGit?: GitHubNativeRequest; selectionInteractionId?: string; targetService?: string; connectionId?: string; toolNames?: string[] } = {},
   ): Promise<ConnectionRequestResult> {
     const context = await loadRunContext(claims);
     return requestWithContext(context, serviceSlug, options);
@@ -901,9 +905,24 @@ export function connectionIntentService(db: Db) {
   async function requestWithContext(
     context: Awaited<ReturnType<typeof loadRunContext>>,
     serviceSlug: string,
-    options: { agentSetup?: true; agentSetupOperationId?: string; purpose?: "ai" | "channel"; selectionInteractionId?: string; targetService?: string; connectionId?: string; toolNames?: string[] } = {},
+    options: { agentSetup?: true; agentSetupOperationId?: string; purpose?: "ai" | "channel"; githubGit?: GitHubNativeRequest; selectionInteractionId?: string; targetService?: string; connectionId?: string; toolNames?: string[] } = {},
   ): Promise<ConnectionRequestResult> {
     const claims = { sub: context.agent.id, company_id: context.run.companyId, run_id: context.run.id, responsible_user_id: context.run.responsibleUserId! };
+    if (options.githubGit && (serviceSlug !== "github" || options.purpose || options.connectionId || options.toolNames
+      || options.targetService || options.selectionInteractionId)) {
+      throw unprocessable("Terminal Git requests require a GitHub repository and operation.");
+    }
+    const nativeGit = options.githubGit ? await githubNativeIntentEligibility(db, {
+      companyId: context.run.companyId, agentId: context.agent.id, issueId: context.issue.id,
+      sourceRunId: context.run.id, request: options.githubGit, requireLauncher: true,
+    }) : undefined;
+    if (nativeGit?.status === "available") return {
+      version: 1, service: "github", state: "ready", interactionId: null, connectionId: null,
+      instruction: `The GitHub App grant covers ${nativeGit.grant.repository} for this terminal Git operation. Use the task workspace's GitHub remote.`,
+    };
+    if (nativeGit?.status === "unavailable" && ["runtime_denied", "workspace_mismatch"].includes(nativeGit.code)) {
+      throw unprocessable(nativeGit.reason, { code: nativeGit.code });
+    }
     const route = parseAggregatorRoute(serviceSlug);
     let upstreamService: { slug: string; name: string; selectionInteractionId?: string } | undefined;
     if (options.targetService) {
@@ -934,11 +953,11 @@ export function connectionIntentService(db: Db) {
     // identifier instead of asking the model to invent a new tool argument.
     if (serviceSlug === "agentmail" && !options.purpose) options = { ...options, purpose: "channel" };
     const app = await resolveService(serviceSlug, context.run.companyId, context.run.responsibleUserId!, context.agent.id, options.purpose);
-    if (!app.available || app.methods.length === 0) {
+    if (!options.githubGit && (!app.available || app.methods.length === 0)) {
       throw unprocessable(`Connection service ${serviceSlug} is not available`);
     }
     let accessRequest: ConnectionIntentInteraction["payload"]["accessRequest"];
-    if (!options.purpose) {
+    if (!options.purpose && !options.githubGit) {
       const inventory = await connectionInventory(context.run.companyId);
       const matching = inventory.connections.filter(connection =>
         sourceSlugForConnection(connection, inventory.applicationsById) === app.slug
@@ -984,7 +1003,7 @@ export function connectionIntentService(db: Db) {
         }
       }
     }
-    const ready = await usableConnectionForAgent({
+    const ready = options.githubGit ? null : await usableConnectionForAgent({
       companyId: context.run.companyId,
       agentId: context.agent.id,
       responsibleUserId: context.run.responsibleUserId!,
@@ -1006,14 +1025,15 @@ export function connectionIntentService(db: Db) {
     }
     // Missing profile entries can be reviewed in a scoped access card. Acceptance
     // still revalidates every tool and refuses explicit policy denials.
-    if (!options.purpose && !accessRequest && await administrativeDenial(context.run.companyId, context.agent.id, app.slug, await connectionInventory(context.run.companyId))) {
+    if (!options.purpose && !options.githubGit && !accessRequest && await administrativeDenial(context.run.companyId, context.agent.id, app.slug, await connectionInventory(context.run.companyId))) {
       throw forbidden("This agent has no permitted actions for this service. Ask an administrator to review tool permissions; reconnecting will not remove a denial.");
     }
     const outcomeId = context.run.contextSnapshot?.interactionId;
     if (typeof outcomeId === "string") {
       const [outcome] = await db.select().from(issueThreadInteractions).where(and(eq(issueThreadInteractions.id, outcomeId), eq(issueThreadInteractions.companyId, context.run.companyId), eq(issueThreadInteractions.issueId, context.issue.id)));
       const declined = outcome?.kind === "connection_intent" && outcome.status === "rejected" ? connectionIntentPayloadSchema.parse(outcome.payload) : null;
-      if (declined && intentCatalogSlug(declined) === app.slug && declined.purpose === options.purpose) {
+      if (declined && intentCatalogSlug(declined) === app.slug && declined.purpose === options.purpose
+        && isDeepStrictEqual(declined.githubGit, options.githubGit)) {
         throw conflict("The user declined this connection. Pursue alternatives; do not request it again in this continuation.");
       }
     }
@@ -1022,11 +1042,12 @@ export function connectionIntentService(db: Db) {
       {
         payload: {
           version: 1,
+          ...(options.githubGit ? { githubGit: options.githubGit } : {}),
           ...(options.agentSetup ? { agentSetup: true as const, agentSetupOperationId: options.agentSetupOperationId } : {}),
           ...(accessRequest ? { accessRequest } : {}),
           serviceSlug: app.slug,
           ...(options.purpose ? { purpose: options.purpose } : {}),
-          serviceName: accessRequest ? app.name : upstreamService ? `${upstreamService.name} through ${app.name}` : app.name,
+          serviceName: options.githubGit ? "GitHub terminal access" : accessRequest ? app.name : upstreamService ? `${upstreamService.name} through ${app.name}` : app.name,
           ...(upstreamService ? { upstreamService } : {}),
           serviceLogoUrl: app.branding.logoUrl ?? null,
           serviceDarkLogoUrl: app.branding.darkLogoUrl ?? null,
@@ -1037,7 +1058,7 @@ export function connectionIntentService(db: Db) {
         sourceRunId: context.run.id,
         sourceIdentityContextId: context.run.activeIdentityContextId,
         addresseeUserId: context.run.responsibleUserId!,
-        idempotencyKey: `connection-intent:${context.run.id}:${context.run.responsibleUserId}:${app.slug}${upstreamService ? `:${upstreamService.slug}` : ""}${options.purpose ? `:${options.purpose}` : ""}${options.agentSetup ? `:setup:${options.agentSetupOperationId ?? "legacy"}` : ""}${accessRequest ? `:access:${createHash("sha256").update(JSON.stringify(accessRequest)).digest("hex")}` : ""}`,
+        idempotencyKey: `connection-intent:${context.run.id}:${context.run.responsibleUserId}:${app.slug}${upstreamService ? `:${upstreamService.slug}` : ""}${options.purpose ? `:${options.purpose}` : ""}${options.githubGit ? `:git:${options.githubGit.repository}:${options.githubGit.operation}` : ""}${options.agentSetup ? `:setup:${options.agentSetupOperationId ?? "legacy"}` : ""}${accessRequest ? `:access:${createHash("sha256").update(JSON.stringify(accessRequest)).digest("hex")}` : ""}`,
       },
     );
     if (interaction.status !== "pending") throw conflict("This connection request has already been resolved. Follow its recorded outcome.");
@@ -1045,7 +1066,7 @@ export function connectionIntentService(db: Db) {
       companyId: context.run.companyId, actorType: "agent", actorId: context.agent.id,
       agentId: context.agent.id, runId: context.run.id,
       action: "issue.thread_interaction_created", entityType: "issue", entityId: context.issue.id,
-      details: { interactionId: interaction.id, interactionKind: "connection_intent", purpose: options.purpose },
+      details: { interactionId: interaction.id, interactionKind: "connection_intent", purpose: options.purpose, githubGit: options.githubGit },
     });
     return {
       version: 1,
@@ -1053,7 +1074,7 @@ export function connectionIntentService(db: Db) {
       state: "needs_user_action",
       connectionId: null,
       interactionId: interaction.id,
-      instruction: `A connection card was sent to the responsible user. Finish independent work, then yield and wait for continuation. Do not repeat this request.`,
+      instruction: `${nativeGit?.status === "unavailable" ? `${nativeGit.reason} ` : ""}A connection card was sent to the responsible user. Finish independent work, then yield and wait for continuation. Do not repeat this request.`,
     };
   }
 
@@ -1097,6 +1118,19 @@ export function connectionIntentService(db: Db) {
   async function setupOptions(interactionId: string, options: { canManageOrganizationGrant?: boolean } = {}): Promise<ConnectionIntentSetupOptions> {
     const loaded = await loadIntent(interactionId);
     const payload = connectionIntentPayloadSchema.parse(loaded.interaction.payload);
+    if (payload.githubGit) {
+      const githubGit = await githubNativeIntentEligibility(db, {
+        companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, issueId: loaded.issue.id,
+        sourceRunId: loaded.interaction.sourceRunId, request: payload.githubGit,
+        identityContextId: loaded.interaction.sourceIdentityContextId, responsibleUserId: loaded.interaction.addresseeUserId,
+      });
+      return {
+        version: 1, interaction: loaded.interaction, requestedAgentId: payload.requestingAgentId, existingConnections: [],
+        githubGit, canGrantAccess: options.canManageOrganizationGrant === true,
+        service: { service: "github", name: "GitHub terminal access", description: null, logoUrl: payload.serviceLogoUrl ?? null,
+          methods: [], state: "needs_user_action", connectionId: null },
+      };
+    }
     if (payload.savedSetup) {
       const [endpoint] = await db.select().from(chatEndpoints).where(and(eq(chatEndpoints.id, payload.savedSetup.endpointId), eq(chatEndpoints.companyId, loaded.issue.companyId), eq(chatEndpoints.connectionId, payload.savedSetup.connectionId)));
       if (!endpoint || endpoint.assignedAgentId !== payload.requestingAgentId) throw notFound("Saved chat setup not found");
@@ -1228,6 +1262,7 @@ export function connectionIntentService(db: Db) {
     userId: string,
     options: {
       canManageOrganizationGrant?: boolean;
+      nativeGitVerifiedAt?: string;
       bypassCurrentMembershipCheck?: boolean;
       validatedAdoption?: { agentUpdatedAt: Date; binding: AiConnectionBinding };
       /** Only the verified OAuth callback applies a saved draft audience. */
@@ -1236,7 +1271,7 @@ export function connectionIntentService(db: Db) {
   ) {
     const loaded = await loadIntent(interactionId);
     if (loaded.interaction.status !== "pending") {
-      if (loaded.interaction.status === "accepted" && loaded.interaction.result?.connectionId === connectionId && loaded.interaction.addresseeUserId === userId) return loaded.interaction;
+      if (loaded.interaction.status === "accepted" && (loaded.interaction.result?.connectionId ?? loaded.interaction.result?.nativeGitGrantId) === connectionId && loaded.interaction.addresseeUserId === userId) return loaded.interaction;
       throw conflict("Connection intent is already resolved");
     }
     if (loaded.interaction.addresseeUserId !== userId) throw forbidden("Only the addressed user can connect this service");
@@ -1264,10 +1299,26 @@ export function connectionIntentService(db: Db) {
       const txInteractions = issueThreadInteractionService(txDb);
       const current = await txInteractions.getForIssue(task, interactionId) as ConnectionIntentInteraction;
       if (current.status !== "pending") {
-        if (current.status === "accepted" && current.result?.connectionId === connectionId) return current;
+        if (current.status === "accepted" && (current.result?.connectionId ?? current.result?.nativeGitGrantId) === connectionId) return current;
         throw conflict("Connection intent is already resolved");
       }
-      const selectedSetup = connectionIntentPayloadSchema.parse(current.payload).setupAccess;
+      const currentPayload = connectionIntentPayloadSchema.parse(current.payload);
+      if (currentPayload.githubGit) {
+        const eligible = await githubNativeIntentEligibility(txDb, {
+          companyId: task.companyId, agentId: currentPayload.requestingAgentId, issueId: task.id,
+          sourceRunId: current.sourceRunId, request: currentPayload.githubGit, lockAuthority: true,
+          identityContextId: current.sourceIdentityContextId, responsibleUserId: current.addresseeUserId,
+        });
+        if (eligible.status !== "available") throw conflict(eligible.reason, { code: eligible.code });
+        if (eligible.grant.id !== connectionId || eligible.grant.verifiedAt !== options.nativeGitVerifiedAt) {
+          throw conflict("The selected GitHub App grant changed. Refresh the request and choose it again.");
+        }
+        return txInteractions.resolveConnectionIntent(task, interactionId, {
+          version: 1, outcome: "connected", nativeGitGrantId: eligible.grant.id,
+          instruction: "The selected GitHub App grant covers the task repository and requested terminal Git operation.",
+        }, { userId });
+      }
+      const selectedSetup = currentPayload.setupAccess;
       const setupAccess = options.oauthCompletion && selectedSetup?.connectionId === connectionId ? selectedSetup.access : undefined;
       if (setupAccess && !options.canManageOrganizationGrant && (
         setupAccess === "all_agents" || setupAccess.agentIds.some(id => id !== payload.requestingAgentId)
@@ -1600,7 +1651,7 @@ export function connectionIntentService(db: Db) {
       );
       const setupAccess = connectionIntentPayloadSchema.shape.setupAccess.parse(options.setupAccess);
       if (setupAccess) {
-        if (loaded.interaction.payload.purpose || loaded.interaction.payload.accessRequest) {
+        if (loaded.interaction.payload.purpose || loaded.interaction.payload.accessRequest || loaded.interaction.payload.githubGit) {
           throw unprocessable("Only tool connection setup can select a new audience");
         }
         await access.getConnection(setupAccess.connectionId, loaded.issue.companyId);

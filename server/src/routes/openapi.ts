@@ -336,6 +336,7 @@ import {
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
   completeConnectionIntentSchema,
+  adoptAiConnectionIntentSchema,
   connectionIntentPayloadSchema,
   connectionRequestInputSchema,
   connectionsSearchInputSchema,
@@ -12127,8 +12128,9 @@ registerCurrentRoute({
   path: "/api/connection-intents/{interactionId}/complete",
   tags: ["connection-intents"],
   summary: "Complete an addressed connection request",
-  description: ADDRESSED_CONNECTION_REQUEST,
+  description: `${ADDRESSED_CONNECTION_REQUEST} For terminal Git, submit the grant ID and exact verifiedAt from setup-options. A change to the grant requires a fresh selection.`,
   body: completeConnectionIntentSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registerCurrentRoute({
@@ -12136,7 +12138,7 @@ registerCurrentRoute({
   path: "/api/agents/{id}/connection-intents/{interactionId}/adopt",
   tags: ["connection-intents", "agents"],
   summary: "Validate and atomically adopt an AI connection for a legacy agent",
-  body: completeConnectionIntentSchema,
+  body: adoptAiConnectionIntentSchema,
   responses: {
     200: r.ok(),
     400: r.badRequest,

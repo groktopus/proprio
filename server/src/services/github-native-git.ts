@@ -4,11 +4,11 @@ import { agents, executionWorkspaces, githubNativeGrants, heartbeatRuns, issues,
 import { withAccountHomeSecretMutationLock } from "@groktopus/adapter-codex-local/server";
 import {
   githubNativeRepositorySchema, isAgentStatusInvokable, isUuidLike,
-  type GitHubNativeGrantSummary, type GitHubNativeOperation, type GitHubNativeSetupInput,
+  type GitHubNativeEligibility, type GitHubNativeGrantSummary, type GitHubNativeOperation, type GitHubNativeSetupInput,
 } from "@groktopus/shared";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { githubAppJwt, githubBotRequest } from "./chat-github-client.js";
+import { githubAppJwt, requestGitHubApp } from "./github-app-client.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { NativeRuntimeEligibilityError, resolveNativeRuntimeMode } from "./native-runtime/runtime-mode.js";
 import { parseGitHubRepository } from "./github-repository.js";
@@ -42,7 +42,7 @@ function appJwt(appId: string, privateKey: string) {
 }
 
 async function retireToken(token: string) {
-  await githubBotRequest(fetch, token, "/installation/token", { method: "DELETE" });
+  await requestGitHubApp(fetch, token, "/installation/token", { method: "DELETE" });
 }
 
 async function mintToken(jwt: string, installationId: string,
@@ -52,7 +52,7 @@ async function mintToken(jwt: string, installationId: string,
     ...(mode === "verify_pull_request" ? { pull_requests: "read" }
       : mode === "terminal" && permissions.pullRequests ? { pull_requests: "write" } : {}),
   };
-  const result = await githubBotRequest<{
+  const result = await requestGitHubApp<{
     token?: string; expires_at?: string; permissions?: Record<string, string>; repositories?: Repository[];
   }>(fetch, jwt, `/app/installations/${installationId}/access_tokens`, {
     method: "POST",
@@ -89,7 +89,10 @@ export function normalizeGitHubNativeRepositoryUrl(value: string | null | undefi
 type NativeGitRun = Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" |
   "activeIdentityContextId" | "nativeIssueId" | "issueId" | "runtimeMode" | "contextSnapshot" | "responsibleUserId">;
 
-export async function authorizedRunGitHubRepository(db: Db, run: NativeGitRun, projectCheckoutSourceId?: string, allowFinishedRun = false) {
+export async function authorizedRunGitHubRepository(db: Db, run: NativeGitRun,
+  { projectCheckoutSourceId, allowFinishedRun, lockWorkspace }: {
+    projectCheckoutSourceId?: string; allowFinishedRun?: boolean; lockWorkspace?: boolean;
+  } = {}) {
   const { companyId, agentId } = run;
   const issueId = run.nativeIssueId ?? run.issueId ?? run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId;
   if (typeof issueId !== "string" || !isUuidLike(issueId)) return null;
@@ -121,7 +124,7 @@ export async function authorizedRunGitHubRepository(db: Db, run: NativeGitRun, p
     const repository = normalizeGitHubNativeRepositoryUrl(current.repoUrl);
     if (!repository) return null;
     const { workspace } = await assertTaskWorkspaceExecutionAccess(db, actor, companyId, {
-      issueId, workspaceId: task.executionWorkspaceId,
+      issueId, workspaceId: task.executionWorkspaceId, lockWorkspace,
     });
     if (projectCheckoutSourceId && workspace?.projectWorkspaceId !== projectCheckoutSourceId) return null;
     return normalizeGitHubNativeRepositoryUrl(workspace?.repoUrl) === repository ? repository : null;
@@ -177,9 +180,10 @@ export function githubNativeGitService(db: Db) {
     return Boolean(row);
   }
 
-  async function find(companyId: string, agentId: string, repository: string | null) {
+  async function find(companyId: string, agentId: string, repository: string | null, lock = false) {
     if (!repository) return undefined;
-    const [grant] = await db.select().from(githubNativeGrants).where(byRepository(companyId, agentId, repository));
+    const query = db.select().from(githubNativeGrants).where(byRepository(companyId, agentId, repository));
+    const [grant] = await (lock ? query.for("share") : query);
     return grant;
   }
 
@@ -236,11 +240,11 @@ export function githubNativeGitService(db: Db) {
       }
       const before = await find(companyId, input.agentId, repository);
       const jwt = appJwt(input.appId, input.privateKey);
-      const app = await githubBotRequest<{ id?: number; slug?: string }>(fetch, jwt, "/app");
+      const app = await requestGitHubApp<{ id?: number; slug?: string }>(fetch, jwt, "/app");
       if (String(app.id) !== input.appId || !/^[a-z0-9][a-z0-9-]*$/.test(app.slug ?? "")) {
         throw unprocessable("GitHub did not verify the selected App.");
       }
-      const installation = await githubBotRequest<{ id?: number; app_id?: number; suspended_at?: string | null }>(
+      const installation = await requestGitHubApp<{ id?: number; app_id?: number; suspended_at?: string | null }>(
         fetch, jwt, `/repos/${repository}/installation`,
       );
       if (!Number.isSafeInteger(installation.id) || installation.id! < 1
@@ -291,14 +295,20 @@ export function githubNativeGitService(db: Db) {
         return revoked!;
       });
     },
-    async eligibility(companyId: string, agentId: string, repository: string | null, operation: GitHubNativeOperation) {
-      const grant = await find(companyId, agentId, repository);
-      if (!grant || grant.revokedAt) return { status: "unavailable" as const,
-        reason: grant ? "The GitHub App grant for this repository was revoked." : "No eligible GitHub App grant for this agent and repository." };
-      if ((operation === "push" && !grant.push) || (operation === "create_pull_request" && !grant.pullRequests)) {
-        return { status: "unavailable" as const, reason: "The GitHub App grant does not allow this action." };
+    async eligibility(companyId: string, agentId: string, repository: string | null, operation: GitHubNativeOperation,
+      lock = false): Promise<GitHubNativeEligibility> {
+      const grant = await find(companyId, agentId, repository, lock);
+      if (!grant) {
+        const bound = await hasBinding(companyId, agentId);
+        return bound
+          ? { status: "unavailable", code: "repository_denied", reason: "No GitHub App grant covers this repository for this agent." }
+          : { status: "unavailable", code: "no_identity", reason: "No eligible GitHub App identity is configured for this agent." };
       }
-      return { status: "available" as const, grant: summarize(grant) };
+      if (grant.revokedAt) return { status: "unavailable", code: "revoked", reason: "The GitHub App grant for this repository was revoked." };
+      if ((operation === "push" && !grant.push) || (operation === "create_pull_request" && !grant.pullRequests)) {
+        return { status: "unavailable", code: "action_denied", reason: "The GitHub App grant does not allow this action." };
+      }
+      return { status: "available", grant: summarize(grant) };
     },
     async issueToken(companyId: string, agentId: string, repository: string | null,
       options: { mode: TokenMode; reauthorize: () => Promise<void> }) {

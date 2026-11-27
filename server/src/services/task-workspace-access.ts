@@ -127,7 +127,7 @@ export async function assertTaskWorkspaceExecutionAccess(
   db: Db | DbTransaction,
   actor: AuthorizationActor,
   companyId: string,
-  input: { issueId: string; workspaceId?: string | null; projectWorkspaceId?: string | null; persistedSelection?: TaskWorkspaceSelection },
+  input: { issueId: string; workspaceId?: string | null; projectWorkspaceId?: string | null; persistedSelection?: TaskWorkspaceSelection; lockWorkspace?: boolean },
 ) {
   return measureRunPhase("workspace.access.execution", async () => {
     if (actor.companyId && actor.companyId !== companyId) throw forbidden("Task workspace belongs to another company");
@@ -166,10 +166,13 @@ export async function assertTaskWorkspaceExecutionAccess(
     const workspaceId = effectiveSelection
       ? effectiveSelection.kind === "existing" ? effectiveSelection.workspaceId : null
       : input.workspaceId;
-    const [workspace] = workspaceId ? await measureRunPhase("workspace.access.workspace_read", async () => db.select({
-      id: executionWorkspaces.id, companyId: executionWorkspaces.companyId,
-      projectId: executionWorkspaces.projectId, projectWorkspaceId: executionWorkspaces.projectWorkspaceId, repoUrl: executionWorkspaces.repoUrl,
-    }).from(executionWorkspaces).where(and(eq(executionWorkspaces.id, workspaceId), eq(executionWorkspaces.companyId, companyId)))) : [];
+    const [workspace] = workspaceId ? await measureRunPhase("workspace.access.workspace_read", async () => {
+      const query = db.select({
+        id: executionWorkspaces.id, companyId: executionWorkspaces.companyId,
+        projectId: executionWorkspaces.projectId, projectWorkspaceId: executionWorkspaces.projectWorkspaceId, repoUrl: executionWorkspaces.repoUrl,
+      }).from(executionWorkspaces).where(and(eq(executionWorkspaces.id, workspaceId), eq(executionWorkspaces.companyId, companyId)));
+      return input.lockWorkspace ? query.for("share") : query;
+    }) : [];
     if (workspaceId && (!workspace || (task.executionWorkspaceId !== workspace.id
       && !(selection?.kind === "existing" && selection.workspaceId === workspace.id)
       && !(pendingSelection?.kind === "existing" && pendingSelection.workspaceId === workspace.id)))) {

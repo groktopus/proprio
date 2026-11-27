@@ -822,8 +822,8 @@ export class ProprioRunnerToolAuthority {
         return connections.search(claims, input.query, { retryProviderChoice: input.retryProviderChoice });
       }
       const input = connectionRequestInputSchema.parse(call.arguments);
-      const result = await connections.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames });
-      if (result.state === "ready" && this.binding.pinnedMcpDigest && this.binding.enqueueWakeup) {
+      const result = await connections.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames, ...(input.githubGit ? { githubGit: input.githubGit } : {}) });
+      if (!input.githubGit && result.state === "ready" && this.binding.pinnedMcpDigest && this.binding.enqueueWakeup) {
         const current = await resolveNativeRuntimeMcpSnapshot({ db: this.db, agent: { id: this.binding.agentId, companyId: this.binding.companyId }, runId: this.binding.runId });
         if (current.digest !== this.binding.pinnedMcpDigest) {
           const idempotencyKey = `connection-intent:tools:${this.binding.runId}:${current.digest}`;
