@@ -167,8 +167,8 @@ function restoreOnboardingAdapterType(savedAdapterType: unknown, provider?: unkn
 
 /** True only when the selected setup produced a real, successful hello inference. */
 function hasSuccessfulInference(result: AdapterEnvironmentTestResult): boolean {
-  return result.status === "pass" && result.checks.some((check) =>
-    check.level === "info" && /^[a-z0-9]+_hello_probe_passed$/.test(check.code));
+  return result.status !== "fail" && result.checks.some((check) =>
+    check.level === "info" && /^[a-z0-9_]+_hello_probe_passed$/.test(check.code));
 }
 
 /** True when an adapter-test result is not sufficient to hire the first agent. */

@@ -1063,6 +1063,25 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
+    it("accepts a successful inference alongside a non-fatal warning", async () => {
+      mockAgentsApi.testEnvironment.mockResolvedValue({
+        adapterType: "claude_local",
+        status: "warn" as const,
+        checks: [
+          { code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." },
+          { code: "environment_identity", level: "warn" as const, message: "Environment identity is incomplete." },
+        ],
+        testedAt: new Date().toISOString(),
+      });
+      const { root, clickByText } = await openConnectStep();
+
+      await clickByText((t) => isArcPrimary(t));
+
+      expect(mockAgentsApi.hire).toHaveBeenCalled();
+
+      await act(async () => root.unmount());
+    });
+
     // The Connect handler reuses a passing probe instead of re-running it, so the
     // effect that clears the cache has to name every input to the configuration
     // the probe tested. `credentialMode` and `apiKey` were missing from it, and
