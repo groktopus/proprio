@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 const CODEX_ACPX_DIGEST: &str =
     "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc";
 const PI_ACPX_DIGEST: &str =
+    "sha256:e799aaf706fc971c4a7e3d6ab27185e74d17cfc95ab5f243a3566294d7c539a6";
+const PI_ACPX_PREVIOUS_DIGEST: &str =
     "sha256:d22aeb0b796f6af2a72d8856bad15f26752e77162a015012b498050686ae15ec";
 
 fn temporary_directory(label: &str) -> PathBuf {
@@ -289,6 +291,14 @@ fn candidate_verified_cold_session_retires_on_suspend_instead_of_warm_adoption()
 }
 
 fn pi_acpx_config(state_dir: &Path, mode: &str) -> DurableRunnerConfig {
+    pi_acpx_config_with_digest(state_dir, mode, PI_ACPX_DIGEST)
+}
+
+fn pi_acpx_config_with_digest(
+    state_dir: &Path,
+    mode: &str,
+    digest: &str,
+) -> DurableRunnerConfig {
     let mut config = acpx_config(state_dir, mode);
     *config
         .acpx_launch_profile
@@ -296,7 +306,7 @@ fn pi_acpx_config(state_dir: &Path, mode: &str) -> DurableRunnerConfig {
         .unwrap()
         .args
         .last_mut()
-        .unwrap() = PI_ACPX_DIGEST.to_owned();
+        .unwrap() = digest.to_owned();
     config
 }
 
@@ -2904,6 +2914,47 @@ fn rejects_pi_without_an_explicit_model_before_starting_a_sidecar() {
         .contains("does not match a qualified immutable profile"));
     assert!(!directory.join("acpx-runtime").exists());
     assert!(!directory.join("acpx-provider-state.json").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "verified launch is not supported on Windows yet")]
+fn pi_session_from_previous_profile_digest_is_preserved_and_refused_after_upgrade() {
+    let directory = temporary_directory("pi-profile-digest-cutover");
+    let previous = pi_acpx_config_with_digest(&directory, "bootstrap", PI_ACPX_PREVIOUS_DIGEST);
+    let mut payload = pi_prepare_payload(&directory, "bootstrap");
+    payload["provider"]["commandDigest"] = json!(PI_ACPX_PREVIOUS_DIGEST);
+    payload["provider"]["sidecarArgs"][3] = json!(PI_ACPX_PREVIOUS_DIGEST);
+    let mut old_runner = NativeProviderCommandExecutor::with_runner_config(&directory, &previous);
+    old_runner
+        .execute(&command(1, "run.prepare", payload))
+        .unwrap();
+    old_runner
+        .execute(&command(2, "session.open", json!({})))
+        .unwrap();
+    old_runner.shutdown().unwrap();
+    drop(old_runner);
+
+    let state_path = directory.join("acpx-provider-state.json");
+    let saved = fs::read(&state_path).unwrap();
+    let current = pi_acpx_config(&directory, "bootstrap");
+    let mut upgraded = NativeProviderCommandExecutor::with_runner_config(&directory, &current);
+    let error = upgraded
+        .execute(&command(
+            3,
+            "run.prepare",
+            pi_prepare_payload(&directory, "bootstrap"),
+        ))
+        .expect_err("new release must not attach to an old exact profile digest");
+    assert_eq!(error.classification(), Some(PROVIDER_STATE_INCOMPATIBLE));
+    assert!(error
+        .to_string()
+        .contains("ACPX durable launch profile digest does not match runner startup"));
+    assert_eq!(
+        fs::read(&state_path).unwrap(),
+        saved,
+        "cutover refusal preserves saved session state"
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

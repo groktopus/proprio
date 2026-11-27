@@ -53,7 +53,7 @@ const { resolveProprioRunnerBinary } = await import(pathToFileURL(join(server, '
 const { createCapabilityRunnerdCodexTransport } = await import(pathToFileURL(join(server, 'dist/vendor/proprio-runner/live/runnerd-codex-transport.js')));
 const { QUALIFIED_ACPX_PROFILES } = await import(pathToFileURL(join(server, 'dist/vendor/proprio-runner/drivers/acpx/qualified-profiles.js')));
 assert.equal(QUALIFIED_ACPX_PROFILES.pi.agentProfileVersion, 37);
-assert.equal(QUALIFIED_ACPX_PROFILES.pi.commandDigest, 'sha256:d22aeb0b796f6af2a72d8856bad15f26752e77162a015012b498050686ae15ec');
+assert.equal(QUALIFIED_ACPX_PROFILES.pi.commandDigest, 'sha256:e799aaf706fc971c4a7e3d6ab27185e74d17cfc95ab5f243a3566294d7c539a6');
 assert.equal(Object.hasOwn(QUALIFIED_ACPX_PROFILES.pi, 'qualificationModel'), false);
 assert.equal(Object.hasOwn(QUALIFIED_ACPX_PROFILES.pi, 'reportedModelId'), false);
 const daemon = resolveProprioRunnerBinary();
