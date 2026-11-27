@@ -12,6 +12,10 @@ separate qualification.
 Dispatch **Linux image release** from `main` after checking the selected SHA.
 Set `release_tag` to `linux-0.0.x` for an approved publication. Leaving it
 blank builds and qualifies a candidate without assigning a public version tag.
+For a versioned promotion, publish the matching GitHub source release at
+`v0.0.x` first. The promotion guard resolves that tag (including annotated
+tags) and requires its commit to equal the workflow's exact source SHA. A
+missing release or source mismatch stops before registry operations.
 
 The build publishes one candidate digest. It records the source revision in
 an OCI label and signs build provenance and the SPDX SBOM for the digest with
@@ -37,6 +41,31 @@ manifests, signed attestations, and release records for the latest two
 qualified versions and any digest still deployed. Candidate tags can be
 removed after their disposition is recorded. Do not delete a manifest
 referenced by a retained release or its attestation.
+
+### Release checklist
+
+Before promoting a versioned image:
+
+1. Confirm the GitHub release tag `v0.0.x` points to the exact selected source
+   SHA and the release notes identify whether the image is source-only local
+   self-hosting or includes another separately qualified profile.
+2. Require successful build, signature, SBOM, amd64 digest, and both Compose
+   state-restore checks from the same workflow attempt. Promote only the
+   workflow's qualified digest; do not rebuild or substitute an earlier
+   candidate.
+3. On a clean Linux amd64 host, anonymously pull the version tag and confirm
+   it resolves to the recorded digest. Verify provenance and SPDX SBOM, then
+   exercise the advertised authenticated Compose topology with persisted
+   state.
+4. Qualify an upgrade from the previous known-good image, or rehearse the
+   documented rollback/restore procedure using its retained digest,
+   configuration, and backup. Record which path passed and the resulting
+   version/storage migration outcome.
+5. Add the immutable digest, version tag, compatible Compose setup, required
+   migration steps, previous known-good digest, qualification run, and
+   upgrade or rollback evidence to the GitHub release notes. Leave the
+   optional remote provider pack unadvertised until it passes separate
+   qualification.
 
 ## Verify and install
 
