@@ -904,7 +904,7 @@ describe("agent test-environment route", () => {
         },
       });
       expect(mockValidateAiApiKey).toHaveBeenCalledWith("openai", apiKey);
-      expect(mockSecretService.normalizeAdapterConfigForPersistence.mock.calls[0]?.[1]).toEqual({ engine: "acp", model: "gpt-5.6" });
+      expect(mockSecretService.normalizeAdapterConfigForPersistence.mock.calls[0]?.[1]).toEqual({ engine: "acp", model: "gpt-5.6", env: {} });
       expect(JSON.stringify(res.body)).not.toContain(apiKey);
     } finally {
       unregisterServerAdapter("codex_local");
