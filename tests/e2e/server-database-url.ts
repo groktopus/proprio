@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-export async function readTestServerDatabaseUrl(): Promise<string> {
-  const configPath = process.env.PROPRIO_E2E_SERVER_CONFIG;
+export async function readTestServerDatabaseUrl(configPath = process.env.PROPRIO_E2E_SERVER_CONFIG): Promise<string> {
   if (!configPath) throw new Error("The test server config path is missing");
   const config = JSON.parse(await readFile(configPath, "utf8"));
   if (config.database.mode === "postgres") return config.database.connectionString;
