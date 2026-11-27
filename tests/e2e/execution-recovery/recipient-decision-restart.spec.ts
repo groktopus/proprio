@@ -1,12 +1,18 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { and, eq } from "../../../server/node_modules/drizzle-orm/index.js";
 import { expect, test } from "@playwright/test";
-import { agentApiKeys, agents, caseAccessSources, caseEvents, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
+import { agents, caseAccessSources, caseEvents, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
+import { resolveProprioInstanceConfigPath } from "../../../packages/shared/src/home-paths.ts";
+import { agentService } from "../../../server/src/services/agents.ts";
 import { caseHandoffService } from "../../../server/src/services/case-handoffs.ts";
-import { launchTestDrive, stopTestDrive } from "../fixtures/test-drive-process";
+import { launchTestDrive } from "../fixtures/test-drive-process";
+import { json } from "../http";
+import { readTestServerDatabaseUrl } from "../server-database-url";
+import { createProcessTreeOwner, stopOwnedProcessTree } from "../../runner-e2e/process-tree-owner";
 
 const outcomes: { outcome: string; reasonCode?: string }[] = [
   { outcome: "accepted" },
@@ -14,29 +20,36 @@ const outcomes: { outcome: string; reasonCode?: string }[] = [
   { outcome: "declined", reasonCode: "missing_capability" },
 ] as const;
 
-test("recipient decisions survive a controller restart with their Case audit history", async ({ request }) => {
+test("recipient decisions survive a controller restart with their Case audit history", async ({ request }, info) => {
   test.setTimeout(240_000);
   const repo = resolve(import.meta.dirname, "../../..");
   const dataDir = await mkdtemp(resolve(tmpdir(), "proprio-recipient-decision-restart-"));
   const root = await mkdtemp(resolve(tmpdir(), "proprio-recipient-decision-fixture-"));
   const codexHome = resolve(root, "codex-home");
   const codex = resolve(root, "codex");
-  const codexLoader = resolve(root, "codex-loader.mjs");
-  const log = { text: "" };
-  const env = { ...process.env, NODE_ENV: "test", PROPRIO_HOME: dataDir, PROPRIO_INSTANCE_ID: "default", CODEX_HOME: codexHome,
-    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${codexLoader}`,
-    OPENAI_API_KEY: "recipient-decision-fixture", DATABASE_URL: undefined, DATABASE_MIGRATION_URL: undefined };
-  let drive: ReturnType<typeof launchTestDrive> | undefined;
+  const codexLoader = resolve(import.meta.dirname, "../fixtures/recipient-decision-codex-loader.mjs");
+  const env = { ...process.env, NODE_ENV: "test", CODEX_HOME: codexHome,
+    RECIPIENT_DECISION_CODEX_COMMAND: codex,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(codexLoader).href}`,
+    OPENAI_API_KEY: "recipient-decision-fixture", CODEX_API_KEY: "" };
+  let drive: { child: ReturnType<typeof launchTestDrive>["child"]; owner: ReturnType<typeof createProcessTreeOwner> } | undefined;
   function startDrive() {
-    drive = launchTestDrive({ cwd: repo, env,
+    const launched = launchTestDrive({ cwd: repo, env,
       args: ["--data-dir", dataDir, "--harness", "codex", "--api-key-env", "OPENAI_API_KEY", "--company-name", "Recipient Decision Fixture", "--no-browser"],
-      onOutput: chunk => { log.text += chunk; },
+      onOutput: () => undefined,
     });
-    return drive.ready;
+    drive = { child: launched.child, owner: createProcessTreeOwner(launched.child) };
+    return launched.ready;
   }
   async function stopDrive() {
-    await stopTestDrive(drive?.child);
-    drive = undefined;
+    const active = drive;
+    if (!active) return;
+    try {
+      await stopOwnedProcessTree(active.child, active.owner);
+      drive = undefined;
+    } finally {
+      active.owner.stopObserving();
+    }
   }
 
   let databaseUrl: string | undefined;
@@ -45,22 +58,15 @@ test("recipient decisions survive a controller restart with their Case audit his
     await mkdir(codexHome);
     await writeFile(codex, "#!/bin/sh\nexit 78\n", { mode: 0o700 });
     await chmod(codex, 0o700);
-    await copyFile(resolve(import.meta.dirname, "../fixtures/recipient-decision-codex-loader.mjs"), codexLoader);
     let base = await startDrive();
     const api = async (path: string, method = "GET", data?: unknown) => {
-      const response = await request.fetch(`${base}/api${path}`, { method, data });
-      const body = await response.text();
-      expect(response.ok(), `${method} ${path}: ${response.status()} ${body}`).toBe(true);
-      return body ? JSON.parse(body) : null;
+      return json(await request.fetch(`${base}/api${path}`, { method, data }));
     };
     const company = (await api("/companies"))[0];
     await api("/instance/settings/experimental", "PATCH", { enableCases: true, enableNativeRunner: true });
 
-    const configPath = resolve(dataDir, "instances/default/config.json");
-    const config = JSON.parse(await readFile(configPath, "utf8"));
-    const databaseDir = config.database.embeddedPostgresDataDir;
-    const serverPort = (await readFile(resolve(databaseDir, "postmaster.pid"), "utf8")).split("\n")[3];
-    databaseUrl = `postgres://proprio:proprio@127.0.0.1:${serverPort}/proprio`;
+    const configPath = resolveProprioInstanceConfigPath({ homeDir: dataDir, instanceId: "default" });
+    databaseUrl = await readTestServerDatabaseUrl(configPath);
     db = createDb(databaseUrl);
     // Seed dormant fixture agents and native runs for receipt persistence and
     // attribution. Creating agents through onboarding starts background probes.
@@ -76,9 +82,8 @@ test("recipient decisions survive a controller restart with their Case audit his
     ]);
     const [responsibleMembership] = await db.select().from(companyMemberships).where(and(eq(companyMemberships.companyId, company.id), eq(companyMemberships.principalType, "user")));
     expect(responsibleMembership?.principalId, "test-drive creates an active responsible user membership").toBeTruthy();
-    const recipientToken = `recipient-restart-${randomUUID()}`;
-    await db.insert(agentApiKeys).values({ companyId: company.id, agentId: recipient.id, name: "Restart fixture decision key",
-      keyHash: createHash("sha256").update(recipientToken).digest("hex"), responsibleUserId: responsibleMembership!.principalId });
+    const { token: recipientToken } = await agentService(db).createApiKey(recipient.id, "Restart fixture decision key",
+      { kind: "standard" }, { responsibleUserId: responsibleMembership!.principalId });
 
     const seeded: { caseId: string; taskId: string; handoffId: string; runId: string; requirementRevisionId: string; outcome: string; reasonCode?: string }[] = [];
     for (const [index, decision] of outcomes.entries()) {
@@ -112,13 +117,11 @@ test("recipient decisions survive a controller restart with their Case audit his
 
     const recorded = new Map<string, Record<string, unknown>>();
     for (const entry of seeded) {
-      const response = await request.post(`${base}/api/cases/${entry.caseId}/handoffs/${entry.handoffId}/decision`, {
+      const responseBody = await json(await request.post(`${base}/api/cases/${entry.caseId}/handoffs/${entry.handoffId}/decision`, {
         headers: { authorization: `Bearer ${recipientToken}` },
         data: { outcome: entry.outcome, ...(entry.reasonCode ? { reasonCode: entry.reasonCode, message: `Recorded ${entry.reasonCode}` } : {}),
           expectedHandoffVersion: 2, requirementRevisionId: entry.requirementRevisionId },
-      });
-      const responseBody = await response.json();
-      expect(response.ok(), `${entry.outcome}: ${response.status()} ${JSON.stringify(responseBody)}`).toBe(true);
+      }));
       expect(responseBody.recipientDecision).toMatchObject({ outcome: entry.outcome, actorType: "agent", actorId: recipient.id,
         handoffVersion: 2, requirementRevisionId: entry.requirementRevisionId, decidedAt: expect.any(String),
         ...(entry.reasonCode ? { reasonCode: entry.reasonCode } : {}) });
@@ -126,28 +129,44 @@ test("recipient decisions survive a controller restart with their Case audit his
     }
 
     const stopTime = new Date().toISOString();
+    await closeRegisteredClients(databaseUrl, { scope: "database" });
+    databaseUrl = undefined;
+    db = undefined;
     await stopDrive();
     base = await startDrive();
     expect((await api("/companies"))[0].id).toBe(company.id);
+    databaseUrl = await readTestServerDatabaseUrl(configPath);
+    db = createDb(databaseUrl);
     for (const entry of seeded) {
       const history = await api(`/cases/${entry.caseId}/handoffs?limit=5`);
-      const items = Array.isArray(history) ? history : history.items ?? history.handoffs;
+      const items = history.items;
+      expect(Array.isArray(items)).toBe(true);
       const handoff = items.find((item: { id: string }) => item.id === entry.handoffId);
-      expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2 });
+      expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2,
+        offerContract: { requirementRevision: { id: entry.requirementRevisionId, revision: 1 } } });
       expect(handoff.recipientDecision).toMatchObject(recorded.get(entry.handoffId)!);
       expect(handoff.recipientDecision.message).toBe(entry.reasonCode ? `Recorded ${entry.reasonCode}` : undefined);
-      const events = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, entry.caseId), eq(caseEvents.kind, "handoff_decision_recorded")));
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ actorType: "agent", actorAgentId: recipient.id, payload: { handoffId: entry.handoffId,
-        issueId: entry.taskId, outcome: entry.outcome, ...(entry.reasonCode ? { reasonCode: entry.reasonCode } : {}) } });
+      const events = await api(`/cases/${entry.caseId}/events?limit=100`);
+      expect(Array.isArray(events)).toBe(true);
+      const decisionEvents = events.filter((event: { kind: string; payload: { handoffId?: string } }) =>
+        event.kind === "handoff_decision_recorded" && event.payload?.handoffId === entry.handoffId);
+      expect(decisionEvents).toHaveLength(1);
+      expect(decisionEvents[0]).toMatchObject({ actorType: "agent", actorAgentId: recipient.id, payload: {
+        handoffId: entry.handoffId, issueId: entry.taskId, version: 2, outcome: entry.outcome,
+        requirementRevisionId: entry.requirementRevisionId, ...(entry.reasonCode ? { reasonCode: entry.reasonCode } : {}) } });
+      const persistedEvents = await db!.select().from(caseEvents).where(and(eq(caseEvents.caseId, entry.caseId), eq(caseEvents.kind, "handoff_decision_recorded")));
+      expect(persistedEvents).toHaveLength(1);
+      expect(persistedEvents[0]).toMatchObject({ actorType: "agent", actorAgentId: recipient.id, payload: {
+        handoffId: entry.handoffId, issueId: entry.taskId, version: 2, outcome: entry.outcome,
+        requirementRevisionId: entry.requirementRevisionId } });
     }
-    await test.info().attach("decision-restart-evidence", { contentType: "application/json", body: JSON.stringify({
+    const evidencePath = info.outputPath("recipient-decision-restart-evidence.json");
+    await mkdir(resolve(evidencePath, ".."), { recursive: true });
+    await writeFile(evidencePath, JSON.stringify({
       stoppedAt: stopTime, restartedAt: new Date().toISOString(), controller: "test-drive process restarted with the same embedded database",
       source: "seeded native run and completion contract", recipient: recipient.id, decisions: seeded,
-    }, null, 2) });
-  } catch (error) {
-    await test.info().attach("test-drive-logs", { body: log.text, contentType: "text/plain" });
-    throw error;
+    }, null, 2));
+    await info.attach("decision-restart-evidence", { path: evidencePath, contentType: "application/json" });
   } finally {
     await stopDrive();
     if (databaseUrl) await closeRegisteredClients(databaseUrl, { scope: "database" });
