@@ -66,11 +66,18 @@ import { issueThreadInteractionService, type InteractionResolutionMutationOption
 import { lockToolConnectionRuntimeInputs, toolAccessService } from "./tool-access.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { captureRunIdentity } from "./run-identity.js";
-import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { isGitHubMcpPatConnection, resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { isConnectionGrantAudienceAllowed } from "./tool-gateway.js";
 import { restConnectorFor } from "./connectors/rest-registry.js";
 
 type ConnectionRunClaims = Pick<RuntimeToolsTokenClaims, "sub" | "company_id" | "run_id" | "responsible_user_id">;
 type SavedChatSetup = NonNullable<ConnectionIntentInteraction["payload"]["savedSetup"]>;
+type ListedGrant = Awaited<ReturnType<ReturnType<typeof toolAccessService>["listConnectionGrants"]>>["grants"][number];
+
+function githubMcpGrant(grants: ListedGrant[], responsibleUserId: string) {
+  return grants.find(grant => grant.kind === "organization" && grant.isDefault && grant.status === "active"
+    && isConnectionGrantAudienceAllowed(grant.members.filter(member => member.subjectType === "user").map(member => member.subjectId), responsibleUserId, true));
+}
 
 /** Opaque completion proof committed alongside the rotated vault references. */
 export function chatCredentialRotationId(setup: object): string | null {
@@ -364,6 +371,7 @@ export function connectionIntentService(db: Db) {
     agentSetup?: true;
     agentSetupOperationId?: string;
     inventory?: Awaited<ReturnType<typeof connectionInventory>>;
+    connectionId?: string;
   }) {
     const managed = input.purpose === "ai" ? await managedAgent(input.companyId, input.agentId, input.serviceSlug, { sourceRunId: input.sourceRunId, agentSetup: input.agentSetup, agentSetupOperationId: input.agentSetupOperationId }) : null;
     if (managed) {
@@ -393,10 +401,18 @@ export function connectionIntentService(db: Db) {
       && (["mcp_remote", "local_stdio"].includes(connection.transport) || Boolean(restConnectorFor(connection)))
       && !isToolConnectionAttentionHealth(connection.healthStatus) ? connection : null;
     if (input.serviceSlug === "github") {
+      const mcp = (await Promise.all(matching.filter(isGitHubMcpPatConnection).filter(connection =>
+        usable(connection) && (!input.connectionId || connection.id === input.connectionId),
+      ).map(async connection => {
+        const { grants } = await access.listConnectionGrants(connection.id, input.companyId);
+        return githubMcpGrant(grants, input.responsibleUserId) ? connection : null;
+      }))).filter(connection => connection !== null);
       const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
         agentId: input.agentId, responsibleUserId: input.responsibleUserId,
       });
-      return usable(matching.find((connection) => connection.id === selection.grant?.connectionId));
+      const managed = usable(matching.find(connection => connection.id === selection.grant?.connectionId
+        && (!input.connectionId || input.connectionId === connection.id)));
+      return managed ?? (mcp.length === 1 ? mcp[0]! : null);
     }
     const installed = matching.filter((connection) => installedIds.has(connection.id));
     const grantsByConnection = await Promise.all(installed.map(async (connection) => ({
@@ -931,6 +947,7 @@ export function connectionIntentService(db: Db) {
         && !isToolConnectionAttentionHealth(connection.healthStatus));
       const eligible = (await Promise.all(matching.map(async connection => {
         const { grants } = await access.listConnectionGrants(connection.id, context.run.companyId);
+        if (isGitHubMcpPatConnection(connection)) return githubMcpGrant(grants, context.run.responsibleUserId!) ? connection : null;
         return grants.some(grant => grant.status === "active" && (
           grant.kind === "organization" || grant.subjectUserId === context.run.responsibleUserId
           || (grant.kind === "agent" && grant.subjectAgentId === context.agent.id))) ? connection : null;
@@ -972,6 +989,7 @@ export function connectionIntentService(db: Db) {
       agentId: context.agent.id,
       responsibleUserId: context.run.responsibleUserId!,
       serviceSlug: app.slug,
+      connectionId: options.connectionId,
       purpose: options.purpose,
       sourceRunId: context.run.id,
       ...(options.agentSetup ? { agentSetup: true as const, agentSetupOperationId: options.agentSetupOperationId } : {}),
@@ -1161,7 +1179,12 @@ export function connectionIntentService(db: Db) {
     );
     const existingConnections = (await Promise.all(matchingConnections.map(async (connection) => {
       if (managed) return connection.id === usableAiConnection?.id ? connection : null;
+      if (payload.accessRequest && connection.id !== payload.accessRequest.connectionId) return null;
+      if (app.slug === "github" && (connection.transport !== "mcp_remote" || isToolConnectionAttentionHealth(connection.healthStatus))) return null;
       const { grants } = await access.listConnectionGrants(connection.id, loaded.issue.companyId);
+      if (isGitHubMcpPatConnection(connection)) {
+        return options.canManageOrganizationGrant && githubMcpGrant(grants, loaded.interaction.addresseeUserId!) ? connection : null;
+      }
       const eligible = grants.some((grant) =>
         grant.status === "active"
         && (grant.kind === "organization" || grant.subjectUserId === loaded.interaction.addresseeUserId
@@ -1338,6 +1361,13 @@ export function connectionIntentService(db: Db) {
         selectedConnection.id,
         loaded.issue.companyId,
       );
+      const usesGitHubMcpPat = isGitHubMcpPatConnection(selectedConnection);
+      if (usesGitHubMcpPat) {
+        if (!options.canManageOrganizationGrant) throw forbidden("Sharing a company connection requires connection-management authority");
+        if (!githubMcpGrant(grants, userId)) {
+          throw conflict("No eligible Organization GitHub tool authorization. Review this connection's audience and authorization in Connectors.");
+        }
+      }
       const pendingPersonalGrant = grants.find((grant) =>
         grant.kind === "user" && grant.status === "active" && grant.subjectUserId === userId
       );
@@ -1410,11 +1440,13 @@ export function connectionIntentService(db: Db) {
       const effective = await txAccess.getEffectiveToolAssignmentsForAgent(loaded.issue.companyId, payload.requestingAgentId);
       if (!effective.allowedTools.some((tool) => tool.connectionId === selectedConnection.id)) throw conflict("This connection has no permitted tools. Review its action permissions before continuing.");
 
-      const runtimeConnection = await connectionIntentService(txDb).usableConnectionForAgent({
-        companyId: loaded.issue.companyId, agentId: payload.requestingAgentId,
-        responsibleUserId: userId, serviceSlug: payload.serviceSlug,
-      });
-      if (runtimeConnection?.id !== selectedConnection.id) throw conflict("This identity is not the connection this agent can execute. Resolve conflicting identities before continuing.");
+      if (!usesGitHubMcpPat) {
+        const runtimeConnection = await connectionIntentService(txDb).usableConnectionForAgent({
+          companyId: loaded.issue.companyId, agentId: payload.requestingAgentId,
+          responsibleUserId: userId, serviceSlug: payload.serviceSlug,
+        });
+        if (runtimeConnection?.id !== selectedConnection.id) throw conflict("This identity is not the connection this agent can execute. Resolve conflicting identities before continuing.");
+      }
 
       return txInteractions.resolveConnectionIntent(
         loaded.issue,

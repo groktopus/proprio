@@ -15,6 +15,7 @@ import {
   companySecretBindings,
   companySecrets,
   connectionGrantDelegations,
+  connectionGrantMembers,
   connectionGrants,
   createDb,
   goals,
@@ -41,7 +42,7 @@ import { materializeNativeInteractionResponses } from "../services/native-runtim
 import { toolAccessService } from "../services/tool-access.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { connectionIntentService } from "../services/connection-intents.js";
-import { resolveManagedGitHubIdentitySelection } from "../services/git-credentials.js";
+import { filterResolvedGitHubConnectionsForRun, resolveManagedGitHubIdentitySelection } from "../services/git-credentials.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { attentionService } from "../services/attention.js";
 import { initializeRunIdentity } from "../services/run-identity.js";
@@ -1139,6 +1140,35 @@ describeEmbeddedPostgres("connectionIntentService", () => {
     ].map(tool => ({ ...tool, companyId: company.id, connectionId: connection.id, name: tool.toolName, versionHash: "v1", entryKind: "tool" as const, status: "active" as const }))).returning();
     return { company, agent, otherAgent, issue, connection, catalog, service: connectionIntentService(db), claims: { ...claims, sub: agent.id, company_id: company.id, run_id: run.id, responsible_user_id: "grant-user" } };
   }
+
+  it("accepts the Organization GitHub PAT for MCP without selecting it as a native identity", async () => {
+    const f = await accessFixture("github");
+    const [connection] = await db.update(toolConnections).set({ authKind: "api_key",
+      config: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" } })
+      .where(eq(toolConnections.id, f.connection.id)).returning();
+    const [grant] = await db.update(connectionGrants).set({ isDefault: true })
+      .where(eq(connectionGrants.connectionId, connection.id)).returning();
+    const request = await f.service.request(f.claims, "github", {
+      connectionId: connection.id, toolNames: [f.catalog[0].toolName],
+    });
+    expect((await f.service.setupOptions(request.interactionId!, { canManageOrganizationGrant: true })).existingConnections)
+      .toEqual([expect.objectContaining({ id: connection.id })]);
+    await db.insert(connectionGrantMembers).values({ companyId: f.company.id, grantId: grant.id,
+      subjectType: "user", subjectId: "another-user" });
+    expect((await f.service.setupOptions(request.interactionId!, { canManageOrganizationGrant: true })).existingConnections).toEqual([]);
+    await expect(f.service.complete(request.interactionId!, connection.id, "grant-user", { canManageOrganizationGrant: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("No eligible Organization GitHub tool authorization") });
+    expect((await f.service.loadIntent(request.interactionId!)).interaction.status).toBe("pending");
+    expect((await toolAccessService(db).getEffectiveToolAssignmentsForAgent(f.company.id, f.agent.id)).allowedTools).toEqual([]);
+    await db.delete(connectionGrantMembers).where(eq(connectionGrantMembers.grantId, grant.id));
+    await expect(f.service.complete(request.interactionId!, connection.id, "grant-user", { canManageOrganizationGrant: true }))
+      .resolves.toMatchObject({ status: "accepted", result: { connectionId: connection.id } });
+    const context = { agentId: f.agent.id, responsibleUserId: "grant-user" };
+    await expect(filterResolvedGitHubConnectionsForRun({ db, companyId: f.company.id, ...context, connections: [connection] }))
+      .resolves.toEqual([connection]);
+    await expect(resolveManagedGitHubIdentitySelection(db, f.company.id, context))
+      .resolves.toMatchObject({ error: "No managed GitHub identity is available for this run" });
+  });
 
   it("keeps GitHub permission saves aligned with credential admission for existing and future agents", async () => {
     const f = await accessFixture("github");

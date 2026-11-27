@@ -61,7 +61,7 @@ import { runIdentityContexts } from "@groktopus/db";
 import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent-tools.js";
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
-import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { isGitHubMcpPatConnection, resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import {
   backgroundPollDelayMs,
@@ -3486,8 +3486,9 @@ export function createToolGatewayService(
           ),
         );
       if (
-        connection?.config.sourceTemplateKey === "github" ||
-        connection?.transportConfig?.sourceTemplateKey === "github"
+        connection && !isGitHubMcpPatConnection(connection) &&
+        (connection.config.sourceTemplateKey === "github" ||
+          connection.transportConfig?.sourceTemplateKey === "github")
       ) {
         let selected = await resolveManagedGitHubIdentitySelection(
           db,
@@ -4653,6 +4654,7 @@ export function createToolGatewayService(
   ): Promise<Record<string, string>> {
     const tracked =
       session.identityContextId &&
+      !isGitHubMcpPatConnection(connection) &&
       (connection.config.sourceTemplateKey === "github" ||
         connection.transportConfig?.sourceTemplateKey === "github");
     try {
@@ -5286,6 +5288,7 @@ export function createToolGatewayService(
     if (
       session.identityContextId &&
       session.agentId &&
+      !isGitHubMcpPatConnection(connection) &&
       (connection.config.sourceTemplateKey === "github" ||
         connection.transportConfig?.sourceTemplateKey === "github")
     ) {
