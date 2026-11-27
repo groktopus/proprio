@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
+import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, companies, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, managedAuditTransitionReceipts, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, not, or, sql, type SQL } from "drizzle-orm";
 import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -337,12 +337,22 @@ export async function readManagedAuditExportPage(
 ) {
   const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
+    // Acquire the company FK lock before the snapshot row. Company deletion
+    // locks the company first and then cascades into snapshots/receipts; using
+    // the same order prevents invalidation from deadlocking with deletion.
+    const [company] = await tx.select({ id: companies.id }).from(companies)
+      .where(eq(companies.id, scope.companyId)).for("key share");
+    if (!company) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     const ownedSnapshot = and(
       eq(managedAuditExports.id, exportId),
       eq(managedAuditExports.companyId, scope.companyId),
       eq(managedAuditExports.userId, userId),
     );
-    const [snapshot] = await tx.select(snapshotColumns).from(managedAuditExports).where(ownedSnapshot);
+    // Coordinate validation, page receipts, and invalidation on the snapshot
+    // row. NO KEY UPDATE serializes competing readers without the lock-upgrade
+    // deadlocks that shared locks can cause when a reader invalidates.
+    const [snapshot] = await tx.select(snapshotColumns).from(managedAuditExports)
+      .where(ownedSnapshot).for("no key update");
     if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {
       throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
@@ -370,7 +380,21 @@ export async function readManagedAuditExportPage(
       if (available.eventCount !== snapshot.eventCount) {
         // Commit the invalidation before sending a conflict so any cursor for
         // this snapshot remains invalid after visibility or data is restored.
-        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] }).where(ownedSnapshot);
+        const [invalidated] = await tx.update(managedAuditExports)
+          .set({ invalidated: true, eventIds: [] })
+          .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
+          .returning({ id: managedAuditExports.id });
+        if (invalidated) {
+          await tx.insert(managedAuditTransitionReceipts).values({
+            companyId: scope.companyId,
+            transition: "export_invalidated",
+            actorId: userId,
+            exportId: invalidated.id,
+            recordCount: 1,
+            source: "tool_gateway",
+            createdAt: sql`clock_timestamp()`,
+          });
+        }
         return null;
       }
     }

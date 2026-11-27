@@ -26,6 +26,7 @@ import {
   managedAuditEvents,
   managedAuditExportPageAccess,
   managedAuditExports,
+  managedAuditTransitionReceipts,
   principalPermissionGrants,
   ensurePostgresDatabase,
   runDatabaseBackup,
@@ -66,6 +67,7 @@ describePostgres("agent action audit routes", () => {
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(managedAuditExportPageAccess);
+    await db.delete(managedAuditTransitionReceipts);
     await db.delete(managedAuditExports);
     await db.delete(managedAuditEvents);
     await db.delete(caseEvents);
@@ -874,11 +876,138 @@ describePostgres("agent action audit routes", () => {
         invalidated: managedAuditExports.invalidated, eventIds: managedAuditExports.eventIds,
       }).from(managedAuditExports).where(eq(managedAuditExports.id, created.body.exportId));
       expect(snapshot).toEqual({ invalidated: true, eventIds: [] });
+      expect((await db.select().from(activityLog))
+        .filter(row => row.action === "audit.managed_export_invalidated")).toHaveLength(0);
+      const receipts = await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.exportId, created.body.exportId));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({
+        companyId: company.id,
+        transition: "export_invalidated",
+        actorId: userId,
+        exportId: created.body.exportId,
+        recordCount: 1,
+        source: "tool_gateway",
+      });
+      const [protection] = await db.execute<{
+        rls: boolean; public_grants: boolean; anon_select: boolean; authenticated_select: boolean;
+      }>(sql`select relation.relrowsecurity as rls,
+        exists(select 1 from aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) grant_entry
+          where grant_entry.grantee = 0) as public_grants,
+        coalesce((select has_table_privilege(role_entry.oid, relation.oid, 'select') from pg_roles role_entry where role_entry.rolname = 'anon'), false) as anon_select,
+        coalesce((select has_table_privilege(role_entry.oid, relation.oid, 'select') from pg_roles role_entry where role_entry.rolname = 'authenticated'), false) as authenticated_select
+        from pg_class relation where relation.oid = 'managed_audit_transition_receipts'::regclass`);
+      expect(protection).toEqual({ rls: true, public_grants: false, anon_select: false, authenticated_select: false });
 
+      // The public activity writer may accept a lookalike event, but it cannot
+      // alter or expose the protected server-authored receipt.
+      const forgedExportId = randomUUID();
+      const forgedActorId = randomUUID();
+      await board.post(`/api/companies/${company.id}/activity`).send({
+        actorType: "user", actorId: forgedActorId, action: "audit.managed_export_invalidated",
+        entityType: "company", entityId: company.id,
+        details: { exportId: forgedExportId, recordCount: 999_999 },
+      }).expect(201);
+      expect((await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.companyId, company.id))).map(row => row.recordCount)).toEqual([1]);
+      const activityView = await board.get(`/api/companies/${company.id}/activity`).expect(200);
+      const publicInvalidations = activityView.body.filter((row: { action: string }) => row.action === "audit.managed_export_invalidated");
+      expect(publicInvalidations).toHaveLength(1);
+      expect(publicInvalidations[0]?.actorId).toBe(forgedActorId);
+      expect(publicInvalidations[0]?.details).toMatchObject({ exportId: forgedExportId, recordCount: 999_999 });
+
+      await db.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 25 * 60 * 60 * 1000) })
+        .where(eq(managedAuditExports.id, created.body.exportId));
       const fresh = await board.post(path).send(window).expect(201);
       expect(fresh.body.eventCount).toBe(201);
       expect(fresh.body.exportId).not.toBe(created.body.exportId);
+      expect(await db.select().from(managedAuditExports)
+        .where(eq(managedAuditExports.id, created.body.exportId))).toHaveLength(0);
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.exportId, created.body.exportId))).toHaveLength(1);
+
+      // The company FK cascades only at actual company retirement; snapshots
+      // and expiration do not own this receipt.
+      const deletionCompany = (await db.insert(companies).values({ name: "Receipt cascade fixture" }).returning())[0]!;
+      await db.insert(managedAuditTransitionReceipts).values({
+        companyId: deletionCompany.id,
+        transition: "company_exports_retired",
+        actorId: userId,
+        exportId: null,
+        recordCount: 1,
+        source: "company_retirement",
+      });
+      await db.delete(companies).where(eq(companies.id, deletionCompany.id));
+      expect(await db.select().from(managedAuditTransitionReceipts)
+        .where(eq(managedAuditTransitionReceipts.companyId, deletionCompany.id))).toHaveLength(0);
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not release a page from a repeatable-read snapshot after concurrent invalidation wins", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const from = "2026-07-17T00:00:00.000Z";
+    const to = "2026-07-17T00:00:02.000Z";
+    await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+    });
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    const writer = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let locker: Promise<unknown> | undefined;
+    let pendingRead: Promise<request.Response> | undefined;
+    try {
+      const created = await board.post(path).send({ from, to }).expect(201);
+      const exportPath = `${path}/${created.body.exportId}`;
+      let writerPid = 0;
+      locker = writer.transaction(async tx => {
+        await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+          .where(eq(managedAuditExports.id, created.body.exportId)).for("no key update");
+        const [owner] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        writerPid = owner!.pid;
+        locked.resolve();
+        await release.promise;
+        await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+          .where(eq(managedAuditExports.id, created.body.exportId));
+      });
+      await Promise.race([locked.promise, locker]);
+      pendingRead = board.get(exportPath).then(response => response);
+      // Prove the HTTP transaction is blocked by this writer, rather than
+      // relying on a timing delay before committing the competing update.
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where datname = current_database() and query like '%managed_audit_exports%'
+            and ${writerPid} = any(pg_blocking_pids(pid))`);
+        expect(waiting).toHaveLength(1);
+      }, { timeout: 1_500, interval: 20 });
+      release.resolve();
+      await locker;
+      const response = await pendingRead;
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      expect(await db.select().from(managedAuditExportPageAccess)
+        .where(eq(managedAuditExportPageAccess.exportId, created.body.exportId))).toHaveLength(0);
+      await board.get(exportPath).expect(409);
+    } finally {
+      release.resolve();
+      if (locker) await Promise.allSettled([locker]);
+      if (pendingRead) await Promise.allSettled([pendingRead]);
+      await writer.$client.end();
       vi.unstubAllEnvs();
     }
   });

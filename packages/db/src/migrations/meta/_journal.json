@@ -3585,6 +3585,13 @@
       "when": 1795793119499,
       "tag": "0513_optimal_scarecrow",
       "breakpoints": true
+    },
+    {
+      "idx": 514,
+      "version": "7",
+      "when": 1795794483025,
+      "tag": "0514_zippy_sage",
+      "breakpoints": true
     }
   ]
 }

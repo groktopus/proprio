@@ -50,8 +50,17 @@ every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. The server persists the invalidation
 until the snapshot expires and discards its membership. Old cursors remain
-invalid after the evidence becomes visible again. Preserve the checkpoint and
-reconcile before opening a new export. The server commits an access record
+invalid after the evidence becomes visible again. The server serializes page
+validation and invalidation for each snapshot. It records the company, operator,
+export ID and one transitioned-snapshot count in `managed_audit_transition_receipts` in
+the same transaction. This protected database receipt is not exposed through
+company activity or WebSocket publications; only the database owner can read
+it. A client-written activity row cannot create or alter the receipt. The
+company foreign key cascades when the company is deleted, while snapshot expiry
+does not remove it. Drain every older API replica before claiming this
+visibility guarantee because mixed-version replicas may still publish the old
+activity event. Preserve the checkpoint and reconcile before opening a new
+export. The server commits an access record
 before releasing each successful page, including a replay. The record holds the
 company, operator, export ID, page offset, item count and access time. Storage
 operators can review it by company and export ID in
