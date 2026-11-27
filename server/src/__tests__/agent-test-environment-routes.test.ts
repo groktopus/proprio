@@ -834,6 +834,84 @@ describe("agent test-environment route", () => {
     }
   });
 
+  it("forwards the selected managed Codex ACP model to the probe and returns its hello result", async () => {
+    const apiKey = "sk-openai-codex-route-test";
+    const identity = "openai-grant:local-board:0000000000000000";
+    mockPrepareManagedAiRuntime.mockImplementationOnce(async (_db: unknown, input: { config: Record<string, unknown> }) => ({
+      config: {
+        ...input.config,
+        env: { OPENAI_API_KEY: apiKey },
+        managedAiConnection: {
+          connectionId: "conn-openai",
+          grantId: "grant-openai",
+          provider: "openai",
+          method: "api_key",
+          mode: "responsible_user",
+          responsibleUserId: "local-board",
+          identity,
+        },
+      },
+      attribution: {
+        connectionId: "conn-openai",
+        grantId: "grant-openai",
+        provider: "openai",
+        method: "api_key",
+        mode: "responsible_user",
+        responsibleUserId: "local-board",
+      },
+      accountName: "My Codex Account",
+      accountOwnerUserId: "local-board",
+      identity,
+      cleanup: vi.fn(async () => {}),
+    }));
+
+    const { registerServerAdapter, getServerAdapter, unregisterServerAdapter } = await import("../adapters/index.js");
+    const previous = getServerAdapter("codex_local");
+    unregisterServerAdapter("codex_local");
+    const codexProbe = vi.fn(async (_context: AdapterEnvironmentTestContext) => ({
+      adapterType: "codex_local" as const,
+      status: "pass" as const,
+      checks: [{ code: "codex_acp_hello_probe_passed", level: "info" as const, message: "The selected model replied with hello." }],
+      testedAt: new Date(0).toISOString(),
+    }));
+    registerServerAdapter({ ...externalAdapter, type: "codex_local", testEnvironment: codexProbe });
+
+    try {
+      const app = await createApp();
+      const res = await request(app)
+        .post("/api/companies/company-1/adapters/codex_local/test-environment")
+        .send({
+          adapterConfig: { engine: "acp", model: "gpt-5.6" },
+          aiConnection: { provider: "openai", method: "api_key", mode: "responsible_user" },
+        });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({ adapterType: "codex_local", status: "pass" });
+      expect(res.body.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "codex_acp_hello_probe_passed", level: "info" }),
+        expect.objectContaining({ code: "ai_connection_api_key_reverified", level: "info" }),
+      ]));
+      expect(codexProbe).toHaveBeenCalledTimes(1);
+      expect(codexProbe.mock.calls[0]?.[0]).toMatchObject({
+        companyId: "company-1",
+        adapterType: "codex_local",
+        executionTarget: null,
+        config: {
+          engine: "acp",
+          model: "gpt-5.6",
+          env: { OPENAI_API_KEY: apiKey },
+          managedAiConnection: { provider: "openai", method: "api_key", identity },
+        },
+      });
+      expect(mockValidateAiApiKey).toHaveBeenCalledWith("openai", apiKey);
+      expect(mockSecretService.normalizeAdapterConfigForPersistence.mock.calls[0]?.[1]).toEqual({ engine: "acp", model: "gpt-5.6" });
+      expect(JSON.stringify(res.body)).not.toContain(apiKey);
+    } finally {
+      unregisterServerAdapter("codex_local");
+      if (previous) registerServerAdapter(previous);
+    }
+  });
+
   it("fails adoption of an api_key connection the provider no longer accepts", async () => {
     mockManagedRuntime("api_key");
     const { unprocessable } = await import("../errors.js");
