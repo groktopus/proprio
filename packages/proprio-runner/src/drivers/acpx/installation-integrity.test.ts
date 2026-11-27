@@ -41,6 +41,7 @@ import {
   type VerifiedAcpxProviderLifetime,
 } from "./installation-integrity.js";
 import { stageManagedCodexCredential } from "./codex-credentials.js";
+import { RUNNER_EGRESS_ALLOWLIST_ENV } from "./provider-egress.js";
 
 async function withLinuxX64TestPlatform<T>(run: () => Promise<T>): Promise<T> {
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
@@ -60,6 +61,7 @@ const temporaryDirectories: string[] = [];
 const descriptorCommandPath = "/proc/self/fd/4/server.js";
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -1758,6 +1760,48 @@ describe("ACPX installation integrity", () => {
         expect(() => command.spawn([], {}, lifetime)).toThrow(
           "ACPX provider credential fence is invalid",
         );
+      }
+    },
+  );
+
+  it.runIf(process.platform === "linux" && process.env.PROPRIO_TEST_BWRAP === "/usr/bin/bwrap")(
+    "launches a setup provider through Runner-owned egress confinement without credential fences",
+    async () => {
+      if (!process.env.RUNNER_TEMP) throw new Error("Hosted Linux egress integration requires RUNNER_TEMP outside masked temp paths.");
+      vi.stubEnv("TMPDIR", process.env.RUNNER_TEMP);
+      vi.stubEnv(RUNNER_EGRESS_ALLOWLIST_ENV, "[]");
+      const fixture = await installationFixture();
+      const installation = await verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve);
+      const lease = await installation.openCommand();
+      try {
+        const child = lease.spawn([], { cwd: fixture.root });
+        await expectOutput(child, "verified");
+      } finally {
+        await lease.close();
+      }
+    },
+  );
+
+  it.runIf(process.platform === "linux" && process.env.PROPRIO_TEST_BWRAP === "/usr/bin/bwrap")(
+    "reaps an egress-confined setup provider after guardian owner revocation",
+    async () => {
+      if (!process.env.RUNNER_TEMP) throw new Error("Hosted Linux egress integration requires RUNNER_TEMP outside masked temp paths.");
+      vi.stubEnv("TMPDIR", process.env.RUNNER_TEMP);
+      vi.stubEnv(RUNNER_EGRESS_ALLOWLIST_ENV, "[]");
+      const fixture = await persistentInstallationFixture();
+      const installation = await verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve);
+      const lease = await installation.openCommand();
+      const child = lease.spawn([], {
+        cwd: fixture.root,
+        env: { ...process.env, PROPRIO_PROVIDER_PID_FILE: join(fixture.root, "provider.pid") },
+      });
+      try {
+        await awaitVerifiedAcpxProviderOwnership(child);
+        const providerExit = awaitVerifiedAcpxProviderExit(child);
+        expect(child.kill("SIGKILL")).toBe(true);
+        await Promise.all([once(child, "exit"), providerExit]);
+      } finally {
+        await lease.close();
       }
     },
   );

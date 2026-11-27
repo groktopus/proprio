@@ -2,6 +2,18 @@ import { MAX_ACPX_RUNTIME_EXECUTABLE_BYTES, ACPX_PRIVATE_SNAPSHOT_ENV, createAcp
 import { createNativeAcpxDistributionSnapshot, NATIVE_ACPX_BOOTSTRAP_NAME, readNativeAcpxDistributionEntries, type NativeAcpxDistributionInput } from "./native-distribution-integrity.js";
 export type { NativeAcpxDistributionInput } from "./native-distribution-integrity.js";
 import { createHash } from "node:crypto";
+import {
+  buildRunnerEgressSandboxCommand,
+  buildRunnerEgressProviderSandboxCommand,
+  parseRunnerEgressPolicy,
+  RUNNER_EGRESS_ALLOWLIST_ENV,
+  RUNNER_EGRESS_CREDENTIAL_FENCES_ENV,
+  RUNNER_EGRESS_PROXY_PORT,
+  RUNNER_EGRESS_SECCOMP_FD_ENV,
+  RUNNER_EGRESS_SOCKET_ENV,
+  startRunnerEgressProxy,
+  type RunnerEgressProxy,
+} from "./provider-egress.js";
 import { executableDigestCache, type ExecutableFileIdentity } from "../../executable-digest-cache.js";
 import {
   spawn as spawnChildProcess,
@@ -48,6 +60,14 @@ const PROVIDER_GUARDIAN_HANDSHAKE_TIMEOUT_MS = 5_000;
 // Cover bounded runtime close and TERM/KILL verification without allowing a
 // surviving provider to hold the entire cleanup result indefinitely.
 const NATIVE_SNAPSHOT_EXIT_TIMEOUT_MS = 10_000;
+
+async function openRunnerEgressBoundary(): Promise<{ proxy: RunnerEgressProxy } | null> {
+  const policy = parseRunnerEgressPolicy(process.env[RUNNER_EGRESS_ALLOWLIST_ENV]);
+  if (policy === null) return null;
+  if (process.platform !== "linux") throw new Error("Runner egress confinement is supported only on Linux.");
+  const proxy = await startRunnerEgressProxy(policy);
+  return { proxy };
+}
 const VERIFIED_PROVIDER_RUNTIME_TARGET_ENV =
   "PROPRIO_ACPX_VERIFIED_PROVIDER_RUNTIME_TARGET";
 
@@ -153,8 +173,15 @@ try {
 export const PROVIDER_LIFETIME_GUARDIAN_SOURCE = `
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
+const net = require("node:net");
+const path = require("node:path");
+const buildRunnerEgressProviderSandboxCommand = ${buildRunnerEgressProviderSandboxCommand.toString()};
 const WATCHDOG_SOURCE = ${JSON.stringify(PROVIDER_LIFETIME_WATCHDOG_SOURCE)};
 const runtimeExecutable = process.env.${VERIFIED_RUNTIME_EXECUTABLE_ENV} || process.execPath;
+const egressSocketPath = process.env.${RUNNER_EGRESS_SOCKET_ENV};
+const egressSeccompFd = Number.parseInt(process.env.${RUNNER_EGRESS_SECCOMP_FD_ENV} || "", 10);
+const credentialFencesEnabled = process.env.${RUNNER_EGRESS_CREDENTIAL_FENCES_ENV} === "1";
+delete process.env.${RUNNER_EGRESS_SECCOMP_FD_ENV};
 const dependencyAncestorCount = Number.parseInt(process.argv[4], 10);
 const providerRuntimeExecutableCount = Number.parseInt(process.argv[8], 10);
 if (!Number.isSafeInteger(dependencyAncestorCount) || dependencyAncestorCount < 0 || dependencyAncestorCount > ${MAX_DEPENDENCY_ANCESTORS}) throw new Error("ACPX provider dependency ancestry is invalid");
@@ -185,9 +212,11 @@ const owner = fs.createReadStream("", { fd: OWNER_FD, autoClose: false });
 owner.once("end", reap);
 owner.once("error", reap);
 owner.resume();
-// Fail before provider code exists unless both inherited quorum fences are live.
-fs.fstatSync(CREDENTIAL_FENCE_FD_START);
-fs.fstatSync(CREDENTIAL_FENCE_FD_START + 1);
+// Credential-fenced executions require both inherited quorum handles.
+if (credentialFencesEnabled) {
+  fs.fstatSync(CREDENTIAL_FENCE_FD_START);
+  fs.fstatSync(CREDENTIAL_FENCE_FD_START + 1);
+}
 const shutdown = () => {
   if (shutdownStarted || reaped) return;
   shutdownStarted = true;
@@ -205,21 +234,41 @@ process.on("SIGHUP", shutdown);
 const startProvider = () => {
   if (provider || reaped || shutdownStarted) return;
   try {
-    provider = spawn(
-      runtimeExecutable,
-      ["--eval", process.argv[1], ...process.argv.slice(2)],
-      {
+    const providerArgs = ["--eval", process.argv[1], ...process.argv.slice(2)];
+    const providerStdio = [
+      0, 1, 2, ${COMMAND_SOURCE_FD}, ${COMMAND_DIRECTORY_FD}, ...dependencyAncestorFds,
+      ...(providerRuntimeExecutableCount === 1 ? [PROVIDER_RUNTIME_EXECUTABLE_FD] : []),
+      "pipe", PROVIDER_EXIT_FD,
+      ...(credentialFencesEnabled ? [CREDENTIAL_FENCE_FD_START, CREDENTIAL_FENCE_FD_START + 1] : ["ignore", "ignore"]),
+      ...(runtimeDescriptorFd === null ? [] : [runtimeDescriptorFd]),
+    ];
+    if (egressSocketPath && (!Number.isSafeInteger(egressSeccompFd) || egressSeccompFd < 3)) throw new Error("ACPX provider seccomp descriptor is missing");
+    if (egressSocketPath) providerStdio.push(egressSeccompFd);
+    const providerBoundary = egressSocketPath
+      ? buildRunnerEgressProviderSandboxCommand({
+          command: runtimeExecutable,
+          args: providerArgs,
+          seccompDescriptor: providerStdio.length - 1,
+          inheritedDescriptorCount: providerStdio.length - 3,
+          sandboxCommand: "/usr/bin/bwrap",
+        })
+      : null;
+    const childEnvironment = { ...process.env };
+    delete childEnvironment.${RUNNER_EGRESS_SOCKET_ENV};
+    delete childEnvironment.${RUNNER_EGRESS_SECCOMP_FD_ENV};
+    const childCommand = providerBoundary?.command ?? runtimeExecutable;
+    const childArgs = providerBoundary?.args ?? providerArgs;
+    provider = spawn(childCommand, childArgs, {
         cwd: process.cwd(),
         detached: false,
-        env: process.env,
+        env: childEnvironment,
         shell: false,
         // The provider observes this guardian-owned pipe directly. Kernel EOF
         // therefore revokes it even when SIGKILL/OOM prevents our JS reap path.
         // It also inherits both quorum fences until that self-reap completes.
-        stdio: [0, 1, 2, ${COMMAND_SOURCE_FD}, ${COMMAND_DIRECTORY_FD}, ...dependencyAncestorFds, ...(providerRuntimeExecutableCount === 1 ? [PROVIDER_RUNTIME_EXECUTABLE_FD] : []), "pipe", PROVIDER_EXIT_FD, CREDENTIAL_FENCE_FD_START, CREDENTIAL_FENCE_FD_START + 1, ...(runtimeDescriptorFd === null ? [] : ["ignore", runtimeDescriptorFd])],
+        stdio: providerStdio,
         windowsHide: true,
-      },
-    );
+      });
     provider.once("error", reap);
     provider.once("exit", reap);
     provider.once("spawn", () => {
@@ -240,6 +289,31 @@ const startProvider = () => {
   } catch {
     reap();
   }
+};
+const startEgressBridge = () => {
+  if (!egressSocketPath) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const bridge = net.createServer((client) => {
+      const upstream = net.connect(egressSocketPath);
+      client.pipe(upstream);
+      upstream.pipe(client);
+      const close = () => { client.destroy(); upstream.destroy(); };
+      client.once("error", close);
+      upstream.once("error", close);
+      client.once("close", () => upstream.destroy());
+      upstream.once("close", () => client.destroy());
+    });
+    bridge.once("error", reject);
+    bridge.listen(${RUNNER_EGRESS_PROXY_PORT}, "127.0.0.1", () => {
+      bridge.removeAllListeners("error");
+      const proxy = "http://127.0.0.1:${RUNNER_EGRESS_PROXY_PORT}";
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) process.env[name] = proxy;
+      process.env.NO_PROXY = "";
+      process.env.no_proxy = "";
+      delete process.env.${RUNNER_EGRESS_SOCKET_ENV};
+      resolve();
+    });
+  });
 };
 try {
   // A credential-free peer in this same process group reaps the group through
@@ -285,7 +359,7 @@ try {
     watchdogArmed = true;
     clearTimeout(watchdogReadyTimeout);
     watchdogReady.removeAllListeners("data");
-    startProvider();
+    void startEgressBridge().then(startProvider, reap);
   });
 } catch {
   reap();
@@ -516,10 +590,13 @@ export async function verifyNativeAcpxInstallation(
     agentRuntimePackageJsonPath: null,
     async openCommand(options?: { signal?: AbortSignal }): Promise<VerifiedAcpxCommandLease> {
       const native = await createNativeAcpxDistributionSnapshot(declaration, entries, options?.signal);
+      let egressBoundary: Awaited<ReturnType<typeof openRunnerEgressBoundary>>;
+      try { egressBoundary = await openRunnerEgressBoundary(); }
+      catch (error) { await native.snapshot.close(); throw error; }
       const lease = commandLease(
         native.snapshot.roots[0]!, NATIVE_ACPX_BOOTSTRAP_NAME, "commonjs",
         native.bootstrap, native.commandDirectory, [], 0, "commonjs", [],
-        null, null, native.snapshot,
+        null, null, native.snapshot, egressBoundary,
       );
       return {
         spawn(args = [], options = {}, lifetime) {
@@ -916,6 +993,9 @@ export async function verifyQualifiedAcpxInstallation(
             }
           } catch (error) { await privateSnapshot.close(); throw error; }
         }
+        let egressBoundary: Awaited<ReturnType<typeof openRunnerEgressBoundary>>;
+        try { egressBoundary = await openRunnerEgressBoundary(); }
+        catch (error) { await privateSnapshot?.close(); throw error; }
         return commandLease(
           commandDirectory,
           basename(commandPath),
@@ -929,6 +1009,7 @@ export async function verifyQualifiedAcpxInstallation(
           currentRuntimeExecutable,
           runtimeExecutable?.environmentVariable ?? null,
           privateSnapshot,
+          egressBoundary,
         );
       } catch (error) {
         await Promise.all([
@@ -1482,12 +1563,14 @@ function commandLease(
   providerRuntimeEnvironmentVariable:
     VerifiedAcpxRuntimeExecutable["environmentVariable"] | null,
   privateSnapshot: AcpxPrivateSnapshot | null,
+  egressBoundary: { proxy: RunnerEgressProxy } | null,
 ): VerifiedAcpxCommandLease {
   let consumed = false;
   let directoriesRelease: Promise<void> | undefined;
   let spawnedChild: ChildProcess | null = null;
   let childExit: Promise<void> | null = null;
   let snapshotCleanup: Promise<void> | null = null;
+  let egressCleanup: Promise<void> | null = null;
   const cleanSnapshot = (): Promise<void> => {
     if (snapshotCleanup === null) {
       snapshotCleanup = Promise.resolve().then(() => privateSnapshot?.close());
@@ -1495,6 +1578,9 @@ function commandLease(
       void snapshotCleanup.catch(() => undefined);
     }
     return snapshotCleanup;
+  };
+  const cleanEgress = (): Promise<void> => {
+    return (egressCleanup ??= Promise.resolve().then(() => egressBoundary?.proxy?.close()));
   };
   const releaseDirectories = (): Promise<void> => {
     return (directoriesRelease ??= Promise.all([
@@ -1539,6 +1625,12 @@ function commandLease(
       if (snapshotCleanup === cleanup) snapshotCleanup = null;
       throw error;
     }
+    try {
+      await cleanEgress();
+    } catch (error) {
+      egressCleanup = null;
+      throw error;
+    }
   };
   return {
     spawn(
@@ -1550,7 +1642,8 @@ function commandLease(
       consumed = true;
       let child: ChildProcess;
       try {
-        const guarded = lifetime !== undefined;
+        const guarded = lifetime !== undefined || egressBoundary !== null;
+        const credentialFenced = lifetime !== undefined;
         if (guarded) assertVerifiedAcpxProviderPlatform(process.platform);
         const providerBootstrap = guarded
           ? format === "module"
@@ -1568,7 +1661,7 @@ function commandLease(
         const providerOwnershipFd = providerGuardianFd + 1;
         const providerExitFd = providerOwnershipFd + 1;
         if (
-          guarded &&
+          lifetime !== undefined &&
           (!Array.isArray(lifetime.credentialFenceFds) ||
             lifetime.credentialFenceFds.length !== 2 ||
             lifetime.credentialFenceFds.some(
@@ -1587,6 +1680,11 @@ function commandLease(
         const runtimeHandoff =
           verifiedRuntimeExecutableHandoff(runtimeTargetFd);
         const environment = sanitizedNodeEnvironment(options.env);
+        delete environment[RUNNER_EGRESS_ALLOWLIST_ENV];
+        delete environment[RUNNER_EGRESS_SOCKET_ENV];
+        delete environment[RUNNER_EGRESS_SECCOMP_FD_ENV];
+        if (guarded) environment[RUNNER_EGRESS_CREDENTIAL_FENCES_ENV] = credentialFenced ? "1" : "0";
+        else delete environment[RUNNER_EGRESS_CREDENTIAL_FENCES_ENV];
         delete environment[ACPX_PRIVATE_SNAPSHOT_ENV];
         if (privateSnapshot) environment[ACPX_PRIVATE_SNAPSHOT_ENV] = JSON.stringify(privateSnapshot.handoff);
         if (runtimeHandoff.environmentValue === undefined) {
@@ -1607,38 +1705,60 @@ function commandLease(
           environment[VERIFIED_PROVIDER_RUNTIME_TARGET_ENV] =
             providerRuntimeEnvironmentVariable;
         }
+        const providerArgs = guarded
+          ? [
+              "--preserve-symlinks", "--eval", PROVIDER_LIFETIME_GUARDIAN_SOURCE,
+              providerBootstrap, commandDirectoryPath, commandName,
+              String(dependencyAncestors.length), String(serverDependencyAncestorCount),
+              serverPackageFormat, JSON.stringify(dependencyAncestorFormats),
+              String(providerRuntimeExecutableCount), ...args,
+            ]
+          : [
+              "--preserve-symlinks", "--eval", providerBootstrap,
+              commandDirectoryPath, commandName,
+              String(dependencyAncestors.length), String(serverDependencyAncestorCount),
+              serverPackageFormat, JSON.stringify(dependencyAncestorFormats),
+              String(providerRuntimeExecutableCount), ...args,
+            ];
+        const stdio: Array<number | "pipe" | "ignore"> = guarded
+          ? [
+              "pipe", "pipe", "pipe", "pipe", commandDirectory.fd,
+              ...dependencyAncestors.map((handle) => handle.fd),
+              ...(providerRuntimeExecutable === null ? [] : [providerRuntimeExecutable.fd]),
+              "pipe", "pipe", "pipe",
+              ...(credentialFenced ? lifetime!.credentialFenceFds : ["ignore", "ignore"] as const),
+              ...(runtimeHandoff.sourceFd === null ? [] : [runtimeHandoff.sourceFd]),
+            ]
+          : [
+              "pipe", "pipe", "pipe", "pipe", commandDirectory.fd,
+              ...dependencyAncestors.map((handle) => handle.fd),
+              ...(providerRuntimeExecutable === null ? [] : [providerRuntimeExecutable.fd]),
+              ...(runtimeHandoff.sourceFd === null ? [] : [runtimeHandoff.sourceFd]),
+            ];
+        if (egressBoundary !== null) {
+          environment[RUNNER_EGRESS_SECCOMP_FD_ENV] = String(stdio.length);
+          stdio.push(egressBoundary.proxy.seccompProfile.fd);
+        } else delete environment[RUNNER_EGRESS_SECCOMP_FD_ENV];
+        let launchCommand = runtimeHandoff.executable;
+        let launchArgs = providerArgs;
+        if (egressBoundary !== null) {
+          for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) environment[key] = undefined;
+          environment.NO_PROXY = "";
+          environment.no_proxy = "";
+          const wrapped = buildRunnerEgressSandboxCommand({
+            command: runtimeHandoff.executable,
+            args: providerArgs,
+            socketDirectory: egressBoundary.proxy.socketDirectory,
+            workingDirectory: resolve(options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd()),
+            inheritedDescriptorCount: Math.max(0, stdio.length - 3),
+          });
+          launchCommand = wrapped.command;
+          launchArgs = wrapped.args;
+          Object.assign(environment, wrapped.env);
+        }
         child = spawnedChild = spawnChildProcess(
-          runtimeHandoff.executable,
-          guarded
-            ? [
-                // Keep resolved module URLs on the retained descriptor paths
-                // so the hook can distinguish them from host ancestry.
-                "--preserve-symlinks",
-                "--eval",
-                PROVIDER_LIFETIME_GUARDIAN_SOURCE,
-                providerBootstrap,
-                commandDirectoryPath,
-                commandName,
-                String(dependencyAncestors.length),
-                String(serverDependencyAncestorCount),
-                serverPackageFormat,
-                JSON.stringify(dependencyAncestorFormats),
-                String(providerRuntimeExecutableCount),
-                ...args,
-              ]
-            : [
-                "--preserve-symlinks",
-                "--eval",
-                providerBootstrap,
-                commandDirectoryPath,
-                commandName,
-                String(dependencyAncestors.length),
-                String(serverDependencyAncestorCount),
-                serverPackageFormat,
-                JSON.stringify(dependencyAncestorFormats),
-                String(providerRuntimeExecutableCount),
-                ...args,
-              ],
+          launchCommand,
+          launchArgs,
           {
             ...options,
             // In production this process is a persistent sentinel and group
@@ -1648,43 +1768,11 @@ function commandLease(
             detached: process.platform !== "win32",
             env: environment,
             shell: false,
-            stdio: guarded
-              ? [
-                  "pipe",
-                  "pipe",
-                  "pipe",
-                  "pipe",
-                  commandDirectory.fd,
-                  ...dependencyAncestors.map((handle) => handle.fd),
-                  ...(providerRuntimeExecutable === null
-                    ? []
-                    : [providerRuntimeExecutable.fd]),
-                  "pipe",
-                  "pipe",
-                  "pipe",
-                  ...lifetime.credentialFenceFds,
-                  ...(runtimeHandoff.sourceFd === null
-                    ? []
-                    : [runtimeHandoff.sourceFd]),
-                ]
-              : [
-                  "pipe",
-                  "pipe",
-                  "pipe",
-                  "pipe",
-                  commandDirectory.fd,
-                  ...dependencyAncestors.map((handle) => handle.fd),
-                  ...(providerRuntimeExecutable === null
-                    ? []
-                    : [providerRuntimeExecutable.fd]),
-                  ...(runtimeHandoff.sourceFd === null
-                    ? []
-                    : [runtimeHandoff.sourceFd]),
-                ],
+            stdio,
           },
         );
         spawnedChild = child;
-        if (privateSnapshot !== null) {
+        if (privateSnapshot !== null || egressBoundary !== null) {
           childExit = new Promise<void>((resolve) => {
             child.once("exit", () => resolve());
             child.once("error", () => {
@@ -1693,10 +1781,18 @@ function commandLease(
               if (child.pid === undefined) resolve();
             });
           });
-          child.once("exit", () => { void cleanSnapshot(); });
-          child.once("error", () => {
-            if (child.pid === undefined) void cleanSnapshot();
-          });
+          if (privateSnapshot !== null) {
+            child.once("exit", () => { void cleanSnapshot(); });
+            child.once("error", () => {
+              if (child.pid === undefined) void cleanSnapshot();
+            });
+          }
+          if (egressBoundary !== null) {
+            child.once("exit", () => { void cleanEgress(); });
+            child.once("error", () => {
+              if (child.pid === undefined) void cleanEgress();
+            });
+          }
         }
         if (guarded) {
           const guardianOwnerPipe = child.stdio[
@@ -1714,9 +1810,11 @@ function commandLease(
           const guardianPid = child.pid!;
           const ownership = Promise.all([
             providerOwnershipHandshake(child, providerOwnershipFd),
-            Promise.resolve().then(() =>
-              lifetime.activateCredentialFenceOwner(guardianPid),
-            ),
+            lifetime === undefined
+              ? Promise.resolve()
+              : Promise.resolve().then(() =>
+                  lifetime.activateCredentialFenceOwner(guardianPid),
+                ),
           ]).then(() => undefined);
           // Session construction can reject before the adapter reaches its
           // explicit ownership await. Observe that early rejection now while
@@ -1728,7 +1826,9 @@ function commandLease(
         verifiedBytes.fill(0);
         releaseDirectoriesBestEffort();
         spawnedChild?.kill();
-        void Promise.resolve(childExit).then(cleanSnapshot).catch(() => undefined);
+        void Promise.resolve(childExit)
+          .then(() => Promise.all([cleanSnapshot(), cleanEgress()]))
+          .catch(() => undefined);
         throw error;
       }
       releaseDirectoriesBestEffort();
@@ -1736,6 +1836,7 @@ function commandLease(
       if (sourceInput === null) {
         verifiedBytes.fill(0);
         child.kill();
+        void Promise.resolve(childExit).then(cleanEgress).catch(() => undefined);
         throw new Error("Verified ACPX command source pipe was not created");
       }
       const release = (): void => {
@@ -1915,6 +2016,7 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
     "const serverPackageFormat = process.argv[5];",
     "const dependencyAncestorFormats = JSON.parse(process.argv[6]);",
     "const providerRuntimeExecutableCount = Number.parseInt(process.argv[7], 10);",
+    `const credentialFencesEnabled = process.env.${RUNNER_EGRESS_CREDENTIAL_FENCES_ENV} === "1"; delete process.env.${RUNNER_EGRESS_CREDENTIAL_FENCES_ENV};`,
     `const providerRuntimeEnvironmentVariable = process.env.${VERIFIED_PROVIDER_RUNTIME_TARGET_ENV};`,
     `delete process.env.${VERIFIED_PROVIDER_RUNTIME_TARGET_ENV};`,
     `const snapshotHandoff = process.platform === "darwin" ? JSON.parse(process.env.${ACPX_PRIVATE_SNAPSHOT_ENV} || "null") : null;`,
@@ -1943,8 +2045,7 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
           'guardian.once("error", reapOnGuardianLoss);',
           "guardian.resume();",
           "fs.fstatSync(guardianFd + 1);",
-          "fs.fstatSync(guardianFd + 2);",
-          "fs.fstatSync(guardianFd + 3);",
+          "if (credentialFencesEnabled) { fs.fstatSync(guardianFd + 2); fs.fstatSync(guardianFd + 3); }",
         ]
       : []),
     "const commandPath = resolve(commandDirectory, commandName);",

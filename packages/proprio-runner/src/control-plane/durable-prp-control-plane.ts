@@ -48,6 +48,7 @@ import {
 } from "./prp-transport-types.js";
 import { crashPoint } from "../crash-point.js";
 import { runnerVersionCanResume } from "../contracts/runner-version.js";
+import { RUNNER_EGRESS_ALLOWLIST_ENV } from "../runner-egress.js";
 
 const protocol = "proprio.runner";
 export const RUNNER_PRP_PROTOCOL_MIN = 1;
@@ -4966,6 +4967,10 @@ function runnerEnvironment(
     const value = platformSource[key];
     if (value !== undefined) environment[key] = value;
   }
+  // This is operator-owned process policy. It must not come from the
+  // per-run/provider environment supplied by a caller.
+  const runnerEgressPolicy = process.env[RUNNER_EGRESS_ALLOWLIST_ENV];
+  if (runnerEgressPolicy !== undefined) environment[RUNNER_EGRESS_ALLOWLIST_ENV] = runnerEgressPolicy;
   // Provider credentials cross this boundary only when the caller supplies an
   // already-sanitized environment for this run. Never inherit them implicitly
   // from the server process.

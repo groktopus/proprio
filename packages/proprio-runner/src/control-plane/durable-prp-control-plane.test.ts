@@ -27,6 +27,7 @@ import { NativeSessionProtocolIntegrityError } from "../contracts/native-session
 import { createCapabilityRunnerdCodexTransport, createCapabilityRunnerdProviderEnvironment, waitForRunnerCommand } from "../live/runnerd-codex-transport.js";
 import { providerTurnStartBefore } from "../live/provider-turn-tool-order.js";
 import { ACPX_CREDENTIAL_BINDING_ENV, createAcpxSidecarHostEnvironment } from "../drivers/acpx/environment.js";
+import { RUNNER_EGRESS_ALLOWLIST_ENV } from "../runner-egress.js";
 import { validatePrpEvent } from "../protocol/replay-contract.js";
 import { digestProprioSemanticContent } from "../semantic-tools/receipts.js";
 import {
@@ -261,6 +262,26 @@ it("hands the ticket refresh to the process owner for the first launch only", ()
   handle.restart!("replacement-ticket");
   expect(launches[1]?.refreshBootstrapTicket).toBeUndefined();
   expect(launches[1]?.environment.PROPRIO_RUNNER_BOOTSTRAP_TICKET).toBe("replacement-ticket");
+});
+
+it("hands operator-owned egress policy to runnerd without trusting per-run provider input", () => {
+  const launches: RunnerProcessLaunchSpec[] = [];
+  vi.stubEnv(RUNNER_EGRESS_ALLOWLIST_ENV, '["operator.example.test"]');
+  try {
+    spawnRunner({
+      connection: { mode: "connect", connectUrl: "ws://127.0.0.1:43127" },
+      stateDirectory: "/tmp/proprio-runner-egress-policy-test", identity, ticket: "bootstrap-ticket",
+      maxOutboxBytes: 256 * 1024, p0ReserveBytes: 64 * 1024,
+      runnerVersion: expectedRunnerVersion, runnerDigest: expectedRunnerDigest,
+      environment: { [RUNNER_EGRESS_ALLOWLIST_ENV]: '["caller.example.test"]' },
+      processLauncher: spec => {
+        launches.push(spec);
+        return { child: { pid: 42, exitCode: null, kill: () => true },
+          completion: Promise.resolve({ code: 0, signal: null, stdout: "", stderr: "" }), isExitConfirmed: () => true };
+      },
+    });
+    expect(launches[0]?.environment[RUNNER_EGRESS_ALLOWLIST_ENV]).toBe('["operator.example.test"]');
+  } finally { vi.unstubAllEnvs(); }
 });
 
 it("retains ever-issued bootstrap history after credential pruning and cold restore", async () => {
