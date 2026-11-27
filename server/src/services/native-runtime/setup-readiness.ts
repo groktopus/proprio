@@ -6,16 +6,31 @@ import { CODEX_CHATGPT_MODEL_REJECTION_RE, codexChatGptRetirementHint } from "@g
 import { copyBackCodexAuth } from "@groktopus/adapter-codex-local/server";
 import type { AdapterEnvironmentTestContext, AdapterEnvironmentTestResult } from "@groktopus/adapter-utils";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@groktopus/shared";
-import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveClaudeEffort, resolveSourceCodexHome } from "../../vendor/proprio-runner/index.js";
+import { configuredEnvironmentProjection, NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveSourceCodexHome } from "../../vendor/proprio-runner/index.js";
 import { resolveProprioRunnerBinary, resolveRemoteProprioRunnerBinary } from "./native-codex-runner.js";
 import { readLocalAiCredentialFile } from "../local-ai-credential-file.js";
 import { readRemoteUserHome } from "./remote-user-home.js";
 import { createNativeSshCommandRunner } from "./native-ssh-command-runner.js";
 import { resolveProprioRunnerTransport } from "@groktopus/adapter-utils/runner-connectivity";
 import { createNativeRunnerExecutionDriver } from "./native-runner-execution-driver.js";
+import { resolveConfiguredClaudeEffort } from "./provider-profile.js";
 
 
 const PROBE_TRANSPORT_ENV_KEYS = ["PATH", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy"];
+
+function buildSetupProbeEnvironment(configuredValue: unknown, options: { inheritHost: boolean; inheritProxies: boolean; projectConfigured?: boolean; preserveConfiguredKeys?: readonly string[] }): Record<string, string> {
+  const configured = Object.entries(configuredValue && typeof configuredValue === "object" && !Array.isArray(configuredValue) ? configuredValue : {})
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string");
+  const configuredRecord = Object.fromEntries(configured);
+  const projected = options.projectConfigured ? configuredEnvironmentProjection(configuredRecord) : configuredRecord;
+  const preserve = new Set(options.preserveConfiguredKeys ?? []);
+  return Object.fromEntries([
+    ...(options.inheritHost ? PROBE_TRANSPORT_ENV_KEYS.filter(key => options.inheritProxies || !/proxy/i.test(key))
+      .flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!] as [string, string]] : []) : []),
+    ...Object.entries(projected).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    ...configured.filter(([key]) => preserve.has(key)),
+  ]);
+}
 
 function redactNativeProbeMessage(message: string, environment: Record<string, string>): string {
   const redact = (value: unknown): void => {
@@ -198,12 +213,7 @@ async function probeRemoteNativeCodex(options: {
 
 export async function testNativeRunnerAuthentication(context: AdapterEnvironmentTestContext, provider: "codex", model: string | null): Promise<AdapterEnvironmentTestResult> {
   const remote = context.executionTarget?.kind === "remote";
-  const configured = context.config.env;
-  const environment: Record<string, string> = Object.fromEntries([
-    ...(remote ? [] : PROBE_TRANSPORT_ENV_KEYS.flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!]] : [])),
-    ...Object.entries(configured && typeof configured === "object" && !Array.isArray(configured) ? configured : {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  ]);
+  const environment = buildSetupProbeEnvironment(context.config.env, { inheritHost: !remote, inheritProxies: true });
   const authKey = "_PROPRIO_NATIVE_SETUP_CODEX_AUTH_JSON_SECRET";
   const configKey = "_PROPRIO_NATIVE_SETUP_CODEX_CONFIG_TOML_SECRET";
   delete environment[authKey];
@@ -288,14 +298,11 @@ export async function testNativeAcpxClaudeAuthentication(context: AdapterEnviron
   if (customRoute) return failed("claude_hello_probe_custom_route_unsupported",
     "Native Claude verification cannot safely probe a custom provider route.", "Use the standard Anthropic endpoint without custom proxy settings, then retry.");
   // This request-time probe has no connection-pinned routing or egress authority.
-  const environment: Record<string, string> = Object.fromEntries([
-    ...PROBE_TRANSPORT_ENV_KEYS.filter(key => !/proxy/i.test(key)).flatMap(key => typeof process.env[key] === "string" ? [[key, process.env[key]!] as [string, string]] : []),
-    ...savedEnvironment,
-  ]);
+  const environment = buildSetupProbeEnvironment(configured, { inheritHost: true, inheritProxies: false, projectConfigured: true,
+    preserveConfiguredKeys: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] });
   // Never let the probe borrow the controller's Claude or Codex account.
   const runtimeDirectory = await realpath(await mkdtemp(join(tmpdir(), "proprio-native-claude-setup-")));
   try {
-    const effort = context.config.modelReasoningEffort ?? context.config.reasoningEffort ?? context.config.effort;
     await probePreparedNativeRuntime(runtimeDirectory, async () => ({
       runtimeDirectory,
       provider: "acpx",
@@ -310,7 +317,7 @@ export async function testNativeAcpxClaudeAuthentication(context: AdapterEnviron
         acpxAgent: "claude",
         acpxPermissionMode: "deny-all",
         acpxPermissionModePinned: true,
-        claudeEffort: resolveClaudeEffort("claude", effort),
+        claudeEffort: resolveConfiguredClaudeEffort(context.config),
       },
     }));
     return { adapterType: "proprio_runner", status: "pass", testedAt: new Date().toISOString(), checks: [{

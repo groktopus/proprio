@@ -581,14 +581,14 @@ describe("native Claude selected profile inference", () => {
       return { provider: "acpx", providerDriver: "acpx_runtime", effectiveModel: "claude-sonnet-5", helloProbePassed: true };
     });
     const result = await testNativeAcpxClaudeAuthentication({ companyId: "company", adapterType: "proprio_runner",
-      config: { env: { ANTHROPIC_API_KEY: "saved-claude-key" }, modelReasoningEffort: "high" } }, "claude-sonnet-5");
+      config: { env: { ANTHROPIC_API_KEY: "saved-claude-key", CLAUDE_CONFIG_FLAG: "approved-value" }, modelReasoningEffort: "high" } }, "claude-sonnet-5");
 
     expect(result.status).toBe("pass");
     expect(result.checks).toMatchObject([{ code: "claude_hello_probe_passed", level: "info", message: expect.stringContaining("claude-sonnet-5") }]);
     const input = nativeProbe.mock.calls.at(-1)![0];
     expect(input).toMatchObject({ provider: "acpx", model: "claude-sonnet-5", timeoutMs: 45_000,
-      environment: { ANTHROPIC_API_KEY: "saved-claude-key" },
-      transportOptions: { acpxAgent: "claude", acpxPermissionMode: "deny-all", acpxPermissionModePinned: true, sourceCodexHome: "", externallySandboxed: false } });
+      environment: { ANTHROPIC_API_KEY: "saved-claude-key", CLAUDE_CONFIG_FLAG: "approved-value", PROPRIO_CONFIGURED_ENV_KEYS: '["CLAUDE_CONFIG_FLAG"]' },
+      transportOptions: { acpxAgent: "claude", acpxPermissionMode: "deny-all", acpxPermissionModePinned: true, sourceCodexHome: "", externallySandboxed: false, claudeEffort: "high" } });
     expect(input.environment.ANTHROPIC_API_KEY).not.toBe("ambient-account-must-not-be-used");
     expect(input.environment.CODEX_API_KEY).toBeUndefined();
     expect(input.environment.OPENAI_API_KEY).toBeUndefined();
