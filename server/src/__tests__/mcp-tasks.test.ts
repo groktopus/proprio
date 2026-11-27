@@ -16,6 +16,7 @@ import {
   heartbeatRuns,
   issues,
   issueThreadInteractions,
+  managedAuditEvents,
   projects,
   toolInvocations,
   toolMcpTasks,
@@ -134,6 +135,7 @@ function taskServer() {
   const requests: Recorded[] = [];
   const tasks = new Map<string, FakeTask>();
   let forgetAll = false;
+  let onLegacyRejection: ((request: Recorded) => Promise<void>) | undefined;
   /** The next N task polls fail as if the app were briefly unreachable. */
   let failingGets = 0;
   const tool = (name: string) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } });
@@ -150,7 +152,10 @@ function taskServer() {
     const headers = new Headers(init.headers);
     requests.push({ method: body.method, headers, body });
     const meta = body.params?._meta ?? {};
-    if (meta[META_VERSION] !== MCP_MODERN_PROTOCOL_VERSION || headers.get("mcp-protocol-version") !== MCP_MODERN_PROTOCOL_VERSION) return fail(400, body.id, -32020, "Header mismatch");
+    if (meta[META_VERSION] !== MCP_MODERN_PROTOCOL_VERSION || headers.get("mcp-protocol-version") !== MCP_MODERN_PROTOCOL_VERSION) {
+      await onLegacyRejection?.(requests.at(-1)!);
+      return fail(400, body.id, -32020, "Header mismatch");
+    }
     const declared = Boolean(meta[META_CAPABILITIES]?.extensions?.[MCP_TASKS_EXTENSION_ID]);
     switch (body.method) {
       case "server/discover":
@@ -207,6 +212,7 @@ function taskServer() {
   };
   return {
     requests, tasks, handle, only,
+    observeLegacyRejection: (callback: (request: Recorded) => Promise<void>) => { onLegacyRejection = callback; },
     count: (method: string) => requests.filter((request) => request.method === method).length,
     finish: () => { only().task.status = "completed"; },
     /** The running task now needs a person's answer. */
@@ -718,10 +724,64 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.update(toolConnections).set({ config: { ...connection!.config, mcpProtocolVersion: "2025-11-25" } }).where(eq(toolConnections.id, connection!.id));
     const fresh = ctx.restart();
     const tool = (await fresh.listToolsForSession(ctx.session.token)).find((candidate) => candidate.name.endsWith(":build"))!;
-    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" }, timeoutMs: 1_500 }))
+    const key = "legacy-stateless-task-retry";
+    const requestOffset = server.requests.length;
+    let intentSeenAtLegacySend = false;
+    server.observeLegacyRejection(async (request) => {
+      expect(request.method).toBe("tools/call");
+      const intents = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ));
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({ providerRequestId: String(request.body.id) });
+      intentSeenAtLegacySend = true;
+    });
+    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" },
+      idempotencyKey: key, timeoutMs: 1_500 }))
       .rejects.toMatchObject({ reasonCode: "provider_task_pending" });
+    expect(intentSeenAtLegacySend).toBe(true);
     expect((await ctx.rows())[0]).toMatchObject({ protocolVersion: MCP_MODERN_PROTOCOL_VERSION, status: "working" });
     expect(server.tasks.size).toBe(1);
+
+    const firstAttempt = server.requests.slice(requestOffset).filter((request) => request.method === "tools/call");
+    expect(firstAttempt).toHaveLength(2);
+    expect(firstAttempt[0]!.headers.get("mcp-protocol-version")).not.toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[0]!.body.params._meta?.[META_CAPABILITIES]?.extensions?.[MCP_TASKS_EXTENSION_ID]).toBeUndefined();
+    expect(firstAttempt[1]!.headers.get("mcp-protocol-version")).toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[0]!.body.id).toBe(firstAttempt[1]!.body.id);
+    expect(firstAttempt[1]!.body.params._meta[META_VERSION]).toBe(MCP_MODERN_PROTOCOL_VERSION);
+    expect(firstAttempt[1]!.body.params._meta[META_CAPABILITIES].extensions[MCP_TASKS_EXTENSION_ID]).toEqual({});
+
+    const companyReceipts = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+    ));
+    const [intent] = companyReceipts;
+    expect(intent).toMatchObject({ providerRequestId: String(firstAttempt[0]!.body.id) });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
+    expect(invocation).toMatchObject({ status: "timed_out", errorCode: "provider_task_pending" });
+    const companyOutcomesBeforeCollection = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, ctx.org.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+    ));
+    expect(companyOutcomesBeforeCollection).toHaveLength(0);
+
+    server.finish();
+    const collectionOffset = server.requests.length;
+    await expect(fresh.executeTool({ sessionToken: ctx.session.token, tool: tool.name, parameters: { ref: "main" },
+      idempotencyKey: key, timeoutMs: 2_000 })).resolves.toMatchObject({ status: "completed", result: { content: "build finished" } });
+    const collectionRequests = server.requests.slice(collectionOffset);
+    expect(collectionRequests.filter((request) => request.method === "tools/call")).toHaveLength(0);
+    expect(collectionRequests.filter((request) => request.method === "tasks/get").length).toBeGreaterThan(0);
+    expect(server.tasks.size).toBe(1);
+
+    const [collectedTask] = await ctx.rows();
+    expect(collectedTask).toMatchObject({ status: "completed", deliveredAt: expect.any(Date) });
+    const [settledInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, intent!.invocationId));
+    expect(settledInvocation).toMatchObject({ status: "succeeded", errorCode: null });
+    const allCompanyReceipts = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, ctx.org.id));
+    expect(allCompanyReceipts.filter((event) => event.phase === "dispatch_intent")).toEqual([intent]);
+    expect(allCompanyReceipts.filter((event) => event.phase === "terminal_outcome")).toEqual([
+      expect.objectContaining({ status: "succeeded", invocationId: intent!.invocationId, requestId: intent!.requestId }),
+    ]);
   });
 
   it("never wakes twice when a wake was already requested before a crash", async () => {
