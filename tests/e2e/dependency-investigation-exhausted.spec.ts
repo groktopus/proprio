@@ -1,21 +1,16 @@
-import { readFile } from "node:fs/promises";
-import { test, expect, type APIResponse } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { activityLog, closeRegisteredClients, createDb } from "../../packages/db/src/index.ts";
-
-async function json(response: APIResponse) {
-  const body = await response.text();
-  expect(response.ok(), `${response.status()} ${body}`).toBe(true);
-  return JSON.parse(body);
-}
+import { json } from "./http.ts";
+import { readTestServerDatabaseUrl } from "./server-database-url.ts";
 
 test("shows an exhausted parent diagnosis after reload", async ({ page, request }) => {
-  const config = JSON.parse(await readFile(process.env.PROPRIO_E2E_SERVER_CONFIG!, "utf8"));
-  const databaseUrl = config.database.mode === "postgres" ? config.database.connectionString
-    : `postgres://proprio:proprio@127.0.0.1:${(await readFile(`${config.database.embeddedPostgresDataDir}/postmaster.pid`, "utf8")).split("\n")[3]}/proprio`;
+  const databaseUrl = await readTestServerDatabaseUrl();
   const db = createDb(databaseUrl);
+  let companyId: string | undefined;
 
   try {
     const company = await json(await request.post("/api/companies", { data: { name: `Exhausted diagnosis ${Date.now()}` } }));
+    companyId = company.id;
     const companyPath = `/api/companies/${company.id}`;
     const parentAgent = await json(await request.post(`${companyPath}/agents`, { data: {
       name: "Dependency investigator", role: "engineer", adapterType: "process",
@@ -40,19 +35,23 @@ test("shows an exhausted parent diagnosis after reload", async ({ page, request 
 
     const diagnosis = await json(await request.get(investigationPath));
     expect(diagnosis).toMatchObject({ wake: { status: "exhausted" }, canInvestigate: false,
-      nextOwner: { type: "agent", id: parentAgent.id, name: parentAgent.name },
-      nextAction: "Automatic diagnosis wake admission was refused three times." });
+      nextOwner: { type: "agent", name: parentAgent.name },
+      nextAction: "The diagnostic continuation could not start. Review the parent task’s execution status for the current next step." });
     await page.goto(`/${company.issuePrefix}/issues/${parent.identifier}`);
     const notice = page.getByTestId("dependency-diagnosis-notice");
     await expect(notice.getByTestId("dependency-parent-wake-state")).toHaveText("The parent wake has exhausted its attempts.");
-    await expect(notice).toContainText("Automatic diagnosis wake admission was refused three times.");
+    await expect(notice).toContainText("The diagnostic continuation could not start. Review the parent task’s execution status for the current next step.");
     await expect(notice.getByRole("button", { name: "Ask assignee to investigate" })).toHaveCount(0);
     await page.reload();
     await expect(notice.getByTestId("dependency-parent-wake-state")).toHaveText("The parent wake has exhausted its attempts.");
-    await expect(notice).toContainText("Automatic diagnosis wake admission was refused three times.");
+    await expect(notice).toContainText("The diagnostic continuation could not start. Review the parent task’s execution status for the current next step.");
     await expect(notice.getByRole("button", { name: "Ask assignee to investigate" })).toHaveCount(0);
 
   } finally {
-    await closeRegisteredClients(databaseUrl, { scope: "database" });
+    try {
+      if (companyId) await request.patch(`/api/companies/${companyId}`, { data: { status: "archived" } });
+    } finally {
+      await closeRegisteredClients(databaseUrl, { scope: "database" });
+    }
   }
 });
