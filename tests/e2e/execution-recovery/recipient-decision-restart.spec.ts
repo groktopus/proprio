@@ -10,7 +10,7 @@ import { expect, test } from "@playwright/test";
 import { agentApiKeys, agents, caseAccessSources, caseEvents, caseIssueLinks, cases, companyMemberships, completionContracts, closeRegisteredClients, createDb, heartbeatRuns, issues } from "../../../packages/db/src/index.ts";
 import { caseHandoffService } from "../../../server/src/services/case-handoffs.ts";
 
-const outcomes = [
+const outcomes: { outcome: string; reasonCode?: string }[] = [
   { outcome: "accepted" },
   { outcome: "clarification", reasonCode: "missing_prerequisite" },
   { outcome: "declined", reasonCode: "missing_capability" },
@@ -84,7 +84,7 @@ test("recipient decisions survive a controller restart with their Case audit his
     // Seed dormant fixture agents and native runs for receipt persistence and
     // attribution. Creating agents through onboarding starts background probes.
     const source = { id: randomUUID() }, recipient = { id: randomUUID() };
-    const dormantNativeAgent = { companyId: company.id, role: "engineer", status: "active", lifecycleState: "ready",
+    const dormantNativeAgent: typeof agents.$inferInsert = { companyId: company.id, name: "Fixture agent", role: "engineer", status: "active", lifecycleState: "ready",
       adapterType: "proprio_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-sol", cwd: root,
         lifecycleMode: "per_turn", codexPermissionMode: "never", timeoutSec: 60,
         env: { CODEX_HOME: codexHome, OPENAI_API_KEY: "restart-fixture-stub" } },
@@ -129,7 +129,7 @@ test("recipient decisions survive a controller restart with their Case audit his
         ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}) });
     }
 
-    const recorded = new Map<string, unknown>();
+    const recorded = new Map<string, Record<string, unknown>>();
     for (const entry of seeded) {
       const response = await request.post(`${base}/api/cases/${entry.caseId}/handoffs/${entry.handoffId}/decision`, {
         headers: { authorization: `Bearer ${recipientToken}` },
@@ -154,7 +154,7 @@ test("recipient decisions survive a controller restart with their Case audit his
       const items = Array.isArray(history) ? history : history.items ?? history.handoffs;
       const handoff = items.find((item: { id: string }) => item.id === entry.handoffId);
       expect(handoff).toMatchObject({ issueId: entry.taskId, version: 2 });
-      expect(handoff.recipientDecision).toMatchObject(recorded.get(entry.handoffId));
+      expect(handoff.recipientDecision).toMatchObject(recorded.get(entry.handoffId)!);
       expect(handoff.recipientDecision.message).toBe(entry.reasonCode ? `Recorded ${entry.reasonCode}` : undefined);
       const events = await db.select().from(caseEvents).where(and(eq(caseEvents.caseId, entry.caseId), eq(caseEvents.kind, "handoff_decision_recorded")));
       expect(events).toHaveLength(1);
