@@ -5,8 +5,8 @@ import path from "node:path";
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore } from "acpx/runtime";
 import type { AcpRuntimeHandle, AcpRuntimeTurn } from "acpx/runtime";
 import type { AdapterExecutionTarget } from "../execution-target.js";
-import { startAdapterExecutionTargetProcessSessionBridge } from "../execution-target.js";
-import { assertNoHostAcpxAuthEnvironment, stockAcpRuntimeOptions } from "./stock-runtime-options.js";
+import { runAdapterExecutionTargetShellCommand, startAdapterExecutionTargetProcessSessionBridge } from "../execution-target.js";
+import { assertNoHostAcpxAuthEnvironment, splitWindowsAgentCommand, stockAcpRuntimeOptions } from "./stock-runtime-options.js";
 
 const CLEANUP_TIMEOUT_MS = 10_000;
 
@@ -47,9 +47,8 @@ export type AcpProbeTurnResult =
 export async function runAcpProbeTurn(input: {
   agent: string;
   command: string;
-  cwd: string;
   env: Record<string, string>;
-  model?: string | null;
+  sessionOptions?: { model?: string };
   target?: AdapterExecutionTarget | null;
   timeoutMs: number;
   maxResponseChars?: number;
@@ -57,27 +56,39 @@ export async function runAcpProbeTurn(input: {
 }): Promise<AcpProbeTurnResult> {
   const deadline = Date.now() + input.timeoutMs;
   const root = await mkdtemp(path.join(tmpdir(), "proprio-acp-probe-"));
+  // A credential probe must not read project-level Claude settings or run
+  // project hooks from the agent's checkout. The probe needs no workspace IO.
   const runId = `acp-probe-${randomUUID()}`;
+  let probeCwd = root;
+  let remoteProbeCwd: string | null = null;
   let bridge: Awaited<ReturnType<typeof startAdapterExecutionTargetProcessSessionBridge>> | null = null;
   let runtime: ReturnType<typeof createAcpRuntime> | undefined;
   let handle: AcpRuntimeHandle | undefined;
   let turn: AcpRuntimeTurn | undefined;
   let failure: AcpProbeTurnResult["status"] = "failed";
   let result: Extract<AcpProbeTurnResult, { status: "completed" }> | undefined;
-  const probeEnv = { ...input.env, ...(input.model ? { ANTHROPIC_MODEL: input.model } : {}) };
+  const probeEnv = { ...input.env };
 
   try {
     assertNoHostAcpxAuthEnvironment();
     let agentCommand = input.command;
     if (input.target?.kind === "remote") {
+      remoteProbeCwd = path.posix.join("/tmp", `proprio-acp-probe-${randomUUID()}`);
+      const createProbeCwd = await runAdapterExecutionTargetShellCommand(
+        `${runId}-cwd`, input.target,
+        `umask 077 && mkdir ${remoteProbeCwd} && chmod 700 ${remoteProbeCwd}`,
+        { cwd: input.target.remoteCwd, env: {}, timeoutSec: Math.max(1, Math.ceil(remainingProbeTime(deadline) / 1000)) },
+      );
+      if (createProbeCwd.exitCode !== 0 || createProbeCwd.timedOut) throw new Error("could_not_create_probe_directory");
+      probeCwd = remoteProbeCwd;
       bridge = await startAdapterExecutionTargetProcessSessionBridge({
         runId,
         target: input.target,
         runtimeRootDir: path.posix.join(input.target.remoteCwd, ".proprio-runtime", input.agent),
         adapterKey: input.agent,
-        command: input.command,
-        args: [],
-        cwd: input.cwd,
+        command: "sh",
+        args: [input.target.transport === "ssh" ? "-c" : "-lc", `exec ${input.command}`],
+        cwd: probeCwd,
         env: probeEnv,
         timeoutSec: Math.ceil(remainingProbeTime(deadline) / 1000),
       });
@@ -86,9 +97,14 @@ export async function runAcpProbeTurn(input: {
     }
 
     runtime = createAcpRuntime(stockAcpRuntimeOptions({
-      cwd: input.cwd,
+      cwd: probeCwd,
+      ...(bridge ? { spawnCwd: root } : {}),
       sessionStore: createRuntimeStore({ stateDir: path.join(root, "state") }),
-      agentRegistry: createAgentRegistry({ overrides: { [input.agent]: agentCommand } }),
+      agentRegistry: createAgentRegistry({ overrides: {
+        [input.agent]: bridge
+          ? [process.execPath, bridge.agentCommand].map(part => part.replaceAll("\\", "/"))
+          : process.platform === "win32" ? splitWindowsAgentCommand(agentCommand) : agentCommand,
+      } }),
       agentEnvironment: () => ({ PATH: process.env.PATH ?? "", ...probeEnv }),
       permissionMode: "deny-all",
       nonInteractivePermissions: "deny",
@@ -100,8 +116,8 @@ export async function runAcpProbeTurn(input: {
       sessionKey: runId,
       agent: input.agent,
       mode: "oneshot",
-      cwd: input.cwd,
-      sessionOptions: { ...(input.model ? { model: input.model } : {}), allowedTools: [], maxTurns: 1 },
+      cwd: probeCwd,
+      sessionOptions: { allowedTools: [], maxTurns: 1, ...input.sessionOptions },
     }), deadline);
 
     const response = { text: "", toolCall: false };
@@ -150,6 +166,13 @@ export async function runAcpProbeTurn(input: {
     // ended. shutdown() closes any remaining local owners without reconnecting.
     if (runtime && !(await cleanupWithinBudget(() => runtime!.shutdown()))) cleanupFailed = true;
     if (bridge && !(await cleanupWithinBudget(() => bridge!.stop()))) cleanupFailed = true;
+    if (remoteProbeCwd && input.target?.kind === "remote" && !(await cleanupWithinBudget(async () => {
+      const removed = await runAdapterExecutionTargetShellCommand(
+        `${runId}-cwd-cleanup`, input.target, `rm -rf -- ${remoteProbeCwd}`,
+        { cwd: input.target.remoteCwd, env: {}, timeoutSec: CLEANUP_TIMEOUT_MS / 1_000 },
+      );
+      if (removed.exitCode !== 0 || removed.timedOut) throw new Error("ACP probe directory cleanup failed");
+    }))) cleanupFailed = true;
     if (!(await cleanupWithinBudget(() => rm(root, { recursive: true, force: true })))) cleanupFailed = true;
     if (cleanupFailed) result = undefined;
   }
