@@ -200,20 +200,17 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
       expect(idempotencyKey).toMatch(/^issue_blocker_stalled:diagnosis:[a-f0-9]{64}$/);
       const requestOutcome = controller.api("POST", `/issues/${parentId}/dependency-investigation`, { idempotencyKey })
         .then(value => ({ kind: "response" as const, value }), error => ({ kind: "error" as const, error }));
-      let crash: { code: number | null; signal: NodeJS.Signals | null };
-      try {
-        crash = await waitFor(async () => controller!.child.exitCode !== null || controller!.child.signalCode !== null
-          ? controller!.exited : null, () => true, "The initial controller did not reach the armed diagnosis crashpoint");
-      } catch (error) {
+      if (!(await exitedWithin(controller.exited, 45_000))) {
         const [latestClaim] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
           eq(activityLog.entityId, parentId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
         const wakeRows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
-        throw new Error(`${error instanceof Error ? error.message : String(error)}; initial controller diagnostic state: ${JSON.stringify({
+        throw new Error(`The initial controller did not close after the armed diagnosis request: ${JSON.stringify({
           exitCode: controller.child.exitCode, signalCode: controller.child.signalCode,
           claim: latestClaim?.details ?? null, wakeStatuses: wakeRows.map(row => ({ status: row.status, key: row.idempotencyKey,
             issueId: row.payload?.issueId })), output: controller.output.slice(-8000),
-        })}`, { cause: error });
+        })}`);
       }
+      const crash = await controller.exited;
       const failedRequest = await requestOutcome;
       expect(failedRequest.kind).toBe("error");
       expect(crash.signal, controller.output).toBe("SIGKILL");
@@ -313,14 +310,12 @@ describe.skipIf(!support.supported)("dependency diagnosis in a restarted full co
           .from(issues).where(eq(issues.id, parentId));
         const requests = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId),
           eq(agentWakeupRequests.agentId, agentId)));
-        const issueRuns = (await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
-          eq(heartbeatRuns.agentId, agentId)))).filter(row =>
-          (row.contextSnapshot as Record<string, unknown> | null)?.issueId === parentId);
+        const allAgentRuns = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId)));
+        const issueRuns = allAgentRuns.filter(row => (row.contextSnapshot as Record<string, unknown> | null)?.issueId === parentId);
         const [currentClaim] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
           eq(activityLog.entityId, parentId), eq(activityLog.action, "issue.dependency_diagnosis.requested")));
         const activeRequests = requests.filter(row => ["queued", "claimed", "deferred_issue_execution"].includes(row.status));
-        const allAgentRuns = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
-          eq(heartbeatRuns.agentId, agentId)));
         const activeRuns = allAgentRuns.filter(row => ["queued", "running"].includes(row.status));
         return { agentStatus: agent?.status, issueExecutionRunId: issue?.executionRunId,
           issueCheckoutRunId: issue?.checkoutRunId, activeRequests, activeRuns, issueRuns, currentClaim };
