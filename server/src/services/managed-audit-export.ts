@@ -186,7 +186,7 @@ export async function readManagedAuditExportPage(
 ) {
   try {
     return await db.transaction(async tx => {
-      await tx.execute(sql`set local statement_timeout = ${`${EXPORT_READ_STATEMENT_TIMEOUT_MS}ms`}`);
+      await tx.execute(sql`select set_config('statement_timeout', ${String(EXPORT_READ_STATEMENT_TIMEOUT_MS)}, true)`);
       const userId = await assertCurrentAuditAuthority(tx, scope);
       const [snapshot] = await tx.select().from(managedAuditExports).where(and(
         eq(managedAuditExports.id, exportId),
