@@ -63381,7 +63381,7 @@
             }
           },
           "429": {
-            "description": "Export admission is busy or the company has 128 active snapshots. Retry with backoff or resume a retained snapshot.",
+            "description": "For export_busy, retry the request with backoff. For active_snapshot_limit, resume a retained snapshot or retry after one expires.",
             "content": {
               "application/json": {
                 "schema": {

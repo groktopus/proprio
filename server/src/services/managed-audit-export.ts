@@ -207,21 +207,37 @@ export async function createManagedAuditExport(
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
     const now = new Date();
+    // Serialize quota admission for this company across API replicas. The
+    // lock keeps the bounded reclaim, boundary probe, and insert one ordered
+    // operation while leaving different companies independent.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${scope.companyId}, 0))`);
     // Serializable isolation makes this quota check and the insert one
     // ordered operation even when separate API replicas create snapshots.
-    const active = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
-      .where(and(eq(managedAuditExports.companyId, scope.companyId), gt(managedAuditExports.expiresAt, now)))
+    // A source-epoch rotation or a retention advance invalidates old
+    // snapshots just like expiry. Reclaim only a bounded batch so a single
+    // request cannot turn quota admission into an unbounded cleanup job.
+    const invalidated = or(
+      lte(managedAuditExports.expiresAt, now),
+      not(eq(managedAuditExports.sourceEpoch, scope.sourceEpoch)),
+      scope.retainAfter ? lt(managedAuditExports.from, scope.retainAfter) : sql`false`,
+    );
+    const reclaimable = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+      .where(and(eq(managedAuditExports.companyId, scope.companyId), invalidated))
+      .orderBy(asc(managedAuditExports.expiresAt))
       .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
-    if (active.length === MAX_ACTIVE_COMPANY_SNAPSHOTS) {
+    await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, reclaimable));
+
+    // Only the quota boundary row is needed. Do not materialize up to 128
+    // UUIDs merely to decide whether the 128th active row exists.
+    const [quotaBoundary] = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
+      .where(and(eq(managedAuditExports.companyId, scope.companyId), gt(managedAuditExports.expiresAt, now)))
+      .offset(MAX_ACTIVE_COMPANY_SNAPSHOTS - 1)
+      .limit(1);
+    if (quotaBoundary) {
       throw tooManyRequests("The company already has the maximum number of active audit snapshots. Retry after a snapshot expires.", {
         reasonCode: "active_snapshot_limit",
       });
     }
-    const expired = tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
-      .where(and(eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now)))
-      .orderBy(asc(managedAuditExports.expiresAt))
-      .limit(MAX_ACTIVE_COMPANY_SNAPSHOTS);
-    await tx.delete(managedAuditExports).where(inArray(managedAuditExports.id, expired));
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)

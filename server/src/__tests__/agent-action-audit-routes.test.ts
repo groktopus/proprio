@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -172,6 +172,15 @@ describePostgres("agent action audit routes", () => {
         companyId: company.id, userId, sourceEpoch: epoch, from: new Date(window.from), to: new Date(window.to),
         eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: expiredAt,
       });
+      const [oldEpochSnapshot] = await db.insert(managedAuditExports).values({
+        companyId: company.id, userId, sourceEpoch: randomUUID(), from: new Date(window.from), to: new Date(window.to),
+        eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: new Date(Date.now() + 60_000),
+      }).returning({ id: managedAuditExports.id });
+      const [oldRetentionSnapshot] = await db.insert(managedAuditExports).values({
+        companyId: company.id, userId, sourceEpoch: epoch, from: new Date("2026-07-16T00:00:00.000Z"), to: new Date(window.from),
+        eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: new Date(Date.now() + 60_000),
+      }).returning({ id: managedAuditExports.id });
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
       const creates = await Promise.all(Array.from({ length: 4 }, () =>
         board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window)));
       expect(creates.map(response => response.status).sort((left, right) => left - right)).toEqual([201, 429, 429, 429]);
@@ -181,6 +190,8 @@ describePostgres("agent action audit routes", () => {
         expect(retry.body.eventCount).toBe(0);
       }
       expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
+      const remaining = await db.select({ id: managedAuditExports.id }).from(managedAuditExports);
+      expect(remaining.map(row => row.id)).not.toEqual(expect.arrayContaining([oldEpochSnapshot!.id, oldRetentionSnapshot!.id]));
     } finally {
       vi.unstubAllEnvs();
     }
@@ -411,20 +422,34 @@ describePostgres("agent action audit routes", () => {
     const ready = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const replica = otherWriter.transaction(async tx => {
-      const active = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports).where(and(
-        eq(managedAuditExports.companyId, company.id), gt(managedAuditExports.expiresAt, new Date()),
-      )).limit(128);
-      expect(active).toHaveLength(127);
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${company.id}, 0))`);
       ready.resolve();
       await release.promise;
       await tx.insert(managedAuditExports).values(fields);
     }, { isolationLevel: "serializable" });
     try {
       await Promise.race([ready.promise, replica]);
-      await board.post(path).send(window).expect(201);
-      const rejectedReplica = expect(replica).rejects.toMatchObject({ cause: { code: "40001" } });
+      const losingPost = board.post(path).send(window);
+      await expect.poll(async () => {
+        const [waiting] = await db.execute<{ waiting: boolean }>(sql`
+          select exists (
+            select 1 from pg_stat_activity a
+            join pg_locks l on l.pid = a.pid
+            where a.datname = current_database()
+              and l.locktype = 'advisory'
+              and not l.granted
+          ) as waiting
+        `);
+        return waiting?.waiting ?? false;
+      }).toBe(true);
       release.resolve();
-      await rejectedReplica;
+      const losingResponse = await losingPost;
+      expect(losingResponse.status, losingResponse.text).toBe(503);
+      expect(losingResponse.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      expect(losingResponse.body).not.toHaveProperty("exportId");
+      expect(losingResponse.body).not.toHaveProperty("eventCount");
+      await replica;
+      expect(await db.select().from(activityLog).where(eq(activityLog.action, "audit.managed_export_created"))).toHaveLength(0);
 
       const limited = await board.post(path).send(window).expect(429);
       expect(limited.body).toMatchObject({ details: { reasonCode: "active_snapshot_limit" } });
