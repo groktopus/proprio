@@ -85,7 +85,7 @@ describePostgres("agent action audit routes", () => {
   afterAll(async () => tempDb?.cleanup());
 
   async function seed(targetDb: Db = db) {
-    const company = await db.insert(companies).values({
+    const company = await targetDb.insert(companies).values({
       name: "Audit Company",
       issuePrefix: `AU${randomUUID().slice(0, 6).toUpperCase()}`,
     }).returning().then((rows) => rows[0]!);
