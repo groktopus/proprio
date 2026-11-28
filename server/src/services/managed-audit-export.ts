@@ -226,9 +226,9 @@ export async function createManagedAuditExport(
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
     const now = new Date();
-    // The pre-transaction session lock orders quota admission across API
-    // replicas; SERIALIZABLE still makes this check and insert fail closed if
-    // another writer changes the relevant state unexpectedly.
+    // The pre-transaction session lock orders quota admission for cooperating
+    // current-version API replicas. SERIALIZABLE can still abort this check
+    // and insert on a relevant serialization conflict.
     // A source-epoch rotation or a retention advance invalidates old
     // snapshots just like expiry. Reclaim only a bounded batch so a single
     // request cannot turn quota admission into an unbounded cleanup job.
