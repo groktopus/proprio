@@ -1346,7 +1346,7 @@ describePostgres("agent action audit routes", () => {
 });
 
 describe("managed audit export bounded failure mapping", () => {
-  it("maps a cancelled validation query to a fail-closed conflict", async () => {
+  it("maps a cancelled validation query to a bounded export failure", async () => {
     const timeoutDb = {
       transaction: async () => {
         throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
@@ -1359,8 +1359,8 @@ describe("managed audit export bounded failure mapping", () => {
       retainAfter: null,
       actor: { type: "board", source: "session", userId: randomUUID(), companyIds: [] },
     }, randomUUID())).rejects.toMatchObject({
-      status: 409,
-      details: { reasonCode: "snapshot_read_timeout" },
+      status: 503,
+      details: { reasonCode: "export_retry_required" },
     });
     dedicatedConnection.mockRestore();
   });
