@@ -3,7 +3,7 @@ import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { authorizationService, issueEvidenceReadSqlCondition, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
+import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
@@ -51,7 +51,7 @@ async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope
 async function visibleEvents(db: DbTransaction, { companyId, actor }: ExportScope) {
   const hasIssueAccess = (issueId: typeof managedAuditEvents.taskId | typeof heartbeatRuns.issueId) =>
     exists(db.select({ id: issues.id }).from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), issuePrivacySqlCondition(actor))));
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), issueEvidenceReadSqlCondition(actor))));
   const runVisible = await heartbeatRunReadSqlCondition(db, actor, companyId, managedAuditEvents.runId);
   return and(
     eq(managedAuditEvents.companyId, companyId),
