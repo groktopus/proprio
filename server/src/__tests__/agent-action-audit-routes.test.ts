@@ -265,7 +265,7 @@ describePostgres("agent action audit routes", () => {
       await board.head(exportPath).expect(200);
       expect(await pageAccess()).toHaveLength(0);
       await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
-      const first = await board.get(exportPath).set("If-None-Match", 'W/"anything"');
+      const first = await board.get(exportPath).set("If-None-Match", "*");
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
       expect((await board.get(exportPath)).body).toEqual(first.body);
