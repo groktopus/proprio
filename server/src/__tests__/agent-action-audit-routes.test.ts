@@ -373,6 +373,87 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
+  it("recovers a late commit only through a fresh overlap and fences the old epoch", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const writerDb = createDb(tempDb!.connectionString, { maxConnections: 1, applicationName: "audit-overlap-writer" });
+    const epoch = randomUUID();
+    const nextEpoch = randomUUID();
+    const from = "2026-07-17T00:00:00.000Z";
+    const boundary = "2026-07-17T00:00:02.000Z";
+    const to = "2026-07-17T00:00:04.000Z";
+    const eventId = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+
+    let releaseWriter!: () => void;
+    const writerMayCommit = new Promise<void>(resolve => { releaseWriter = resolve; });
+    let inserted!: () => void;
+    const insertedPromise = new Promise<void>(resolve => { inserted = resolve; });
+    const lateTransaction = writerDb.transaction(async tx => {
+      await tx.insert(managedAuditEvents).values({
+        id: eventId,
+        companyId: company.id,
+        source: "tool_gateway",
+        schemaVersion: 1,
+        eventType: "invocation_decision_recorded",
+        phase: "policy_decision",
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"),
+        invocationId: randomUUID(),
+        actorType: "agent",
+        actorId: agent.id,
+        decision: "allow",
+        status: "authorized",
+      });
+      inserted();
+      await writerMayCommit;
+    });
+
+    try {
+      await insertedPromise;
+      const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const initial = await board.post(path).send({ from, to: boundary }).expect(201);
+      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
+      expect(initial.body.eventCount).toBe(0);
+      expect(adjacent.body.eventCount).toBe(0);
+
+      releaseWriter();
+      await lateTransaction;
+      const initialPage = await board.get(`${path}/${initial.body.exportId}`).expect(200);
+      const adjacentPage = await board.get(`${path}/${adjacent.body.exportId}`).expect(200);
+      expect(initialPage.body.events).toEqual([]);
+      expect(adjacentPage.body.events).toEqual([]);
+
+      const overlap = await board.post(path).send({ from, to }).expect(201);
+      const overlapPage = await board.get(`${path}/${overlap.body.exportId}`).expect(200);
+      expect(overlapPage.body.events).toMatchObject([{ id: eventId, source: "tool_gateway" }]);
+      expect(overlapPage.body.complete).toBe(true);
+
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", nextEpoch);
+      expect((await board.get(`${path}/${overlap.body.exportId}`)).body)
+        .toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
+      const nextEpochExport = await board.post(path).send({ from, to }).expect(201);
+      const nextEpochPage = await board.get(`${path}/${nextEpochExport.body.exportId}`).expect(200);
+      expect(nextEpochPage.body.events).toMatchObject([{ id: eventId, source: "tool_gateway" }]);
+      const archivedKeys = [overlapPage.body.events[0], nextEpochPage.body.events[0]]
+        .map(event => `${event.source}:${event.id}`);
+      expect(new Set(archivedKeys).size).toBe(1);
+    } finally {
+      releaseWriter();
+      vi.unstubAllEnvs();
+      await lateTransaction;
+      await writerDb.$client.end({ timeout: 1 });
+    }
+  }, 45_000);
+
   it("invalidates a frozen audit export when evidence on another page loses visibility", async () => {
     const { company, agent, issue } = await seed();
     const userId = randomUUID();
