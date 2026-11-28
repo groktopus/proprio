@@ -34,9 +34,13 @@ reader returns `snapshot_read_busy`; a query that reaches the bound returns
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
-3. Persist the page to separately governed storage. Deduplicate events by source
-   and ID. Then record the returned `nextCursor` and send it as `cursor` on the
-   next request. A repeated page uses the same event IDs.
+3. Persist every page's membership under its export ID before advancing the
+   cursor, even when the payload is already present in the archive. Deduplicate
+   archived events by `(source, event ID)`; the event ID remains stable across
+   restores and source-epoch rotations. Persist the page's IDs and payloads
+   before recording the returned `nextCursor`. If a collector stops after the
+   page write but before cursor advancement, replay that page idempotently. A
+   repeated page uses the same event IDs.
 4. Confirm that the final page reports `complete`, the archived count equals
    `eventCount`, and the watermark equals the SHA-256 of the compact JSON
    array of archived event IDs in lexicographic order.
@@ -76,3 +80,21 @@ Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
 An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
+
+For periodic collection, use a fresh export ID for a bounded overlapping
+lookback. Set its `from` to the latest of the desired lookback start,
+`PROPRIO_MANAGED_AUDIT_CAPTURE_FROM`, and `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER`
+when configured. Create it only when that effective `from` precedes `to`, and
+record any clipped portion for source reconciliation. Keep the source epoch,
+export ID, bounds, count, watermark, page membership and cursor together. A
+snapshot that expires must be reconciled before opening another one.
+
+An invocation can carry an earlier `occurredAt` while its transaction commits
+after the initial snapshot. That event is absent from both the frozen initial
+window and a fresh adjacent window that starts at the initial boundary. A new
+overlapping export can find it while the source row remains available. The
+watermark proves membership and delivery for that one frozen snapshot, not a
+commit-ordered high-water mark; delays beyond the bounded lookback require
+source or target reconciliation. A source-epoch change fences old exports, so
+start a fresh export after reconciliation and deduplicate its event by the same
+`(source, event ID)` key.
