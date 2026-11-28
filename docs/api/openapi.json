@@ -63323,7 +63323,7 @@
             }
           },
           "409": {
-            "description": "Export cannot be created for this window or source state",
+            "description": "Export cannot be created for this window or source state. For retention_window_expired, start a new snapshot at or after the configured retention cutoff.",
             "content": {
               "application/json": {
                 "schema": {
@@ -63677,7 +63677,7 @@
             }
           },
           "409": {
-            "description": "Export requires reconciliation",
+            "description": "Export requires reconciliation. For retention_window_expired, start a new snapshot at or after the configured retention cutoff; the old cursor cannot be resumed.",
             "content": {
               "application/json": {
                 "schema": {

@@ -6521,7 +6521,7 @@ registry.registerPath({
     400: { description: "Invalid window", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export cannot be created for this window or source state", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start a new snapshot at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 
@@ -6540,7 +6540,7 @@ registry.registerPath({
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export requires reconciliation", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export requires reconciliation. For retention_window_expired, start a new snapshot at or after the configured retention cutoff; the old cursor cannot be resumed.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 

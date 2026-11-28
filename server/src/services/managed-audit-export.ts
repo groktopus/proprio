@@ -13,6 +13,7 @@ type ExportScope = {
   companyId: string;
   sourceEpoch: string;
   actor: AuthorizationActor;
+  retainAfter?: Date;
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
@@ -22,6 +23,14 @@ function actorUserId(scope: ExportScope) {
     throw forbidden("Managed audit exports require authenticated board access");
   }
   return scope.actor.userId;
+}
+
+function assertRetentionAllows(scope: ExportScope, from: Date) {
+  if (scope.retainAfter && from < scope.retainAfter) {
+    throw conflict("The requested audit window starts before the configured retention boundary. Create a new export at or after the boundary.", {
+      reasonCode: "retention_window_expired",
+    });
+  }
 }
 
 async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope) {
@@ -100,6 +109,7 @@ export async function createManagedAuditExport(db: Db, scope: ExportScope, windo
   // repeatable-read snapshot transaction fail on the same expired rows.
   await db.transaction(async tx => {
     await assertCurrentAuditAuthority(tx, scope);
+    assertRetentionAllows(scope, window.from);
     const now = new Date();
     await tx.delete(managedAuditExports).where(and(
       eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
@@ -174,6 +184,7 @@ export async function readManagedAuditExportPage(
     if (snapshot.sourceEpoch !== scope.sourceEpoch) {
       throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
     }
+    assertRetentionAllows(scope, snapshot.from);
     if (snapshot.expiresAt <= new Date()) {
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }

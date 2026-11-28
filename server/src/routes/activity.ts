@@ -156,8 +156,20 @@ export function activityRoutes(db: Db) {
     }
     const epoch = z.guid().transform(value => value.toLowerCase()).safeParse(process.env.PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH);
     const captureFrom = managedAuditTimestampSchema.safeParse(process.env.PROPRIO_MANAGED_AUDIT_CAPTURE_FROM);
-    if (!epoch.success || !captureFrom.success) throw forbidden("Managed audit export is unavailable");
-    return { companyId, sourceEpoch: epoch.data, actor: req.actor, captureFrom: new Date(captureFrom.data) };
+    const configuredRetainAfter = process.env.PROPRIO_MANAGED_AUDIT_RETAIN_AFTER;
+    const retainAfter = configuredRetainAfter === undefined
+      ? undefined
+      : managedAuditTimestampSchema.safeParse(configuredRetainAfter);
+    if (!epoch.success || !captureFrom.success || (retainAfter && !retainAfter.success)) {
+      throw forbidden("Managed audit export is unavailable");
+    }
+    return {
+      companyId,
+      sourceEpoch: epoch.data,
+      actor: req.actor,
+      captureFrom: new Date(captureFrom.data),
+      retainAfter: retainAfter?.success ? new Date(retainAfter.data) : undefined,
+    };
   }
 
   function hasAttributionFilters(query: z.infer<typeof agentActionAuditQuerySchema>) {
