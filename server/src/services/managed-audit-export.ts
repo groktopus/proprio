@@ -72,7 +72,7 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
         eq(issues.id, managedAuditEvents.taskId),
         not(issueEvidenceReadSqlCondition(scope.actor)),
       ))),
-  ));
+  ))!;
   const hiddenRunBinding = heartbeatRunIssueBindingDeniedSqlCondition(tx, scope.actor, scope.companyId, managedAuditEvents.runId);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
     .where(and(sourceWindow, or(missingRun, missingTask), not(hiddenTaskBinding), not(hiddenRunBinding))).limit(1);

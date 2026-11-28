@@ -15,7 +15,7 @@ import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeup
 import { conflict } from "../errors.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
-import { githubNativeGitService } from "./github-native-git.js";
+import { removeAgentNativeGitBindings } from "./github-native-git.js";
 
 function assertAgentDeletionTransaction(tx: Db | DbTransaction): asserts tx is DbTransaction {
   if (!("nestedIndex" in tx)) throw new Error("Agent dependency deletion requires a database transaction");
@@ -99,7 +99,7 @@ export async function deleteAgentDependencies(tx: Db | DbTransaction, companyId:
   await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));
   await tx.delete(agentApiKeys).where(eq(agentApiKeys.agentId, id));
   await tx.delete(agentRuntimeState).where(eq(agentRuntimeState.agentId, id));
-  await githubNativeGitService(tx).removeAgentBindings(companyId, id);
+  await removeAgentNativeGitBindings(tx, companyId, id);
   await tx.delete(principalPermissionGrants).where(and(
     eq(principalPermissionGrants.companyId, companyId),
     eq(principalPermissionGrants.principalType, "agent"),
