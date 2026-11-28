@@ -82,7 +82,7 @@ const mockAgentsApi = vi.hoisted(() => ({
     async (): Promise<import("@groktopus/shared").AdapterEnvironmentTestResult> => ({
       adapterType: "claude_local",
       status: "pass",
-      checks: [],
+      checks: [{ code: "claude_hello_probe_passed", level: "info", message: "Claude login probe succeeded." }],
       testedAt: new Date().toISOString(),
     }),
   ),
@@ -431,7 +431,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     mockAgentsApi.testEnvironment.mockResolvedValue({
       adapterType: "claude_local",
       status: "pass" as const,
-      checks: [],
+      checks: [{ code: "claude_hello_probe_passed", level: "info", message: "Claude login probe succeeded." }],
       testedAt: new Date().toISOString(),
     });
     mockAgentsApi.hire.mockReset();
@@ -1018,12 +1018,12 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         "No stored Claude login was found for this agent.",
       );
 
-      expect(document.body.textContent).toContain("No working authentication was found");
+      expect(document.body.textContent).toContain("couldn't verify that this setup can run the selected model");
 
       await act(async () => root.unmount());
     });
 
-    it("still hires on a warn result that carries no adapter_auth_missing check", async () => {
+    it("keeps the setup draft when a warning has no successful inference", async () => {
       mockAgentsApi.testEnvironment.mockResolvedValue({
         adapterType: "claude_local",
         status: "warn" as const,
@@ -1033,6 +1033,43 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
             level: "warn" as const,
             message: "ANTHROPIC_API_KEY overrides the subscription login.",
           },
+        ],
+        testedAt: new Date().toISOString(),
+      });
+      const { root, clickByText } = await openConnectStep();
+
+      await clickByText((t) => isArcPrimary(t));
+
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("couldn't verify that this setup can run the selected model");
+
+      await act(async () => root.unmount());
+    });
+
+    it("does not treat a pass without a hello-probe check as inference verification", async () => {
+      mockAgentsApi.testEnvironment.mockResolvedValue({
+        adapterType: "codex_local",
+        status: "pass" as const,
+        checks: [{ code: "codex_hello_probe_skipped_cli_version", level: "info" as const, message: "Probe skipped." }],
+        testedAt: new Date().toISOString(),
+      });
+      const { root, clickByText } = await openConnectStep();
+
+      await clickByText((t) => isArcPrimary(t));
+
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("couldn't verify that this setup can run the selected model");
+
+      await act(async () => root.unmount());
+    });
+
+    it("accepts a successful inference alongside a non-fatal warning", async () => {
+      mockAgentsApi.testEnvironment.mockResolvedValue({
+        adapterType: "claude_local",
+        status: "warn" as const,
+        checks: [
+          { code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." },
+          { code: "environment_identity", level: "warn" as const, message: "Environment identity is incomplete." },
         ],
         testedAt: new Date().toISOString(),
       });
@@ -1181,7 +1218,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       mockAgentsApi.testEnvironment.mockResolvedValue({
         adapterType: "claude_local",
         status: "pass" as const,
-        checks: [],
+        checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." }],
         testedAt: new Date().toISOString(),
       });
       // The hire fails, which is what leaves the passing probe behind.
@@ -1363,7 +1400,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
             ? {
                 adapterType: "claude_local" as const,
                 status: "pass" as const,
-                checks: [],
+                checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." }],
                 testedAt: new Date().toISOString(),
               }
             : {
@@ -2412,7 +2449,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           id: "managed-connection", grantId: "managed-grant", companyId: "company-new",
           name: "My gateway.example.test", provider: "openai", method: "api_key", ownership: "personal",
           ownerUserId: "user-1", isDefault: false, status: "connected",
-          routing: { kind: "gateway", protocol: "responses", auth: "bearer", baseUrl: "https://gateway.example.test/v1", models: [{ id: "gpt-5.4-mini" }] },
+          routing: { kind: "gateway", protocol: "responses", auth: "bearer", baseUrl: "https://gateway.example.test/v1", models: [{ id: "gpt-5.4-mini" }, { id: "gpt-5.4" }] },
         }];
         lookupFails = failRefresh;
         return { connectionId: "managed-connection", grantId: "managed-grant" };
@@ -2434,14 +2471,14 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           setControlledValue(gatewayDialog.querySelector('input[aria-label="API key"]')!, "example-gateway-key");
         });
         await click("Change");
-        await act(async () => setControlledValue(document.querySelector('input[aria-label="Model IDs"]')!, "gpt-5.4-mini"));
+        await act(async () => setControlledValue(document.querySelector('input[aria-label="Model IDs"]')!, "gpt-5.4-mini, gpt-5.4"));
         await act(async () => gatewayDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })));
         expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
         expect(mockAgentsApi.hire).not.toHaveBeenCalled();
         await click("Save connection");
         expect(managedApi.create).toHaveBeenCalledExactlyOnceWith("company-new", expect.objectContaining({
           provider: "openai", method: "api_key", apiKey: "example-gateway-key", ownership: "personal",
-          agentIds: [expect.any(String)], routing: expect.objectContaining({ kind: "gateway", protocol: "responses", models: [{ id: "gpt-5.4-mini" }] }),
+          agentIds: [expect.any(String)], routing: expect.objectContaining({ kind: "gateway", protocol: "responses", models: [{ id: "gpt-5.4-mini" }, { id: "gpt-5.4" }] }),
         }));
         if (failRefresh) {
           await vi.waitFor(() => expect(document.body.textContent).toContain("Your saved gateway connection could not be loaded."));
@@ -2461,19 +2498,31 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         const connect = [...document.body.querySelectorAll("button")].find(entry => entry.textContent?.trim() === "Connect")!;
         expect(connect.disabled).toBe(true);
         const select = document.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
-        expect([...select.options].map(option => option.value)).toEqual(["", "gpt-5.4-mini"]);
+        expect([...select.options].map(option => option.value)).toEqual(["", "gpt-5.4", "gpt-5.4-mini"]);
         await act(async () => { select.value = "gpt-5.4-mini"; select.dispatchEvent(new Event("change", { bubbles: true })); });
         await flushReact();
         expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
         expect(mockAgentsApi.hire).not.toHaveBeenCalled();
         expect(JSON.stringify(window.localStorage)).not.toContain("example-gateway-key");
+        mockAgentsApi.hire.mockRejectedValueOnce(new Error("network went away"));
         await click("Connect");
         const binding = { provider: "openai", method: "api_key", mode: "delegated", connectionId: "managed-connection", grantId: "managed-grant" };
-        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledExactlyOnceWith("company-new", "codex_local", expect.objectContaining({
+        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
+        expect(mockAgentsApi.testEnvironment).toHaveBeenNthCalledWith(1, "company-new", "codex_local", expect.objectContaining({
           environmentId: "env-sandbox-1", aiConnection: binding, adapterConfig: expect.objectContaining({ model: "gpt-5.4-mini" }),
         }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
-        expect(mockAgentsApi.hire).toHaveBeenCalledExactlyOnceWith("company-new", expect.objectContaining({
-          runtimeConfig: expect.objectContaining({ aiConnection: binding }), adapterConfig: expect.objectContaining({ model: "gpt-5.4-mini" }),
+        await vi.waitFor(() => expect(document.body.textContent).toContain("network went away"));
+        const changedModel = document.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+        await act(async () => { changedModel.value = "gpt-5.4"; changedModel.dispatchEvent(new Event("change", { bubbles: true })); });
+        await flushReact();
+        await click("Connect");
+        expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(2);
+        expect(mockAgentsApi.testEnvironment).toHaveBeenNthCalledWith(2, "company-new", "codex_local", expect.objectContaining({
+          environmentId: "env-sandbox-1", aiConnection: binding, adapterConfig: expect.objectContaining({ model: "gpt-5.4" }),
+        }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+        expect(mockAgentsApi.hire).toHaveBeenCalledTimes(2);
+        expect(mockAgentsApi.hire).toHaveBeenLastCalledWith("company-new", expect.objectContaining({
+          runtimeConfig: expect.objectContaining({ aiConnection: binding }), adapterConfig: expect.objectContaining({ model: "gpt-5.4" }),
         }));
         expect(JSON.stringify(mockAgentsApi.hire.mock.calls)).not.toContain("example-gateway-key");
       } finally {
@@ -2508,7 +2557,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         return { ok: true, driver: "sandbox", summary: "Measured image", details: { platformQualificationRecorded: true, leaseId: "owned-platform-lease" } };
       });
       mockAgentsApi.testEnvironment.mockImplementation(async () => {
-        calls.push("adapter"); return { adapterType: measured === "proprio" ? "proprio_runner" : "claude_local", status: "pass", checks: [], testedAt: "2026-10-13T00:00:00Z" };
+        calls.push("adapter"); return { adapterType: measured === "proprio" ? "proprio_runner" : "claude_local", status: "pass", checks: [{ code: "claude_hello_probe_passed", level: "info", message: "Claude login probe succeeded." }], testedAt: "2026-10-13T00:00:00Z" };
       });
       mockAgentsApi.hire.mockImplementation(async () => { calls.push("hire"); return { agent: { id: "agent-1" }, approval: null }; });
       try {
@@ -2983,7 +3032,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
 
     it("drops the restored OpenAI connection after switching to a stored Claude login", async () => {
       mockAgentsApi.testEnvironment.mockImplementation(async (...args: unknown[]) => ({ adapterType: args[1] as string,
-        status: args[1] === "codex_local" ? "fail" as const : "pass" as const, checks: [], testedAt: new Date().toISOString() }));
+        status: args[1] === "codex_local" ? "fail" as const : "pass" as const, checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." }], testedAt: new Date().toISOString() }));
       const setupId = "00000000-0000-4000-8000-000000000084";
       mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({ secretId: "saved-claude", latestVersion: 1 });
       mockAgentsApi.create.mockResolvedValueOnce({ id: setupId, companyId: "company-new", name: "Ada", role: "general",
@@ -3023,7 +3072,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     it.each(["api", "subscription"] as const)("removes old Claude credentials when resuming with %s authentication", async mode => {
       let changedMode = false;
       mockAgentsApi.testEnvironment.mockImplementation(async () => ({ adapterType: "claude_local",
-        status: changedMode ? "pass" as const : "fail" as const, checks: [], testedAt: new Date().toISOString() }));
+        status: changedMode ? "pass" as const : "fail" as const, checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "Claude login probe succeeded." }], testedAt: new Date().toISOString() }));
       const setupId = "00000000-0000-4000-8000-000000000087";
       const secret = { type: "secret_ref", secretId: "saved-key" };
       mockAgentsApi.getClaudeOAuthTokenStatus.mockResolvedValue({ secretId: "saved-claude", latestVersion: 1 });
@@ -3817,7 +3866,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
-    it("shows no probe diagnostics between the sign-in succeeding and the step advancing", async () => {
+    it("does not advance after sign-in until the environment test verifies inference", async () => {
       // Reported from staging: a block of amber diagnostics flashed up right
       // after a successful sign-in. They are the identity and target INFO
       // checks every run reports, which make the result a `warn` without
@@ -3843,16 +3892,6 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         ],
         testedAt: new Date().toISOString(),
       });
-      // Hold the hire open, which is the window the diagnostics appeared in:
-      // the probe has returned but `loading` is not cleared until the `finally`
-      // that runs after the step advances.
-      let finishHire: (v: { agent: { id: string }; approval: null }) => void = () => {};
-      mockAgentsApi.hire.mockReturnValue(
-        new Promise((resolve) => {
-          finishHire = resolve;
-        }),
-      );
-
       const { root } = await openStep4({ adapterType: "claude_local" });
       await pickSource(/Claude/);
       for (let i = 0; i < 8; i++) await flushReact();
@@ -3863,15 +3902,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       });
       for (let i = 0; i < 8; i++) await flushReact();
 
-      expect(mockAgentsApi.hire).toHaveBeenCalled();
-      expect(document.body.textContent).not.toContain("Environment test identity");
-      expect(document.body.textContent).not.toContain("Warnings");
-      // And the button goes on saying what is happening rather than going quiet.
-      expect(
-        [...document.body.querySelectorAll("button")].pop()?.textContent?.trim(),
-      ).toBe("Connecting…");
-
-      await act(async () => finishHire({ agent: { id: "agent-1" }, approval: null }));
+      expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain("couldn't verify that this setup can run the selected model");
       for (let i = 0; i < 6; i++) await flushReact();
 
       await act(async () => root.unmount());
@@ -4368,7 +4400,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         });
         mockAgentsApi.testEnvironment.mockImplementation(async () => {
           calls.push("adapter");
-          return { adapterType: defaultRunner === "proprio" ? "proprio_runner" : "codex_local", status: "pass", checks: [], testedAt: "2026-10-13T00:00:00Z" };
+          return { adapterType: defaultRunner === "proprio" ? "proprio_runner" : "codex_local", status: "pass", checks: [{ code: "codex_hello_probe_passed", level: "info", message: "Codex hello probe succeeded." }], testedAt: "2026-10-13T00:00:00Z" };
         });
         mockAgentsApi.hire.mockImplementation(async () => { calls.push("hire"); return { agent: { id: "agent-1" }, approval: null }; });
         try {
@@ -4498,7 +4530,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         ["claude_local", "anthropic", /Claude/],
         ["codex_local", "openai", /OpenAI/],
       ] as const;
-      const passed = { adapterType: "codex_local", status: "pass" as const, checks: [], testedAt: new Date().toISOString() };
+      const passed = { adapterType: "codex_local", status: "pass" as const, checks: [{ code: "codex_hello_probe_passed", level: "info" as const, message: "Codex hello probe succeeded." }], testedAt: new Date().toISOString() };
 
       beforeEach(() => {
         localHealth.get.mockResolvedValue({ deploymentMode: "local_trusted" });
