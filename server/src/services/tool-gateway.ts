@@ -9012,8 +9012,6 @@ export function createToolGatewayService(
       // Capture intent before every modern tools/call, including calls that
       // may return a task. Task responses are persisted before waitForMcpTask
       // can return or fail, so pending results retain the same intent.
-      const requiresApprovedElicitationContinuation = Boolean(captureManagedAudit && captureManagedAudit.mode === "approved"
-        && captureManagedAudit.allowContinuation === true);
       managedDispatchEligible = Boolean(captureManagedAudit && session.runId && session.agentId) &&
         (!reuseManagedDispatchIntent || requiresApprovedElicitationContinuation) &&
         !taskIdentity && (!elicitationClaim || requiresApprovedElicitationContinuation) &&
