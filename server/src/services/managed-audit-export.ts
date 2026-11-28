@@ -36,6 +36,7 @@ const snapshotColumns = {
   watermark: managedAuditExports.watermark,
   expiresAt: managedAuditExports.expiresAt,
   cursorSecret: managedAuditExports.cursorSecret,
+  invalidated: managedAuditExports.invalidated,
   eventCount: sql<number>`cardinality(${managedAuditExports.eventIds})`,
 };
 let activeExportCompany: string | null = null;
@@ -324,7 +325,8 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
-  return runExportTransaction(db, scope, async tx => {
+  const publications: ActivityPublication[] = [];
+  const page = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
     const ownedSnapshot = and(
       eq(managedAuditExports.id, exportId),
@@ -340,6 +342,7 @@ export async function readManagedAuditExportPage(
       throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
     }
     assertRetainedWindow(scope, snapshot.from);
+    if (snapshot.invalidated) return null;
     // Defensive fence for rows written by older code or modified outside this
     // service. It also bounds the all-member visibility revalidation below.
     if (snapshot.eventCount > MAX_SNAPSHOT_MEMBERSHIP) {
@@ -356,7 +359,23 @@ export async function readManagedAuditExportPage(
       const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
         .where(and(visible, sql`${managedAuditEvents.id} = any((${membership})::uuid[])`));
       if (available.eventCount !== snapshot.eventCount) {
-        throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
+        // Commit the invalidation before sending a conflict so any cursor for
+        // this snapshot remains invalid after visibility or data is restored.
+        const [invalidated] = await tx.update(managedAuditExports).set({ invalidated: true, eventIds: [] })
+          .where(and(ownedSnapshot, eq(managedAuditExports.invalidated, false)))
+          .returning({ id: managedAuditExports.id });
+        if (invalidated) {
+          await logActivity(tx as unknown as Db, {
+            companyId: scope.companyId,
+            actorType: "user",
+            actorId: userId,
+            action: "audit.managed_export_invalidated",
+            entityType: "company",
+            entityId: scope.companyId,
+            details: { exportId: invalidated.id },
+          }, publications);
+        }
+        return null;
       }
     }
     const pageIds = tx.select({
@@ -412,4 +431,11 @@ export async function readManagedAuditExportPage(
       complete: deliveredThrough === snapshot.eventCount,
     };
   });
+  for (const publication of publications) publishActivity(publication);
+  if (!page) {
+    throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", {
+      reasonCode: "snapshot_incomplete",
+    });
+  }
+  return page;
 }

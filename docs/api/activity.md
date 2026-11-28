@@ -59,7 +59,9 @@ record failure returns HTTP `500` with a fixed diagnostic and releases no page.
 Every page verifies access to all events in the snapshot. If any event is
 missing or no longer visible, the API returns HTTP `409` with
 `details.reasonCode` set to `snapshot_incomplete`. The response contains no
-events, event count, or watermark.
+events, event count, or watermark. The snapshot and its cursors remain invalid
+if the missing event returns or becomes visible again. Reconcile the checkpoint
+before opening a new snapshot.
 
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
