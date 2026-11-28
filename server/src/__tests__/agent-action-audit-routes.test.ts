@@ -335,7 +335,10 @@ describePostgres("agent action audit routes", () => {
       expect(await pageAccess()).toHaveLength(0);
       const lateEventId = "00000000-0000-0000-0000-000000000001";
       await db.insert(managedAuditEvents).values({ ...baseEvent, id: lateEventId, invocationId: randomUUID() });
-      const first = await board.get(exportPath).set("If-None-Match", 'W/"anything"');
+      // `*` matches any existing representation and would have yielded 304
+      // through the old res.json freshness path; a successful GET must still
+      // record and return the full page body.
+      const first = await board.get(exportPath).set("If-None-Match", "*");
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
       expect(first.body.events[0]).not.toHaveProperty("operationFingerprint");
