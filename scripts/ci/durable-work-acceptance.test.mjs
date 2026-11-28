@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { requiresDurableWorkAcceptance } from "./durable-work-acceptance.mjs";
 
 test("routes changes that affect update, restore, or run recovery", () => {
@@ -42,6 +45,38 @@ test("unrelated docs and board changes skip durable-work qualification", () => {
   assert.equal(requiresDurableWorkAcceptance(["doc/GOAL.md", "ui/src/pages/Inbox.tsx", "packages/proprio-runner/docs/tutorials/replay.md"]), false);
 });
 
+test("both routers use the full merge group range and recompute it for a replacement candidate", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "smoke-merge-group-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const commit = (...args) => {
+    git("add", "-A");
+    git("-c", "user.name=CI", "-c", "user.email=ci@example.invalid", "commit", "-qm", "fixture", ...args);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "-q");
+  const base = commit("--allow-empty");
+  writeFileSync(join(cwd, ".nvmrc"), "24\n"); // Both qualification routes apply to this predecessor.
+  commit();
+  writeFileSync(join(cwd, "README.md"), "unrelated successor\n");
+  const group = commit();
+  git("checkout", "--detach", "-q", base);
+  writeFileSync(join(cwd, "README.md"), "unrelated successor\n");
+  const replacement = commit();
+  const output = join(cwd, "route-output");
+
+  for (const [script, args] of [["durable-work-acceptance.mjs", ["route"]], ["board-accessibility-routing.mjs", []]]) {
+    const scriptPath = fileURLToPath(new URL(script, import.meta.url));
+    for (const [candidate, applicable] of [[group, true], [replacement, false]]) {
+      writeFileSync(output, "");
+      execFileSync(process.execPath, [scriptPath, ...args, candidate, base, "--merge-group"], {
+        cwd, env: { ...process.env, GITHUB_OUTPUT: output },
+      });
+      assert.equal(readFileSync(output, "utf8"), `applicable=${applicable}\n`);
+    }
+  }
+});
+
 test("the smoke workflow gates its verdict on the routing outputs and applicable jobs", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/stability-smoke.yml", import.meta.url), "utf8");
   const routeOutput = "$" + "{{ steps.route.outputs.applicable }}";
@@ -72,6 +107,7 @@ test("the smoke workflow gates its verdict on the routing outputs and applicable
   assert.notEqual(verdict(unrelated, "failure"), 0);
   assert.notEqual(verdict(relevant, "success", { ROUTING_RESULT: "failure" }), 0);
   assert.notEqual(verdict(relevant, "success", { STABILITY_RESULT: "failure" }), 0);
+  assert.notEqual(verdict(relevant, "success", { STABILITY_RESULT: "cancelled" }), 0);
 
   function boardVerdict(applicable, result) {
     return verdict(unrelated, "skipped", {

@@ -4,20 +4,29 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, edited]
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
-  group: stability-smoke-${{ github.event.pull_request.number }}
+  group: stability-smoke-${{ github.event.pull_request.number || github.sha }}
   # A title or body edit can queue smoke but should not interrupt a running check.
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
+
+env:
+  TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   route-durable-work:
     if: github.repository == 'groktopus/proprio'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      POLICY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+      PR_HEAD: ${{ github.event.pull_request.head.sha }}
     outputs:
       applicable: ${{ steps.route.outputs.applicable }}
       board-accessibility: ${{ steps.board-accessibility.outputs.applicable }}
@@ -25,24 +34,28 @@ jobs:
       - name: Check out the trusted target policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ env.POLICY_BASE }}
           path: target-policy
           persist-credentials: false
-      - name: Read GitHub's PR comparison commit
+      - name: Read GitHub's comparison commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: pr-comparison
           fetch-depth: 2
           persist-credentials: false
+      - name: Fetch the merge group base tree
+        if: github.event_name == 'merge_group'
+        working-directory: pr-comparison
+        run: git fetch --no-tags --depth=1 --no-recurse-submodules origin "$POLICY_BASE"
       - name: Route durable-work acceptance
         id: route
         working-directory: pr-comparison
-        env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           policy=../target-policy/scripts/ci/durable-work-acceptance.mjs
-          if [[ -f "$policy" ]]; then
+          if [[ -f "$policy" && "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            node "$policy" route "$GITHUB_SHA" "$POLICY_BASE" --merge-group
+          elif [[ -f "$policy" ]]; then
             node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
           else
             echo "Target branch predates routing. Require the full Linux lane."
@@ -52,11 +65,11 @@ jobs:
       - name: Route board accessibility tests
         id: board-accessibility
         working-directory: pr-comparison
-        env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           policy=../target-policy/scripts/ci/board-accessibility-routing.mjs
-          if [[ -f "$policy" ]]; then
+          if [[ -f "$policy" && "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            node "$policy" "$GITHUB_SHA" "$POLICY_BASE" --merge-group
+          elif [[ -f "$policy" ]]; then
             node "$policy" "$GITHUB_SHA" "$PR_HEAD"
           else
             echo "Target branch predates the accessibility routing policy. Run the browser suite."
@@ -74,10 +87,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Check out the exact pull request head
+      - name: Check out the exact tested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -86,7 +99,7 @@ jobs:
           package-manager-cache: false
       - name: Verify head and install locked dependencies
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD: ${{ env.TESTED_SHA }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git rev-parse HEAD
@@ -557,10 +570,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 18
     steps:
-      - name: Check out the exact pull request head
+      - name: Check out the exact tested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -569,7 +582,7 @@ jobs:
           package-manager-cache: false
       - name: Install locked workspace dependencies and Chromium
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD: ${{ env.TESTED_SHA }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           if [[ ! -f tests/board-accessibility/playwright.config.ts || ! -f scripts/ci/board-accessibility-routing.test.mjs ]]; then

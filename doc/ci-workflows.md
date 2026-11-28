@@ -66,6 +66,29 @@ see [PR #257](https://github.com/groktopus/proprio/pull/257) at
 and [required check](https://github.com/groktopus/proprio/actions/runs/45323253671/job/138220078291).
 Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
 
+### Merge queue pilot
+
+On `merge_group` for `main`, Stability smoke checks out the exact candidate
+and reports the same required `smoke` check. It selects durable-work and
+board accessibility qualification using the difference between the queue's
+base and candidate, with routing rules from the base. A rebuilt candidate has
+its own SHA and check result. PR runs continue to test the exact PR head.
+
+After this workflow lands, the maintainer can test queue enforcement on a
+disposable target with the same `smoke` requirement and workflow filters
+adjusted for that target. Use a passing change, two changes that pass
+individually but fail together, and a replacement candidate after removing a
+predecessor. Verify that `smoke` reports on the exact candidate and that the
+replacement gets its own result. Then enable the `main` queue with one build
+at a time, minimum merge size one, and **Only merge non-failing pull requests**
+enabled. Keep the existing required check. To stop the pilot, remove the queue
+requirement and retain the required `smoke` check for pull requests.
+
+Track conflict repairs, freshness-only pushes, and the median and 95th
+percentile time from approval or maintainer sign-off to merge. Increase queue
+build concurrency only if ready changes are waiting and runners have spare
+capacity.
+
 ### Board performance
 
 The [Board performance workflow](../.github/workflows/board-performance.yml)

@@ -5,7 +5,7 @@ description: Prepare a Proprio branch for PR with commits, template body, and ch
 # Prepare Proprio PR
 
 The standard Proprio procedure for turning branch work into a reviewed,
-green pull request against `groktopus/proprio` master. Apply it once per
+green pull request against `groktopus/proprio` main. Apply it once per
 PR (if a task splits a branch into several PRs, run the whole procedure for
 each one).
 
@@ -15,11 +15,8 @@ each one).
   `~/proprio` checkout typically runs the live Proprio server — never
   check out branches there. If you are already on a worktree/branch, verify it
   (`git rev-parse --git-dir`, `git branch --show-current`) and proceed.
-* If the main checkout is unexpectedly off `master`, fix that first without
-  losing work (usually: move that branch's work into a worktree).
-* Confirm which remote/ref you are targeting (normally `master` on the
-  `groktopus/proprio` repo; the task may name a specific remote such as
-  `origin` or `public-gh`).
+* Confirm which remote/ref you are targeting. The default is `main` on
+  `groktopus/proprio`. The task can specify another remote or branch.
 
 ## 1. Commit everything — lose no work
 
@@ -29,12 +26,13 @@ each one).
 * Commit messages must end with exactly:
   `Co-Authored-By: Proprio <noreply@groktop.us>`
 
-## 2. Get changes cleanly on top of master
+## 2. Check integration with the target branch
 
-* Fetch the target remote and rebase (or otherwise replay) your branch on top
-  of the target master so the PR has no merge conflicts.
-* Re-verify after rebase: build/tests relevant to the change still pass at
-  whatever depth the task warrants.
+* Fetch the target remote and check for merge conflicts. Base movement alone
+  does not require a rebase. Update the branch when it has a conflict, the
+  change depends on a newer target commit, or the branch rules require it.
+* After updating the branch, rerun the relevant checks on the new PR head.
+  When a merge queue is active, it checks the combined commit before landing.
 
 ## 3. Guardrails checklist (every PR)
 
@@ -44,8 +42,8 @@ each one).
   explicitly about that and the task calls it out.
 * **No design screenshots / wireframe images** committed to the repo unless
   they are genuinely part of the work product.
-* **Migrations**: numbered incrementally with no conflicts against master. If
-  master moved and took your number, renumber on top. Make migrations
+* **Migrations**: numbered incrementally with no conflicts against the target.
+  If the target took your number, renumber on top. Make migrations
   **idempotent** so users who already applied the old number are safe.
 * **Review size**: keep each PR under **100 changed files**; if a PR
   exceeds that, split it into two.

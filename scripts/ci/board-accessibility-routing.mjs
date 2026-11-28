@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { mergeDiff } from "../../.github/scripts/ci-diff.mjs";
+import { changedTreePaths, mergeDiff } from "../../.github/scripts/ci-diff.mjs";
 
 const boardAccessibilityPaths = [
   /^ui\//,
@@ -17,9 +17,11 @@ export function requiresBoardAccessibility(changedPaths) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [, , merge, head] = process.argv;
-  const { changed } = mergeDiff(merge, head);
+  const [, , comparison, prHeadOrGroupBase, mode] = process.argv;
+  const changed = mode === "--merge-group"
+    ? changedTreePaths(prHeadOrGroupBase, comparison)
+    : mergeDiff(comparison, prHeadOrGroupBase).changed;
   const applicable = requiresBoardAccessibility(changed);
-  console.log(`Board accessibility applicable: ${applicable}. PR head: ${head}`);
+  console.log(`Board accessibility applicable: ${applicable}. Comparison: ${comparison}`);
   appendFileSync(process.env.GITHUB_OUTPUT, `applicable=${applicable}\n`);
 }
