@@ -128,15 +128,6 @@ fi
 catalog_dir="$(mktemp -d)"
 trap 'rm -rf "$catalog_dir"' EXIT
 
-remote_tag_commit() {
-  local tag_ref="refs/tags/$1"
-  local refs
-  refs="$(git -C "$REPO_ROOT" ls-remote --exit-code --tags "$PUBLISH_REMOTE" "$tag_ref" "$tag_ref^{}")" || return "$?"
-  awk -v tag_ref="$tag_ref" -v peeled_ref="$tag_ref^{}" \
-    '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print (peeled != "" ? peeled : ref) }' \
-    <<<"$refs"
-}
-
 if [ "$source_prerelease" = true ]; then
   canonical_remote() {
     case "$1" in
@@ -155,7 +146,7 @@ if [ "$source_prerelease" = true ]; then
   if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$head_commit" "$main_sha"; then
     release_fail "The candidate is not on current main. Fetch main and use a merged revision."
   fi
-  base_sha="$(remote_tag_commit "$previous_tag")" || release_fail "Cannot resolve previous source tag $previous_tag."
+  base_sha="$(remote_tag_commit "$PUBLISH_REMOTE" "$previous_tag")" || release_fail "Cannot resolve previous source tag $previous_tag."
   if [ "$base_sha" = "$head_commit" ] || ! git -C "$REPO_ROOT" merge-base --is-ancestor "$base_sha" "$head_commit"; then
     release_fail "The previous source tag must be an ancestor of the candidate. Fetch the release tags."
   fi
@@ -178,7 +169,7 @@ if [ "$source_prerelease" = true ]; then
     else throw new Error("The existing release must be inspected before publication.");
   ' "$tag" "$previous_tag" <<<"$inventory")"
   existing_source_tag=""
-  if existing_source_tag="$(remote_tag_commit "$tag")"; then
+  if existing_source_tag="$(remote_tag_commit "$PUBLISH_REMOTE" "$tag")"; then
     [ "$existing_source_tag" = "$tag_commit" ] ||
       release_fail "Remote tag $tag points to $existing_source_tag, expected $tag_commit."
   elif [ "$?" -ne 2 ]; then
@@ -207,7 +198,7 @@ if [ "$source_prerelease" = true ]; then
     [ "$release_state" = "create" ] || release_fail "The existing release has no matching remote tag."
     git -C "$REPO_ROOT" push "$PUBLISH_REMOTE" "$tag_commit:$tag_ref"
   fi
-  published_sha="$(remote_tag_commit "$tag")"
+  published_sha="$(remote_tag_commit "$PUBLISH_REMOTE" "$tag")"
   [ "$published_sha" = "$tag_commit" ] || release_fail "Remote tag $tag changed before publication."
 
   case "$release_state" in
@@ -234,7 +225,7 @@ if [ "$dry_run" = true ]; then
   exit 0
 fi
 
-if ! published_sha="$(remote_tag_commit "$tag")"; then
+if ! published_sha="$(remote_tag_commit "$PUBLISH_REMOTE" "$tag")"; then
   release_fail "Remote tag $tag was not found on $PUBLISH_REMOTE. Push the release commit and tag first."
 fi
 if [ "$published_sha" != "$tag_commit" ]; then

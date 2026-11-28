@@ -335,6 +335,17 @@ require_canary_number_from_master_commit() {
   release_info "  ✓ ${version} was numbered from ${source_sha} (master position ${position})"
 }
 
+remote_tag_commit() {
+  local remote="$1"
+  local tag="$2"
+  local tag_ref="refs/tags/$tag"
+  local refs
+  refs="$(git -C "${REPO_ROOT:-.}" ls-remote --exit-code --tags "$remote" "$tag_ref" "$tag_ref^{}")" || return "$?"
+  awk -v tag_ref="$tag_ref" -v peeled_ref="$tag_ref^{}" \
+    '$2 == peeled_ref { peeled = $1 } $2 == tag_ref { ref = $1 } END { print (peeled != "" ? peeled : ref) }' \
+    <<<"$refs"
+}
+
 push_release_tag_at() {
   local remote="$1"
   local tag_name="$2"
