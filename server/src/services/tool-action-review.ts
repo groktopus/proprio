@@ -8,9 +8,11 @@ import {
   toolActionRequests,
   toolInvocations,
   toolActionDeliveries,
+  managedAuditEvents,
   type Db,
 } from "@groktopus/db";
-import { conflict, forbidden, notFound } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { assertIssueThreadInteractionResolverAudience } from "./issue-thread-interaction-resolution.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
@@ -188,6 +190,47 @@ export async function commitToolActionReview(
           eq(toolInvocations.companyId, input.companyId),
         ),
       );
+    // Only invocations admitted by the versioned managed gateway capture have
+    // a covered resolution event. Legacy and other producers remain outside
+    // this source contract until their write boundaries are added explicitly.
+    try {
+      const [admission] = await tx
+        .select()
+        .from(managedAuditEvents)
+        .where(
+          and(
+            eq(managedAuditEvents.companyId, input.companyId),
+            eq(managedAuditEvents.source, "tool_gateway"),
+            eq(managedAuditEvents.phase, "policy_decision"),
+            eq(managedAuditEvents.invocationId, current.invocationId),
+            eq(managedAuditEvents.requestId, current.id),
+          ),
+        )
+        .limit(1);
+      if (admission) {
+        await tx.insert(managedAuditEvents).values({
+          companyId: input.companyId,
+          source: admission.source,
+          schemaVersion: admission.schemaVersion,
+          eventType: "approval_resolution_recorded",
+          phase: "approval_resolution",
+          occurredAt: now,
+          runId: admission.runId,
+          taskId: admission.taskId,
+          invocationId: current.invocationId,
+          requestId: current.id,
+          connectionId: admission.connectionId,
+          actorType: "user",
+          actorId: updated.decidedByUserId ?? "board",
+          decision: input.decision,
+          status: input.decision,
+          reasonCode: null,
+        });
+      }
+    } catch (err) {
+      logger.error({ err, companyId: input.companyId, actionRequestId: current.id }, "Managed tool review audit capture failed");
+      throw new HttpError(503, "Tool review could not be saved. Retry the decision.");
+    }
     if (interaction && issue) {
       await tx
         .update(issueThreadInteractions)
