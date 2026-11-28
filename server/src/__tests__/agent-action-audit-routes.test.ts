@@ -35,6 +35,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { readManagedAuditExportPage } from "../services/managed-audit-export.js";
+import * as dbClient from "@groktopus/db";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -1351,6 +1352,8 @@ describe("managed audit export bounded failure mapping", () => {
         throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
       },
     } as unknown as Db;
+    const dedicatedConnection = vi.spyOn(dbClient, "withDedicatedDbConnection")
+      .mockImplementation(async (_db, action) => action(timeoutDb));
     await expect(readManagedAuditExportPage(timeoutDb, {
       companyId: randomUUID(), sourceEpoch: randomUUID(),
       retainAfter: null,
@@ -1359,5 +1362,6 @@ describe("managed audit export bounded failure mapping", () => {
       status: 409,
       details: { reasonCode: "snapshot_read_timeout" },
     });
+    dedicatedConnection.mockRestore();
   });
 });
