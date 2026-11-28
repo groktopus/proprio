@@ -14376,19 +14376,20 @@ export function createToolGatewayService(
             : "tool_execution_failed";
         const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
           invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
-        const hasCollectableManagedTask = capturedManagedDispatch && tool.connectionId !== null &&
+        const managedTaskConnectionId = tool.connectionId;
+        const hasCollectableManagedTask = capturedManagedDispatch && managedTaskConnectionId != null &&
           Boolean(await db.select({ id: toolMcpTasks.id }).from(toolMcpTasks).where(and(
             eq(toolMcpTasks.companyId, session.companyId),
             or(eq(toolMcpTasks.invocationId, invocationId), eq(toolMcpTasks.lastInvocationId, invocationId)),
-            eq(toolMcpTasks.connectionId, tool.connectionId),
+            eq(toolMcpTasks.connectionId, managedTaskConnectionId),
             eq(toolMcpTasks.argumentsIdentity, mcpTaskArgumentsIdentity(effectiveParameters)),
             mcpTaskCollectable(),
           )).limit(1));
-        const hasTerminalReadTask = capturedManagedDispatch && tool.risk === "read" && tool.connectionId !== null &&
+        const hasTerminalReadTask = capturedManagedDispatch && tool.risk === "read" && managedTaskConnectionId != null &&
           Boolean(await db.select({ id: toolMcpTasks.id }).from(toolMcpTasks).where(and(
             eq(toolMcpTasks.companyId, session.companyId),
             or(eq(toolMcpTasks.invocationId, invocationId), eq(toolMcpTasks.lastInvocationId, invocationId)),
-            eq(toolMcpTasks.connectionId, tool.connectionId),
+            eq(toolMcpTasks.connectionId, managedTaskConnectionId),
             eq(toolMcpTasks.argumentsIdentity, mcpTaskArgumentsIdentity(effectiveParameters)),
             inArray(toolMcpTasks.status, ["completed", "failed", "cancelled", "expired"]),
           )).limit(1));
