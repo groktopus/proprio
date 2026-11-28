@@ -31,6 +31,7 @@ import {
   resolveCodexExecutionEngineForRun,
   testCodexAcpEnvironment,
 } from "./acp.js";
+import { testEnvironment } from "./test.js";
 
 // A local stand-in for a sandbox runner: runs the managed-runtime staging
 // scripts (mkdir/tar/find) as real child processes so the remote ACP lane can
@@ -574,6 +575,80 @@ describe("codex_local ACP lane", () => {
         level: "info",
       }),
     );
+  });
+
+  it("uses a real ACP hello turn with the selected managed model through the adapter test entrypoint", async () => {
+    const root = await makeTempRoot("proprio-codex-acp-inference-");
+    const commandPath = path.join(root, "bin", "codex-acp");
+    await fs.mkdir(path.dirname(commandPath), { recursive: true });
+    await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
+    setNodeVersion("v24.11.0");
+    const runInference = vi.fn(async (_context: AdapterExecutionContext) => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "hello",
+    }));
+
+    const result = await testEnvironment({
+      adapterType: "codex_local",
+      companyId: "company-1",
+      config: {
+        engine: "acp",
+        model: "gpt-5.6",
+        cwd: root,
+        agentCommand: commandPath,
+        instructionsFilePath: "/private/user-instructions.md",
+        bootstrapPromptTemplate: "Private setup instructions",
+        managedAiConnection: { provider: "openai", method: "api_key" },
+        env: { OPENAI_API_KEY: "selected-test-key" },
+      },
+    }, { runAcpInference: runInference });
+
+    expect(result.status).toBe("pass");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "codex_acp_hello_probe_passed", level: "info" }));
+    expect(runInference).toHaveBeenCalledTimes(1);
+    const probe = runInference.mock.calls[0]?.[0];
+    expect(probe?.config).toMatchObject({
+      engine: "acp",
+      model: "gpt-5.6",
+      mode: "oneshot",
+      promptTemplate: "Respond with exactly hello.",
+      instructionsFilePath: "",
+      bootstrapPromptTemplate: "",
+      env: { OPENAI_API_KEY: "selected-test-key" },
+    });
+    expect(JSON.stringify(result.checks)).not.toContain("selected-test-key");
+  });
+
+  it.each([
+    { label: "empty response", result: { exitCode: 0, summary: "", timedOut: false }, expectedCode: "codex_acp_hello_probe_failed" },
+    { label: "non-hello response", result: { exitCode: 0, summary: "I cannot complete this request.", timedOut: false }, expectedCode: "codex_acp_hello_probe_failed" },
+    { label: "timeout", result: { exitCode: null, summary: "", timedOut: true }, expectedCode: "codex_acp_hello_probe_timed_out" },
+  ])("does not accept a Codex ACP probe with $label", async ({ result: inference, expectedCode }) => {
+    const root = await makeTempRoot("proprio-codex-acp-inference-negative-");
+    const commandPath = path.join(root, "bin", "codex-acp");
+    await fs.mkdir(path.dirname(commandPath), { recursive: true });
+    await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
+    setNodeVersion("v24.11.0");
+    const result = await testEnvironment({
+      adapterType: "codex_local",
+      companyId: "company-1",
+      config: {
+        engine: "acp",
+        model: "gpt-5.6",
+        cwd: root,
+        agentCommand: commandPath,
+        managedAiConnection: { provider: "openai", method: "api_key" },
+        env: { OPENAI_API_KEY: "selected-test-key" },
+      },
+    }, { runAcpInference: async () => ({ exitCode: inference.exitCode, signal: null, timedOut: inference.timedOut, summary: inference.summary }) });
+
+    expect(result.status).toBe("warn");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: expectedCode, level: "warn" }));
+    expect(result.checks.some(check => check.code === "codex_acp_hello_probe_passed")).toBe(false);
+    expect(JSON.stringify(result.checks)).not.toContain("selected-test-key");
+    expect(JSON.stringify(result.checks)).not.toContain("I cannot complete this request.");
   });
 
   it("detects shared managed Codex auth in ACP environment tests", async () => {

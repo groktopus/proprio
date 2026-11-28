@@ -537,6 +537,9 @@ function isNonEmpty(value: unknown): value is string {
 
 export async function testCodexAcpEnvironment(
   ctx: AdapterEnvironmentTestContext,
+  dependencies: {
+    runInference?: (context: AdapterExecutionContext) => Promise<AdapterExecutionResult>;
+  } = {},
 ): Promise<AdapterEnvironmentTestResult> {
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
@@ -713,6 +716,74 @@ export async function testCodexAcpEnvironment(
     message: "Codex ACP runtime execution is available through the shared ACP engine.",
     detail: `mode=${mode}; warmHandleIdleMs=${warmHandleIdleMs}`,
   });
+
+  // A managed connection is only ready for onboarding after the selected ACP
+  // runtime completes a real turn. The account/key checks above establish
+  // credential readiness; they do not prove the configured model can infer.
+  if (config.managedAiConnection) {
+    const model = asString(config.model, "").trim();
+    if (!model) {
+      checks.push({
+        code: "codex_acp_hello_probe_model_missing",
+        level: "warn",
+        message: "Select a Codex model before testing this managed connection.",
+      });
+    } else {
+      const runId = `codex-acp-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const probeContext: AdapterExecutionContext = {
+        runId,
+        agent: {
+          id: "codex-acp-environment-probe",
+          companyId: ctx.companyId,
+          name: "Codex ACP environment probe",
+          adapterType: "codex_local",
+          adapterConfig: config,
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          ...config,
+          engine: "acp",
+          mode: "oneshot",
+          warmHandleIdleMs: 0,
+          timeoutSec: 45,
+          instructionsFilePath: "",
+          bootstrapPromptTemplate: "",
+          promptTemplate: "Respond with exactly hello.",
+        },
+        context: {},
+        executionTarget: ctx.executionTarget ?? null,
+        onLog: async () => {},
+      };
+      try {
+        const inference = await (dependencies.runInference ?? createCodexAcpExecutor())(probeContext);
+        if (!inference.timedOut && inference.exitCode === 0 && /\bhello\b/i.test(inference.summary ?? "")) {
+          checks.push({
+            code: "codex_acp_hello_probe_passed",
+            level: "info",
+            message: "The selected Codex ACP runtime completed a hello turn with the configured model.",
+          });
+        } else {
+          checks.push({
+            code: inference.timedOut ? "codex_acp_hello_probe_timed_out" : "codex_acp_hello_probe_failed",
+            level: "warn",
+            retryable: inference.timedOut,
+            message: inference.timedOut
+              ? "The Codex ACP hello probe timed out."
+              : "The selected Codex ACP runtime did not complete the hello turn.",
+            hint: "Retry the check. Confirm the selected account can use the configured model.",
+          });
+        }
+      } catch {
+        checks.push({
+          code: "codex_acp_hello_probe_failed",
+          level: "warn",
+          retryable: true,
+          message: "The selected Codex ACP runtime did not complete the hello turn.",
+          hint: "Retry the check. Confirm the selected account can use the configured model.",
+        });
+      }
+    }
+  }
 
   return {
     adapterType: ctx.adapterType,

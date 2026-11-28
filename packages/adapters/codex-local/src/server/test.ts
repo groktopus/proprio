@@ -2,6 +2,8 @@ import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
   AdapterEnvironmentTestResult,
+  AdapterExecutionContext,
+  AdapterExecutionResult,
 } from "@groktopus/adapter-utils";
 import {
   asString,
@@ -272,6 +274,9 @@ async function prepareCodexHelloProbe(input: {
 
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
+  dependencies: {
+    runAcpInference?: (context: AdapterExecutionContext) => Promise<AdapterExecutionResult>;
+  } = {},
 ): Promise<AdapterEnvironmentTestResult> {
   const engineSelection = await resolveCodexExecutionEngineForRun({
     config: parseObject(ctx.config),
@@ -293,7 +298,7 @@ export async function testEnvironment(
     };
   }
   if (engineSelection.engine === "acp") {
-    return testCodexAcpEnvironment(ctx);
+    return testCodexAcpEnvironment(ctx, { runInference: dependencies.runAcpInference });
   }
 
   const checks: AdapterEnvironmentCheck[] = [];
