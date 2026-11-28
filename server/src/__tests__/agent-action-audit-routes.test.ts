@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
@@ -9,6 +12,7 @@ import {
   caseAccessSources,
   caseEvents,
   cases,
+  closeRegisteredClients,
   companies,
   companyMemberships,
   createDb,
@@ -20,6 +24,9 @@ import {
   managedAuditEvents,
   managedAuditExports,
   principalPermissionGrants,
+  ensurePostgresDatabase,
+  runDatabaseBackup,
+  runDatabaseRestore,
   toolApplications,
   toolCatalogEntries,
   toolConnections,
@@ -77,12 +84,12 @@ describePostgres("agent action audit routes", () => {
 
   afterAll(async () => tempDb?.cleanup());
 
-  async function seed() {
-    const company = await db.insert(companies).values({
+  async function seed(targetDb: Db = db) {
+    const company = await targetDb.insert(companies).values({
       name: "Audit Company",
       issuePrefix: `AU${randomUUID().slice(0, 6).toUpperCase()}`,
     }).returning().then((rows) => rows[0]!);
-    const [agent, otherAgent] = await db.insert(agents).values([1, 2].map((index) => ({
+    const [agent, otherAgent] = await targetDb.insert(agents).values([1, 2].map((index) => ({
       companyId: company.id,
       name: `Audit Agent ${index}`,
       role: "engineer",
@@ -91,39 +98,39 @@ describePostgres("agent action audit routes", () => {
       adapterConfig: {},
       runtimeConfig: {},
     }))).returning();
-    const issue = await db.insert(issues).values({
+    const issue = await targetDb.insert(issues).values({
       companyId: company.id,
       identifier: `${company.issuePrefix}-1`,
       title: "Audit target",
       status: "todo",
       priority: "medium",
     }).returning().then((rows) => rows[0]!);
-    const comment = await db.insert(issueComments).values({
+    const comment = await targetDb.insert(issueComments).values({
       companyId: company.id,
       issueId: issue.id,
       authorAgentId: agent.id,
       body: "A useful comment excerpt for the audit feed.",
     }).returning().then((rows) => rows[0]!);
-    const document = await db.insert(documents).values({
+    const document = await targetDb.insert(documents).values({
       companyId: company.id,
       title: "Plan",
       latestBody: "Plan body",
       createdByAgentId: agent.id,
       updatedByAgentId: agent.id,
     }).returning().then((rows) => rows[0]!);
-    const issueDocument = await db.insert(issueDocuments).values({
+    const issueDocument = await targetDb.insert(issueDocuments).values({
       companyId: company.id,
       issueId: issue.id,
       documentId: document.id,
       key: "plan",
     }).returning().then((rows) => rows[0]!);
-    const run = await db.insert(heartbeatRuns).values({
+    const run = await targetDb.insert(heartbeatRuns).values({
       companyId: company.id,
       agentId: agent.id,
       responsibleUserId: "legacy-user",
     }).returning().then((rows) => rows[0]!);
     const base = new Date("2026-07-17T00:00:00.000Z");
-    await db.insert(activityLog).values([
+    await targetDb.insert(activityLog).values([
       { companyId: company.id, actorType: "agent", actorId: agent.id, action: "issue.comment.created", entityType: "issue_comment", entityId: comment.id, agentId: agent.id, runId: run.id, responsibleUserId: null, createdAt: new Date(base.getTime() + 3000) },
       { companyId: company.id, actorType: "system", actorId: "system", action: "issue.document.updated", entityType: "issue_document", entityId: issueDocument.id, agentId: agent.id, runId: run.id, responsibleUserId: "direct-user", createdAt: new Date(base.getTime() + 2000) },
       { companyId: company.id, actorType: "agent", actorId: otherAgent.id, action: "issue.updated", entityType: "issue", entityId: issue.id, agentId: otherAgent.id, responsibleUserId: "other-user", createdAt: new Date(base.getTime() + 1000) },
@@ -149,6 +156,7 @@ describePostgres("agent action audit routes", () => {
     const epoch = randomUUID();
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     try {
       await db.insert(managedAuditEvents).values({
         companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
@@ -194,6 +202,7 @@ describePostgres("agent action audit routes", () => {
     await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId: issue.id }).where(eq(heartbeatRuns.id, run.id));
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     try {
       const [application] = await db.insert(toolApplications).values({
         companyId: company.id, applicationKey: `audit-${randomUUID()}`, name: "Audit fixture", type: "mcp_http", status: "active",
@@ -278,6 +287,7 @@ describePostgres("agent action audit routes", () => {
     const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     try {
       expect((await anon.post(path).send(window)).status).toBe(403);
       expect(await db.select().from(managedAuditExports)).toHaveLength(0);
@@ -351,6 +361,191 @@ describePostgres("agent action audit routes", () => {
       vi.unstubAllEnvs();
     }
   }, 45_000);
+
+  it("retains archive bytes and checkpoints outside an older restore and rotates the source epoch", async ({ skip }) => {
+    const oldEpoch = randomUUID();
+    const newEpoch = randomUUID();
+    const from = "2026-07-17T00:00:00.000Z";
+    const to = "2026-07-17T00:00:02.000Z";
+    const olderFrom = "2026-07-16T00:00:00.000Z";
+    const tempDir = await mkdtemp(join(tmpdir(), "managed-audit-restore-"));
+    let targetUrl: string | null = null;
+    let targetName: string | null = null;
+    let adminUrl: string | null = null;
+    let dedicatedFixture: typeof tempDb = null;
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", oldEpoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", olderFrom);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      try {
+        await db.$client.begin(tx => tx`SET LOCAL session_replication_role = replica`);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "42501") throw error;
+        // A CREATEDB-only external fixture supports the route suite, but cannot
+        // replay the JavaScript backup's session replication setting.
+        vi.stubEnv("PROPRIO_TEST_POSTGRES_ADMIN_URL", undefined);
+        const embeddedSupport = await getEmbeddedPostgresTestSupport();
+        if (!embeddedSupport.supported) skip(embeddedSupport.reason);
+        dedicatedFixture = await startEmbeddedPostgresTestDatabase("proprio-agent-audit-restore-");
+      }
+      const sourceFixture = dedicatedFixture ?? tempDb!;
+      const sourceDb = dedicatedFixture ? createDb(sourceFixture.connectionString) : db;
+      const { company, agent } = await seed(sourceDb);
+      const userId = randomUUID();
+      await sourceDb.insert(companyMemberships).values({
+        companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+      });
+      await sourceDb.insert(principalPermissionGrants).values({
+        companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+      });
+      const actor = { type: "board" as const, source: "session" as const, userId, companyIds: [company.id] };
+      const board = request(await createApp(sourceDb, actor));
+      const rows = Array.from({ length: 205 }, () => ({
+        companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+        phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(),
+      }));
+      await sourceDb.insert(managedAuditEvents).values(rows);
+      const [privateTask] = await sourceDb.insert(issues).values({
+        companyId: company.id, title: "Restricted retained evidence", visibility: "private", responsibleUserId: randomUUID(),
+      }).returning();
+      const [restricted] = await sourceDb.insert(managedAuditEvents).values({
+        companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+        occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+        phase: "policy_decision", decision: "allow", status: "authorized", invocationId: randomUUID(), taskId: privateTask.id,
+      }).returning();
+
+      const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const window = { from, to };
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", "2026-07-17T00:00:00.000001Z");
+      const imprecise = await board.post(path).send(window);
+      expect(imprecise.status).toBe(403);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", from);
+      const created = await board.post(path).send(window);
+      expect(created.status, created.text).toBe(201);
+      expect(created.body.eventCount).toBe(rows.length);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+      const exportPath = `${path}/${created.body.exportId}`;
+      const first = await board.get(exportPath);
+      expect(first.status, first.text).toBe(200);
+      expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
+      expect(first.body.events.some((event: { id: string }) => event.id === restricted.id)).toBe(false);
+
+      // These files are the independently retained archive page and resume checkpoint.
+      const archiveFile = join(tempDir, "managed-audit-pages.jsonl");
+      const checkpointFile = join(tempDir, "managed-audit-checkpoint.json");
+      await writeFile(archiveFile, `${first.text}\n`);
+      await writeFile(checkpointFile, JSON.stringify({
+        exportId: created.body.exportId, sourceEpoch: oldEpoch, cursor: first.body.nextCursor,
+        watermark: created.body.watermark, eventCount: created.body.eventCount,
+      }));
+
+      const [olderEvent] = await sourceDb.insert(managedAuditEvents).values({
+        ...rows[0]!, invocationId: randomUUID(), occurredAt: new Date(olderFrom),
+      }).returning();
+      const olderReceipt = await board.post(path).send({ from: olderFrom, to: from });
+      expect(olderReceipt.status).toBe(201);
+      expect((await board.get(`${path}/${olderReceipt.body.exportId}`)).body.events)
+        .toMatchObject([expect.objectContaining({ id: olderEvent.id })]);
+
+      const expired = await board.post(path).send(window);
+      expect(expired.status).toBe(201);
+      await sourceDb.update(managedAuditExports).set({ expiresAt: new Date(Date.now() - 60_000) })
+        .where(eq(managedAuditExports.id, expired.body.exportId));
+      expect((await board.get(`${path}/${expired.body.exportId}`)).body)
+        .toMatchObject({ details: { reasonCode: "snapshot_expired" } });
+
+      const backup = await runDatabaseBackup({
+        connectionString: sourceFixture.connectionString,
+        backupDir: tempDir,
+        backupEngine: "javascript",
+        retention: { dailyDays: 1, weeklyWeeks: 0, monthlyMonths: 0 },
+      });
+
+      const checkpoint = JSON.parse(await readFile(checkpointFile, "utf8")) as {
+        cursor: string; exportId: string; eventCount: number; sourceEpoch: string; watermark: string;
+      };
+      const checkpointPath = `${path}/${checkpoint.exportId}`;
+      const second = await board.get(checkpointPath).query({ cursor: checkpoint.cursor });
+      expect(second.status, second.text).toBe(200);
+      expect(second.body).toMatchObject({
+        deliveredThrough: checkpoint.eventCount, complete: true, nextCursor: null,
+        sourceEpoch: checkpoint.sourceEpoch, watermark: checkpoint.watermark,
+      });
+      await appendFile(archiveFile, `${second.text}\n`);
+      const archivedBytes = await readFile(archiveFile);
+      const archivedPages = archivedBytes.toString("utf8").trim().split("\n").map(line => JSON.parse(line));
+      const archivedEvents = archivedPages.flatMap(page => page.events as Array<{ id: string }>);
+      const archivedIds = archivedEvents.map(event => event.id).sort();
+      expect(archivedIds).toHaveLength(checkpoint.eventCount);
+      expect(new Set(archivedIds).size).toBe(checkpoint.eventCount);
+      expect(createHash("sha256").update(JSON.stringify(archivedIds)).digest("hex")).toBe(checkpoint.watermark);
+
+      // A missing row is an explicit incomplete checkpoint, never a fresh complete page.
+      const missingId = second.body.events[0].id as string;
+      await sourceDb.delete(managedAuditEvents).where(eq(managedAuditEvents.id, missingId));
+      const incomplete = await board.get(checkpointPath).query({ cursor: checkpoint.cursor });
+      expect(incomplete.status).toBe(409);
+      expect(incomplete.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
+
+      const source = new URL(sourceFixture.connectionString);
+      const admin = new URL(sourceFixture.connectionString);
+      admin.pathname = "/postgres";
+      adminUrl = admin.toString();
+      targetName = `audit_restore_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
+      expect(await ensurePostgresDatabase(adminUrl, targetName)).toBe("created");
+      source.pathname = `/${targetName}`;
+      targetUrl = source.toString();
+      await runDatabaseRestore({ connectionString: targetUrl, backupFile: backup.backupFile });
+
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", newEpoch);
+      const restoredDb = createDb(targetUrl);
+      const restoredBoard = request(await createApp(restoredDb, actor));
+      const restoredCheckpoint = JSON.parse(await readFile(checkpointFile, "utf8")) as { cursor: string; exportId: string };
+      const stale = await restoredBoard.get(`${path}/${restoredCheckpoint.exportId}`).query({ cursor: restoredCheckpoint.cursor });
+      expect(stale.status).toBe(409);
+      expect(stale.body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
+
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", from);
+      const beyondRetention = await restoredBoard.post(path).send({ from: olderFrom, to });
+      expect(beyondRetention.status).toBe(409);
+      expect(beyondRetention.body).toMatchObject({ details: { reasonCode: "retention_window_expired" } });
+
+      const fresh = await restoredBoard.post(path).send(window);
+      expect(fresh.status, fresh.text).toBe(201);
+      expect(fresh.body).toMatchObject({ sourceEpoch: newEpoch, eventCount: rows.length });
+      const restoredPage = await restoredBoard.get(`${path}/${fresh.body.exportId}`);
+      expect(restoredPage.body).toMatchObject({ complete: false });
+      expect(restoredPage.body.events.some((event: { id: string }) =>
+        event.id === olderEvent.id || event.id === restricted.id)).toBe(false);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", "2026-07-17T00:00:00.000001Z");
+      const impreciseResume = await restoredBoard.get(`${path}/${fresh.body.exportId}`)
+        .query({ cursor: restoredPage.body.nextCursor });
+      expect(impreciseResume.status).toBe(403);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", to);
+      const shortened = await restoredBoard.get(`${path}/${fresh.body.exportId}`).query({ cursor: restoredPage.body.nextCursor });
+      expect(shortened.status).toBe(409);
+      expect(shortened.body).toMatchObject({ details: { reasonCode: "retention_window_expired" } });
+      expect((await restoredBoard.get(`${path}/${expired.body.exportId}`)).status).toBe(404);
+
+      expect(await readFile(archiveFile)).toEqual(archivedBytes);
+      expect(archivedIds).toContain(missingId);
+    } finally {
+      vi.unstubAllEnvs();
+      try {
+        if (targetUrl) await closeRegisteredClients(targetUrl, { scope: "database" });
+        if (targetName && adminUrl) {
+          const admin = createDb(adminUrl);
+          try { await admin.$client`DROP DATABASE ${admin.$client(targetName)}`; }
+          finally { await closeRegisteredClients(adminUrl, { scope: "database" }); }
+        }
+      } finally {
+        try { await dedicatedFixture?.cleanup(); }
+        finally { await rm(tempDir, { recursive: true, force: true }); }
+      }
+    }
+  }, 90_000);
+
 
   async function seedActorOnlyRows(companyId: string) {
     return db.insert(activityLog).values([

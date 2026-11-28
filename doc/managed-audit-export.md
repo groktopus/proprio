@@ -15,6 +15,14 @@ before enabling export. Record which intervals require reconciliation. The
 database and these settings cannot tell an archive that an event was lost before
 it was first collected.
 
+Set `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER` on every API instance to the earliest
+event time allowed by the deployment's retention policy. Use an ISO timestamp
+with an offset and no more than three fractional-second digits. A window before
+this boundary, or a cursor for such a window, returns
+`retention_window_expired`. When advancing the boundary, remove API instances
+with the old setting from export traffic before treating the new boundary as
+enforced.
+
 1. Send `POST /api/companies/:companyId/audit/managed-exports` with `from` and
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
