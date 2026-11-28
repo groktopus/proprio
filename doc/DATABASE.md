@@ -251,18 +251,20 @@ validators, `server` routes and services, and `ui` API clients and pages.
 
 ### Coordinate concurrent migration work
 
-When assigning work that needs a migration, record one migration owner and any
-dependent PRs on the driving issue. The owner coordinates changes to the
-relevant schema, generates the migration SQL and Drizzle metadata, and resolves
-numbering or journal conflicts for that PR. Keep one active writer of new
-migrations while the pilot runs. The next owner generates against the updated
-target once the preceding migration lands. Use an explicit PR dependency when
-two changes must land in order.
+Before generating migration SQL or Drizzle metadata, request the single writer
+slot in the [migration writer pilot issue](https://github.com/groktopus/proprio/issues/458).
+Include the driving issue or PR. The maintainer records one active writer in
+that shared issue. Wait for the reservation before generating. The writer owns
+the schema change, generated metadata, and any numbering or journal conflicts.
+The maintainer clears the reservation after the migration lands or the writer
+hands it back. The next writer generates against the updated target. Record
+PR dependencies on the driving issue when changes must land in order.
 
-Agents can prepare independent application changes in parallel in their own
-worktrees. When a shared contract must change, land the backward-compatible
-schema change first, migrate callers in parallel, and schedule any cleanup
-after the old contract is no longer used.
+Agents can prepare independent application changes in their own worktrees.
+Land backward-compatible schema changes first, then migrate callers in
+parallel. Ship destructive cleanup in a later release, after confirming that
+no running release uses the old contract. See
+[Migration compatibility with the running release](#migration-compatibility-with-the-running-release).
 
 ### Competing migration processes
 
