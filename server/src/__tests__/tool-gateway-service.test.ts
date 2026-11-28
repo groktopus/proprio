@@ -2072,10 +2072,14 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await expect(gateway.executeTool({
       sessionToken: session.token,
       tool: "mcp-remote-fixture:update_note",
-      parameters: { noteId: "n1", body: "reviewed body" },
+      parameters: { noteId: "n1", body: "private free-form note" },
     })).rejects.toMatchObject({ reasonCode: "approval_required" });
 
     const [actionRequest] = await db.select().from(toolActionRequests);
+    const [admission] = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.invocationId, actionRequest.invocationId),
+      eq(managedAuditEvents.phase, "policy_decision"),
+    ));
     const approved = await gateway.approveActionRequest({
       companyId: company.id,
       actionRequestId: actionRequest.id,
@@ -2086,6 +2090,20 @@ describeEmbeddedPostgres("tool gateway service", () => {
       resolvedByUserId: "board-user",
       resultSummary: expect.stringContaining("bodyLength"),
     });
+    const approvalEvents = await db.select().from(managedAuditEvents).where(
+      eq(managedAuditEvents.invocationId, actionRequest.invocationId),
+    );
+    expect(approvalEvents).toHaveLength(2);
+    expect(approvalEvents.find(event => event.phase === "approval_resolution")).toMatchObject({
+      source: "tool_gateway", schemaVersion: admission.schemaVersion,
+      eventType: "approval_resolution_recorded", phase: "approval_resolution",
+      occurredAt: approved.decidedAt,
+      runId: admission.runId, taskId: admission.taskId,
+      invocationId: actionRequest.invocationId, requestId: actionRequest.id,
+      connectionId: admission.connectionId, actorType: "user", actorId: "board-user",
+      decision: "approved", status: "approved", reasonCode: null,
+    });
+    expect(JSON.stringify(approvalEvents)).not.toContain("private free-form note");
 
     // The server carries out the approved call itself with no interactive
     // caller left to raise timeoutMs, so it must get the full 60s headroom
@@ -2099,10 +2117,10 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const result = await gateway.executeTool({
       sessionToken: session.token,
       tool: "mcp-remote-fixture:update_note",
-      parameters: { noteId: "n1", body: "reviewed body" },
+      parameters: { noteId: "n1", body: "private free-form note" },
     });
     expect(result.status).toBe("replayed");
-    expect((result.result as { data?: { bodyLength?: number } }).data?.bodyLength).toBe("reviewed body".length);
+    expect((result.result as { data?: { bodyLength?: number } }).data?.bodyLength).toBe("private free-form note".length);
 
     const [invocation] = await db.select().from(toolInvocations);
     expect(invocation).toMatchObject({
