@@ -605,6 +605,9 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     if (adapterType === "proprio_runner" && context.executionTarget?.kind === "remote"
       && context.executionTarget.transport === "sandbox" && context.executionTarget.runnerTask) return result;
     const resolvedMethod = (context.config as { managedAiConnection?: { method?: string } }).managedAiConnection?.method;
+    const nativeClaudeHelloPassed = adapterType === "proprio_runner" && context.config.provider === "acpx"
+      && context.config.acpxAgent === "claude"
+      && result.status === "pass" && result.checks.some(check => check.code === "claude_hello_probe_passed" && check.level === "info");
     // An api_key account does not take the CLI hello probe below: a key
     // travels as an env var any engine understands, and the engine's own test
     // above judged whether this runtime can execute with it — the ACP lane
@@ -621,7 +624,7 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     const nativePiOpenRouter = adapterType === "proprio_runner" && context.config.provider === "acpx"
       && context.config.acpxAgent === "pi" && binding.provider === "openrouter"
       && asRecord(context.config.managedAiRouting)?.kind === "openrouter";
-    if (resolvedMethod === "api_key" && (!context.config.managedAiRouting || nativePiOpenRouter)) {
+    if (resolvedMethod === "api_key" && !nativeClaudeHelloPassed && (!context.config.managedAiRouting || nativePiOpenRouter)) {
       const envKey = AI_CONNECTION_CAPABILITIES[binding.provider].methods.api_key?.envKey;
       const key = envKey ? parseObject(context.config.env)[envKey] : undefined;
       try {
@@ -635,7 +638,7 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
       }
       return finishManagedConnectionTest(adapterType, context, result);
     }
-    let providerTestPassed = false;
+    let providerTestPassed = nativeClaudeHelloPassed;
     if (!result.checks.some(check => check.code.includes("hello_probe"))) {
       const providerAdapter = context.config.managedAiRouting ? aiRoutingHarness(adapterType, context.config.provider, context.config.acpxAgent) : { anthropic: "claude_local", openai: "codex_local", openrouter: "opencode_local", xai: "grok_local", google: "gemini_local" }[binding.provider];
       const probe = await requireServerAdapter(providerAdapter).testEnvironment({ ...context, adapterType: providerAdapter, config: { ...context.config, engine: "cli" } });

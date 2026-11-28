@@ -9655,7 +9655,7 @@ function retainNativeProbeCleanup(cleanup: (retry: boolean) => Promise<void>) {
   return { retired: owner.run(), retryCleanup: owner.run };
 }
 
-export async function probeNativeRunnerEnvironment(options: {
+type NativeRunnerEnvironmentProbeOptions = {
   runtimeDirectory: string;
   provider: "codex" | "opencode" | "acpx";
   model: string | null;
@@ -9670,14 +9670,38 @@ export async function probeNativeRunnerEnvironment(options: {
   transportOptions?: CapabilityRunnerdCodexTransportOptions;
   onCodexCredentialRefresh?: (filename: string) => Promise<void>;
   onCleanupConfirmed?: () => Promise<void>;
-}): Promise<{
+};
+type NativeRunnerEnvironmentProbeReceipt = {
   provider: "codex" | "opencode" | "acpx";
   providerDriver: string;
   effectiveModel: string;
   helloProbePassed: boolean;
   admissionOnly?: true;
   sessionAdmissionPassed?: true;
-}> {
+};
+
+export async function probeNativeRunnerEnvironment(options: NativeRunnerEnvironmentProbeOptions): Promise<NativeRunnerEnvironmentProbeReceipt> {
+  let cleanupConfirmed = false;
+  try {
+    return await runNativeRunnerEnvironmentProbe({ ...options, onCleanupConfirmed: options.onCleanupConfirmed ? async () => {
+      await options.onCleanupConfirmed!();
+      cleanupConfirmed = true;
+    } : undefined });
+  } catch (error) {
+    // Failures before transport construction/admission have no process to
+    // retire. Still release the private setup directory through its owner.
+    if (!cleanupConfirmed && options.onCleanupConfirmed && !(error instanceof NativeEnvironmentProbeCleanupError)) {
+      const retained = retainNativeProbeCleanup(async () => options.onCleanupConfirmed!());
+      try { await retained.retired; }
+      catch (cleanupError) {
+        throw new NativeEnvironmentProbeCleanupError(retained.retired, error, [cleanupError], retained.retryCleanup);
+      }
+    }
+    throw error;
+  }
+}
+
+async function runNativeRunnerEnvironmentProbe(options: NativeRunnerEnvironmentProbeOptions): Promise<NativeRunnerEnvironmentProbeReceipt> {
   const environment = { ...options.environment };
   const remoteFilesystemRoot = options.transportOptions?.runnerFilesystemRoot;
   const ownsPreparation = options.transportOptions?.prepareLaunch !== undefined;
@@ -9817,8 +9841,12 @@ export async function probeNativeRunnerEnvironment(options: {
         return;
       }
       if (event.eventType === "turn.failed" || event.eventType === "turn.interrupted" || event.eventType === "turn.cancelled") {
-        const detail = record(event.payload.error).message;
-        throw new Error(typeof detail === "string" ? detail : "The native provider hello probe failed.");
+        const errorPayload = record(event.payload.error);
+        const detail = errorPayload.message;
+        const failure = new Error(typeof detail === "string" ? detail : "The native provider hello probe failed.");
+        const providerFailure = record(errorPayload.providerFailure);
+        if (typeof providerFailure.category === "string") Object.defineProperty(failure, "providerFailure", { value: { category: providerFailure.category } });
+        throw failure;
       }
     }
     throw new Error("The native provider hello probe ended without a successful turn.");

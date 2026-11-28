@@ -6,10 +6,10 @@ import { join } from "node:path";
 import type { AdapterEnvironmentTestContext, AdapterEnvironmentTestResult } from "@groktopus/adapter-utils";
 import { resolveProprioRunnerPiThinkingLevel } from "@groktopus/adapter-utils";
 import { environmentTaskResultSchema } from "@groktopus/plugin-sdk";
-import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveClaudeEffort, resolveGrokEffort } from "../../vendor/proprio-runner/index.js";
+import { NativeEnvironmentProbeCleanupError, probeNativeRunnerEnvironment, resolveGrokEffort } from "../../vendor/proprio-runner/index.js";
 import { preparePluginRunnerCredentials } from "./plugin-runner-credentials.js";
 import { createPluginRunnerTaskOwner } from "./plugin-runner-task.js";
-import { resolveProprioRunnerProviderProfile } from "./provider-profile.js";
+import { resolveConfiguredClaudeEffort, resolveProprioRunnerProviderProfile } from "./provider-profile.js";
 import { resolveAcpxQualification } from "./acpx-qualification.js";
 import { isRunnerRevisionMismatch, runnerRevisionMismatchTestResult } from "../runner-revision-mismatch.js";
 
@@ -60,7 +60,7 @@ export async function probePluginRunnerEnvironment(context: AdapterEnvironmentTe
         ...(profile.provider === "opencode" ? { opencodePermissionMode: "deny" } : {}),
         ...(profile.provider === "acpx" ? { acpxAgent: profile.acpxAgent, acpxPermissionMode: "deny-all", acpxPermissionModePinned: true,
           ...(profile.acpxAgent === "pi" ? { piThinkingLevel: resolveProprioRunnerPiThinkingLevel("acpx", "pi", context.config.piThinkingLevel) } : {}),
-          ...(profile.acpxAgent === "claude" ? { claudeEffort: resolveClaudeEffort("claude", context.config.modelReasoningEffort ?? context.config.reasoningEffort ?? context.config.effort) } : {}),
+          ...(profile.acpxAgent === "claude" ? { claudeEffort: resolveConfiguredClaudeEffort(context.config) } : {}),
           ...(profile.acpxAgent === "grok" ? { grokEffort: resolveGrokEffort("grok", context.config.modelReasoningEffort ?? context.config.reasoningEffort ?? context.config.effort), grokDisableWebSearch: resolveGrokDisableWebSearch("grok", context.config.disableWebSearch) } : {}),
           acpxCandidateProfile: profile.acpxAgent === "pi" ? undefined : resolveAcpxQualification({ kind: "acpx", agent: profile.acpxAgent, model: profile.model }, process.env) } : {}),
         prpIdentity: { runnerInstanceId: runnerId, environmentLeaseId: target.leaseId, runId: binding.runId,

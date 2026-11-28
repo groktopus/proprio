@@ -6,7 +6,7 @@ import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 import { QUALIFIED_ACPX_PROFILES, KIMI_DISTRIBUTION_CLOSURE_SHA256 } from "../vendor/proprio-runner/index.js";
 import { assertHarnessTestPassed } from "../services/agent-harness-verification.js";
 
-const { probeInstallation, probeGrokInstallation, probePiInstallation, probeKimiInstallation, probeKimiModels, probeKimiRemote, verifyApiKey } = vi.hoisted(() => ({
+const { probeInstallation, probeGrokInstallation, probePiInstallation, probeKimiInstallation, probeKimiModels, probeKimiRemote, verifyApiKey, nativeClaudeProbe } = vi.hoisted(() => ({
   verifyApiKey: vi.fn(),
   probeInstallation: vi.fn(),
   probeGrokInstallation: vi.fn(),
@@ -14,6 +14,7 @@ const { probeInstallation, probeGrokInstallation, probePiInstallation, probeKimi
   probeKimiInstallation: vi.fn(),
   probeKimiModels: vi.fn(),
   probeKimiRemote: vi.fn(),
+  nativeClaudeProbe: vi.fn(),
 }));
 vi.mock("../services/ai-api-key-test.js", () => ({ validateAiApiKey: verifyApiKey }));
 vi.mock("../services/kimi-connection-probe.js", () => ({ probeKimiExecutionTarget: probeKimiRemote }));
@@ -24,6 +25,10 @@ vi.mock("../vendor/proprio-runner/live/index.js", () => ({
   probeAcpxKimiInstallation: probeKimiInstallation,
   probeKimiModels,
   probeAcpxCursorInstallation: vi.fn(async () => undefined),
+}));
+vi.mock("../services/native-runtime/setup-readiness.js", async original => ({
+  ...await original<typeof import("../services/native-runtime/setup-readiness.js")>(),
+  testNativeAcpxClaudeAuthentication: nativeClaudeProbe,
 }));
 
 // The registry registers a login capability for the two built-in interactive
@@ -158,6 +163,8 @@ describe("native ACPX environment checks", () => {
     probeKimiInstallation.mockReset().mockResolvedValue(undefined);
     probeKimiModels.mockReset().mockResolvedValue(undefined);
     probeKimiRemote.mockReset().mockResolvedValue(undefined);
+    nativeClaudeProbe.mockReset().mockImplementation(async (_context, model) => ({ adapterType: "proprio_runner", status: "pass", testedAt: new Date().toISOString(),
+      checks: [{ code: "claude_hello_probe_passed", level: "info", message: `The native Claude runtime completed a read-only hello turn with the selected model ${model}.` }] }));
   });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
@@ -214,13 +221,18 @@ describe("native ACPX environment checks", () => {
     expect(probeKimiModels).not.toHaveBeenCalled();
   });
 
-  it("verifies a native Claude key without the global CLI or a model prompt", async () => {
+  it("runs the selected native Claude profile through inference after runtime integrity verification", async () => {
     const result = await requireServerAdapter("proprio_runner").testEnvironment!({ ...context,
       config: { ...context.config, env: { ANTHROPIC_API_KEY: "test-key" } },
     });
     expect(result.status).toBe("pass");
-    expect(verifyApiKey).toHaveBeenCalledExactlyOnceWith("anthropic", "test-key");
-    expect(result.checks.map(check => check.code)).toEqual(["acpx_runtime_ready", "ai_connection_api_key_reverified"]);
+    expect(probeInstallation).toHaveBeenCalledExactlyOnceWith(context.config.model);
+    expect(nativeClaudeProbe).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      companyId: context.companyId,
+      config: expect.objectContaining({ provider: "acpx", acpxAgent: "claude", model: context.config.model, env: { ANTHROPIC_API_KEY: "test-key" } }),
+    }), context.config.model);
+    expect(verifyApiKey).not.toHaveBeenCalled();
+    expect(result.checks.map(check => check.code)).toEqual(["claude_hello_probe_passed"]);
   });
 
   it.each(["verified", "rejected", "unavailable", "missing", "managed"])("keeps remote Grok adoption tied to account verification: %s", async state => {
@@ -241,13 +253,14 @@ describe("native ACPX environment checks", () => {
     expect(probeGrokInstallation).not.toHaveBeenCalled();
   });
 
-  it.each(["ai_connection_api_key_rejected", "ai_connection_verification_failed"])("fails setup on %s", async code => {
-    verifyApiKey.mockRejectedValue({ details: { code } });
+  it.each(["claude_hello_probe_auth_required", "claude_hello_probe_failed"])("keeps setup blocked when the native Claude probe returns %s", async code => {
+    nativeClaudeProbe.mockResolvedValue({ adapterType: "proprio_runner", status: "fail", testedAt: new Date().toISOString(),
+      checks: [{ code, level: "error", message: "The selected native Claude account and model did not complete the hello probe." }] });
     const result = await requireServerAdapter("proprio_runner").testEnvironment!({ ...context,
       config: { ...context.config, env: { ANTHROPIC_API_KEY: "test-key" } },
     });
     expect(result.status).toBe("fail");
-    expect(result.checks.at(-1)).toMatchObject({ code, level: "error" });
+    expect(result.checks).toMatchObject([{ code, level: "error" }]);
   });
 
   it.each(["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"])("preserves the supplementary probe for custom routing via %s", async name => {
@@ -255,6 +268,7 @@ describe("native ACPX environment checks", () => {
       config: { ...context.config, env: { ANTHROPIC_API_KEY: "test-key", [name]: "configured" } },
     });
     expect(verifyApiKey).not.toHaveBeenCalled();
+    expect(nativeClaudeProbe).toHaveBeenCalledExactlyOnceWith(expect.anything(), context.config.model);
     expect(result.checks.some(check => check.code === "ai_connection_api_key_reverified")).toBe(false);
   });
 

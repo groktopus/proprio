@@ -20,9 +20,10 @@ import {
   hasActiveAdapterOverride,
 } from "../adapters/registry.js";
 
-const nativeSetup = vi.hoisted(() => ({ authenticate: vi.fn() }));
+const nativeSetup = vi.hoisted(() => ({ authenticate: vi.fn(), claudeAuthenticate: vi.fn() }));
 vi.mock("../services/native-runtime/setup-readiness.js", () => ({
   testNativeRunnerAuthentication: nativeSetup.authenticate,
+  testNativeAcpxClaudeAuthentication: nativeSetup.claudeAuthenticate,
 }));
 vi.mock("../services/copilot-connection-probe.js",()=>({probeCopilotExecutionTarget:vi.fn(async()=>({status:"verified",models:[{id:"gpt-5.6-luna"}]}))}));
 
@@ -348,6 +349,7 @@ describe("server adapter registry", () => {
     const probe = vi.mocked(probeAcpxClaudeInstallation);
     if (ready) probe.mockResolvedValueOnce(undefined);
     else probe.mockRejectedValueOnce(new Error("Runtime package integrity verification failed"));
+    nativeSetup.claudeAuthenticate.mockReset().mockResolvedValue({ adapterType: "proprio_runner", status: "pass", testedAt: "", checks: [{ code: "claude_hello_probe_passed", level: "info", message: "Verified by native hello probe" }] });
     const result = await requireServerAdapter("proprio_runner").testEnvironment({
       companyId: "company-1", adapterType: "proprio_runner",
       config: { provider: "acpx", acpxAgent: "claude", model: "custom-claude-model" },
@@ -355,8 +357,9 @@ describe("server adapter registry", () => {
     expect(probe).toHaveBeenLastCalledWith("custom-claude-model");
     expect(result).toMatchObject({
       status: ready ? "pass" : "fail",
-      checks: [expect.objectContaining({ code: ready ? "acpx_runtime_ready" : "acpx_runtime_unavailable" })],
+      checks: [expect.objectContaining({ code: ready ? "claude_hello_probe_passed" : "acpx_runtime_unavailable" })],
     });
+    if (ready) expect(nativeSetup.claudeAuthenticate).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ model: "custom-claude-model" }) }), "custom-claude-model");
   });
 
   it.each([true, false])("probes the exact Pi installation without qualification opt-in (ready=%s)", async (ready) => {

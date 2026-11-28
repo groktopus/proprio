@@ -34,6 +34,11 @@ export const DEFAULT_OPENCODE_RUNNER_MODEL =
   "openrouter/deepseek/deepseek-v4-flash-0731" as const;
 export const CLAUDE_MANAGED_BETA_VERSION = "managed-agents-2026-04-01" as const;
 
+export function resolveConfiguredClaudeEffort(config: { modelReasoningEffort?: unknown; reasoningEffort?: unknown; effort?: unknown }):
+  "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+  return resolveClaudeEffort("claude", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort);
+}
+
 export const DEFAULT_ACPX_RUNNER_MODELS = {
   grok: "grok-4.7",
   claude: "claude-opus-5-5",
@@ -498,7 +503,7 @@ export function resolveProprioRunnerProviderProfile(
       error instanceof Error ? error.message : "Invalid Cursor session mode",
     );
   }
-  try { if (candidate === "acpx" && agentHarnessType("proprio_runner", config) === "claude_local") resolveClaudeEffort("claude", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort); } catch (error) {
+  try { if (candidate === "acpx" && agentHarnessType("proprio_runner", config) === "claude_local") resolveConfiguredClaudeEffort(config); } catch (error) {
     throw new ProprioRunnerProviderProfileError("proprio_runner_claude_effort_invalid", error instanceof Error ? error.message : "Invalid Claude effort");
   }
   try { if (candidate === "acpx" && config.acpxAgent === "grok") resolveGrokEffort("grok", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort); } catch (error) {
@@ -777,7 +782,7 @@ export function resolveProprioRunnerNativeProviderInput(input: {
       provider: "acpx",
       model: profile.model,
       acpxAgent: profile.acpxAgent,
-      ...(profile.acpxAgent === "claude" ? { claudeEffort: resolveClaudeEffort("claude", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort) } : {}),
+      ...(profile.acpxAgent === "claude" ? { claudeEffort: resolveConfiguredClaudeEffort(config) } : {}),
       ...(profile.acpxAgent === "grok" ? { grokEffort: resolveGrokEffort("grok", config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort), grokDisableWebSearch: resolveGrokDisableWebSearch("grok", config.disableWebSearch) } : {}),
       ...(profile.acpxAgent === "pi" ? { piThinkingLevel: resolveProprioRunnerPiThinkingLevel("acpx", "pi", config.piThinkingLevel) } : {}),
       ...(profile.acpxAgent === "cursor" ? {
