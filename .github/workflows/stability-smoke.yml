@@ -4,14 +4,20 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, edited]
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
-  group: stability-smoke-${{ github.event.pull_request.number }}
+  group: stability-smoke-${{ github.event.pull_request.number || github.sha }}
   # A title or body edit can queue smoke but should not interrupt a running check.
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
+
+env:
+  TESTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   route-durable-work:
@@ -22,28 +28,46 @@ jobs:
       applicable: ${{ steps.route.outputs.applicable }}
       board-accessibility: ${{ steps.board-accessibility.outputs.applicable }}
     steps:
-      - name: Check out the trusted target policy
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: target-policy
-          persist-credentials: false
-      - name: Read GitHub's PR comparison commit
+      - name: Read GitHub's comparison commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: pr-comparison
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '2' }}
+          filter: ${{ github.event_name == 'merge_group' && 'blob:none' || '' }}
+          persist-credentials: false
+      - name: Select the trusted target policy revision
+        id: policy-base
+        working-directory: pr-comparison
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          TARGET_REF: ${{ github.event.merge_group.base_ref }}
+        run: |
+          policy_base="$PR_BASE"
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            [[ "$TARGET_REF" == refs/heads/* ]]
+            target_tracking_ref="refs/remotes/origin/${TARGET_REF#refs/heads/}"
+            policy_base=$(git merge-base "$target_tracking_ref" "$GITHUB_SHA")
+          fi
+          [[ "$policy_base" =~ ^[a-f0-9]{40}$ ]]
+          echo "sha=$policy_base" >> "$GITHUB_OUTPUT"
+      - name: Check out the trusted target policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.policy-base.outputs.sha }}
+          path: target-policy
           persist-credentials: false
       - name: Route durable-work acceptance
         id: route
         working-directory: pr-comparison
         env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          POLICY_BASE: ${{ steps.policy-base.outputs.sha }}
         run: |
           policy=../target-policy/scripts/ci/durable-work-acceptance.mjs
-          if [[ -f "$policy" ]]; then
-            node "$policy" route "$GITHUB_SHA" "$PR_HEAD"
+          if [[ -f "$policy" && "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            node "$policy" route "$GITHUB_SHA" "$POLICY_BASE" --merge-group
+          elif [[ -f "$policy" ]]; then
+            node "$policy" route "$GITHUB_SHA" "$TESTED_SHA"
           else
             echo "Target branch predates routing. Require the full Linux lane."
             echo 'applicable=true' >> "$GITHUB_OUTPUT"
@@ -53,11 +77,13 @@ jobs:
         id: board-accessibility
         working-directory: pr-comparison
         env:
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          POLICY_BASE: ${{ steps.policy-base.outputs.sha }}
         run: |
           policy=../target-policy/scripts/ci/board-accessibility-routing.mjs
-          if [[ -f "$policy" ]]; then
-            node "$policy" "$GITHUB_SHA" "$PR_HEAD"
+          if [[ -f "$policy" && "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            node "$policy" "$GITHUB_SHA" "$POLICY_BASE" --merge-group
+          elif [[ -f "$policy" ]]; then
+            node "$policy" "$GITHUB_SHA" "$TESTED_SHA"
           else
             echo "Target branch predates the accessibility routing policy. Run the browser suite."
             echo 'applicable=true' >> "$GITHUB_OUTPUT"
@@ -74,10 +100,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Check out the exact pull request head
+      - name: Check out the exact tested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -85,10 +111,8 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
       - name: Verify head and install locked dependencies
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
           git rev-parse HEAD
           npm install --global --ignore-scripts pnpm@9.15.4
           pnpm install --frozen-lockfile --ignore-scripts
@@ -557,10 +581,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 18
     steps:
-      - name: Check out the exact pull request head
+      - name: Check out the exact tested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -568,15 +592,13 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
       - name: Install locked workspace dependencies and Chromium
-        env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
           if [[ ! -f tests/board-accessibility/playwright.config.ts || ! -f scripts/ci/board-accessibility-routing.test.mjs ]]; then
             echo 'Update the PR branch from main to include the required board accessibility suite.' >&2
             exit 1
           fi
-          printf 'Board a11y fixtures at `%s` (Ubuntu 24.04; locked Chromium).\n' "$EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Board a11y fixtures at `%s` (Ubuntu 24.04; locked Chromium).\n' "$TESTED_SHA" >> "$GITHUB_STEP_SUMMARY"
           npm install --global --ignore-scripts "$(node -p 'require("./package.json").packageManager')"
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm --filter @groktopus/plugin-sdk ensure-build-deps

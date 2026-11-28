@@ -70,7 +70,9 @@ export function readinessVerdict({ pullRequest, checks, greptile, behindBy, orig
   if (checks.checks.length === 0) reasons.push(reason("checks_missing", "No status checks were found at the current head"));
   if (pullRequest.reviewDecision === "CHANGES_REQUESTED") reasons.push(reason("changes_requested", "A review requests changes"));
   if (pullRequest.reviewDecision === "REVIEW_REQUIRED") reasons.push(reason("review_required", "Required review approval is missing"));
-  if (behindBy > 0) reasons.push(reason("base_behind", `Head is ${behindBy} commit(s) behind base`, "blocking", { behindBy }));
+  if (pullRequest.mergeStateStatus === "BEHIND") {
+    reasons.push(reason("base_behind", "GitHub requires the PR to be up to date with its target", "blocking", { behindBy }));
+  }
   if (!originatingIssue) reasons.push(reason("originating_issue_missing", "No originating Proprio issue was identified", "reporting"));
   else if (!isTerminalIssue(originatingIssue.status)) {
     reasons.push(reason("originating_issue_active", `Originating issue ${originatingIssue.identifier ?? originatingIssue.issueId} is ${originatingIssue.status}`, "reporting"));

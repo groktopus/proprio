@@ -235,6 +235,15 @@ test("unresolved nullable mergeability is reported instead of crashing", () => {
   assert.equal(result.reasons[0].code, "mergeability_unknown");
 });
 
+test("base distance blocks only when GitHub requires the PR to be up to date", () => {
+  const pullRequest = { state: "OPEN", isDraft: false, mergeable: "MERGEABLE", reviewDecision: "APPROVED" };
+  const base = { checks: { checks: [{}], pending: [], failing: [] }, behindBy: 4, originatingIssue: { status: "done" } };
+  assert.equal(readinessVerdict({ ...base, pullRequest: { ...pullRequest, mergeStateStatus: "CLEAN" } }).verdict, "ready");
+  const blocked = readinessVerdict({ ...base, pullRequest: { ...pullRequest, mergeStateStatus: "BEHIND" } });
+  assert.equal(blocked.verdict, "needs_gardening");
+  assert.equal(blocked.reasons[0].code, "base_behind");
+});
+
 test("renders scope, purpose, confidence groups, and immutable guardrail", () => {
   const entry = {
     number: 1,

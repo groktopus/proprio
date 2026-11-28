@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { mergeDiff } from "../../.github/scripts/ci-diff.mjs";
+import { comparisonChangedPaths } from "../../.github/scripts/ci-diff.mjs";
 
 const durableWorkPaths = [
   /^(?:\.github\/workflows\/(?:stability-smoke|linux-source-qualification|durable-work-policy)\.yml|\.github\/scripts\/ci-diff\.mjs)$/,
@@ -19,12 +19,12 @@ export function requiresDurableWorkAcceptance(changedPaths) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [command, first, second] = process.argv.slice(2);
+  const [command, comparison, prHeadOrGroupBase, mode] = process.argv.slice(2);
   switch (command) {
     case "route": {
-      const { changed } = mergeDiff(first, second);
+      const changed = comparisonChangedPaths(comparison, prHeadOrGroupBase, mode);
       const applicable = requiresDurableWorkAcceptance(changed);
-      console.log(`Durable-work acceptance applicable: ${applicable}. PR head: ${second}`);
+      console.log(`Durable-work acceptance applicable: ${applicable}. Comparison: ${comparison}`);
       appendFileSync(process.env.GITHUB_OUTPUT, `applicable=${applicable}\n`);
       break;
     }

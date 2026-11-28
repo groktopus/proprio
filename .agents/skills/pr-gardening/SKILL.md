@@ -163,7 +163,7 @@ node .agents/skills/pr-gardening/scripts/render-report.mjs \
 
 The report states the scope (authors + window), and for every open PR gives its author, a one-line purpose summary taken from the PR description, and a readiness confidence bucket:
 
-- **High:** current-head checks green, no conflicts, required review complete, base fresh, originating issue terminal.
+- **High:** current-head checks green, no conflicts, required review complete, target branch rules satisfied, originating issue terminal.
 - **Medium:** otherwise green but base stale, review not complete, or originating issue active.
 - **Low:** failing/pending checks, draft/just-fixed-unverified state, or no identifiable origin.
 

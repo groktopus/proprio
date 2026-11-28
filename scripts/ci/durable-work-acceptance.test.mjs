@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { requiresDurableWorkAcceptance } from "./durable-work-acceptance.mjs";
 
 test("routes changes that affect update, restore, or run recovery", () => {
@@ -42,6 +45,56 @@ test("unrelated docs and board changes skip durable-work qualification", () => {
   assert.equal(requiresDurableWorkAcceptance(["doc/GOAL.md", "ui/src/pages/Inbox.tsx", "packages/proprio-runner/docs/tutorials/replay.md"]), false);
 });
 
+test("both routers use the full merge group range and recompute it for a replacement candidate", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "smoke-merge-group-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const commit = (...args) => {
+    git("add", "-A");
+    git("-c", "user.name=CI", "-c", "user.email=ci@example.invalid", "commit", "-qm", "fixture", ...args);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "-q");
+  const base = commit("--allow-empty");
+  writeFileSync(join(cwd, ".nvmrc"), "24\n"); // Both qualification routes apply to this predecessor.
+  const predecessor = commit();
+  writeFileSync(join(cwd, "README.md"), "unrelated successor\n");
+  const group = commit();
+  git("checkout", "--detach", "-q", base);
+  writeFileSync(join(cwd, "README.md"), "unrelated successor\n");
+  const replacement = commit();
+  git("checkout", "--detach", "-q", base);
+  writeFileSync(join(cwd, "main-only.md"), "target moved\n");
+  git("update-ref", "refs/remotes/origin/main", commit());
+  const output = join(cwd, "route-output");
+  const event = join(cwd, "event.json");
+  writeFileSync(event, JSON.stringify({ merge_group: { base_sha: predecessor, base_ref: "refs/heads/main" } }));
+  const workflow = readFileSync(new URL("../../.github/workflows/stability-smoke.yml", import.meta.url), "utf8");
+  const resolver = workflow.split("- name: Select the trusted target policy revision\n")[1]
+    .split("          ref:", 1)[0].split("        run: |\n")[1].split("      - name:", 1)[0];
+  const bases = new Map();
+  for (const candidate of [group, replacement]) {
+    writeFileSync(output, "");
+    execFileSync("bash", ["-e", "-c", resolver], {
+      cwd, env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_EVENT_PATH: event,
+        GITHUB_EVENT_NAME: "merge_group", TARGET_REF: "refs/heads/main", GITHUB_SHA: candidate },
+    });
+    assert.equal(readFileSync(output, "utf8"), `sha=${base}\n`);
+    bases.set(candidate, readFileSync(output, "utf8").trim().slice("sha=".length));
+  }
+
+  for (const [script, args] of [["durable-work-acceptance.mjs", ["route"]], ["board-accessibility-routing.mjs", []]]) {
+    const scriptPath = fileURLToPath(new URL(script, import.meta.url));
+    for (const [candidate, applicable] of [[group, true], [replacement, false]]) {
+      writeFileSync(output, "");
+      execFileSync(process.execPath, [scriptPath, ...args, candidate, bases.get(candidate), "--merge-group"], {
+        cwd, env: { ...process.env, GITHUB_OUTPUT: output },
+      });
+      assert.equal(readFileSync(output, "utf8"), `applicable=${applicable}\n`);
+    }
+  }
+});
+
 test("the smoke workflow gates its verdict on the routing outputs and applicable jobs", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/stability-smoke.yml", import.meta.url), "utf8");
   const routeOutput = "$" + "{{ steps.route.outputs.applicable }}";
@@ -72,6 +125,7 @@ test("the smoke workflow gates its verdict on the routing outputs and applicable
   assert.notEqual(verdict(unrelated, "failure"), 0);
   assert.notEqual(verdict(relevant, "success", { ROUTING_RESULT: "failure" }), 0);
   assert.notEqual(verdict(relevant, "success", { STABILITY_RESULT: "failure" }), 0);
+  assert.notEqual(verdict(relevant, "success", { STABILITY_RESULT: "cancelled" }), 0);
 
   function boardVerdict(applicable, result) {
     return verdict(unrelated, "skipped", {
