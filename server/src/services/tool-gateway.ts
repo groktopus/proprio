@@ -135,6 +135,7 @@ import {
   toolActionRequests,
   toolActionDeliveries,
   toolAccessAuditEvents,
+  managedAuditEvents,
   toolApplications,
   toolCallEvents,
   toolCatalogEntries,
@@ -1667,6 +1668,174 @@ export function createToolGatewayService(
         throw new ToolGatewayHttpError(error.status, error.message, details.reasonCode, details);
       }
       throw error;
+    }
+  }
+  async function recordManagedMcpDispatchIntent(input: {
+    companyId: string;
+    runId: string | null;
+    taskId: string | null;
+    invocationId: string;
+    connectionId: string;
+    destinationFingerprint: string;
+    toolName: string;
+    argumentsHash: string;
+    routingHash: string;
+    providerRequestId: string;
+    fenceEquivalentWrites: boolean;
+  }): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const [admission] = await tx.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, input.companyId),
+        eq(managedAuditEvents.source, "tool_gateway"),
+        eq(managedAuditEvents.phase, "policy_decision"),
+        eq(managedAuditEvents.invocationId, input.invocationId),
+      )).limit(1);
+      if (!admission) return false;
+      if (admission.runId !== input.runId || admission.taskId !== input.taskId ||
+          admission.connectionId !== input.connectionId || admission.decision !== "allow") {
+        throw new ToolGatewayHttpError(409,
+          "Managed gateway invocation context no longer matches its recorded admission",
+          "managed_audit_context_mismatch", { invocationId: input.invocationId });
+      }
+      // Serialize equivalent writes across idempotency keys and replacement runs.
+      // The arguments component is already a keyed digest; no raw input is persisted.
+      const operationFingerprint = input.fenceEquivalentWrites ? createHash("sha256").update(JSON.stringify([
+        admission.companyId, admission.actorType, admission.actorId, admission.connectionId,
+        input.destinationFingerprint, input.toolName, input.argumentsHash, input.routingHash,
+      ])).digest("hex") : null;
+      if (operationFingerprint) {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${operationFingerprint}, 0))`);
+        const openIntent = await tx.execute(sql`select 1 from managed_audit_events i
+          where i.company_id = ${input.companyId}::uuid
+            and i.source = 'tool_gateway' and i.phase = 'dispatch_intent'
+            and i.operation_fingerprint = ${operationFingerprint}
+            and not exists (select 1 from managed_audit_events t
+              where t.company_id = i.company_id and t.source = i.source
+                and t.phase = 'terminal_outcome' and t.invocation_id = i.invocation_id)
+          limit 1`);
+        if (openIntent.length) {
+          throw new ToolGatewayHttpError(409,
+            "An equivalent managed MCP write has no terminal receipt. Reconcile it before starting another operation.",
+            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+        }
+      }
+      const [inserted] = await tx.insert(managedAuditEvents).values({
+        companyId: admission.companyId,
+        source: admission.source,
+        schemaVersion: admission.schemaVersion,
+        eventType: "provider_dispatch_intended",
+        phase: "dispatch_intent",
+        occurredAt: new Date(),
+        runId: admission.runId,
+        taskId: admission.taskId,
+        invocationId: admission.invocationId,
+        requestId: admission.requestId,
+        operationFingerprint,
+        providerRequestId: input.providerRequestId,
+        connectionId: admission.connectionId,
+        actorType: admission.actorType,
+        actorId: admission.actorId,
+        decision: admission.decision,
+        status: "dispatch_intended",
+        reasonCode: null,
+      }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
+      if (!inserted) {
+        throw new ToolGatewayHttpError(409,
+          "This managed gateway invocation already has a dispatch intent without a terminal receipt",
+          "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+      }
+      return true;
+    });
+  }
+
+  async function hasManagedMcpPhase(companyId: string, invocationId: string, phase: "dispatch_intent" | "terminal_outcome") {
+    const [event] = await db.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, companyId),
+      eq(managedAuditEvents.source, "tool_gateway"),
+      eq(managedAuditEvents.phase, phase),
+      eq(managedAuditEvents.invocationId, invocationId),
+    )).limit(1);
+    return Boolean(event);
+  }
+
+  async function managedMcpReceiptRequired(input: {
+    companyId: string; invocationId: string; providerType: ToolGatewayDescriptor["providerType"];
+    approvedActionRequestId?: string | null;
+  }) {
+    return !input.approvedActionRequestId && input.providerType === "mcp_remote_http" &&
+      await hasManagedMcpPhase(input.companyId, input.invocationId, "dispatch_intent");
+  }
+
+  type ManagedMcpTerminalInvocationUpdate = {
+    status: "succeeded" | "failed" | "timed_out" | "rate_limited";
+    completedAt: Date;
+    updatedAt: Date;
+    resultHash?: string | null;
+    resultSummary?: typeof toolInvocations.$inferSelect.resultSummary;
+    resultSizeBytes?: number | null;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+  };
+
+  async function writeManagedMcpTerminalOutcome(input: {
+    companyId: string;
+    invocationId: string;
+    invocationUpdate: ManagedMcpTerminalInvocationUpdate;
+    reasonCode: string | null;
+  }): Promise<void> {
+    try {
+      await db.transaction(async (tx) => {
+        const [intent] = await tx.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, input.companyId),
+          eq(managedAuditEvents.source, "tool_gateway"),
+          eq(managedAuditEvents.phase, "dispatch_intent"),
+          eq(managedAuditEvents.invocationId, input.invocationId),
+        )).limit(1);
+        const [updated] = await tx.update(toolInvocations).set(input.invocationUpdate).where(and(
+          eq(toolInvocations.id, input.invocationId),
+          eq(toolInvocations.companyId, input.companyId),
+        )).returning({ id: toolInvocations.id });
+        if (!updated) throw new Error("Managed MCP invocation disappeared before terminal capture");
+        if (!intent) throw new Error("Managed MCP terminal outcome has no dispatch intent");
+        const [admission] = await tx.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, input.companyId),
+          eq(managedAuditEvents.source, "tool_gateway"),
+          eq(managedAuditEvents.phase, "policy_decision"),
+          eq(managedAuditEvents.invocationId, input.invocationId),
+        )).limit(1);
+        if (!admission) throw new Error("Managed MCP dispatch intent has no admission record");
+        const [inserted] = await tx.insert(managedAuditEvents).values({
+          companyId: admission.companyId,
+          source: admission.source,
+          schemaVersion: admission.schemaVersion,
+          eventType: "gateway_terminal_outcome_recorded",
+          phase: "terminal_outcome",
+          occurredAt: input.invocationUpdate.completedAt,
+          runId: admission.runId,
+          taskId: admission.taskId,
+          invocationId: admission.invocationId,
+          requestId: admission.requestId,
+          connectionId: admission.connectionId,
+          actorType: admission.actorType,
+          actorId: admission.actorId,
+          decision: admission.decision,
+          status: input.invocationUpdate.status,
+          reasonCode: input.reasonCode,
+        }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
+        if (!inserted) throw new Error("Managed MCP invocation already has a terminal receipt");
+      });
+    } catch (error) {
+      // Do not let the caller classify a failed durable receipt as a provider
+      // failure: the dispatch is now ambiguous and must remain visibly open.
+      try { await recordToolRuntimeAuditWriteFailure(db, input.companyId); } catch { /* Preserve the original capture failure. */ }
+      throw new ManagedAuditCaptureError(error);
+    }
+  }
+
+  class ManagedAuditCaptureError extends Error {
+    constructor(cause: unknown) {
+      super("Managed gateway terminal receipt could not be persisted", { cause });
+      this.name = "ManagedAuditCaptureError";
     }
   }
   const secrets = secretService(db);
@@ -8147,6 +8316,7 @@ export function createToolGatewayService(
     useDefaultTimeout = false,
     /** `run` aborts when the run is stopped (the task is cancelled); `caller` when the caller leaves (it is kept). */
     taskSignals: { run?: AbortSignal; caller?: AbortSignal; attachToTaskRecordId?: string | null } = {},
+    captureManagedAudit = false,
   ): Promise<RemoteHttpExecutionResult> {
     const { entry, connection, sourceTemplateKey } = await resolveConnectedRemoteTool(
       session,
@@ -8253,10 +8423,36 @@ export function createToolGatewayService(
           throw new ToolGatewayHttpError(403, "This Google action is not covered by the current permission grant.", "oauth_insufficient_scope");
         }
       };
-      const dispatchRemote = async (target: string, init: RequestInit) => {
+      let managedDispatchEligible = false;
+      let managedDispatchIntentWritten = false;
+      let managedRoutingHash = toolRequestIdentityHash({}, options.toolActionSigningSecret);
+      const dispatchRemote = async (
+        target: string,
+        init: RequestInit,
+        toolCall = false,
+        providerRequestId?: string | number,
+      ) => {
         // Refresh can reduce consent. Recheck the selected grant after refreshing
         // credentials and before every dispatch (including an authorization retry).
         await assertWorkspaceGrantCurrent();
+        if (managedDispatchEligible && !managedDispatchIntentWritten && toolCall) {
+          if (typeof providerRequestId !== "string" && typeof providerRequestId !== "number") {
+            throw new Error("Managed MCP tools/call is missing its provider correlation id");
+          }
+          managedDispatchIntentWritten = await recordManagedMcpDispatchIntent({
+            companyId: session.companyId,
+            runId: session.runId,
+            taskId: session.issueId,
+            invocationId,
+            connectionId: connection.id,
+            destinationFingerprint: createHash("sha256").update(String(endpoint)).digest("hex"),
+            toolName: upstreamToolName,
+            argumentsHash: toolRequestIdentityHash(parameters ?? {}, options.toolActionSigningSecret),
+            routingHash: managedRoutingHash,
+            providerRequestId: String(providerRequestId),
+            fenceEquivalentWrites: tool.risk !== "read",
+          });
+        }
         return options.remoteHttpRequest
           ? options.remoteHttpRequest(target, init)
           : guardedRemoteHttpFetch(target, init, {
@@ -8518,6 +8714,7 @@ export function createToolGatewayService(
       // route the call too, so they are part of a task's identity. Per-run
       // metadata headers and credentials are not: they change on recovery.
       const taskCallerHeaders = mcpTaskCallerHeaders(connection, callerHeaders);
+      managedRoutingHash = toolRequestIdentityHash(taskCallerHeaders, options.toolActionSigningSecret);
       const taskRoutingIdentity = mcpTaskArgumentsIdentity(taskCallerHeaders);
       // Built from the version a request actually used: a version retry can
       // move a saved legacy connection to stateless MCP mid-call.
@@ -8533,6 +8730,8 @@ export function createToolGatewayService(
         } : null;
       };
       const taskIdentity = taskIdentityFor(requestHeaders);
+      managedDispatchEligible = captureManagedAudit && Boolean(session.runId && session.agentId) &&
+        !taskIdentity && !elicitationClaim;
       // This call's hold on a task it starts or attaches to.
       const taskOwner = `call:${invocationId}:${randomUUID()}`;
       const taskTransport = (protocolVersion: string) => mcpTaskTransport({
@@ -8567,7 +8766,7 @@ export function createToolGatewayService(
         // endpoint changed): report it rather than start the work again.
         throw mcpTaskExpiredError();
       }
-      let response = await dispatchRemote(endpoint, toolCallInit());
+      let response = await dispatchRemote(endpoint, toolCallInit(), true, callRequestId);
       // A stateless server rejects a request it cannot accept before running
       // anything (wrong version, or legacy request shape), so one retry with a
       // supported version is safe.
@@ -8611,8 +8810,9 @@ export function createToolGatewayService(
             const sessionId = new Headers(requestHeaders).get("mcp-session-id");
             if (sessionId) mcpSession = { scope, headers, sessionId };
           }
-          callRequestId = `${requestId}-version`;
-          response = await dispatchRemote(endpoint, toolCallInit());
+          // Keep the same JSON-RPC id across the safe protocol negotiation retry.
+          callRequestId = requestId;
+          response = await dispatchRemote(endpoint, toolCallInit(), true, callRequestId);
         }
       }
       if (isInsufficientConnectionScope(response)) {
@@ -13825,6 +14025,15 @@ export function createToolGatewayService(
               throw new ToolGatewayHttpError(409, "The saved GitHub publication is not available yet", "github_publication_unavailable");
           }
         }
+        if (recorded.replayed && !input.approvedActionRequestId &&
+            !retryingMcpTaskRecordId &&
+            tool.providerType === "mcp_remote_http" &&
+            await hasManagedMcpPhase(session.companyId, invocationId, "dispatch_intent") &&
+            !(await hasManagedMcpPhase(session.companyId, invocationId, "terminal_outcome"))) {
+          throw new ToolGatewayHttpError(409,
+            "The previous managed MCP dispatch has no terminal receipt. Reconcile it before retrying this action.",
+            "managed_dispatch_outcome_unknown", { invocationId });
+        }
         if (recorded.replayed && !retryingSlackRateLimit && !retryingGitHubPublication && !retryingMcpTask) {
           if (gitHubPublicationReplay && !gitHubReplayPolicyAllowed)
             throw new ToolGatewayHttpError(policyErrorStatus(accessDecision), accessDecision.explanation, accessDecision.reasonCode);
@@ -13844,11 +14053,14 @@ export function createToolGatewayService(
               replayed: true,
             },
           });
+          const replayInvocation = await db.select().from(toolInvocations).where(and(
+            eq(toolInvocations.companyId, session.companyId), eq(toolInvocations.id, invocationId),
+          )).limit(1).then(rows => rows[0] ?? recorded.invocation);
           return {
             invocationId,
             status: "replayed" as const,
             tool: tool.name,
-            result: recorded.invocation.resultSummary ?? null,
+            result: replayInvocation.resultSummary ?? null,
           };
         }
         if (accessDecision.decision === "require_approval") {
@@ -13931,6 +14143,7 @@ export function createToolGatewayService(
         },
       });
 
+      let managedTerminalCommitted = false;
       try {
         await assertCurrentGatewayIssuer(session, tool, effectiveParameters, invocationId, !!input.approvedActionRequestId);
         const executionTimeoutMs = timeoutMs(input.timeoutMs, tool);
@@ -13961,6 +14174,7 @@ export function createToolGatewayService(
                   caller: input.signal,
                   attachToTaskRecordId: retryingMcpTaskRecordId,
                 },
+                !input.approvedActionRequestId && tool.providerType === "mcp_remote_http",
               )
             : tool.providerType === "mcp_local_stdio"
               ? await executeLocalStdioTool(
@@ -14013,17 +14227,30 @@ export function createToolGatewayService(
             { execution: connectedMcpExecution?.execution },
           );
         }
-        await db
-          .update(toolInvocations)
-          .set({
-            status: "succeeded",
-            resultHash: resultValidation.summary.sha256 ?? null,
-            resultSummary: resultValidation.summary,
-            resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-            completedAt,
-            updatedAt: completedAt,
-          })
-          .where(eq(toolInvocations.id, invocationId));
+        const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
+          invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
+        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
+          status: "succeeded",
+          resultHash: resultValidation.summary.sha256 ?? null,
+          resultSummary: resultValidation.summary,
+          resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+          ...(capturedManagedDispatch ? { errorCode: null } : {}),
+          completedAt,
+          updatedAt: completedAt,
+        };
+        if (capturedManagedDispatch) {
+          await writeManagedMcpTerminalOutcome({
+            companyId: session.companyId,
+            invocationId,
+            invocationUpdate,
+            reasonCode: "tool_completed",
+          });
+          managedTerminalCommitted = true;
+          void emitConnectionInvoked(db, invocationId);
+        } else {
+          await db.update(toolInvocations).set(invocationUpdate)
+            .where(eq(toolInvocations.id, invocationId));
+        }
         // A provider task's result is now recorded; only now is it delivered.
         await markMcpTaskDelivered(session.companyId, invocationId);
         if (input.approvedActionRequestId) {
@@ -14099,10 +14326,6 @@ export function createToolGatewayService(
             execution: connectedMcpExecution?.execution ?? undefined,
           },
         });
-        // After the bookkeeping above: a throw there is caught below, overwrites
-        // the row to failed, and emits — an earlier success emit would make one
-        // execution report both outcomes.
-        void emitConnectionInvoked(db, invocationId);
         if (connectedMcpExecution) {
           await recordMcpAppView(db, {
             session,
@@ -14130,6 +14353,11 @@ export function createToolGatewayService(
                 err.details,
               )
             : err;
+        if (normalizedError instanceof ManagedAuditCaptureError ||
+            (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown")) {
+          throw normalizedError;
+        }
+        if (managedTerminalCommitted) throw normalizedError;
         const status =
           normalizedError instanceof ToolGatewayHttpError
             ? normalizedError.status
@@ -14154,21 +14382,25 @@ export function createToolGatewayService(
           throw normalizedError;
         }
         const completedAt = new Date();
-        await db
-          .update(toolInvocations)
-          .set({
-            status:
-              status === 504
-                ? "timed_out"
-                : status === 429
-                  ? "rate_limited"
-                  : "failed",
-            errorCode: reasonCode,
-            errorMessage: message,
-            completedAt,
-            updatedAt: completedAt,
-          })
-          .where(eq(toolInvocations.id, invocationId));
+        const terminalStatus = status === 504 ? "timed_out" as const
+          : status === 429 ? "rate_limited" as const : "failed" as const;
+        const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
+          invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
+        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
+          status: terminalStatus,
+          errorCode: reasonCode,
+          errorMessage: message,
+          completedAt,
+          updatedAt: completedAt,
+        };
+        if (capturedManagedDispatch && reasonCode !== "provider_task_pending") {
+          await writeManagedMcpTerminalOutcome({
+            companyId: session.companyId, invocationId, invocationUpdate, reasonCode,
+          });
+        } else {
+          await db.update(toolInvocations).set(invocationUpdate)
+            .where(eq(toolInvocations.id, invocationId));
+        }
         void emitConnectionInvoked(db, invocationId);
         if (input.approvedActionRequestId) {
           const actionRequestId = input.approvedActionRequestId;

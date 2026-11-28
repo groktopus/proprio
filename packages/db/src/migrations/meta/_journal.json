@@ -3585,6 +3585,13 @@
       "when": 1795827518289,
       "tag": "0513_swift_mephisto",
       "breakpoints": true
+    },
+    {
+      "idx": 514,
+      "version": "7",
+      "when": 1795833377404,
+      "tag": "0514_managed_mcp_dispatch_receipts",
+      "breakpoints": true
     }
   ]
 }

@@ -583,6 +583,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     await db.delete(toolActionRequests);
     await db.delete(toolInvocations);
     await db.delete(toolAccessAuditEvents);
+    await db.delete(managedAuditEvents);
     await db.delete(toolPolicies);
     await db.delete(toolMcpGatewayTokens);
     await db.delete(toolMcpGateways);
@@ -611,6 +612,168 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
   afterAll(async () => {
     await db?.$client.end({ timeout: 1 });
     await tempDb?.cleanup();
+  });
+
+  it("records managed dispatch intent before direct MCP send and terminal receipt with the result", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    let intentWasVisibleAtSend = false;
+    const remote = await startFakeRemoteMcpServer(({ body }) => {
+      const args = body?.params && typeof body.params === "object"
+        ? (body.params as { arguments?: { key?: string } }).arguments : undefined;
+      const failed = args?.key === "audit-provider-failure";
+      return { body: {
+        jsonrpc: "2.0", id: body?.id,
+        result: { content: [{ type: "text", text: failed ? "provider refused action" : "safe result" }], ...(failed ? { isError: true } : {}) },
+      } };
+    });
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (url, init) => {
+        const body = typeof init.body === "string" ? JSON.parse(init.body) as { method?: string } : null;
+        if (body?.method === "tools/call") {
+          const [intent] = await db.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+            eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+          )).limit(1);
+          intentWasVisibleAtSend = Boolean(intent);
+        }
+        return fetch(url, init);
+      } });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const input = { sessionToken: session.token, tool, parameters: { key: "audit-private-key", value: "audit-private-value" },
+        idempotencyKey: "managed-mcp-audit-1" };
+      const result = await gateway.executeTool(input);
+      expect(result).toMatchObject({ status: "completed", tool });
+      expect(intentWasVisibleAtSend).toBe(true);
+      const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id));
+      expect(events).toHaveLength(3);
+      const invocation = events.find(event => event.phase === "policy_decision")!;
+      expect(invocation).toMatchObject({ runId: run.id, taskId: issue.id,
+        connectionId: connection.id, actorType: "agent", phase: "policy_decision" });
+      expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
+        eventType: "provider_dispatch_intended", status: "dispatch_intended", decision: "allow",
+        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
+      });
+      const intent = events.find(event => event.phase === "dispatch_intent")!;
+      const providerRequest = remote.requests.find(request => request.body?.method === "tools/call")!;
+      expect(intent.providerRequestId).toBe(String(providerRequest.body?.id));
+      expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
+        eventType: "gateway_terminal_outcome_recorded", status: "succeeded", reasonCode: "tool_completed",
+        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
+      });
+      expect(JSON.stringify(events)).not.toContain("audit-private-key");
+      expect(JSON.stringify(events)).not.toContain("audit-private-value");
+      await expect(gateway.executeTool(input)).resolves.toMatchObject({ status: "replayed", invocationId: invocation.invocationId });
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(3);
+
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_mcp_receipt_failure_${suffix}`;
+      const triggerName = `managed_mcp_receipt_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed terminal receipt fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'terminal_outcome') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        const ambiguousInput = { ...input, idempotencyKey: "managed-mcp-audit-ambiguous-1",
+          parameters: { key: "another-private-key", value: "another-private-value" } };
+        await expect(gateway.executeTool(ambiguousInput)).rejects.toThrow(/terminal receipt could not be persisted/);
+        const [ambiguous] = await db.select().from(toolInvocations).where(and(
+          eq(toolInvocations.companyId, company.id), eq(toolInvocations.idempotencyKey, "managed-mcp-audit-ambiguous-1"),
+        ));
+        expect(ambiguous).toMatchObject({ status: "executing" });
+        expect(await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguous.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+        ))).toHaveLength(0);
+        expect(await db.select().from(toolCallEvents).where(and(
+          eq(toolCallEvents.invocationId, ambiguous.id), eq(toolCallEvents.eventType, "call_completed"),
+        ))).toHaveLength(0);
+        expect((await db.select().from(toolRuntimeMetricCounters).where(and(
+          eq(toolRuntimeMetricCounters.companyId, company.id), eq(toolRuntimeMetricCounters.metric, "audit_write_failed"),
+        ))).reduce((sum, row) => sum + row.count, 0)).toBeGreaterThan(0);
+        await expect(gateway.executeTool(ambiguousInput)).rejects.toMatchObject({
+          status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+        });
+        const replacementRun = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+          invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning().then(rows => rows[0]!);
+        const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: replacementRun.id, issueId: issue.id });
+        await expect(gateway.executeTool({ ...ambiguousInput, sessionToken: replacementSession.token,
+          idempotencyKey: "managed-mcp-audit-ambiguous-different-key" })).rejects.toMatchObject({
+          status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+        });
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+      const failedInput = { ...input, idempotencyKey: "managed-mcp-audit-failure-1",
+        parameters: { key: "audit-provider-failure", value: "another-private-value" } };
+      await expect(gateway.executeTool(failedInput)).rejects.toMatchObject({ reasonCode: "tool_error" });
+      const [failedInvocation] = await db.select().from(toolInvocations).where(and(
+        eq(toolInvocations.companyId, company.id), eq(toolInvocations.idempotencyKey, "managed-mcp-audit-failure-1"),
+      ));
+      expect(failedInvocation).toMatchObject({ status: "failed", errorCode: "tool_error" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, failedInvocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toEqual([expect.objectContaining({ status: "failed", reasonCode: "tool_error" })]);
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(3);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("does not apply the unresolved write fingerprint fence to read-only MCP calls", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const first = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id, result: { content: [{ type: "text", text: "read result" }] },
+    } }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_get", riskLevel: "read",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_mcp_read_receipt_failure_${suffix}`;
+      const triggerName = `managed_mcp_read_receipt_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed read receipt fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'terminal_outcome') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        const firstSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: first.run.id, issueId: first.issue.id });
+        const input = { tool, parameters: { message: "same-key" }, idempotencyKey: "managed-read-1" };
+        await expect(gateway.executeTool({ ...input, sessionToken: firstSession.token })).rejects.toThrow(/terminal receipt could not be persisted/);
+        const second = await createIssueAndRun(db, company.id, agent.id);
+        const secondSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+          runId: second.run.id, issueId: second.issue.id });
+        await expect(gateway.executeTool({ ...input, sessionToken: secondSession.token,
+          idempotencyKey: "managed-read-2" })).rejects.toThrow(/terminal receipt could not be persisted/);
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+        const intents = await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+        ));
+        expect(intents).toHaveLength(2);
+        expect(intents.map(event => event.operationFingerprint)).toEqual([null, null]);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+    } finally {
+      await remote.close();
+    }
   });
 
   it("preserves provider tool errors in MCP responses and failed invocation audits", async () => {
