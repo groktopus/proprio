@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.20
-FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS base
+FROM node:26-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
@@ -134,7 +134,7 @@ COPY packages/shared/src/provider-failure.generated.ts /packages/shared/src/
 # here also runs on trixie. The pack copies this Node binary as its own
 # interpreter, which is why the exact Node release is pinned and part of the
 # image identity. The digest is the multi-platform index (amd64 and arm64).
-FROM node:24.22.3-bookworm@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496 AS runner-artifacts-node
+FROM node:26.13.1-bookworm@sha256:b7087bc4d973034b30854b378ba107f9fab622b47514cb7e2592e41b8bab8d49 AS runner-artifacts-node
 RUN corepack enable
 
 # The image identity, computed inside the build from the files the build
