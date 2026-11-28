@@ -249,6 +249,21 @@ When you change the data model:
 Then update every layer that the change affects: `packages/shared` types and
 validators, `server` routes and services, and `ui` API clients and pages.
 
+### Coordinate concurrent migration work
+
+When assigning work that needs a migration, record one migration owner and any
+dependent PRs on the driving issue. The owner coordinates changes to the
+relevant schema, generates the migration SQL and Drizzle metadata, and resolves
+numbering or journal conflicts for that PR. Keep one active writer of new
+migrations while the pilot runs. The next owner generates against the updated
+target once the preceding migration lands. Use an explicit PR dependency when
+two changes must land in order.
+
+Agents can prepare independent application changes in parallel in their own
+worktrees. When a shared contract must change, land the backward-compatible
+schema change first, migrate callers in parallel, and schedule any cleanup
+after the old contract is no longer used.
+
 ### Competing migration processes
 
 The migration command and server startup acquire the same PostgreSQL session
