@@ -40,6 +40,11 @@ import * as dbClient from "@groktopus/db";
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
 type Db = ReturnType<typeof createDb>;
+type PendingAuditResponse = {
+  status: number;
+  text: string;
+  body: Record<string, unknown>;
+};
 let activityRoutes: typeof import("../routes/activity.js").activityRoutes;
 
 async function createApp(db: Db, actor: Express.Request["actor"]) {
@@ -421,9 +426,6 @@ describePostgres("agent action audit routes", () => {
     };
     const saved = await db.insert(managedAuditExports)
       .values(Array.from({ length: 127 }, () => fields)).returning({ id: managedAuditExports.id });
-    const [expired] = await db.insert(managedAuditExports).values({
-      ...fields, expiresAt: new Date(0),
-    }).returning({ id: managedAuditExports.id });
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
@@ -431,6 +433,7 @@ describePostgres("agent action audit routes", () => {
     const otherWriter = createDb(tempDb!.connectionString, { maxConnections: 1 });
     const ready = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
+    let losingPost: Promise<unknown> | undefined;
     const replica = otherWriter.transaction(async tx => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${company.id}, 0))`);
       ready.resolve();
@@ -439,7 +442,9 @@ describePostgres("agent action audit routes", () => {
     }, { isolationLevel: "serializable" });
     try {
       await Promise.race([ready.promise, replica]);
-      const losingPost = board.post(path).send(window);
+      // Calling then starts the SuperTest request. Keep the promise pending
+      // while the authenticated request waits on the competing writer lock.
+      losingPost = board.post(path).send(window).then(response => response);
       await expect.poll(async () => {
         const [waiting] = await db.execute<{ waiting: boolean }>(sql`
           select exists (
@@ -453,9 +458,9 @@ describePostgres("agent action audit routes", () => {
         return waiting?.waiting ?? false;
       }).toBe(true);
       release.resolve();
-      const losingResponse = await losingPost;
-      expect(losingResponse.status, losingResponse.text).toBe(503);
-      expect(losingResponse.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+      const losingResponse = await losingPost! as PendingAuditResponse;
+      expect(losingResponse.status, losingResponse.text).toBe(429);
+      expect(losingResponse.body).toMatchObject({ details: { reasonCode: "active_snapshot_limit" } });
       expect(losingResponse.body).not.toHaveProperty("exportId");
       expect(losingResponse.body).not.toHaveProperty("eventCount");
       await replica;
@@ -466,14 +471,13 @@ describePostgres("agent action audit routes", () => {
       const retained = await db.select({ id: managedAuditExports.id }).from(managedAuditExports)
         .where(eq(managedAuditExports.companyId, company.id));
       expect(retained).toHaveLength(128);
-      expect(retained.map(entry => entry.id)).not.toContain(expired.id);
       await board.post(`/api/companies/${otherCompany.id}/audit/managed-exports`).send(window).expect(201);
 
       await db.update(managedAuditExports).set({ expiresAt: new Date(0) }).where(eq(managedAuditExports.id, saved[0].id));
       await board.post(path).send(window).expect(201);
     } finally {
       release.resolve();
-      await Promise.allSettled([replica]);
+      await Promise.allSettled([replica, losingPost]);
       await otherWriter.$client.end();
       vi.unstubAllEnvs();
     }

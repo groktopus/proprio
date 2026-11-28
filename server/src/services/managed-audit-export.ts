@@ -86,6 +86,7 @@ async function runExportTransaction<T>(
   { companyId, signal }: ExportScope,
   work: (tx: DbTransaction) => Promise<T>,
   transactionOptions: typeof repeatableRead | typeof serializable = repeatableRead,
+  lockCompanyQuota = false,
 ): Promise<T> {
   await acquireExport(companyId, signal);
   try {
@@ -96,10 +97,28 @@ async function runExportTransaction<T>(
       const applyStatementTimeout = (tx: DbTransaction) => tx.execute(sql`select set_config('statement_timeout',
         least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
         true) from pg_settings where name = 'statement_timeout'`);
-      return dedicated.transaction(async tx => {
+      const run = () => dedicated.transaction(async tx => {
         await applyStatementTimeout(tx);
         return work(tx);
       }, transactionOptions);
+      if (!lockCompanyQuota) return run();
+
+      // Acquire the company admission lock before beginning SERIALIZABLE.
+      // A session-level lock does not establish an MVCC snapshot while it
+      // waits, so the transaction sees the committed quota state after the
+      // previous writer releases the lock.
+      await dedicated.execute(sql`select pg_advisory_lock(hashtextextended(${companyId}, 0))`);
+      try {
+        return await run();
+      } finally {
+        // A deadline can end the dedicated session. In that case PostgreSQL
+        // releases the session lock as part of disconnect cleanup.
+        try {
+          await dedicated.execute(sql`select pg_advisory_unlock(hashtextextended(${companyId}, 0))`);
+        } catch {
+          // Preserve the transaction/deadline failure.
+        }
+      }
     }, { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
   } catch (error) {
     if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
@@ -207,12 +226,9 @@ export async function createManagedAuditExport(
       throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
     }
     const now = new Date();
-    // Serialize quota admission for this company across API replicas. The
-    // lock keeps the bounded reclaim, boundary probe, and insert one ordered
-    // operation while leaving different companies independent.
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${scope.companyId}, 0))`);
-    // Serializable isolation makes this quota check and the insert one
-    // ordered operation even when separate API replicas create snapshots.
+    // The pre-transaction session lock orders quota admission across API
+    // replicas; SERIALIZABLE still makes this check and insert fail closed if
+    // another writer changes the relevant state unexpectedly.
     // A source-epoch rotation or a retention advance invalidates old
     // snapshots just like expiry. Reclaim only a bounded batch so a single
     // request cannot turn quota admission into an unbounded cleanup job.
@@ -278,7 +294,7 @@ export async function createManagedAuditExport(
       details: { exportId: saved.id, source: "tool_gateway" },
     }, publications);
     return saved;
-  }, serializable);
+  }, serializable, true);
   for (const publication of publications) publishActivity(publication);
   return exportReceipt(snapshot);
 }

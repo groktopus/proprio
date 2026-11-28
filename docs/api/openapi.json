@@ -63381,7 +63381,7 @@
             }
           },
           "429": {
-            "description": "For export_busy, retry the request with backoff. For active_snapshot_limit, resume a retained snapshot or retry after one expires.",
+            "description": "The response details.reasonCode distinguishes recovery: export_busy means retry the request with backoff; active_snapshot_limit means resume a retained snapshot or retry after one expires.",
             "content": {
               "application/json": {
                 "schema": {

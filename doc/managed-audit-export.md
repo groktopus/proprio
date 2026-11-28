@@ -88,7 +88,8 @@ after an active snapshot expires. A new snapshot reclaims at most 128 rows
 that are expired or invalidated by the current source epoch or retention
 cutoff. Page access records follow their separate retention rules. The quota
 is company-wide; per-operator fairness and epoch/retention-aware capacity
-policy are follow-up work in #383.
+policy are follow-up work in #383. Permanent invalidation, rollout
+coordination, and losing-writer behavior are owned by #385.
 
 During a rolling upgrade, this bound is enforced only by API instances running
 this version. Complete the API rollout before treating the company quota as a
