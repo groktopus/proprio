@@ -457,6 +457,47 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
+  it("does not reveal a missing task when a surviving run is bound to another user's private task", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const [privateTask] = await db.insert(issues).values({
+      companyId: company.id, title: "Private surviving binding", visibility: "private", responsibleUserId: randomUUID(),
+    }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: privateTask.id,
+    }).returning();
+    const missingTaskId = randomUUID();
+    await db.insert(managedAuditEvents).values({
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
+      phase: "policy_decision", decision: "allow", status: "authorized", taskId: missingTaskId,
+      runId: run.id, invocationId: randomUUID(),
+    });
+
+    const path = `/api/companies/${company.id}/audit/managed-exports`;
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const created = await board.post(path).send(window).expect(201);
+      expect(created.body.eventCount).toBe(0);
+      const page = await board.get(`${path}/${created.body.exportId}`).expect(200);
+      expect(page.body).toMatchObject({ eventCount: 0, events: [], complete: true });
+      expect(page.text).not.toContain(missingTaskId);
+      expect(page.text).not.toContain(run.id);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each(["responsibility_dashboard", "responsibility_bar", "responsibility_status_update", "automation_conversation"])(
     "keeps %s audit events visible only to their owner, including when a binding disappears",
     async (originKind) => {
