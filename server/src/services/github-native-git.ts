@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, executionWorkspaces, githubNativeGrants, heartbeatRuns, issues, projects, projectWorkspaces, type Db } from "@groktopus/db";
+import { agents, executionWorkspaces, githubNativeGrants, heartbeatRuns, issues, projects, projectWorkspaces, type Db, type DbTransaction } from "@groktopus/db";
 import { withAccountHomeSecretMutationLock } from "@groktopus/adapter-codex-local/server";
 import {
   githubNativeRepositorySchema, isAgentStatusInvokable, isUuidLike,
@@ -23,6 +23,16 @@ type Repository = { id: number; full_name: string };
 
 export function supportsNativeGitBackend(backend: string | null) {
   return backend === "codex_app_server" || backend === "opencode_server" || backend === "acpx_runtime";
+}
+
+export async function removeAgentNativeGitBindings(db: Db | DbTransaction, companyId: string, agentId: string) {
+  const removed = await db.delete(githubNativeGrants).where(and(
+    eq(githubNativeGrants.companyId, companyId), eq(githubNativeGrants.agentId, agentId),
+  )).returning({ secretId: githubNativeGrants.secretId });
+  const vault = secretService(db);
+  for (const row of removed) {
+    if (row.secretId) await vault.remove(row.secretId, { systemPurpose: "github_native_git" });
+  }
 }
 
 function summarize(grant: Grant): GitHubNativeGrantSummary {
@@ -224,12 +234,7 @@ export function githubNativeGitService(db: Db) {
       return candidates.filter(agent => supportsNativeGit(agent, enableNativeRunner)).map(agent => agent.id);
     },
     async removeAgentBindings(companyId: string, agentId: string) {
-      const removed = await db.delete(githubNativeGrants).where(agentGrants(companyId, agentId))
-        .returning({ secretId: githubNativeGrants.secretId });
-      const vault = secretService(db);
-      for (const row of removed) {
-        if (row.secretId) await vault.remove(row.secretId, { systemPurpose: "github_native_git" });
-      }
+      await removeAgentNativeGitBindings(db, companyId, agentId);
     },
     async configure(companyId: string, userId: string, input: GitHubNativeSetupInput, reauthorize?: () => Promise<void>) {
       const repository = githubNativeRepositorySchema.parse(input.repository);

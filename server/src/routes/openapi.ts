@@ -4,6 +4,7 @@ import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePref
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@groktopus/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
+import { managedAuditExportErrorSchema, managedAuditExportPageQuerySchema, managedAuditExportPageSchema, managedAuditExportParamsSchema, managedAuditExportReceiptSchema, managedAuditExportWindowSchema } from "./managed-audit-export-contract.js";
 import { LINK_PREVIEW_BATCH_LIMIT, ATTENTION_SOURCE_KINDS } from "@groktopus/shared";
 import { agentCaseHandoffSchema, caseHandoffRecoveryHistorySchema, caseHandoffRecipientDecisionSchema, caseHandoffWithdrawalSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@groktopus/shared";
 import {
@@ -1485,6 +1486,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   // Workload identity status and key rotation are board-only (assertBoard in routes/workload-identity.ts).
   "GET /api/companies/{companyId}/workload-identity",
   "POST /api/companies/{companyId}/workload-identity/rotation",
+  "POST /api/companies/{companyId}/audit/managed-exports",
+  "GET /api/companies/{companyId}/audit/managed-exports/{exportId}",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding/greeting",
   "PATCH /api/agents/{id}/permission-grants",
@@ -6500,6 +6503,44 @@ registry.registerPath({
     400: r.badRequest,
     401: r.unauthorized,
     403: r.forbidden,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/audit/managed-exports",
+  tags: ["activity"],
+  summary: "Create a minimized managed audit export snapshot",
+  description: "Detects retained events with missing task/run bindings before snapshot creation. This cannot detect decisions a producer never persisted.",
+  request: {
+    params: managedAuditExportParamsSchema.pick({ companyId: true }),
+    body: jsonBody(managedAuditExportWindowSchema),
+  },
+  responses: {
+    201: { description: "Managed audit export receipt", content: { "application/json": { schema: managedAuditExportReceiptSchema } } },
+    400: { description: "Invalid window", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export cannot be created for this window or source state", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
+  tags: ["activity"],
+  summary: "Read a managed audit export page",
+  request: {
+    params: managedAuditExportParamsSchema,
+    query: managedAuditExportPageQuerySchema,
+  },
+  responses: {
+    200: { description: "Managed audit export page", content: { "application/json": { schema: managedAuditExportPageSchema } } },
+    400: { description: "Invalid cursor or identifiers", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export requires reconciliation", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 

@@ -1,7 +1,7 @@
-import type { Db } from "@groktopus/db";
+import type { Db, DbTransaction } from "@groktopus/db";
 import { issues, heartbeatRuns } from "@groktopus/db";
-import { and, eq, inArray } from "drizzle-orm";
-import { canActorReadExecutionWorkspace, type AuthorizationActor, type AuthorizationDecision, type authorizationService } from "./authorization.js";
+import { and, eq, exists, inArray, not, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { canActorReadExecutionWorkspace, issueEvidenceReadSqlCondition, type AuthorizationActor, type AuthorizationDecision, type authorizationService } from "./authorization.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 
 export const heartbeatRunReadAccessColumns = {
@@ -16,6 +16,39 @@ type RunIssueBinding = {
   scopeKind?: "company" | "issue" | null;
   issueId?: string | null;
 };
+
+function runBindingExists(db: Db | DbTransaction, companyId: string, runId: SQLWrapper, condition: SQL) {
+  return exists(db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    sql`${heartbeatRuns.id} = ${runId}`,
+    eq(heartbeatRuns.companyId, companyId),
+    condition,
+  )));
+}
+
+function issueRunBindingMatches(db: Db | DbTransaction, condition: SQL) {
+  return and(
+    eq(heartbeatRuns.scopeKind, "issue"),
+    exists(db.select({ id: issues.id }).from(issues).where(and(
+      eq(issues.id, heartbeatRuns.issueId),
+      eq(issues.companyId, heartbeatRuns.companyId),
+      condition,
+    ))),
+  )!;
+}
+
+/** SQL visibility for a run binding, with task and conversation privacy enforced for issue-scoped runs. */
+export function heartbeatRunReadSqlCondition(db: Db | DbTransaction, actor: AuthorizationActor, companyId: string, runId: SQLWrapper) {
+  const readableIssue = issueEvidenceReadSqlCondition(actor);
+  return runBindingExists(db, companyId, runId, or(
+    eq(heartbeatRuns.scopeKind, "company"),
+    issueRunBindingMatches(db, readableIssue),
+  )!);
+}
+
+/** A surviving issue binding can deny visibility. A missing binding cannot. */
+export function heartbeatRunIssueBindingDeniedSqlCondition(db: Db | DbTransaction, actor: AuthorizationActor, companyId: string, runId: SQLWrapper) {
+  return runBindingExists(db, companyId, runId, issueRunBindingMatches(db, not(issueEvidenceReadSqlCondition(actor))));
+}
 
 export async function canActorReadHeartbeatRun(
   db: Db,

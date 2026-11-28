@@ -63169,6 +63169,583 @@
         }
       }
     },
+    "/api/companies/{companyId}/audit/managed-exports": {
+      "post": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Create a minimized managed audit export snapshot",
+        "description": "Detects retained events with missing task/run bindings before snapshot creation. This cannot detect decisions a producer never persisted.",
+        "responses": {
+          "201": {
+            "description": "Managed audit export receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "exportId": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "tool_gateway"
+                      ]
+                    },
+                    "coverage": {
+                      "type": "string",
+                      "enum": [
+                        "initial_gateway_decisions"
+                      ]
+                    },
+                    "sourceEpoch": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "watermark": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "eventCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "expiresAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "exportId",
+                    "source",
+                    "coverage",
+                    "sourceEpoch",
+                    "from",
+                    "to",
+                    "watermark",
+                    "eventCount",
+                    "expiresAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Export cannot be created for this window or source state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
+        }
+      }
+    },
+    "/api/companies/{companyId}/audit/managed-exports/{exportId}": {
+      "get": {
+        "tags": [
+          "activity"
+        ],
+        "summary": "Read a managed audit export page",
+        "responses": {
+          "200": {
+            "description": "Managed audit export page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "exportId": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "tool_gateway"
+                      ]
+                    },
+                    "coverage": {
+                      "type": "string",
+                      "enum": [
+                        "initial_gateway_decisions"
+                      ]
+                    },
+                    "sourceEpoch": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "watermark": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "eventCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "expiresAt": {
+                      "type": "string"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "companyId": {
+                            "type": "string"
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "schemaVersion": {
+                            "type": "integer"
+                          },
+                          "eventType": {
+                            "type": "string"
+                          },
+                          "phase": {
+                            "type": "string"
+                          },
+                          "occurredAt": {
+                            "type": "string"
+                          },
+                          "runId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "taskId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "invocationId": {
+                            "type": "string"
+                          },
+                          "requestId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "connectionId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "actorType": {
+                            "type": "string"
+                          },
+                          "actorId": {
+                            "type": "string"
+                          },
+                          "decision": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "companyId",
+                          "source",
+                          "schemaVersion",
+                          "eventType",
+                          "phase",
+                          "occurredAt",
+                          "runId",
+                          "taskId",
+                          "invocationId",
+                          "requestId",
+                          "connectionId",
+                          "actorType",
+                          "actorId",
+                          "decision",
+                          "status",
+                          "reasonCode"
+                        ]
+                      }
+                    },
+                    "deliveredThrough": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "exportId",
+                    "source",
+                    "coverage",
+                    "sourceEpoch",
+                    "from",
+                    "to",
+                    "watermark",
+                    "eventCount",
+                    "expiresAt",
+                    "events",
+                    "deliveredThrough",
+                    "nextCursor",
+                    "complete"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor or identifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Export not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Export requires reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "object",
+                      "properties": {
+                        "reasonCode": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reasonCode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "companyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exportId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 75
+            }
+          }
+        ],
+        "security": [
+          {
+            "BoardSessionAuth": []
+          },
+          {
+            "BoardApiKeyAuth": []
+          }
+        ],
+        "x-proprio-authorization": {
+          "actor": "board"
+        }
+      }
+    },
     "/api/companies/{companyId}/audit/agent-actions.csv": {
       "get": {
         "tags": [
