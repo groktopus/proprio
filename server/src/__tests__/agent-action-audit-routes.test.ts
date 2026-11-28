@@ -1353,6 +1353,7 @@ describe("managed audit export bounded failure mapping", () => {
     } as unknown as Db;
     await expect(readManagedAuditExportPage(timeoutDb, {
       companyId: randomUUID(), sourceEpoch: randomUUID(),
+      retainAfter: null,
       actor: { type: "board", source: "session", userId: randomUUID(), companyIds: [] },
     }, randomUUID())).rejects.toMatchObject({
       status: 409,
