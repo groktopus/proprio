@@ -470,12 +470,35 @@ export function createOwnedDatabaseListener(db: Db): OwnedDatabaseListener {
   };
 }
 
-export type DedicatedDbConnectionOptions = { admitWithoutWaiting?: boolean };
+export class DbConnectionBudgetExhaustedError extends Error {
+  readonly code = "DB_CONNECTION_BUDGET_EXHAUSTED";
+  constructor() { super("dedicated database connection budget exhausted"); this.name = "DbConnectionBudgetExhaustedError"; }
+}
+
+export class DbConnectionDeadlineExceededError extends Error {
+  readonly code = "DB_CONNECTION_DEADLINE_EXCEEDED";
+  constructor(readonly deadlineMs: number) {
+    super(`dedicated database connection operation exceeded ${deadlineMs}ms`);
+    this.name = "DbConnectionDeadlineExceededError";
+  }
+}
+
+export type DedicatedDbConnectionOptions = {
+  admitWithoutWaiting?: boolean;
+  /** Reject immediately if a dedicated slot is unavailable; never queue or overcommit. */
+  rejectWhenBudgetExhausted?: boolean;
+  /** End the leased client at this operation deadline and await postgres.js cleanup. */
+  deadlineMs?: number;
+};
 
 export async function withDedicatedDbConnection<T>(db: Db, action: (dedicated: Db) => Promise<T>,
   options: DedicatedDbConnectionOptions = {}): Promise<T> {
   const set = dedicatedConnectionSets.get(db);
   if (!set) throw new Error("dedicated_connection_requires_create_db");
+  const rejectWhenBudgetExhausted = options.rejectWhenBudgetExhausted === true;
+  if (rejectWhenBudgetExhausted && (set.inUse >= set.limit || set.waiters.length > 0)) {
+    throw new DbConnectionBudgetExhaustedError();
+  }
   await admitDedicatedConnection(set, options.admitWithoutWaiting === true || holdsLiveDedicatedOrTransaction(set));
   const hold: DedicatedConnectionHold = { set, active: true };
   let dedicated: Db | undefined;
@@ -487,7 +510,24 @@ export async function withDedicatedDbConnection<T>(db: Db, action: (dedicated: D
     }
     dedicated ??= set.create();
     const connection = dedicated;
-    const result = await heldDedicatedConnections.run([...(heldDedicatedConnections.getStore() ?? []), hold], () => action(connection));
+    const operation = heldDedicatedConnections.run([...(heldDedicatedConnections.getStore() ?? []), hold], () => action(connection));
+    let result: T;
+    if (options.deadlineMs === undefined) {
+      result = await operation;
+    } else {
+      const expired = Symbol("dedicated connection deadline");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<typeof expired>(resolve => {
+        timer = setTimeout(() => resolve(expired), options.deadlineMs);
+      });
+      const outcome = await Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
+      if (outcome === expired) {
+        set.ended.add(connection);
+        await connection.$client.end({ timeout: 0 });
+        throw new DbConnectionDeadlineExceededError(options.deadlineMs);
+      }
+      result = outcome as T;
+    }
     completed = true;
     return result;
   } finally {

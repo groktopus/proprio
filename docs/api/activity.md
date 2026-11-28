@@ -48,27 +48,26 @@ The activity log is append-only and immutable.
 ## Managed Audit Exports
 
 `POST /api/companies/{companyId}/audit/managed-exports` opens a snapshot for a
-half-open interval given by the `from` and `to` timestamps. `GET
-/api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page; use
-the preceding page's `nextCursor` as the `cursor` query parameter to resume.
+half-open interval given by the `from` and `to` timestamps.
+
+`GET /api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page.
+Use the preceding page's `nextCursor` as the `cursor` query parameter to resume.
 Responses are `no-store`; a GET returns its authenticated page body despite
 conditional request headers, and records access before releasing that body.
 HEAD validates the request without recording a page release. A page access
-record failure returns HTTP `500` with a fixed diagnostic and releases no page;
-preserve the current checkpoint and retry the same page.
+record failure returns HTTP `500` with a fixed diagnostic and releases no page.
 Every page verifies access to all events in the snapshot. If any event is
 missing or no longer visible, the API returns HTTP `409` with
 `details.reasonCode` set to `snapshot_incomplete`. The response contains no
 events, event count, or watermark.
 
-Snapshots are limited to 100,000 visible event IDs. Larger windows return
-`snapshot_too_large` and must be split. Page validation is serialized per
-export and bounded to five seconds; contention returns `snapshot_read_busy` and
-a timed-out validation returns `snapshot_read_timeout`, with no partial page.
-
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
-`retention_window_expired`. Open a new snapshot with a start at or after the
-configured cutoff. A cursor for an expired window cannot be resumed. When
-advancing the cutoff, remove API instances with the old setting from export
-traffic before treating the new boundary as enforced.
+`retention_window_expired`. If the requested interval begins before the
+configured retention cutoff, open a new snapshot with a start time at or after
+the cutoff. A cursor for an expired window cannot be resumed. For
+`409 snapshot_membership_limit`, create a narrower snapshot. For
+`429 export_busy` or `503 export_retry_required`, retry the same request or
+cursor with backoff. For a creation request with `413 snapshot_membership_limit`,
+narrow the time window and consult the [export guide](../../doc/managed-audit-export.md)
+for intervals that cannot be split.

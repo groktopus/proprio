@@ -15,50 +15,30 @@ before enabling export. Record which intervals require reconciliation. The
 database and these settings cannot tell an archive that an event was lost before
 it was first collected.
 
-Set `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER` on every API instance to the earliest
-event time allowed by the deployment's retention policy. Use an ISO timestamp
-with an offset and no more than three fractional-second digits. A window before
-this boundary, or a cursor for such a window, returns
-`retention_window_expired`. When advancing the boundary, remove API instances
-with the old setting from export traffic before treating the new boundary as
-enforced.
-
-An export snapshot contains at most 100,000 visible event IDs. A request that
-would exceed this bound returns `snapshot_too_large`; split the time interval
-into smaller windows and reconcile each checkpoint independently. Page reads
-serialize per export and use a five-second database statement bound. A busy
-reader returns `snapshot_read_busy`; a query that reaches the bound returns
-`snapshot_read_timeout` without releasing a partial page.
+Set `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER` to the earliest event time allowed by
+the deployment's data retention policy, if it has an expiry boundary. Set the
+same cutoff on every API instance that serves export creation or page reads.
+Use an ISO timestamp with an offset and at most three fractional-second digits.
+The API returns `retention_window_expired` for an export that overlaps an older interval.
+This also invalidates a cursor created before the retention boundary advanced.
+Keep this boundary outside the database rollback domain.
 
 1. Send `POST /api/companies/:companyId/audit/managed-exports` with `from` and
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
    Request `GET /api/companies/:companyId/audit/managed-exports/:exportId`.
-3. Persist every page's membership under its export ID before advancing the
-   cursor, even when the payload is already present in the archive. Deduplicate
-   archived events by `(source, event ID)`; the event ID remains stable across
-   restores and source-epoch rotations. Persist the page's IDs and payloads
-   before recording the returned `nextCursor`. If a collector stops after the
-   page write but before cursor advancement, replay that page idempotently. A
-   repeated page uses the same event IDs.
-4. Confirm that the final page reports `complete`, the archived count equals
-   `eventCount`, and the watermark equals the SHA-256 of the compact JSON
-   array of archived event IDs in lexicographic order.
-
-The receipt sets `completenessScope` to `authorized_scope`. `complete` means
-that every member in this frozen, currently authorized scope was delivered. It
-does not prove global source completeness. A lost run binding is reported only
-when stored provenance proves that the current operator may read its source.
-Private, deleted, historical, or unknown bindings are not identified or counted
-as authorized loss. A null run scope never means company scope. Keep capture
-boundaries and independent checkpoints so operators can reconcile these gaps.
-
-An invocation's `occurredAt` can predate the commit that makes its event
-visible. A transaction that commits after a window snapshot is frozen can be
-absent from that export even when its timestamp is inside the window. Rescan
-previously exported windows during reconciliation and deduplicate by stable
-event ID; a completed snapshot is final only for its frozen membership, not
-for all events that may later commit into the interval.
+3. Persist each page's event IDs under this export ID, even if all its payloads
+   were already archived. This preserves membership for the snapshot count and
+   watermark. Deduplicate archived events by `(source, event ID)`, which remains
+   stable for events carried across a restore and source-epoch rotation. Bind the export ID
+   and resume checkpoint to the source epoch. Persist the page's payloads and
+   IDs before advancing the checkpoint to the returned `nextCursor`. If a crash
+   occurs before advancing it, replay the same page idempotently. A repeated
+   page uses the same event IDs.
+4. Confirm that the final page reports `complete`. Count the distinct event IDs
+   recorded for this export ID and compare the count to `eventCount`. Compare
+   the watermark to the SHA-256 of those IDs encoded as a compact JSON array in
+   lexicographic order.
 
 An export belongs to the creating operator and company. Company, audit and task
 access are checked for eligible events. Personal conversations also require
@@ -76,36 +56,72 @@ operators can review it by company and export ID in
 `managed_audit_export_page_access` through the authorized database operator
 role. The migration revokes Data API role grants and enables row-level
 security. The table owner retains access. Offsets and counts can disclose
-private evidence. The record survives snapshot deletion and expiry. The
-storage owner applies the deployment's audit retention policy to these records
-and any database backups that contain them.
+private evidence. The record survives snapshot
+expiry. The storage owner applies the deployment's audit retention policy to
+these records and any database backups that contain them.
+
+Each snapshot supports up to 20,000 visible events. If creation returns
+`413 snapshot_membership_limit`, split the time window and preserve the
+collector's overlap and deduplication rules. A cursor from an oversized
+snapshot returns `409 snapshot_membership_limit`. Create a narrower snapshot
+before continuing. If more than 20,000 events share the same millisecond,
+record the affected interval and source epoch as an unresolved gap. Preserve
+the checkpoint before that interval and reconcile it with an independently
+authorized source of audit evidence before marking the interval complete.
+
+An API process runs one export operation at a time. Up to three other
+companies can queue one request each. The oldest queued company gets the next
+slot. Duplicate requests for an active or queued company, a full queue, and
+a wait beyond 25 seconds return `429 export_busy`. Export work uses the
+dedicated connection budget. PostgreSQL statements have a five-second maximum
+timeout, and the export closes a lease that exceeds seven seconds. An exhausted
+connection budget, an interrupted lease, or database contention returns
+`503 export_retry_required`. Retry with backoff using the same request or
+cursor. Advance the checkpoint only after the page arrives and the collector
+persists its membership and payloads.
 
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.
-
-Exported event objects contain only the public event fields in the API contract.
-Internal run-scope provenance is never returned in a page.
 
 Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.
 An export receipt proves the scope and membership of one snapshot. Use target
 receipts to establish what a managed action changed.
 
-For periodic collection, use a fresh export ID for a bounded overlapping
-lookback. Set its `from` to the latest of the desired lookback start,
+For periodic collection, re-export a bounded overlapping lookback using a new
+export ID. Set `from` to the latest of the desired lookback start,
 `PROPRIO_MANAGED_AUDIT_CAPTURE_FROM`, and `PROPRIO_MANAGED_AUDIT_RETAIN_AFTER`
-when configured. Create it only when that effective `from` precedes `to`, and
-record any clipped portion for source reconciliation. Keep the source epoch,
-export ID, bounds, count, watermark, page membership and cursor together. A
-snapshot that expires must be reconciled before opening another one.
+when configured. Create an export only when that `from` precedes `to`. Record any
+portion of the desired interval left outside the request for reconciliation.
+Keep the source epoch,
+export ID, bounds, count, watermark, page membership and cursor together. If a
+snapshot expires, reconcile its checkpoint before opening a fresh export.
 
-An invocation can carry an earlier `occurredAt` while its transaction commits
-after the initial snapshot. That event is absent from both the frozen initial
-window and a fresh adjacent window that starts at the initial boundary. A new
-overlapping export can find it while the source row remains available. The
-watermark proves membership and delivery for that one frozen snapshot, not a
-commit-ordered high-water mark; delays beyond the bounded lookback require
-source or target reconciliation. A source-epoch change fences old exports, so
-start a fresh export after reconciliation and deduplicate its event by the same
-`(source, event ID)` key.
+A covered gateway transaction can commit after the snapshot was created while
+carrying an earlier `occurredAt`. An adjacent interval will exclude it. A fresh
+overlapping snapshot can find it while the source row remains available. The
+watermark verifies membership and delivery for one frozen snapshot. If a
+transaction commits after its event time has passed out of the lookback,
+reconcile the affected interval against source or target evidence.
+
+## Restore qualification and limits
+
+`server/src/__tests__/agent-action-audit-routes.test.ts` exercises the normal
+export API against an older JavaScript logical backup restored into a sibling
+database. It writes delivered page bytes and the resume checkpoint to files
+outside both databases, resumes by that checkpoint, and verifies the archived
+ID watermark after a source row is deleted. The old checkpoint reports
+`snapshot_incomplete` when its row is missing. After restoring the older backup
+and rotating `PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH`, that checkpoint reports
+`source_epoch_changed`; it is not a new complete export. A fresh API snapshot
+uses the restored data and current access. The test rejects the expired event
+window, verifies a new page omits restricted evidence, and verifies an advanced
+retention boundary invalidates its cursor. The qualification scope is an
+isolated logical restore with a local archive fixture.
+
+The 24-hour snapshot expiry and the operator's event retention boundary control
+delivery. The independent archive owner applies a separate erasure policy.
+Before reopening export after an older restore, reconcile individual deletion
+obligations from separately retained records. Rotating the source epoch fences
+old checkpoints. It cannot identify an individual record restored from backup.

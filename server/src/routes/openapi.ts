@@ -1488,6 +1488,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/workload-identity/rotation",
   "POST /api/companies/{companyId}/audit/managed-exports",
   "GET /api/companies/{companyId}/audit/managed-exports/{exportId}",
+  "HEAD /api/companies/{companyId}/audit/managed-exports/{exportId}",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding",
   "POST /api/companies/{companyId}/chats/{agentRef}/onboarding/greeting",
   "PATCH /api/agents/{id}/permission-grants",
@@ -6521,7 +6522,10 @@ registry.registerPath({
     400: { description: "Invalid window", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start a new snapshot at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start the window at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    413: { description: "Snapshot exceeds the 20,000-event limit. Use a narrower time window.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "Export admission is busy. Retry with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the request.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 
@@ -6542,6 +6546,8 @@ registry.registerPath({
     403: { description: "Forbidden" },
     404: { description: "Export not found" },
     409: { description: "Export requires reconciliation" },
+    429: { description: "Export admission is busy. Retry with backoff." },
+    503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the request." },
   },
 });
 
@@ -6561,8 +6567,10 @@ registry.registerPath({
     401: { description: "Unauthorized", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    409: { description: "Export requires reconciliation. For retention_window_expired, start a new snapshot at or after the configured retention cutoff; the old cursor cannot be resumed.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    409: { description: "Export requires reconciliation. For retention_window_expired, open a new export beginning at or after the configured cutoff. For snapshot_membership_limit, open a narrower export and reconcile any interval that cannot be split.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "Export admission is busy. Retry the same cursor with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     500: { description: "Page access could not be recorded; no page is released", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the same cursor.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 

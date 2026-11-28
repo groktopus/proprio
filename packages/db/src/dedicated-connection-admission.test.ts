@@ -14,6 +14,8 @@ import {
   createDb,
   databaseConnectionBudget,
   dedicatedDbConnectionStats,
+  DbConnectionBudgetExhaustedError,
+  DbConnectionDeadlineExceededError,
   fileStorageDb,
   livenessDb,
   withDedicatedDbConnection,
@@ -233,6 +235,36 @@ describe.skipIf(!support.supported)("withDedicatedDbConnection admission", () =>
     expect(waitedMs).toBeGreaterThanOrEqual(90);
     expect(dedicatedDbConnectionStats(db)).toMatchObject({ inUse: 0, waiting: 0, queued: 1, overLimit: 1 });
   });
+
+  it("rejects fail-fast admission without overcommitting the dedicated budget", async () => {
+    const db = owner({ dedicatedConnectionMax: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const holder = withDedicatedDbConnection(db, async () => { await gate; });
+    await expect.poll(() => dedicatedDbConnectionStats(db)!.inUse).toBe(1);
+    await expect(withDedicatedDbConnection(db, dedicated => dedicated.execute(sql`select 1`), {
+      rejectWhenBudgetExhausted: true,
+    })).rejects.toBeInstanceOf(DbConnectionBudgetExhaustedError);
+    expect(dedicatedDbConnectionStats(db)).toMatchObject({ inUse: 1, waiting: 0, overLimit: 0 });
+    release();
+    await holder;
+  });
+
+  it("preserves the original error from an operation with no deadline", async () => {
+    const db = owner({ dedicatedConnectionMax: 1 });
+    const error = new Error("operation failed");
+    await expect(withDedicatedDbConnection(db, async () => { throw error; })).rejects.toBe(error);
+    expect(dedicatedDbConnectionStats(db)?.inUse).toBe(0);
+  });
+
+  it("ends a leased client at its deadline and awaits cleanup before releasing its slot", async () => {
+    const db = owner({ dedicatedConnectionMax: 1 });
+    await expect(withDedicatedDbConnection(db, dedicated => dedicated.execute(sql`select pg_sleep(30)`), {
+      deadlineMs: 100,
+    })).rejects.toBeInstanceOf(DbConnectionDeadlineExceededError);
+    expect(dedicatedDbConnectionStats(db)).toMatchObject({ inUse: 0, waiting: 0 });
+    await expect(withDedicatedDbConnection(db, dedicated => dedicated.execute(sql`select 1`))).resolves.toEqual([{ "?column?": 1 }]);
+  }, 10_000);
 
   it("states a connection budget equal to the sum of every pool's maximum", async () => {
     const db = owner({ maxConnections: 7, dedicatedConnectionMax: 5 });

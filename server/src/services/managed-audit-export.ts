@@ -1,41 +1,118 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { conflict, forbidden, HttpError, notFound } from "../errors.js";
+import { DbConnectionBudgetExhaustedError, DbConnectionDeadlineExceededError, heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, withDedicatedDbConnection, type Db, type DbTransaction } from "@groktopus/db";
+import { and, asc, count, eq, exists, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
+import { HttpError, ManagedAuditExportUnavailableError, conflict, forbidden, notFound, payloadTooLarge, tooManyRequests } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 import { isTransientLockContention, postgresErrorCode } from "./transient-lock-contention.js";
 
 const PAGE_SIZE = 200;
-// Keep the array-backed checkpoint and the all-membership visibility check
-// bounded. Larger windows must be split and reconciled independently.
-export const MAX_SNAPSHOT_EVENTS = 100_000;
-const EXPORT_READ_STATEMENT_TIMEOUT_MS = 5_000;
+// Every page revalidates the complete membership so counts and watermarks stay
+// truthful. Keep that repeated query and its UUID array explicitly bounded.
+const MAX_SNAPSHOT_MEMBERSHIP = 20_000;
+const EXPORT_STATEMENT_TIMEOUT_MS = 5_000;
+const EXPORT_CONNECTION_DEADLINE_MS = 7_000;
+const EXPORT_QUEUE_TIMEOUT_MS = 25_000;
+const MAX_WAITING_COMPANIES = 3;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
   companyId: string;
   sourceEpoch: string;
   actor: AuthorizationActor;
-  retainAfter?: Date;
+  retainAfter: Date | null;
+  signal?: AbortSignal;
 };
 
 const repeatableRead = { isolationLevel: "repeatable read" } as const;
+let activeExportCompany: string | null = null;
+const waitingExports: Array<{ companyId: string; admit: () => void }> = [];
+
+function exportBusy() {
+  return tooManyRequests("Managed audit export capacity is busy. Retry this request.", { reasonCode: "export_busy" });
+}
+
+async function acquireExport(companyId: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  if (activeExportCompany === null) {
+    activeExportCompany = companyId;
+    return;
+  }
+  if (activeExportCompany === companyId || waitingExports.length >= MAX_WAITING_COMPANIES
+    || waitingExports.some(entry => entry.companyId === companyId)) {
+    throw exportBusy();
+  }
+  await new Promise<void>((resolve, reject) => {
+    const entry = {
+      companyId,
+      admit: () => {
+        stopWaiting();
+        activeExportCompany = companyId;
+        resolve();
+      },
+    };
+    const onAbort = () => cancel(signal?.reason);
+    const timeout = setTimeout(() => cancel(exportBusy()), EXPORT_QUEUE_TIMEOUT_MS);
+    function stopWaiting() {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    }
+    function cancel(reason: unknown) {
+      stopWaiting();
+      const index = waitingExports.indexOf(entry);
+      if (index >= 0) waitingExports.splice(index, 1);
+      reject(reason);
+    }
+    waitingExports.push(entry);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function runExportTransaction<T>(
+  db: Db,
+  { companyId, signal }: ExportScope,
+  work: (tx: DbTransaction) => Promise<T>,
+  prepare?: (tx: DbTransaction) => Promise<void>,
+): Promise<T> {
+  await acquireExport(companyId, signal);
+  try {
+    signal?.throwIfAborted();
+    // Keep full snapshot validation off the ordinary request pool and retain
+    // admission until the dedicated connection has settled or closed.
+    return await withDedicatedDbConnection(db, async dedicated => {
+      const applyStatementTimeout = (tx: DbTransaction) => tx.execute(sql`select set_config('statement_timeout',
+        least(${EXPORT_STATEMENT_TIMEOUT_MS}, coalesce(nullif(setting::integer, 0), ${EXPORT_STATEMENT_TIMEOUT_MS}))::text,
+        true) from pg_settings where name = 'statement_timeout'`);
+      if (prepare) {
+        await dedicated.transaction(async tx => {
+          await applyStatementTimeout(tx);
+          await prepare(tx);
+        });
+      }
+      return dedicated.transaction(async tx => {
+        await applyStatementTimeout(tx);
+        return work(tx);
+      }, repeatableRead);
+    }, { rejectWhenBudgetExhausted: true, deadlineMs: EXPORT_CONNECTION_DEADLINE_MS });
+  } catch (error) {
+    if (error instanceof DbConnectionBudgetExhaustedError || error instanceof DbConnectionDeadlineExceededError
+      || ["57014", "53300"].includes(postgresErrorCode(error) ?? "") || isTransientLockContention(error)) {
+      throw new ManagedAuditExportUnavailableError();
+    }
+    throw error;
+  } finally {
+    const next = waitingExports.shift();
+    if (next) next.admit();
+    else activeExportCompany = null;
+  }
+}
 
 function actorUserId(scope: ExportScope) {
   if (scope.actor.type !== "board" || !scope.actor.userId) {
     throw forbidden("Managed audit exports require authenticated board access");
   }
   return scope.actor.userId;
-}
-
-function assertRetentionAllows(scope: ExportScope, from: Date) {
-  if (scope.retainAfter && from < scope.retainAfter) {
-    throw conflict("The requested audit window starts before the configured retention boundary. Create a new export at or after the boundary.", {
-      reasonCode: "retention_window_expired",
-    });
-  }
 }
 
 async function assertCurrentAuditAuthority(tx: DbTransaction, scope: ExportScope) {
@@ -77,16 +154,12 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
   // If a surviving binding proves the event belongs to evidence the caller
   // cannot see, do not reveal whether another task/run binding is missing.
-  const hiddenTaskBinding = and(isNotNull(managedAuditEvents.taskId), or(
-    not(exists(tx.select({ id: issues.id }).from(issues)
-      .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))),
-    exists(tx.select({ id: issues.id }).from(issues)
-      .where(and(
-        eq(issues.companyId, scope.companyId),
-        eq(issues.id, managedAuditEvents.taskId),
-        not(issueEvidenceReadSqlCondition(scope.actor)),
-      ))),
-  ))!;
+  const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
+    .where(and(
+      eq(issues.companyId, scope.companyId),
+      eq(issues.id, managedAuditEvents.taskId),
+      not(issueEvidenceReadSqlCondition(scope.actor)),
+    )));
   const hiddenRunBinding = heartbeatRunIssueBindingDeniedSqlCondition(tx, scope.actor, scope.companyId, managedAuditEvents.runId);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
     .where(and(sourceWindow, or(missingRun, missingTask), not(hiddenTaskBinding), not(hiddenRunBinding))).limit(1);
@@ -107,32 +180,36 @@ function exportReceipt(snapshot: typeof managedAuditExports.$inferSelect) {
   };
 }
 
-export async function createManagedAuditExport(db: Db, scope: ExportScope, window: { from: Date; to: Date }) {
+function assertRetainedWindow(scope: ExportScope, from: Date) {
+  if (scope.retainAfter && from < scope.retainAfter) {
+    throw conflict("The export window includes expired managed audit evidence", { reasonCode: "retention_window_expired" });
+  }
+}
+
+export async function createManagedAuditExport(
+  db: Db,
+  scope: ExportScope & { captureFrom: Date },
+  window: { from: Date; to: Date },
+) {
   const publications: ActivityPublication[] = [];
-  // Expiry cleanup is best-effort maintenance. Commit it in a normal
-  // read-committed transaction so competing creators do not make the
-  // repeatable-read snapshot transaction fail on the same expired rows.
-  await db.transaction(async tx => {
-    await assertCurrentAuditAuthority(tx, scope);
-    assertRetentionAllows(scope, window.from);
-    const now = new Date();
-    await tx.delete(managedAuditExports).where(and(
-      eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
-    ));
-  });
-  const snapshot = await db.transaction(async tx => {
+  const snapshot = await runExportTransaction(db, scope, async tx => {
     const userId = await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
     const now = new Date();
     await assertSourceBindingsAvailable(tx, scope, window);
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
       .where(and(visible, gte(managedAuditEvents.occurredAt, window.from), lt(managedAuditEvents.occurredAt, window.to)))
       .orderBy(asc(managedAuditEvents.id))
-      .limit(MAX_SNAPSHOT_EVENTS + 1);
-    if (rows.length > MAX_SNAPSHOT_EVENTS) {
-      throw conflict(`The requested audit window contains more than ${MAX_SNAPSHOT_EVENTS} visible events. Split the interval into smaller windows and reconcile the resulting checkpoints independently.`, {
-        reasonCode: "snapshot_too_large",
-        maxEvents: MAX_SNAPSHOT_EVENTS,
+      // Fetch one sentinel row so we can reject oversized snapshots without
+      // materializing an unbounded membership array in the service process.
+      .limit(MAX_SNAPSHOT_MEMBERSHIP + 1);
+    if (rows.length > MAX_SNAPSHOT_MEMBERSHIP) {
+      throw payloadTooLarge("Managed audit export exceeds the bounded snapshot membership. Narrow the export window.", {
+        reasonCode: "snapshot_membership_limit",
       });
     }
     const eventIds = rows.map(row => row.id);
@@ -156,7 +233,19 @@ export async function createManagedAuditExport(db: Db, scope: ExportScope, windo
       details: { exportId: saved.id, source: "tool_gateway" },
     }, publications);
     return saved;
-  }, repeatableRead);
+  }, async tx => {
+    // Commit expiry cleanup in read committed on the bounded dedicated lease.
+    // Competing creators cannot conflict inside the snapshot transaction.
+    await assertCurrentAuditAuthority(tx, scope);
+    assertRetainedWindow(scope, window.from);
+    if (window.from < scope.captureFrom) {
+      throw conflict("The requested window starts before configured capture coverage", { reasonCode: "unsupported_interval" });
+    }
+    const now = new Date();
+    await tx.delete(managedAuditExports).where(and(
+      eq(managedAuditExports.companyId, scope.companyId), lte(managedAuditExports.expiresAt, now),
+    ));
+  });
   for (const publication of publications) publishActivity(publication);
   return exportReceipt(snapshot);
 }
@@ -186,95 +275,76 @@ export async function readManagedAuditExportPage(
   cursor?: string,
   recordAccess = true,
 ) {
-  try {
-    return await db.transaction(async tx => {
-      await tx.execute(sql`select set_config('statement_timeout', ${String(EXPORT_READ_STATEMENT_TIMEOUT_MS)}, true)`);
-      const userId = await assertCurrentAuditAuthority(tx, scope);
-      const [snapshot] = await tx.select().from(managedAuditExports).where(and(
-        eq(managedAuditExports.id, exportId),
-        eq(managedAuditExports.companyId, scope.companyId),
-        eq(managedAuditExports.userId, userId),
-      ));
-      if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
-      const [lock] = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(${`managed-audit-export:${snapshot.id}`}, 0)) as locked`);
-      if (!(lock as { locked?: boolean }).locked) {
-        throw conflict("Another page read is already validating this managed audit export. Retry after it completes.", { reasonCode: "snapshot_read_busy" });
-      }
-      if (snapshot.sourceEpoch !== scope.sourceEpoch) {
-        throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
-      }
-      assertRetentionAllows(scope, snapshot.from);
-      if (snapshot.expiresAt <= new Date()) {
-        throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
-      }
-      const offset = decodeCursor(snapshot, cursor);
-      const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
-      const visible = await visibleEvents(tx, scope);
-      if (snapshot.eventIds.length > 0) {
-        // Counts and watermarks also describe rows on other pages. Check all
-        // snapshot members in the same transaction before returning either.
-        const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
-          .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(snapshot.eventIds)}::uuid[])`));
-        if (available.eventCount !== snapshot.eventIds.length) {
-          throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
-        }
-      }
-      const events = ids.length
-        ? await tx.select({
-            id: managedAuditEvents.id,
-            companyId: managedAuditEvents.companyId,
-            source: managedAuditEvents.source,
-            schemaVersion: managedAuditEvents.schemaVersion,
-            eventType: managedAuditEvents.eventType,
-            phase: managedAuditEvents.phase,
-            occurredAt: managedAuditEvents.occurredAt,
-            runId: managedAuditEvents.runId,
-            taskId: managedAuditEvents.taskId,
-            invocationId: managedAuditEvents.invocationId,
-            requestId: managedAuditEvents.requestId,
-            connectionId: managedAuditEvents.connectionId,
-            actorType: managedAuditEvents.actorType,
-            actorId: managedAuditEvents.actorId,
-            decision: managedAuditEvents.decision,
-            status: managedAuditEvents.status,
-            reasonCode: managedAuditEvents.reasonCode,
-          }).from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
-          .orderBy(asc(managedAuditEvents.id))
-        : [];
-      const deliveredThrough = offset + events.length;
-      if (recordAccess) {
-        try {
-          // This write is part of the repeatable-read transaction and is the
-          // final operation before the successful page is released.
-          await tx.insert(managedAuditExportPageAccess).values({
-            companyId: scope.companyId,
-            exportId: snapshot.id,
-            userId,
-            pageOffset: offset,
-            itemCount: events.length,
-            createdAt: sql`clock_timestamp()`,
-          });
-        } catch (error) {
-          // Never expose driver metadata, identifiers, or SQL text from this
-          // failure. Preserve only retry-relevant SQLSTATE information.
-          const code = postgresErrorCode(error);
-          const failure = new HttpError(500, "Managed audit page access could not be recorded");
-          if (code === "57014" || isTransientLockContention(error)) throw Object.assign(failure, { code });
-          throw failure;
-        }
-      }
-      return {
-        ...exportReceipt(snapshot),
-        events,
-        deliveredThrough,
-        nextCursor: deliveredThrough < snapshot.eventIds.length ? encodeCursor(snapshot, deliveredThrough) : null,
-        complete: deliveredThrough === snapshot.eventIds.length,
-      };
-    }, repeatableRead);
-  } catch (error) {
-    if ((error as { code?: string }).code === "57014") {
-      throw conflict("Managed audit export validation exceeded its bounded read time. Split the interval and retry.", { reasonCode: "snapshot_read_timeout" });
+  return runExportTransaction(db, scope, async tx => {
+    const userId = await assertCurrentAuditAuthority(tx, scope);
+    const [snapshot] = await tx.select({
+      ...getTableColumns(managedAuditExports),
+      eventIds: sql<string[] | null>`case when cardinality(${managedAuditExports.eventIds}) <= ${MAX_SNAPSHOT_MEMBERSHIP}
+        then ${managedAuditExports.eventIds} end`.mapWith(managedAuditExports.eventIds),
+    }).from(managedAuditExports).where(and(
+      eq(managedAuditExports.id, exportId),
+      eq(managedAuditExports.companyId, scope.companyId),
+      eq(managedAuditExports.userId, userId),
+    ));
+    if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
+    if (snapshot.sourceEpoch !== scope.sourceEpoch) {
+      throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
     }
-    throw error;
-  }
+    if (snapshot.expiresAt <= new Date()) {
+      throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
+    }
+    assertRetainedWindow(scope, snapshot.from);
+    // Defensive fence for rows written by older code or modified outside this
+    // service. It also bounds the all-member visibility revalidation below.
+    const eventIds = snapshot.eventIds;
+    if (eventIds === null) {
+      throw conflict("Managed audit export exceeds the supported snapshot membership. Create a narrower export.", {
+        reasonCode: "snapshot_membership_limit",
+      });
+    }
+    const boundedSnapshot = { ...snapshot, eventIds };
+    const offset = decodeCursor(boundedSnapshot, cursor);
+    const ids = eventIds.slice(offset, offset + PAGE_SIZE);
+    const visible = await visibleEvents(tx, scope);
+    if (eventIds.length > 0) {
+      // Counts and watermarks also describe rows on other pages. Check all
+      // snapshot members in the same transaction before returning either.
+      const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
+        .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(eventIds, managedAuditExports.eventIds)})`));
+      if (available.eventCount !== eventIds.length) {
+        throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
+      }
+    }
+    const events = ids.length
+      ? await tx.select().from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
+        .orderBy(asc(managedAuditEvents.id))
+      : [];
+    const deliveredThrough = offset + events.length;
+    if (recordAccess) {
+      try {
+        await tx.insert(managedAuditExportPageAccess).values({
+          companyId: scope.companyId,
+          exportId: snapshot.id,
+          userId,
+          pageOffset: offset,
+          itemCount: events.length,
+          createdAt: sql`clock_timestamp()`,
+        });
+      } catch (error) {
+        // The driver error contains private metadata. Preserve only the
+        // SQLSTATE used to decide whether the caller can retry unchanged.
+        const code = postgresErrorCode(error);
+        const failure = new HttpError(500, "Managed audit page access could not be recorded");
+        if (code === "57014" || isTransientLockContention(error)) throw Object.assign(failure, { code });
+        throw failure;
+      }
+    }
+    return {
+      ...exportReceipt(boundedSnapshot),
+      events,
+      deliveredThrough,
+      nextCursor: deliveredThrough < eventIds.length ? encodeCursor(boundedSnapshot, deliveredThrough) : null,
+      complete: deliveredThrough === eventIds.length,
+    };
+  });
 }

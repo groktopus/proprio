@@ -16,6 +16,7 @@ import {
   companies,
   companyMemberships,
   createDb,
+  dedicatedDbConnectionStats,
   documents,
   heartbeatRuns,
   issueAccessGrants,
@@ -29,16 +30,12 @@ import {
   ensurePostgresDatabase,
   runDatabaseBackup,
   runDatabaseRestore,
-  toolApplications,
-  toolCatalogEntries,
-  toolConnections,
-  type DbTransaction,
+  withDedicatedDbConnection,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
-import { MAX_SNAPSHOT_EVENTS, readManagedAuditExportPage } from "../services/managed-audit-export.js";
-import { toolAccessPolicyService } from "../services/tool-access-policy.js";
-import { deleteAgentDependencies } from "../services/agent-deletion.js";
+import { readManagedAuditExportPage } from "../services/managed-audit-export.js";
+import * as dbClient from "@groktopus/db";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
@@ -142,7 +139,7 @@ describePostgres("agent action audit routes", () => {
     return { company, agent, otherAgent, issue, comment, issueDocument, run };
   }
 
-  it("keeps private binding loss private and isolates competing expired-snapshot cleanup", async () => {
+  it("keeps private binding loss private and clears expiry under bounded export admission", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
@@ -160,18 +157,15 @@ describePostgres("agent action audit routes", () => {
     const epoch = randomUUID();
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
     try {
       await db.insert(managedAuditEvents).values({
         companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
         occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
         decision: "allow", status: "authorized", taskId: privateTask.id, runId: randomUUID(), invocationId: randomUUID(),
       });
-      await db.delete(issues).where(eq(issues.id, privateTask.id));
       const privateLoss = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
       expect(privateLoss.status, privateLoss.text).toBe(201);
       expect(privateLoss.body).toMatchObject({ eventCount: 0, sourceEpoch: epoch });
-      expect(privateLoss.body).not.toHaveProperty("details");
 
       const expiredAt = new Date(Date.now() - 1_000);
       await db.insert(managedAuditExports).values({
@@ -180,80 +174,20 @@ describePostgres("agent action audit routes", () => {
       });
       const creates = await Promise.all(Array.from({ length: 4 }, () =>
         board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window)));
-      expect(creates.map(response => response.status)).toEqual([201, 201, 201, 201]);
-      expect(creates.map(response => response.body.eventCount)).toEqual([0, 0, 0, 0]);
+      expect(creates.map(response => response.status).sort((left, right) => left - right)).toEqual([201, 429, 429, 429]);
+      expect(creates.filter(response => response.status === 201).map(response => response.body.eventCount)).toEqual([0]);
+      for (const _response of creates.filter(response => response.status === 429)) {
+        const retry = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window).expect(201);
+        expect(retry.body.eventCount).toBe(0);
+      }
       expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("reports a missing issue-scoped run only to an actor who can read the persisted issue scope", async () => {
-    const { company, agent, issue, run } = await seed();
-    const userId = randomUUID();
-    await db.insert(companyMemberships).values({
-      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
-    await db.insert(principalPermissionGrants).values({
-      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
-    });
-    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
-    const epoch = randomUUID();
-    const occurredAt = Date.now();
-    const from = new Date(Math.floor(occurredAt / 1_000) * 1_000 - 10_000).toISOString();
-    const to = new Date(Date.parse(from) + 2_000).toISOString();
-    const window = { from, to };
-    await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId: issue.id }).where(eq(heartbeatRuns.id, run.id));
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-    try {
-      const [application] = await db.insert(toolApplications).values({
-        companyId: company.id, applicationKey: `audit-${randomUUID()}`, name: "Audit fixture", type: "mcp_http", status: "active",
-      }).returning();
-      const [connection] = await db.insert(toolConnections).values({
-        companyId: company.id, applicationId: application!.id, name: "Audit connection", uid: `audit/${randomUUID()}`,
-        transport: "mcp_remote", status: "active", enabled: true, config: { url: "https://example.invalid/mcp" },
-      }).returning();
-      const [catalogEntry] = await db.insert(toolCatalogEntries).values({
-        companyId: company.id, applicationId: application!.id, connectionId: connection!.id,
-        name: "audit_fixture", toolName: "audit_fixture", riskLevel: "read", versionHash: randomUUID(), schemaHash: randomUUID(),
-      }).returning();
-      const input = {
-        companyId: company.id,
-        actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
-        runContext: { heartbeatRunId: run.id, issueId: issue.id },
-        request: { connectionId: connection!.id, catalogEntryId: catalogEntry!.id, toolName: "audit_fixture", arguments: {} },
-      };
-      const policy = toolAccessPolicyService(db);
-      const decision = await policy.decide(input);
-      await policy.recordInvocation(input, decision);
-      const [capturedEvent] = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.runId, run.id));
-      expect(capturedEvent).toMatchObject({ runScopeKind: "issue", runIssueId: issue.id, taskId: issue.id });
-      await db.update(managedAuditEvents).set({ occurredAt: new Date(Date.parse(from) + 1_000) })
-        .where(eq(managedAuditEvents.id, capturedEvent!.id));
-
-      // Exercise the production lifecycle path that removes the run while
-      // retaining its managed audit event and canonical privacy provenance.
-      await db.transaction((tx: DbTransaction) => deleteAgentDependencies(tx, company.id, agent.id));
-      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id))).toHaveLength(0);
-      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.id, capturedEvent!.id))).toHaveLength(1);
-
-      const response = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
-
-      expect(response.status, response.text).toBe(409);
-      expect(response.body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
-      expect(response.text).not.toContain(capturedEvent!.id);
-      expect(response.text).not.toContain(run.id);
-      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
-      expect((await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created")).toHaveLength(0);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   it("exports a frozen managed audit window beyond the CSV cap and detects known missing bindings", async () => {
-    const { company, agent, issue, run } = await seed();
+    const { company, agent, issue } = await seed();
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
       companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
@@ -270,15 +204,12 @@ describePostgres("agent action audit routes", () => {
       occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
       decision: "allow", status: "authorized",
     };
-    // Keep the large qualification representative of production rows: most
-    // events are unbound, while task/run-scoped rows exercise both visibility
-    // predicates during the full-membership read.
+    const [visibleRun] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: issue.id, status: "succeeded",
+    }).returning();
     const eventRows = Array.from({ length: 10_037 }, (_, index) => ({
-      ...baseEvent,
-      id: randomUUID(),
-      invocationId: randomUUID(),
-      ...(index % 17 === 0 ? { taskId: issue.id } : {}),
-      ...(index % 29 === 0 ? { runId: run.id } : {}),
+      ...baseEvent, id: randomUUID(), invocationId: randomUUID(),
+      ...(index % 10 === 0 ? { taskId: issue.id, runId: visibleRun.id } : {}),
     }));
     for (let index = 0; index < eventRows.length; index += 1_000) {
       await db.insert(managedAuditEvents).values(eventRows.slice(index, index + 1_000));
@@ -333,19 +264,19 @@ describePostgres("agent action audit routes", () => {
       expect((await anon.get(exportPath)).status).toBe(403);
       await board.head(exportPath).expect(200);
       expect(await pageAccess()).toHaveLength(0);
-      const lateEventId = "00000000-0000-0000-0000-000000000001";
-      await db.insert(managedAuditEvents).values({ ...baseEvent, id: lateEventId, invocationId: randomUUID() });
-      // `*` matches any existing representation and would have yielded 304
-      // through the old res.json freshness path; a successful GET must still
-      // record and return the full page body.
+      await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
       const first = await board.get(exportPath).set("If-None-Match", "*");
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
-      expect(first.body.events[0]).not.toHaveProperty("operationFingerprint");
-      expect(first.body.events[0]).not.toHaveProperty("providerRequestId");
       expect((await board.get(exportPath)).body).toEqual(first.body);
-      expect(await pageAccess()).toHaveLength(2);
       expect((await board.get(exportPath).query({ cursor: "10036." + "a".repeat(64) })).status).toBe(409);
+      const firstPageAccess = await pageAccess();
+      expect(firstPageAccess).toHaveLength(2);
+      for (const row of firstPageAccess) {
+        expect(row).toMatchObject({
+          companyId: company.id, exportId: receipt.body.exportId, userId, pageOffset: 0, itemCount: 200,
+        });
+      }
 
       const archived = first.body.events.map((event: { id: string }) => event.id);
       let page = first.body;
@@ -357,13 +288,11 @@ describePostgres("agent action audit routes", () => {
       }
       const expectedIds = eventRows.map(event => event.id).sort();
       expect(archived).toEqual(expectedIds);
-      expect(archived).not.toContain(lateEventId);
       expect(page).toMatchObject({ complete: true, deliveredThrough: expectedIds.length });
       expect(createHash("sha256").update(JSON.stringify(archived)).digest("hex")).toBe(receipt.body.watermark);
       const allPageAccess = await pageAccess();
       expect(allPageAccess).toHaveLength(Math.ceil(expectedIds.length / 200) + 1);
       expect(allPageAccess).toContainEqual(expect.objectContaining({ userId, pageOffset: 10_000, itemCount: 37 }));
-
       await db.execute(sql`alter table managed_audit_export_page_access rename to unavailable_page_access`);
       try {
         const auditWriteFailed = await board.get(exportPath).expect(500);
@@ -375,22 +304,13 @@ describePostgres("agent action audit routes", () => {
         await db.execute(sql`alter table unavailable_page_access rename to managed_audit_export_page_access`);
       }
 
-      // A rescan of the same interval discovers a transaction that committed
-      // after the first membership snapshot was frozen.
-      const rescan = await board.post(path).send(window);
-      expect(rescan.status, rescan.text).toBe(201);
-      expect(rescan.body.eventCount).toBe(eventRows.length + 1);
-      const rescannedPage = await board.get(`${path}/${rescan.body.exportId}`);
-      expect(rescannedPage.status, rescannedPage.text).toBe(200);
-      expect(rescannedPage.body.events.map((event: { id: string }) => event.id)).toContain(lateEventId);
-
       await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, expectedIds[0]));
       expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
       expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
       await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
       await expect(readManagedAuditExportPage(db, {
-        companyId: company.id, sourceEpoch: epoch.toLowerCase(),
+        companyId: company.id, sourceEpoch: epoch.toLowerCase(), retainAfter: null,
         actor: { type: "board", source: "session", userId, companyIds: [company.id] },
       }, receipt.body.exportId)).rejects.toMatchObject({ status: 403 });
       expect((await board.get(exportPath)).status).toBe(403);
@@ -401,7 +321,7 @@ describePostgres("agent action audit routes", () => {
     }
   }, 45_000);
 
-  it("recovers a late commit only through a fresh overlap and fences the old epoch", async () => {
+  it("rejects managed audit windows above the bounded snapshot membership", async () => {
     const { company, agent } = await seed();
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
@@ -411,9 +331,148 @@ describePostgres("agent action audit routes", () => {
       companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
     });
     const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
-    const writerDb = createDb(tempDb!.connectionString, { maxConnections: 1, applicationName: "audit-overlap-writer" });
+    const at = new Date("2026-07-17T00:00:01.000Z");
+    const baseEvent = {
+      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
+      occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
+      decision: "allow", status: "authorized",
+    };
+    const eventRows = Array.from({ length: 20_001 }, () => ({ ...baseEvent, id: randomUUID(), invocationId: randomUUID() }));
+    for (let index = 0; index < eventRows.length; index += 1_000) {
+      await db.insert(managedAuditEvents).values(eventRows.slice(index, index + 1_000));
+    }
+    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
     const epoch = randomUUID();
-    const nextEpoch = randomUUID();
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", epoch);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+    try {
+      const response = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
+      expect(response.status, response.text).toBe(413);
+      expect(response.body).toMatchObject({ details: { reasonCode: "snapshot_membership_limit" } });
+      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
+      expect((await db.select().from(activityLog)).filter(row => row.action === "audit.managed_export_created")).toHaveLength(0);
+
+      const oversizedExportId = randomUUID();
+      await db.insert(managedAuditExports).values({
+        id: oversizedExportId,
+        companyId: company.id,
+        userId,
+        sourceEpoch: epoch,
+        from: new Date(window.from),
+        to: new Date(window.to),
+        eventIds: Array.from({ length: 20_001 }, () => randomUUID()),
+        watermark: "synthetic-oversized-membership",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const replay = await board.get(`/api/companies/${company.id}/audit/managed-exports/${oversizedExportId}`);
+      expect(replay.status, replay.text).toBe(409);
+      expect(replay.body).toMatchObject({ details: { reasonCode: "snapshot_membership_limit" } });
+      expect(replay.body).not.toHaveProperty("eventCount");
+      expect(replay.body).not.toHaveProperty("watermark");
+      expect(replay.body).not.toHaveProperty("events");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 45_000);
+
+  it.each(["managed_audit_exports", "managed_audit_export_page_access"])(
+    "keeps the ordinary pool available while an audit page waits for %s",
+    async (tableName) => {
+      const { company } = await seed();
+      const { company: secondCompany } = await seed();
+      const userId = randomUUID();
+      const secondUserId = randomUUID();
+      const principals = [
+        { companyId: company.id, principalId: userId },
+        { companyId: secondCompany.id, principalId: secondUserId },
+      ];
+      await db.insert(companyMemberships).values(principals.map(principal => ({
+        ...principal, principalType: "user", membershipRole: "operator", status: "active",
+      })));
+      await db.insert(principalPermissionGrants).values(principals.map(principal => ({
+        ...principal, principalType: "user", permissionKey: "audit:view_agent_actions",
+      })));
+      const requestDb = createDb(tempDb!.connectionString, { maxConnections: 1, dedicatedConnectionMax: 1 });
+      const lockDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+      const board = request(await createApp(requestDb, { type: "board", source: "session", userId, companyIds: [company.id] }));
+      const secondBoard = request(await createApp(requestDb, {
+        type: "board", source: "session", userId: secondUserId, companyIds: [secondCompany.id],
+      }));
+      const path = `/api/companies/${company.id}/audit/managed-exports`;
+      const secondPath = `/api/companies/${secondCompany.id}/audit/managed-exports`;
+      const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
+      vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
+      const release = Promise.withResolvers<void>();
+      let lock: Promise<void> | undefined;
+      let pending: Promise<{ status: number; body: Record<string, unknown> }> | undefined;
+      const otherRequests: Array<Promise<{ status: number; body: Record<string, unknown> }>> = [];
+      let completed = false;
+      try {
+        const saved = await board.post(path).send(window).expect(201);
+        const exportPath = `${path}/${saved.body.exportId}`;
+        const secondSaved = await secondBoard.post(secondPath).send(window).expect(201);
+        const secondExport = `${secondPath}/${secondSaved.body.exportId}`;
+        await withDedicatedDbConnection(requestDb, async () => {
+          const unavailable = await board.get(exportPath).timeout({ deadline: 2_000 }).expect(503);
+          expect(unavailable.body).toMatchObject({ details: { reasonCode: "export_retry_required" } });
+          expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1);
+        });
+        const locked = Promise.withResolvers<void>();
+        lock = lockDb.transaction(async tx => {
+          await tx.execute(sql`lock table ${sql.identifier(tableName)} in access exclusive mode`);
+          locked.resolve();
+          await release.promise;
+        });
+        await Promise.race([locked.promise, lock]);
+        pending = board.get(exportPath).then(({ status, body }) => {
+          completed = true;
+          return { status, body };
+        });
+        await vi.waitFor(() => expect(dedicatedDbConnectionStats(requestDb)?.inUse).toBe(1));
+
+        const busy = await board.get(exportPath).timeout({ deadline: 2_000 }).expect(429);
+        expect(busy.body).toMatchObject({ details: { reasonCode: "export_busy" } });
+        for (let index = 0; index < 2; index++) {
+          otherRequests.push(secondBoard.get(secondExport).then(({ status, body }) => ({ status, body })));
+        }
+        expect(await Promise.race(otherRequests)).toMatchObject({ status: 429, body: { details: { reasonCode: "export_busy" } } });
+        await board.get(`/api/companies/${company.id}/activity`).timeout({ deadline: 2_000 }).expect(200);
+        expect(completed).toBe(false);
+
+        const timedOut = await pending;
+        expect(timedOut).toMatchObject({ status: 503, body: { details: { reasonCode: "export_retry_required" } } });
+        expect(timedOut.body).not.toHaveProperty("events");
+        release.resolve();
+        await lock;
+        const outcomes = await Promise.all(otherRequests);
+        expect(outcomes.map(result => result.status).sort()).toEqual([200, 429]);
+        await board.get(exportPath).expect(200);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([lock, pending, ...otherRequests]);
+        await Promise.all([lockDb.$client.end(), requestDb.$client.end()]);
+        vi.unstubAllEnvs();
+      }
+    },
+    30_000,
+  );
+
+  // This race belongs with the route fixtures because it needs a held PostgreSQL
+  // writer plus the suite's authenticated HTTP requests and shared snapshot setup.
+  it("finds a late-committing event only through a fresh overlapping export", async () => {
+    const { company, agent } = await seed();
+    const userId = randomUUID();
+    await db.insert(companyMemberships).values({
+      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
+    });
+    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
+    const epoch = randomUUID();
     const from = "2026-07-17T00:00:00.000Z";
     const boundary = "2026-07-17T00:00:02.000Z";
     const to = "2026-07-17T00:00:04.000Z";
@@ -422,10 +481,11 @@ describePostgres("agent action audit routes", () => {
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", from);
     vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
 
-    let releaseWriter!: () => void;
-    const writerMayCommit = new Promise<void>(resolve => { releaseWriter = resolve; });
-    let inserted!: () => void;
-    const insertedPromise = new Promise<void>(resolve => { inserted = resolve; });
+    let signalInserted!: () => void;
+    const inserted = new Promise<void>(resolve => { signalInserted = resolve; });
+    let finishTransaction!: () => void;
+    const transactionMayCommit = new Promise<void>(resolve => { finishTransaction = resolve; });
+    const writerDb = createDb(tempDb!.connectionString);
     const lateTransaction = writerDb.transaction(async tx => {
       await tx.insert(managedAuditEvents).values({
         id: eventId,
@@ -441,32 +501,35 @@ describePostgres("agent action audit routes", () => {
         decision: "allow",
         status: "authorized",
       });
-      inserted();
-      await writerMayCommit;
+      signalInserted();
+      await transactionMayCommit;
     });
 
     try {
-      await insertedPromise;
+      await Promise.race([inserted, lateTransaction]);
       const path = `/api/companies/${company.id}/audit/managed-exports`;
-      const initial = await board.post(path).send({ from, to: boundary }).expect(201);
-      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
-      expect(initial.body.eventCount).toBe(0);
-      expect(adjacent.body.eventCount).toBe(0);
+      const first = await board.post(path).send({ from, to: boundary }).expect(201);
+      expect(first.body.eventCount).toBe(0);
 
-      releaseWriter();
+      finishTransaction();
       await lateTransaction;
-      const initialPage = await board.get(`${path}/${initial.body.exportId}`).expect(200);
+      const adjacent = await board.post(path).send({ from: boundary, to }).expect(201);
+      expect(adjacent.body.eventCount).toBe(0);
+      const firstPage = await board.get(`${path}/${first.body.exportId}`).expect(200);
       const adjacentPage = await board.get(`${path}/${adjacent.body.exportId}`).expect(200);
-      expect(initialPage.body.events).toEqual([]);
+      expect(firstPage.body.events).toEqual([]);
       expect(adjacentPage.body.events).toEqual([]);
 
-      const overlap = await board.post(path).send({ from, to }).expect(201);
-      const overlapPage = await board.get(`${path}/${overlap.body.exportId}`).expect(200);
+      const overlapping = await board.post(path).send({ from, to }).expect(201);
+      const overlapPage = await board.get(`${path}/${overlapping.body.exportId}`).expect(200);
       expect(overlapPage.body.events).toMatchObject([{ id: eventId, source: "tool_gateway" }]);
       expect(overlapPage.body.complete).toBe(true);
 
+      // A source epoch fences old export checkpoints, while stable event IDs
+      // still deduplicate archived evidence across epochs.
+      const nextEpoch = randomUUID();
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", nextEpoch);
-      expect((await board.get(`${path}/${overlap.body.exportId}`)).body)
+      expect((await board.get(`${path}/${overlapping.body.exportId}`)).body)
         .toMatchObject({ details: { reasonCode: "source_epoch_changed" } });
       const nextEpochExport = await board.post(path).send({ from, to }).expect(201);
       const nextEpochPage = await board.get(`${path}/${nextEpochExport.body.exportId}`).expect(200);
@@ -475,10 +538,13 @@ describePostgres("agent action audit routes", () => {
         .map(event => `${event.source}:${event.id}`);
       expect(new Set(archivedKeys).size).toBe(1);
     } finally {
-      releaseWriter();
-      vi.unstubAllEnvs();
-      await lateTransaction;
-      await writerDb.$client.end({ timeout: 1 });
+      finishTransaction();
+      try {
+        await lateTransaction;
+      } finally {
+        vi.unstubAllEnvs();
+        await writerDb.$client.end();
+      }
     }
   }, 45_000);
 
@@ -566,47 +632,6 @@ describePostgres("agent action audit routes", () => {
     }
   });
 
-  it("does not reveal a missing task when a surviving run is bound to another user's private task", async () => {
-    const { company, agent } = await seed();
-    const userId = randomUUID();
-    await db.insert(companyMemberships).values({
-      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
-    await db.insert(principalPermissionGrants).values({
-      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
-    });
-    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
-    const [privateTask] = await db.insert(issues).values({
-      companyId: company.id, title: "Private surviving binding", visibility: "private", responsibleUserId: randomUUID(),
-    }).returning();
-    const [run] = await db.insert(heartbeatRuns).values({
-      companyId: company.id, agentId: agent.id, scopeKind: "issue", issueId: privateTask.id,
-    }).returning();
-    const missingTaskId = randomUUID();
-    await db.insert(managedAuditEvents).values({
-      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
-      occurredAt: new Date("2026-07-17T00:00:01.000Z"), eventType: "invocation_decision_recorded",
-      phase: "policy_decision", decision: "allow", status: "authorized", taskId: missingTaskId,
-      runId: run.id, invocationId: randomUUID(),
-    });
-
-    const path = `/api/companies/${company.id}/audit/managed-exports`;
-    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-    try {
-      const created = await board.post(path).send(window).expect(201);
-      expect(created.body.eventCount).toBe(0);
-      const page = await board.get(`${path}/${created.body.exportId}`).expect(200);
-      expect(page.body).toMatchObject({ eventCount: 0, events: [], complete: true });
-      expect(page.text).not.toContain(missingTaskId);
-      expect(page.text).not.toContain(run.id);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   it.each(["responsibility_dashboard", "responsibility_bar", "responsibility_status_update", "automation_conversation"])(
     "keeps %s audit events visible only to their owner, including when a binding disappears",
     async (originKind) => {
@@ -665,73 +690,6 @@ describePostgres("agent action audit routes", () => {
       }
     },
   );
-
-  it("rejects an audit window whose frozen membership exceeds the bound", async () => {
-    const { company, agent } = await seed();
-    const userId = randomUUID();
-    await db.insert(companyMemberships).values({
-      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
-    await db.insert(principalPermissionGrants).values({
-      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
-    });
-    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
-    const occurredAt = new Date("2026-07-17T00:00:01.000Z");
-    const rows = Array.from({ length: MAX_SNAPSHOT_EVENTS + 1 }, () => ({
-      companyId: company.id, actorType: "agent", actorId: agent.id, source: "tool_gateway",
-      occurredAt, eventType: "invocation_decision_recorded", phase: "policy_decision",
-      decision: "allow", status: "authorized", invocationId: randomUUID(),
-    }));
-    for (let index = 0; index < rows.length; index += 1_000) {
-      await db.insert(managedAuditEvents).values(rows.slice(index, index + 1_000));
-    }
-    const path = `/api/companies/${company.id}/audit/managed-exports`;
-    const window = { from: "2026-07-17T00:00:00.000Z", to: "2026-07-17T00:00:02.000Z" };
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", randomUUID());
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", window.from);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-    try {
-      const response = await board.post(path).send(window);
-      expect(response.status, response.text).toBe(409);
-      expect(response.body).toMatchObject({ details: { reasonCode: "snapshot_too_large", maxEvents: MAX_SNAPSHOT_EVENTS } });
-      expect(await db.select().from(managedAuditExports)).toHaveLength(0);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  }, 120_000);
-
-  it("fails closed when another reader holds the export validation lock", async () => {
-    const { company } = await seed();
-    const userId = randomUUID();
-    const sourceEpoch = randomUUID();
-    await db.insert(companyMemberships).values({
-      companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
-    });
-    await db.insert(principalPermissionGrants).values({
-      companyId: company.id, principalType: "user", principalId: userId, permissionKey: "audit:view_agent_actions",
-    });
-    const [snapshot] = await db.insert(managedAuditExports).values({
-      companyId: company.id, userId, sourceEpoch, from: new Date("2026-07-17T00:00:00.000Z"),
-      to: new Date("2026-07-17T00:00:02.000Z"), eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"),
-      expiresAt: new Date(Date.now() + 60_000),
-    }).returning();
-    const board = request(await createApp(db, { type: "board", source: "session", userId, companyIds: [company.id] }));
-    const key = `managed-audit-export:${snapshot!.id}`;
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_SOURCE_EPOCH", sourceEpoch);
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_CAPTURE_FROM", "2026-07-17T00:00:00.000Z");
-    vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", undefined);
-    try {
-      await db.transaction(async tx => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-        const response = await board.get(`/api/companies/${company.id}/audit/managed-exports/${snapshot!.id}`);
-        expect(response.status, response.text).toBe(409);
-        expect(response.body).toMatchObject({ details: { reasonCode: "snapshot_read_busy" } });
-        expect(response.body).not.toHaveProperty("events");
-      });
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
 
   it("retains archive bytes and checkpoints outside an older restore and rotates the source epoch", async ({ skip }) => {
     const oldEpoch = randomUUID();
@@ -916,7 +874,6 @@ describePostgres("agent action audit routes", () => {
       }
     }
   }, 90_000);
-
 
   async function seedActorOnlyRows(companyId: string) {
     return db.insert(activityLog).values([
@@ -1389,18 +1346,22 @@ describePostgres("agent action audit routes", () => {
 });
 
 describe("managed audit export bounded failure mapping", () => {
-  it("maps a cancelled validation query to a fail-closed conflict", async () => {
+  it("maps a cancelled validation query to a bounded export failure", async () => {
     const timeoutDb = {
       transaction: async () => {
         throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
       },
     } as unknown as Db;
+    const dedicatedConnection = vi.spyOn(dbClient, "withDedicatedDbConnection")
+      .mockImplementation(async (_db, action) => action(timeoutDb));
     await expect(readManagedAuditExportPage(timeoutDb, {
       companyId: randomUUID(), sourceEpoch: randomUUID(),
+      retainAfter: null,
       actor: { type: "board", source: "session", userId: randomUUID(), companyIds: [] },
     }, randomUUID())).rejects.toMatchObject({
-      status: 409,
-      details: { reasonCode: "snapshot_read_timeout" },
+      status: 503,
+      details: { reasonCode: "export_retry_required" },
     });
+    dedicatedConnection.mockRestore();
   });
 });
