@@ -1,12 +1,16 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
-import { and, asc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or } from "drizzle-orm";
+import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, issuePrivacySqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
 
 const PAGE_SIZE = 200;
+// Keep the array-backed checkpoint and the all-membership visibility check
+// bounded. Larger windows must be split and reconciled independently.
+export const MAX_SNAPSHOT_EVENTS = 100_000;
+const EXPORT_READ_STATEMENT_TIMEOUT_MS = 5_000;
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type ExportScope = {
@@ -122,7 +126,14 @@ export async function createManagedAuditExport(db: Db, scope: ExportScope, windo
     const visible = await visibleEvents(tx, scope);
     const rows = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
       .where(and(visible, gte(managedAuditEvents.occurredAt, window.from), lt(managedAuditEvents.occurredAt, window.to)))
-      .orderBy(asc(managedAuditEvents.id));
+      .orderBy(asc(managedAuditEvents.id))
+      .limit(MAX_SNAPSHOT_EVENTS + 1);
+    if (rows.length > MAX_SNAPSHOT_EVENTS) {
+      throw conflict(`The requested audit window contains more than ${MAX_SNAPSHOT_EVENTS} visible events. Split the interval into smaller windows and reconcile the resulting checkpoints independently.`, {
+        reasonCode: "snapshot_too_large",
+        maxEvents: MAX_SNAPSHOT_EVENTS,
+      });
+    }
     const eventIds = rows.map(row => row.id);
     const watermark = createHash("sha256").update(JSON.stringify(eventIds)).digest("hex");
     const [saved] = await tx.insert(managedAuditExports).values({
@@ -173,56 +184,74 @@ export async function readManagedAuditExportPage(
   exportId: string,
   cursor?: string,
 ) {
-  return db.transaction(async tx => {
-    const userId = await assertCurrentAuditAuthority(tx, scope);
-    const [snapshot] = await tx.select().from(managedAuditExports).where(and(
-      eq(managedAuditExports.id, exportId),
-      eq(managedAuditExports.companyId, scope.companyId),
-      eq(managedAuditExports.userId, userId),
-    ));
-    if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
-    if (snapshot.sourceEpoch !== scope.sourceEpoch) {
-      throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
+  try {
+    return await db.transaction(async tx => {
+      await tx.execute(sql`select set_config('statement_timeout', ${String(EXPORT_READ_STATEMENT_TIMEOUT_MS)}, true)`);
+      const userId = await assertCurrentAuditAuthority(tx, scope);
+      const [snapshot] = await tx.select().from(managedAuditExports).where(and(
+        eq(managedAuditExports.id, exportId),
+        eq(managedAuditExports.companyId, scope.companyId),
+        eq(managedAuditExports.userId, userId),
+      ));
+      if (!snapshot) throw notFound("Managed audit export is unavailable", { reasonCode: "snapshot_missing" });
+      const [lock] = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(${`managed-audit-export:${snapshot.id}`}, 0)) as locked`);
+      if (!(lock as { locked?: boolean }).locked) {
+        throw conflict("Another page read is already validating this managed audit export. Retry after it completes.", { reasonCode: "snapshot_read_busy" });
+      }
+      if (snapshot.sourceEpoch !== scope.sourceEpoch) {
+        throw conflict("Audit source epoch changed. Reconcile the archived checkpoint before creating an export.", { reasonCode: "source_epoch_changed" });
+      }
+      assertRetentionAllows(scope, snapshot.from);
+      if (snapshot.expiresAt <= new Date()) {
+        throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
+      }
+      const offset = decodeCursor(snapshot, cursor);
+      const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
+      const visible = await visibleEvents(tx, scope);
+      if (snapshot.eventIds.length > 0) {
+        // Counts and watermarks also describe rows on other pages. Check all
+        // snapshot members in the same transaction before returning either.
+        const [available] = await tx.select({ eventCount: count() }).from(managedAuditEvents)
+          .where(and(visible, sql`${managedAuditEvents.id} = any(${sql.param(snapshot.eventIds)}::uuid[])`));
+        if (available.eventCount !== snapshot.eventIds.length) {
+          throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
+        }
+      }
+      const events = ids.length
+        ? await tx.select({
+            id: managedAuditEvents.id,
+            companyId: managedAuditEvents.companyId,
+            source: managedAuditEvents.source,
+            schemaVersion: managedAuditEvents.schemaVersion,
+            eventType: managedAuditEvents.eventType,
+            phase: managedAuditEvents.phase,
+            occurredAt: managedAuditEvents.occurredAt,
+            runId: managedAuditEvents.runId,
+            taskId: managedAuditEvents.taskId,
+            invocationId: managedAuditEvents.invocationId,
+            requestId: managedAuditEvents.requestId,
+            connectionId: managedAuditEvents.connectionId,
+            actorType: managedAuditEvents.actorType,
+            actorId: managedAuditEvents.actorId,
+            decision: managedAuditEvents.decision,
+            status: managedAuditEvents.status,
+            reasonCode: managedAuditEvents.reasonCode,
+          }).from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
+          .orderBy(asc(managedAuditEvents.id))
+        : [];
+      const deliveredThrough = offset + events.length;
+      return {
+        ...exportReceipt(snapshot),
+        events,
+        deliveredThrough,
+        nextCursor: deliveredThrough < snapshot.eventIds.length ? encodeCursor(snapshot, deliveredThrough) : null,
+        complete: deliveredThrough === snapshot.eventIds.length,
+      };
+    }, repeatableRead);
+  } catch (error) {
+    if ((error as { code?: string }).code === "57014") {
+      throw conflict("Managed audit export validation exceeded its bounded read time. Split the interval and retry.", { reasonCode: "snapshot_read_timeout" });
     }
-    assertRetentionAllows(scope, snapshot.from);
-    if (snapshot.expiresAt <= new Date()) {
-      throw conflict("Managed audit export expired", { reasonCode: "snapshot_expired" });
-    }
-    const offset = decodeCursor(snapshot, cursor);
-    const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
-    const visible = await visibleEvents(tx, scope);
-    const events = ids.length
-      ? await tx.select({
-          id: managedAuditEvents.id,
-          companyId: managedAuditEvents.companyId,
-          source: managedAuditEvents.source,
-          schemaVersion: managedAuditEvents.schemaVersion,
-          eventType: managedAuditEvents.eventType,
-          phase: managedAuditEvents.phase,
-          occurredAt: managedAuditEvents.occurredAt,
-          runId: managedAuditEvents.runId,
-          taskId: managedAuditEvents.taskId,
-          invocationId: managedAuditEvents.invocationId,
-          requestId: managedAuditEvents.requestId,
-          connectionId: managedAuditEvents.connectionId,
-          actorType: managedAuditEvents.actorType,
-          actorId: managedAuditEvents.actorId,
-          decision: managedAuditEvents.decision,
-          status: managedAuditEvents.status,
-          reasonCode: managedAuditEvents.reasonCode,
-        }).from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
-        .orderBy(asc(managedAuditEvents.id))
-      : [];
-    if (events.length !== ids.length) {
-      throw conflict("Managed audit export is incomplete. Reconcile the archived checkpoint before creating an export.", { reasonCode: "snapshot_incomplete" });
-    }
-    const count = offset + events.length;
-    return {
-      ...exportReceipt(snapshot),
-      events,
-      deliveredThrough: count,
-      nextCursor: count < snapshot.eventIds.length ? encodeCursor(snapshot, count) : null,
-      complete: count === snapshot.eventIds.length,
-    };
-  }, repeatableRead);
+    throw error;
+  }
 }

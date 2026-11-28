@@ -48,9 +48,18 @@ The activity log is append-only and immutable.
 ## Managed Audit Exports
 
 `POST /api/companies/{companyId}/audit/managed-exports` opens a snapshot for a
-half-open interval given by `from` and `to`. `GET
-/api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page; pass
-the preceding page's `nextCursor` as `cursor` to resume.
+half-open interval given by the `from` and `to` timestamps. `GET
+/api/companies/{companyId}/audit/managed-exports/{exportId}` reads a page; use
+the preceding page's `nextCursor` as the `cursor` query parameter to resume.
+Every page verifies access to all events in the snapshot. If any event is
+missing or no longer visible, the API returns HTTP `409` with
+`details.reasonCode` set to `snapshot_incomplete`. The response contains no
+events, event count, or watermark.
+
+Snapshots are limited to 100,000 visible event IDs. Larger windows return
+`snapshot_too_large` and must be split. Page validation is serialized per
+export and bounded to five seconds; contention returns `snapshot_read_busy` and
+a timed-out validation returns `snapshot_read_timeout`, with no partial page.
 
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to

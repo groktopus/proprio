@@ -23,6 +23,13 @@ this boundary, or a cursor for such a window, returns
 with the old setting from export traffic before treating the new boundary as
 enforced.
 
+An export snapshot contains at most 100,000 visible event IDs. A request that
+would exceed this bound returns `snapshot_too_large`; split the time interval
+into smaller windows and reconcile each checkpoint independently. Page reads
+serialize per export and use a five-second database statement bound. A busy
+reader returns `snapshot_read_busy`; a query that reaches the bound returns
+`snapshot_read_timeout` without releasing a partial page.
+
 1. Send `POST /api/companies/:companyId/audit/managed-exports` with `from` and
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.
@@ -50,8 +57,10 @@ event ID; a completed snapshot is final only for its frozen membership, not
 for all events that may later commit into the interval.
 
 An export belongs to the creating operator and company. Company, audit and task
-access are checked for eligible events. A page with unavailable evidence returns
-`snapshot_incomplete` and sends no partial page. Preserve the checkpoint and
+access are checked for eligible events. Before releasing a page, the API checks
+every event in the snapshot because the count and watermark describe all pages.
+If any event is unavailable, the API returns `snapshot_incomplete` without
+returning the page, count or watermark. Preserve the checkpoint and
 reconcile before opening a new export. A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.
