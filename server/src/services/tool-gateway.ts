@@ -8733,6 +8733,9 @@ export function createToolGatewayService(
         } : null;
       };
       const taskIdentity = taskIdentityFor(requestHeaders);
+      // Managed dispatch receipts exclude calls declaring MCP Tasks: the
+      // response may be a durable task tracked in toolMcpTasks. A task result
+      // without its required modern task identity is rejected as malformed below.
       managedDispatchEligible = captureManagedAudit && !reuseManagedDispatchIntent && Boolean(session.runId && session.agentId) &&
         !taskIdentity && !elicitationClaim;
       // This call's hold on a task it starts or attaches to.

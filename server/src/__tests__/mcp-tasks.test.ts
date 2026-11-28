@@ -15,6 +15,7 @@ import {
   createDb,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   issueThreadInteractions,
   projects,
   toolInvocations,
@@ -502,6 +503,10 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(failure.message).toContain("Build runner crashed");
     const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, org.id));
     expect(invocation).toMatchObject({ status: "failed", errorCode: "provider_task_failed" });
+    const events = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+    ));
+    expect(events.some((event) => event.phase === "dispatch_intent" || event.phase === "terminal_outcome")).toBe(false);
   });
 
   it("ends with a clear error when the app forgets the task or its TTL passes, never a hang", async () => {
