@@ -1,0 +1,160 @@
+name: Refresh Runner reporting lock proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [pnpm-lock.yaml]
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: runner-report-lock-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-proof:
+    if: github.repository == 'groktopus/proprio' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: lockfile-refresh
+    env:
+      DEFAULT_BRANCH: main
+      LOCKFILE_REFRESH_APP_CLIENT_ID: ${{ vars.LOCKFILE_REFRESH_APP_CLIENT_ID }}
+      LOCKFILE_REFRESH_APP_LOGIN: ${{ vars.LOCKFILE_REFRESH_APP_LOGIN }}
+    steps:
+      - name: Validate default-branch and App identity configuration
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.LOCKFILE_REFRESH_APP_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "$LOCKFILE_REFRESH_APP_CLIENT_ID" ]]
+          [[ -n "$APP_PRIVATE_KEY" ]]
+          [[ "$LOCKFILE_REFRESH_APP_LOGIN" =~ ^[a-z0-9][a-z0-9-]*\[bot\]$ ]]
+          [[ "$LOCKFILE_REFRESH_APP_LOGIN" != "github-actions[bot]" ]]
+          [[ "$LOCKFILE_REFRESH_APP_LOGIN" != "dependabot[bot]" ]]
+
+      - name: Check out exact main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Install pinned pnpm without lifecycle scripts
+        run: npm install --global --ignore-scripts pnpm@9.15.4
+
+      - name: Verify exact checkout and configured package manager
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          pnpm --version
+
+      - name: Verify trusted main lock provenance
+        id: trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/lockfile-trust.mjs merged
+          trusted="$(sed -n 's/^trusted_lock_sha256=//p' "$GITHUB_OUTPUT" | tail -n 1)"
+          basis="$(sed -n 's/^lock_trust_basis=//p' "$GITHUB_OUTPUT" | tail -n 1)"
+          if [[ -z "$trusted" ]]; then
+            echo "No recognized trusted lock is current on main; proof refresh is not authorized."
+            exit 0
+          fi
+          [[ "$trusted" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$basis" == "dependabot" || "$basis" == "reviewed-main-bootstrap" ]]
+
+      - name: Validate resolution inputs and regenerate reporting proof
+        id: refresh
+        if: steps.trust.outputs.trusted_lock_sha256 != ''
+        env:
+          TRUSTED_LOCK_SHA256: ${{ steps.trust.outputs.trusted_lock_sha256 }}
+          TRUSTED_LOCK_BASIS: ${{ steps.trust.outputs.lock_trust_basis }}
+          BASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+          node tests/runner-e2e/prepare-report-lock.mjs --refresh --trusted-lock-sha256 "$TRUSTED_LOCK_SHA256" --trust-basis "$TRUSTED_LOCK_BASIS"
+          BASE_SHA="$BASE_SHA" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
+            bash .github/scripts/refresh-runner-report-sdk-registry.sh
+
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              pnpm-lock.yaml|tests/runner-e2e/report-lock.json|tests/runner-e2e/report-lock.patch|tests/runner-e2e/source-sdk-public-inputs.json) ;;
+              *) echo "::error::Unexpected generated file: $file"; exit 1 ;;
+            esac
+          done < <(git diff --name-only; git ls-files --others --exclude-standard)
+
+          git add -- tests/runner-e2e/report-lock.json tests/runner-e2e/report-lock.patch tests/runner-e2e/source-sdk-public-inputs.json
+          staged="$(git diff --cached --name-only)"
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              tests/runner-e2e/report-lock.json|tests/runner-e2e/report-lock.patch|tests/runner-e2e/source-sdk-public-inputs.json) ;;
+              *) echo "::error::Refusing to stage unexpected file: $file"; exit 1 ;;
+            esac
+          done <<< "$staged"
+          if [[ -z "$staged" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          printf '%s\n' \
+            '## Runner reporting lock proof' \
+            '' \
+            'Generated from this trusted main lock digest:' \
+            "$TRUSTED_LOCK_SHA256" \
+            'The SDK registry was synchronized from a scratch snapshot of these proof bytes.' \
+            'This workflow opens a PR only; merge remains subject to normal required checks.' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create repository-scoped refresh App token
+        id: app-token
+        if: steps.refresh.outputs.changed == 'true'
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.LOCKFILE_REFRESH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LOCKFILE_REFRESH_APP_PRIVATE_KEY }}
+          owner: groktopus
+          repositories: proprio
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Verify configured identity matches the token App
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          EXPECTED_LOGIN: ${{ vars.LOCKFILE_REFRESH_APP_LOGIN }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+          [[ "${APP_SLUG}[bot]" == "$EXPECTED_LOGIN" ]]
+
+      - name: Create or update the fixed proof PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_LOGIN: ${{ vars.LOCKFILE_REFRESH_APP_LOGIN }}
+          BASE_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        shell: bash
+        run: bash .github/scripts/publish-runner-report-lock-pr.sh

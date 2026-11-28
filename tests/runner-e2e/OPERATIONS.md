@@ -976,16 +976,39 @@ install. `report-lock.json` pins the input lock, patch and resulting lock hashes
 This updates existing patch identities and the already declared yaml dependency
 without registry resolution. The worker target and its lock artifact never
 control report dependencies. An already-reviewed output lock is used unchanged. An unknown committed lock fails before install;
-review the correction with dependency changes. The existing lockfile-refresh bot runs
-`prepare-report-lock.mjs --refresh` and includes the correction and hashes in its
-lockfile PR. The same commit resyncs `source-sdk-public-inputs.json`, whose
-`lockSha256` is copied from the committed `report-lock.json` output hash. The lockfile bot merges that PR without checks or code-owner review
-when every added package version is at least 3 days old on npm; otherwise the PR
-waits for a maintainer (see `doc/RELEASE-AUTOMATION-SETUP.md` §8.1). The bot
-merges only the commit the workflow generated. It refuses to bless an
-unrecognized committed lock. Paid authorization
-and report jobs still apply only the reviewed offline correction. The original
-failed run remains failed when retained evidence gets a new presentation.
+review the correction with dependency changes. After a verified Dependabot
+lock reaches `main`, the reporting-proof writer runs
+`prepare-report-lock.mjs --refresh`, then synchronizes
+`source-sdk-public-inputs.json` from a scratch snapshot containing the candidate
+proof pair. The same App-authored commit contains the proof pair and generated
+registry; `lockSha256` follows the committed `report-lock.json` output hash.
+The workflow opens a pull request and never merges or bypasses checks. The
+release agent merges only after the normal required checks and repository
+protections pass. The writer refuses to admit an unrecognized lock. Paid
+authorization and report jobs still apply only the reviewed offline correction.
+The original failed run remains failed when retained evidence gets a new presentation.
+
+The separate `Refresh Runner reporting lock proof` workflow opens the fixed
+`chore/refresh-lockfile` PR. After configuring the App and environment, the
+release agent can run the first proof refresh on `main` without waiting for
+the daily schedule:
+
+```sh
+gh workflow run refresh-runner-report-lock.yml --ref main -R groktopus/proprio
+```
+
+The dispatch accepts no inputs. The release agent merges it through the protected
+checks, including the `proprio/lockfile-trust` status on the exact PR head and
+an up-to-date base once the repository ruleset requires that context. Until
+then, the workflow publishes the status but does not activate protection.
+When a refresh encounters a stale branch, the release agent
+verifies the branch and its PR belong to the configured App, the branch tip is
+GitHub-signed, and it has one parent and changes only the reporting-proof pair
+plus the generated SDK input registry. The agent waits for any active refresh run to finish, closes the stale
+App PR, reads the fixed branch head again, and deletes that branch with an
+explicit lease on the verified SHA. A moved reference fails the lease. The
+next scheduled run can create a fresh proof PR. If branch ownership is unclear,
+the release agent preserves the branch and escalates the conflicting ownership.
 
 The trusted authorization job checks this correction and validates the frozen
 lock against current dependency manifests offline before catalog/build and paid
