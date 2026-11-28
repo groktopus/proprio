@@ -155,9 +155,11 @@ describePostgres("agent action audit routes", () => {
         occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
         decision: "allow", status: "authorized", taskId: privateTask.id, runId: randomUUID(), invocationId: randomUUID(),
       });
+      await db.delete(issues).where(eq(issues.id, privateTask.id));
       const privateLoss = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window);
       expect(privateLoss.status, privateLoss.text).toBe(201);
       expect(privateLoss.body).toMatchObject({ eventCount: 0, sourceEpoch: epoch });
+      expect(privateLoss.body).not.toHaveProperty("details");
 
       const expiredAt = new Date(Date.now() - 1_000);
       await db.insert(managedAuditExports).values({
@@ -302,7 +304,8 @@ describePostgres("agent action audit routes", () => {
       expect(exportAudit).toHaveLength(1);
       expect(exportAudit[0]).toMatchObject({ companyId: company.id, actorType: "user", actorId: userId, entityType: "company", entityId: company.id, details: { exportId: receipt.body.exportId } });
       const exportPath = `${path}/${receipt.body.exportId}`;
-      await db.insert(managedAuditEvents).values({ ...baseEvent, invocationId: randomUUID() });
+      const lateEventId = "00000000-0000-0000-0000-000000000001";
+      await db.insert(managedAuditEvents).values({ ...baseEvent, id: lateEventId, invocationId: randomUUID() });
       const first = await board.get(exportPath);
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
@@ -319,8 +322,18 @@ describePostgres("agent action audit routes", () => {
       }
       const expectedIds = eventRows.map(event => event.id).sort();
       expect(archived).toEqual(expectedIds);
+      expect(archived).not.toContain(lateEventId);
       expect(page).toMatchObject({ complete: true, deliveredThrough: expectedIds.length });
       expect(createHash("sha256").update(JSON.stringify(archived)).digest("hex")).toBe(receipt.body.watermark);
+
+      // A rescan of the same interval discovers a transaction that committed
+      // after the first membership snapshot was frozen.
+      const rescan = await board.post(path).send(window);
+      expect(rescan.status, rescan.text).toBe(201);
+      expect(rescan.body.eventCount).toBe(eventRows.length + 1);
+      const rescannedPage = await board.get(`${path}/${rescan.body.exportId}`);
+      expect(rescannedPage.status, rescannedPage.text).toBe(200);
+      expect(rescannedPage.body.events.map((event: { id: string }) => event.id)).toContain(lateEventId);
 
       await db.delete(managedAuditEvents).where(eq(managedAuditEvents.id, expectedIds[0]));
       expect((await board.get(exportPath)).body).toMatchObject({ details: { reasonCode: "snapshot_incomplete" } });

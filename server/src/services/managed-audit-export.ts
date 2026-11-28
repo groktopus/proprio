@@ -63,12 +63,16 @@ async function assertSourceBindingsAvailable(tx: DbTransaction, scope: ExportSco
     .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))));
   // If a surviving binding proves the event belongs to evidence the caller
   // cannot see, do not reveal whether another task/run binding is missing.
-  const hiddenTaskBinding = exists(tx.select({ id: issues.id }).from(issues)
-    .where(and(
-      eq(issues.companyId, scope.companyId),
-      eq(issues.id, managedAuditEvents.taskId),
-      not(issueEvidenceReadSqlCondition(scope.actor)),
-    )));
+  const hiddenTaskBinding = and(isNotNull(managedAuditEvents.taskId), or(
+    not(exists(tx.select({ id: issues.id }).from(issues)
+      .where(and(eq(issues.companyId, scope.companyId), eq(issues.id, managedAuditEvents.taskId))))),
+    exists(tx.select({ id: issues.id }).from(issues)
+      .where(and(
+        eq(issues.companyId, scope.companyId),
+        eq(issues.id, managedAuditEvents.taskId),
+        not(issueEvidenceReadSqlCondition(scope.actor)),
+      ))),
+  ));
   const hiddenRunBinding = heartbeatRunIssueBindingDeniedSqlCondition(tx, scope.actor, scope.companyId, managedAuditEvents.runId);
   const [missing] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents)
     .where(and(sourceWindow, or(missingRun, missingTask), not(hiddenTaskBinding), not(hiddenRunBinding))).limit(1);
