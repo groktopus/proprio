@@ -304,6 +304,9 @@ impl AcpxSidecarTransport {
             "PROPRIO_ACPX_BUILTIN_ROOT",
             "PROPRIO_ACPX_PROVIDER_PACKAGE_ROOT",
             "PROPRIO_ACPX_PROVIDER_PACKAGE_MANIFEST",
+            // Deployment-owned provider egress policy reaches the trusted
+            // sidecar, where it is consumed before provider environment build.
+            "PROPRIO_RUNNER_EGRESS_ALLOWLIST",
         ];
         if matches!(agent, "pi" | "cursor" | "copilot" | "kimi" | "antigravity") {
             // Credential values alone are not proof of an explicit task binding.

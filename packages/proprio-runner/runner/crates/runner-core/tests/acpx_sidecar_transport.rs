@@ -600,6 +600,7 @@ fn managed_claude_broker_transport_reaches_the_sidecar_without_host_credentials(
                 .env("PROPRIO_GITHUB_BROKER_URL", "http://127.0.0.1:3210")
                 .env("PROPRIO_GITHUB_BROKER_TOKEN", "session-capability")
                 .env("PROPRIO_GITHUB_BRIDGE_TOKEN", "bridge-capability")
+                .env("PROPRIO_RUNNER_EGRESS_ALLOWLIST", "[\"provider.example.test\"]")
                 .env("GH_TOKEN", "unbound-secret")
                 .env("GITHUB_TOKEN", "unbound-secret")
                 .env("UNRELATED_SECRET", "unbound-secret")
@@ -623,6 +624,7 @@ fn managed_claude_broker_transport_reaches_the_sidecar_without_host_credentials(
         "PROPRIO_GITHUB_BROKER_URL",
         "PROPRIO_GITHUB_BROKER_TOKEN",
         "PROPRIO_GITHUB_BRIDGE_TOKEN",
+        "PROPRIO_RUNNER_EGRESS_ALLOWLIST",
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "UNRELATED_SECRET",
@@ -653,7 +655,10 @@ fn managed_claude_broker_transport_reaches_the_sidecar_without_host_credentials(
         .expect("sidecar should report its launch environment");
     for (index, name) in names.iter().enumerate() {
         let value = response["environment"][index].as_str().unwrap();
-        let expected = if (index < 4 && agent == "claude") || ((4..7).contains(&index) && managed) {
+        let expected = if index == 7
+            || (index < 4 && agent == "claude")
+            || ((4..7).contains(&index) && managed)
+        {
             std::env::var(name).unwrap()
         } else {
             String::new()
