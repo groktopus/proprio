@@ -8507,6 +8507,7 @@ export function createToolGatewayService(
       allowContinuation: boolean;
     } = false,
     reuseManagedDispatchIntent = false,
+    onManagedDispatchIntent?: () => void,
   ): Promise<RemoteHttpExecutionResult> {
     const { entry, connection, sourceTemplateKey } = await resolveConnectedRemoteTool(
       session,
@@ -8648,6 +8649,7 @@ export function createToolGatewayService(
               allowContinuation: captureManagedAudit.allowContinuation,
             } : {}),
           });
+          if (managedDispatchIntentWritten) onManagedDispatchIntent?.();
         }
         try {
           return await (options.remoteHttpRequest
@@ -8998,6 +9000,15 @@ export function createToolGatewayService(
         } : null;
       };
       const taskIdentity = taskIdentityFor(requestHeaders);
+      if (taskIdentity && captureManagedAudit && captureManagedAudit.mode === "approved") {
+        try {
+          if (await hasManagedMcpPhase(session.companyId, invocationId, "dispatch_intent")) {
+            onManagedDispatchIntent?.();
+          }
+        } catch (error) {
+          throw new ManagedAuditCaptureError(error);
+        }
+      }
       // Capture intent before every modern tools/call, including calls that
       // may return a task. Task responses are persisted before waitForMcpTask
       // can return or fail, so pending results retain the same intent.
@@ -10974,6 +10985,7 @@ export function createToolGatewayService(
     invocationId: string;
     claimUpdatedAt: Date;
     expectedInvocationStatus: "awaiting_approval" | "executing";
+    managedMcpReceiptExpected?: boolean;
     error: unknown;
   }) {
     const reasonCode =
@@ -11045,14 +11057,25 @@ export function createToolGatewayService(
             eq(toolActionRequests.updatedAt, input.claimUpdatedAt),
           ),
         );
-      await appendManagedMcpTerminalReceipt(tx, {
-        companyId: actionRequest.companyId,
-        invocationId: input.invocationId,
-        actionRequestId: input.actionRequestId,
-        completedAt: now,
-        status: "failed",
-        reasonCode,
-      });
+      const [intent] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, actionRequest.companyId),
+        eq(managedAuditEvents.source, "tool_gateway"),
+        eq(managedAuditEvents.phase, "dispatch_intent"),
+        eq(managedAuditEvents.invocationId, input.invocationId),
+      )).limit(1);
+      if (input.managedMcpReceiptExpected || intent) {
+        const receiptWritten = await appendManagedMcpTerminalReceipt(tx, {
+          companyId: actionRequest.companyId,
+          invocationId: input.invocationId,
+          actionRequestId: input.actionRequestId,
+          completedAt: now,
+          status: "failed",
+          reasonCode,
+        });
+        if (!receiptWritten) {
+          throw new Error("Expected managed MCP terminal receipt has no dispatch intent");
+        }
+      }
       return true;
     });
     if (!settled) return { reasonCode, message, settled: false };
@@ -11437,6 +11460,7 @@ export function createToolGatewayService(
     const { session, tool, parameters, argumentsSummary } = prepared;
 
     const startedAt = Date.now();
+    let managedMcpReceiptExpected = false;
     // Keep dispatch and outcome persistence outside the preparation retry
     // boundary. Only the still-current claim may record the provider start.
     if (!(await startToolInvocation(db, invocation.id, claim))) {
@@ -11469,6 +11493,8 @@ export function createToolGatewayService(
                     allowContinuation: invocation.errorCode === "elicitation_required",
                   }
                 : false,
+              false,
+              () => { managedMcpReceiptExpected = true; },
             )
           : tool.providerType === "mcp_local_stdio"
             ? await executeLocalStdioTool(
@@ -11588,6 +11614,7 @@ export function createToolGatewayService(
         invocationId: invocation.id,
         claimUpdatedAt: claimed.updatedAt,
         expectedInvocationStatus: "executing",
+        managedMcpReceiptExpected,
         error,
       });
       await writeToolCallEvent({
@@ -14505,6 +14532,7 @@ export function createToolGatewayService(
                         approvalClaim: approvedDispatchClaim, allowContinuation: approvedElicitationContinuation }
                     : !input.approvedActionRequestId ? { mode: "direct" } : false
                   : false,
+                reuseManagedDispatchIntent,
               )
             : tool.providerType === "mcp_local_stdio"
               ? await executeLocalStdioTool(
@@ -14774,6 +14802,7 @@ export function createToolGatewayService(
             invocationId,
             claimUpdatedAt: approvedDispatchClaim.claimedAt,
             expectedInvocationStatus: "executing",
+            managedMcpReceiptExpected: true,
             error: normalizedError,
           });
           settledManagedDispatch = settlement.settled;
