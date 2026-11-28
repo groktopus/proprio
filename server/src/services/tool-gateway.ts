@@ -8319,6 +8319,7 @@ export function createToolGatewayService(
     /** `run` aborts when the run is stopped (the task is cancelled); `caller` when the caller leaves (it is kept). */
     taskSignals: { run?: AbortSignal; caller?: AbortSignal; attachToTaskRecordId?: string | null } = {},
     captureManagedAudit = false,
+    reuseManagedDispatchIntent = false,
   ): Promise<RemoteHttpExecutionResult> {
     const { entry, connection, sourceTemplateKey } = await resolveConnectedRemoteTool(
       session,
@@ -8732,7 +8733,7 @@ export function createToolGatewayService(
         } : null;
       };
       const taskIdentity = taskIdentityFor(requestHeaders);
-      managedDispatchEligible = captureManagedAudit && Boolean(session.runId && session.agentId) &&
+      managedDispatchEligible = captureManagedAudit && !reuseManagedDispatchIntent && Boolean(session.runId && session.agentId) &&
         !taskIdentity && !elicitationClaim;
       // This call's hold on a task it starts or attaches to.
       const taskOwner = `call:${invocationId}:${randomUUID()}`;
@@ -13514,6 +13515,7 @@ export function createToolGatewayService(
       let recoveredGitHubPublication: { content: string; data: unknown } | undefined;
       /** A keyed retry collecting its provider task (MCP Tasks); it may only attach to that task. */
       let retryingMcpTaskRecordId: string | null = null;
+      let reuseManagedDispatchIntent = false;
       let effectiveParameters: unknown = requestedParameters;
       let effectiveArgumentsSummary = argumentValidation.summary;
 
@@ -14002,6 +14004,8 @@ export function createToolGatewayService(
           // own error), a matching unsent round means the answer still has
           // to reach the app.
           && await elicitationRetryMatches(session.companyId, recorded.invocation.id, tool.name, effectiveParameters);
+        reuseManagedDispatchIntent = retryingElicitation && tool.providerType === "mcp_remote_http" &&
+          await hasManagedMcpPhase(session.companyId, invocationId, "dispatch_intent");
         const retryingMcpTask = Boolean(retryingMcpTaskRecordId) || retryingElicitation;
         if (retryingGitHubPublication) {
           // Invocation hashes describe shortened audit previews. The durable
@@ -14028,7 +14032,7 @@ export function createToolGatewayService(
           }
         }
         if (recorded.replayed && !input.approvedActionRequestId &&
-            !retryingMcpTaskRecordId &&
+            !retryingMcpTask &&
             tool.providerType === "mcp_remote_http" &&
             await hasManagedMcpPhase(session.companyId, invocationId, "dispatch_intent") &&
             !(await hasManagedMcpPhase(session.companyId, invocationId, "terminal_outcome"))) {
@@ -14178,6 +14182,7 @@ export function createToolGatewayService(
                   attachToTaskRecordId: retryingMcpTaskRecordId,
                 },
                 !input.approvedActionRequestId && tool.providerType === "mcp_remote_http",
+                reuseManagedDispatchIntent,
               )
             : tool.providerType === "mcp_local_stdio"
               ? await executeLocalStdioTool(
@@ -14361,9 +14366,26 @@ export function createToolGatewayService(
             (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown")) {
           throw normalizedError;
         }
+        const reasonCode = normalizedError instanceof ToolContentValidationError
+          ? normalizedError.reasonCode
+          : normalizedError instanceof ToolGatewayHttpError
+            ? normalizedError.reasonCode
+            : "tool_execution_failed";
         const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
           invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
-        if (capturedManagedDispatch && !managedProviderResultConfirmed) {
+        const verifiedElicitationWait = capturedManagedDispatch && reasonCode === "elicitation_required" &&
+          await elicitationRetryMatches(session.companyId, invocationId, tool.name, effectiveParameters);
+        const verifiedPendingTask = capturedManagedDispatch && reasonCode === "provider_task_pending" &&
+          tool.connectionId !== null && Boolean(await db.select({ id: toolMcpTasks.id }).from(toolMcpTasks).where(and(
+            eq(toolMcpTasks.companyId, session.companyId),
+            or(eq(toolMcpTasks.invocationId, invocationId), eq(toolMcpTasks.lastInvocationId, invocationId)),
+            eq(toolMcpTasks.connectionId, tool.connectionId),
+            eq(toolMcpTasks.argumentsIdentity, mcpTaskArgumentsIdentity(effectiveParameters)),
+            mcpTaskCollectable(),
+          )).limit(1));
+        const verifiedProviderJsonRpcError = reasonCode === "remote_mcp_error";
+        if (capturedManagedDispatch && !managedProviderResultConfirmed && !verifiedElicitationWait &&
+            !verifiedPendingTask && !verifiedProviderJsonRpcError) {
           throw new ToolGatewayHttpError(409,
             "The managed MCP dispatch has no confirmed provider result. Reconcile it before retrying this action.",
             "managed_dispatch_outcome_unknown", { invocationId });
@@ -14373,12 +14395,6 @@ export function createToolGatewayService(
           normalizedError instanceof ToolGatewayHttpError
             ? normalizedError.status
             : 502;
-        const reasonCode =
-          normalizedError instanceof ToolContentValidationError
-            ? normalizedError.reasonCode
-            : normalizedError instanceof ToolGatewayHttpError
-              ? normalizedError.reasonCode
-              : "tool_execution_failed";
         const isRuntimeDeferred =
           status === 429 &&
           (reasonCode === "runtime_capacity_unavailable" ||

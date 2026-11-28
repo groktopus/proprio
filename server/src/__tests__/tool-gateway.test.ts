@@ -793,6 +793,96 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("retries a managed MCP call under its saved elicitation after a person answers", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    let toolCallCount = 0;
+    const question = { jsonrpc: "2.0", id: "folder-question", method: "elicitation/create",
+      params: { message: "Which folder?", requestedSchema: { type: "object", properties: { folder: { type: "string" } } } } };
+    const remote = await startFakeRemoteMcpServer(({ body }) => {
+      if (body?.method !== "tools/call") return {};
+      toolCallCount += 1;
+      const events: Array<Record<string, unknown>> = toolCallCount === 1 ? [question] : [{ jsonrpc: "2.0", id: body.id,
+        result: { content: [{ type: "text", text: "saved in requested folder" }] } }];
+      return { headers: { "content-type": "text/event-stream" },
+        rawBody: events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("") };
+    });
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const input = { sessionToken: session.token, tool, parameters: { key: "elicitation-key", value: "elicitation-value" },
+        idempotencyKey: "managed-mcp-elicitation-retry" };
+      await expect(gateway.executeTool(input)).rejects.toMatchObject({ status: 409, reasonCode: "elicitation_required" });
+      const [invocation] = await db.select().from(toolInvocations).where(and(
+        eq(toolInvocations.companyId, company.id), eq(toolInvocations.idempotencyKey, input.idempotencyKey),
+      ));
+      expect(invocation).toMatchObject({ status: "awaiting_approval", errorCode: "elicitation_required" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, invocation.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, invocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+      const [card] = await db.select().from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, company.id), eq(issueThreadInteractions.issueId, issue.id),
+        eq(issueThreadInteractions.kind, "ask_user_questions"),
+      ));
+      expect(card).toBeDefined();
+      await db.update(issueThreadInteractions).set({ status: "answered", result: { version: 1,
+        answers: [{ questionId: "folder", optionIds: [], otherText: "docs" }] }, resolvedAt: new Date(), updatedAt: new Date(),
+      }).where(eq(issueThreadInteractions.id, card!.id));
+
+      await expect(gateway.executeTool(input)).resolves.toMatchObject({ status: "completed", invocationId: invocation.id });
+      expect(toolCallCount).toBe(2);
+      expect(remote.requests.filter(request => request.body?.result &&
+        (request.body.result as { action?: string }).action === "accept")).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, invocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toEqual([expect.objectContaining({ status: "succeeded", reasonCode: "tool_completed" })]);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("records a terminal receipt for a complete provider JSON-RPC error response", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => body?.method === "tools/call"
+      ? { body: { jsonrpc: "2.0", id: body.id, error: { code: -32000, message: "provider rejected this write" } } }
+      : {});
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      await expect(gateway.executeTool({ sessionToken: session.token, tool,
+        parameters: { key: "jsonrpc-error-key", value: "jsonrpc-error-value" }, idempotencyKey: "managed-mcp-jsonrpc-error" }))
+        .rejects.toMatchObject({ status: 502, reasonCode: "remote_mcp_error" });
+      const [invocation] = await db.select().from(toolInvocations).where(and(
+        eq(toolInvocations.companyId, company.id), eq(toolInvocations.idempotencyKey, "managed-mcp-jsonrpc-error"),
+      ));
+      expect(invocation).toMatchObject({ status: "failed", errorCode: "remote_mcp_error" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, invocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toEqual([expect.objectContaining({ status: "failed", reasonCode: "remote_mcp_error" })]);
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(1);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("does not apply the unresolved write fingerprint fence to read-only MCP calls", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
