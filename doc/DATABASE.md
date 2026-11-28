@@ -249,6 +249,23 @@ When you change the data model:
 Then update every layer that the change affects: `packages/shared` types and
 validators, `server` routes and services, and `ui` API clients and pages.
 
+### Coordinate concurrent migration work
+
+Before generating migration SQL or Drizzle metadata, request the single writer
+slot in the [migration writer pilot issue](https://github.com/groktopus/proprio/issues/458).
+Include the driving issue or PR. The maintainer records one active writer in
+that shared issue. Wait for the reservation before generating. The writer owns
+the schema change, generated metadata, and any numbering or journal conflicts.
+The maintainer clears the reservation after the migration lands or the writer
+hands it back. The next writer generates against the updated target. Record
+PR dependencies on the driving issue when changes must land in order.
+
+Agents can prepare independent application changes in their own worktrees.
+Land backward-compatible schema changes first, then migrate callers in
+parallel. Ship destructive cleanup in a later release, after confirming that
+no running release uses the old contract. See
+[Migration compatibility with the running release](#migration-compatibility-with-the-running-release).
+
 ### Competing migration processes
 
 The migration command and server startup acquire the same PostgreSQL session
