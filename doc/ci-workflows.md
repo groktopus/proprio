@@ -69,20 +69,30 @@ Both examples ran on GitHub-hosted `ubuntu-24.04` runners.
 ### Merge queue pilot
 
 On `merge_group` for `main`, Stability smoke checks out the exact candidate
-and reports the same required `smoke` check. It selects durable-work and
-board accessibility qualification using the difference between the queue's
-base and candidate, with routing rules from the base. A rebuilt candidate has
-its own SHA and check result. PR runs continue to test the exact PR head.
+and reports the same required `smoke` check. It finds the common ancestor of
+the candidate and the protected target branch. The routing policy comes from
+that ancestor, and both qualification routes compare it with the candidate.
+A rebuilt candidate has its own SHA and check result. PR runs continue to test
+the exact PR head.
 
 After this workflow lands, the maintainer can test queue enforcement on a
-disposable target with the same `smoke` requirement and workflow filters
-adjusted for that target. Use a passing change, two changes that pass
-individually but fail together, and a replacement candidate after removing a
-predecessor. Verify that `smoke` reports on the exact candidate and that the
-replacement gets its own result. Then enable the `main` queue with one build
-at a time, minimum merge size one, and **Only merge non-failing pull requests**
-enabled. Keep the existing required check. To stop the pilot, remove the queue
-requirement and retain the required `smoke` check for pull requests.
+disposable target that includes the updated routers, the same `smoke`
+requirement, and workflow filters for that target. Use a passing change, two
+changes that pass individually but fail together, and a replacement candidate
+after removing a predecessor. Verify that `smoke` reports on the exact
+candidate and that the replacement gets its own result.
+
+Before enabling the `main` queue for this public repository, enforce review
+of workflow changes at admission. Confirm that credentials used by privileged
+workflows are in protected environments that exclude queue refs. Queued
+candidates run workflows in the base repository, where fork PR workflow
+restrictions do not provide the same boundary.
+
+Start `main` with one build at a time, minimum merge size one, and **Only merge
+non-failing pull requests** enabled. Use a 90-minute check timeout to cover the
+75-minute Linux lane, routing, the aggregate verdict, and runner wait. Keep the
+existing required check. To stop the pilot, remove the queue requirement and
+retain the required `smoke` check for pull requests.
 
 Track conflict repairs, freshness-only pushes, and the median and 95th
 percentile time from approval or maintainer sign-off to merge. Increase queue

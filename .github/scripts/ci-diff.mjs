@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 
-export function changedTreePaths(base, head, cwd = process.cwd()) {
+function changedTreePaths(base, head, cwd) {
   assert.match(base ?? "", /^[a-f0-9]{40}$/);
   assert.match(head ?? "", /^[a-f0-9]{40}$/);
   return execFileSync("git", ["--no-replace-objects", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
     "--name-only", "-z", base, head, "--"], {
     cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
   }).split("\0").filter(Boolean).sort();
+}
+
+export function comparisonChangedPaths(comparison, prHeadOrGroupBase, mode, cwd = process.cwd()) {
+  return mode === "--merge-group"
+    ? changedTreePaths(prHeadOrGroupBase, comparison, cwd)
+    : mergeDiff(comparison, prHeadOrGroupBase, cwd).changed;
 }
 
 // Read trees only. The routing job fetches Git objects into a bare repository;
