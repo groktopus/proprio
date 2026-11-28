@@ -28,10 +28,10 @@ import {
   heartbeatRuns,
   issueThreadInteractions,
   issues,
-  managedAuditEvents,
   principalPermissionGrants,
   projects,
   toolAccessAuditEvents,
+  managedAuditEvents,
   toolActionRequests,
   toolApplications,
   toolCatalogEntries,
@@ -44,6 +44,7 @@ import {
   toolRateLimitCounters,
   toolMcpGateways,
   toolMcpGatewayTokens,
+  toolMcpElicitations,
   toolPolicies,
   toolProfileBindings,
   toolProfileEntries,
@@ -68,6 +69,7 @@ import {
   summarizeToolValue,
 } from "../services/tool-content-guards.js";
 import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool-gateway.js";
+import { commitToolActionReview } from "../services/tool-action-review.js";
 import { resolveConnectionGrantSecret } from "../services/connection-credentials.js";
 import { secretService } from "../services/secrets.js";
 import * as cogneeBridge from "../services/cognee-connection.js";
@@ -617,7 +619,8 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
   it("records managed dispatch intent before direct MCP send and terminal receipt with the result", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
-    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const run = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+      invocationSource: "assignment", status: "running", contextSnapshot: {} }).returning().then(rows => rows[0]!);
     let intentWasVisibleAtSend = false;
     const remote = await startFakeRemoteMcpServer(({ body }) => {
       const args = body?.params && typeof body.params === "object"
@@ -643,7 +646,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         }
         return fetch(url, init);
       } });
-      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
       const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
         connectionId: connection.id, toolName: catalogEntry.toolName });
       const input = { sessionToken: session.token, tool, parameters: { key: "audit-private-key", value: "audit-private-value" },
@@ -654,18 +657,15 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id));
       expect(events).toHaveLength(3);
       const invocation = events.find(event => event.phase === "policy_decision")!;
-      expect(invocation).toMatchObject({ runId: run.id, taskId: issue.id,
+      expect(invocation).toMatchObject({ runId: run.id, taskId: null,
         connectionId: connection.id, actorType: "agent", phase: "policy_decision" });
       expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
         eventType: "provider_dispatch_intended", status: "dispatch_intended", decision: "allow",
-        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
+        runId: run.id, taskId: null, invocationId: invocation.invocationId, connectionId: connection.id,
       });
-      const intent = events.find(event => event.phase === "dispatch_intent")!;
-      const providerRequest = remote.requests.find(request => request.body?.method === "tools/call")!;
-      expect(intent.providerRequestId).toBe(String(providerRequest.body?.id));
       expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
         eventType: "gateway_terminal_outcome_recorded", status: "succeeded", reasonCode: "tool_completed",
-        runId: run.id, taskId: issue.id, invocationId: invocation.invocationId, connectionId: connection.id,
+        runId: run.id, taskId: null, invocationId: invocation.invocationId, connectionId: connection.id,
       });
       expect(JSON.stringify(events)).not.toContain("audit-private-key");
       expect(JSON.stringify(events)).not.toContain("audit-private-value");
@@ -691,21 +691,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         expect(await db.select().from(managedAuditEvents).where(and(
           eq(managedAuditEvents.invocationId, ambiguous.id), eq(managedAuditEvents.phase, "terminal_outcome"),
         ))).toHaveLength(0);
-        expect(await db.select().from(toolCallEvents).where(and(
-          eq(toolCallEvents.invocationId, ambiguous.id), eq(toolCallEvents.eventType, "call_completed"),
-        ))).toHaveLength(0);
-        expect((await db.select().from(toolRuntimeMetricCounters).where(and(
-          eq(toolRuntimeMetricCounters.companyId, company.id), eq(toolRuntimeMetricCounters.metric, "audit_write_failed"),
-        ))).reduce((sum, row) => sum + row.count, 0)).toBeGreaterThan(0);
         await expect(gateway.executeTool(ambiguousInput)).rejects.toMatchObject({
-          status: 409, reasonCode: "managed_dispatch_outcome_unknown",
-        });
-        const replacementRun = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
-          invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning().then(rows => rows[0]!);
-        const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
-          runId: replacementRun.id, issueId: issue.id });
-        await expect(gateway.executeTool({ ...ambiguousInput, sessionToken: replacementSession.token,
-          idempotencyKey: "managed-mcp-audit-ambiguous-different-key" })).rejects.toMatchObject({
           status: 409, reasonCode: "managed_dispatch_outcome_unknown",
         });
         expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
@@ -883,6 +869,293 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("keeps a write unresolved when transport rejects after managed dispatch intent", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id, result: { content: [{ type: "text", text: "unexpected send" }] },
+    } }));
+    let toolCallAttempts = 0;
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (url, init) => {
+        const body = typeof init.body === "string" ? JSON.parse(init.body) as { method?: string } : null;
+        if (body?.method === "tools/call") {
+          toolCallAttempts += 1;
+          throw new Error("synthetic transport reset");
+        }
+        return fetch(url, init);
+      } });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: run.id, issueId: issue.id });
+      const parameters = { key: "transport-ambiguous-key", value: "transport-ambiguous-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters,
+        idempotencyKey: "transport-ambiguous-first" })).rejects.toMatchObject({
+        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+      });
+      expect(toolCallAttempts).toBe(1);
+      const [intent] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ));
+      expect(intent).toMatchObject({ connectionId: connection.id, runId: run.id, taskId: issue.id,
+        status: "dispatch_intended", providerRequestId: expect.any(String) });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters,
+        idempotencyKey: "transport-ambiguous-retry" })).rejects.toMatchObject({
+        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+      });
+      expect(toolCallAttempts).toBe(1);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("captures the authenticated approvedActionRequestId retry with its review actor", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id,
+      result: { content: [{ type: "text", text: "approved tool call completed" }] },
+    } }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Review connected write",
+        policyType: "require_approval", selectors: { connectionId: connection.id }, priority: 10 });
+      const reviewer = "managed-audit-approved-retry-reviewer";
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: reviewer, status: "active", membershipRole: "owner" });
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const parameters = { key: "approved-retry-private-key", value: "approved-retry-private-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [actionRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
+      await commitToolActionReview(db, { companyId: company.id, issueId: issue.id,
+        interactionId: actionRequest.interactionId!, actionRequestId: actionRequest.id,
+        decision: "approved", actor: { userId: reviewer } });
+
+      const result = await gateway.executeTool({ sessionToken: session.token, tool, parameters,
+        approvedActionRequestId: actionRequest.id });
+      expect(result).toMatchObject({ status: "completed", tool });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, actionRequest.invocationId));
+      expect(events).toHaveLength(4);
+      expect(events.find(event => event.phase === "policy_decision")).toMatchObject({
+        decision: "require_approval", requestId: actionRequest.id, runId: run.id, taskId: issue.id,
+        connectionId: connection.id,
+      });
+      expect(events.find(event => event.phase === "approval_resolution")).toMatchObject({
+        decision: "approved", status: "approved", actorType: "user", actorId: reviewer, requestId: actionRequest.id,
+      });
+      expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
+        decision: "approved", status: "dispatch_intended", actorType: "user", actorId: reviewer,
+        requestId: actionRequest.id, invocationId: actionRequest.invocationId,
+      });
+      expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
+        decision: "approved", status: "succeeded", actorType: "user", actorId: reviewer,
+        requestId: actionRequest.id, invocationId: actionRequest.invocationId,
+      });
+      expect(JSON.stringify(events)).not.toContain("approved-retry-private-key");
+      expect(JSON.stringify(events)).not.toContain("approved-retry-private-value");
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("does not resend an approved MCP action when its elicitation continuation has expired", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => {
+      if (body?.method === "tools/call") return {
+        headers: { "content-type": "text/event-stream" },
+        rawBody: `data: ${JSON.stringify({ jsonrpc: "2.0", id: "saved-question", method: "elicitation/create",
+          params: { message: "Which folder?", requestedSchema: { type: "object" } } })}\n\n`,
+      };
+      return { body: { jsonrpc: "2.0", id: body?.id ?? "reply", result: { action: "cancel" } } };
+    });
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask before remote write",
+        policyType: "require_approval", selectors: { connectionId: connection.id }, priority: 10 });
+      const reviewer = "managed-audit-elicitation-reviewer";
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: reviewer, status: "active", membershipRole: "owner" });
+      const gateway = createTestToolGatewayService(db);
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const parameters = { key: "elicitation-private-key", value: "elicitation-private-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [actionRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
+      const app = createGatewayRouteApp(db, gateway, {
+        type: "board", userId: reviewer, source: "session", companyIds: [company.id],
+        memberships: [{ companyId: company.id, membershipRole: "owner", status: "active" }], isInstanceAdmin: false,
+      });
+      const firstApproval = await request(app).post(`/api/tool-gateway/action-requests/${actionRequest.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(firstApproval.body).toMatchObject({ id: actionRequest.id, status: "approved" });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const [elicitation] = await db.select().from(toolMcpElicitations).where(eq(toolMcpElicitations.invocationId, actionRequest.invocationId));
+      expect(elicitation).toMatchObject({ status: "waiting", invocationId: actionRequest.invocationId });
+      await db.update(toolMcpElicitations).set({ status: "expired", claimedUntil: null, updatedAt: new Date() })
+        .where(eq(toolMcpElicitations.id, elicitation.id));
+
+      const retry = await request(app).post(`/api/tool-gateway/action-requests/${actionRequest.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(retry.body).toMatchObject({ id: actionRequest.id, status: "executing" });
+      expect(remote.requests.filter(entry => entry.body?.method === "tools/call")).toHaveLength(1);
+      const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, actionRequest.invocationId));
+      expect(invocation).toMatchObject({ status: "executing" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, actionRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, actionRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("captures an approved run-session MCP dispatch and terminal decision through the approval route", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({ body: {
+      jsonrpc: "2.0", id: body?.id,
+      result: { content: [{ type: "text", text: "approved action completed" }] },
+    } }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const [approvalPolicy] = await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask before remote write",
+        policyType: "require_approval", selectors: { connectionId: connection.id }, priority: 10 }).returning({ id: toolPolicies.id });
+      const reviewer = "managed-audit-reviewer";
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: reviewer, status: "active", membershipRole: "owner" });
+      let intentVisibleAtSend = false;
+      const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (url, init) => {
+        const body = typeof init.body === "string" ? JSON.parse(init.body) as { method?: string } : null;
+        if (body?.method === "tools/call") {
+          const [intent] = await db.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+            eq(managedAuditEvents.companyId, company.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+          )).limit(1);
+          intentVisibleAtSend = Boolean(intent);
+        }
+        return fetch(url, init);
+      } });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const parameters = { key: "approval-private-key", value: "approval-private-value" };
+      await expect(gateway.executeTool({ sessionToken: session.token, tool, parameters }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [actionRequest] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id));
+      expect(actionRequest).toMatchObject({ status: "pending", invocationId: expect.any(String) });
+      const [admission] = await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, actionRequest.invocationId), eq(managedAuditEvents.phase, "policy_decision"),
+      ));
+      expect(admission).toMatchObject({ decision: "require_approval", requestId: actionRequest.id,
+        runId: run.id, taskId: issue.id, connectionId: connection.id });
+
+      const app = createGatewayRouteApp(db, gateway, {
+        type: "board", userId: reviewer, source: "session", companyIds: [company.id],
+        memberships: [{ companyId: company.id, membershipRole: "owner", status: "active" }], isInstanceAdmin: false,
+      });
+      const response = await request(app).post(`/api/tool-gateway/action-requests/${actionRequest.id}/approve`)
+        .send({ companyId: company.id }).expect(200);
+      expect(response.body).toMatchObject({ id: actionRequest.id, status: "executed" });
+      expect(intentVisibleAtSend).toBe(true);
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(1);
+      const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, actionRequest.invocationId));
+      expect(events).toHaveLength(4);
+      expect(events.find(event => event.phase === "approval_resolution")).toMatchObject({
+        decision: "approved", status: "approved", actorType: "user", actorId: reviewer, requestId: actionRequest.id,
+      });
+      expect(events.find(event => event.phase === "dispatch_intent")).toMatchObject({
+        decision: "approved", status: "dispatch_intended", actorType: "user", actorId: reviewer,
+        requestId: actionRequest.id, runId: run.id, taskId: issue.id, connectionId: connection.id,
+      });
+      expect(events.find(event => event.phase === "terminal_outcome")).toMatchObject({
+        decision: "approved", status: "succeeded", reasonCode: "approved_action_executed",
+        actorType: "user", actorId: reviewer, requestId: actionRequest.id,
+      });
+      expect(JSON.stringify(events)).not.toContain("approval-private-key");
+      expect(JSON.stringify(events)).not.toContain("approval-private-value");
+
+      await expect(gateway.executeTool({ sessionToken: session.token, tool,
+        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" } }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [ambiguousRequest] = await db.select().from(toolActionRequests).where(and(
+        eq(toolActionRequests.companyId, company.id), eq(toolActionRequests.status, "pending"),
+      ));
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_approved_receipt_failure_${suffix}`;
+      const triggerName = `managed_approved_receipt_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed approved receipt fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'terminal_outcome') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        const partial = await request(app).post(`/api/tool-gateway/action-requests/${ambiguousRequest.id}/approve`)
+          .send({ companyId: company.id }).expect(200);
+        expect(partial.body).toMatchObject({ id: ambiguousRequest.id, status: "executing" });
+        const [ambiguousInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, ambiguousRequest.invocationId));
+        expect(ambiguousInvocation).toMatchObject({ status: "executing" });
+        const dispatchIntents = await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "dispatch_intent"),
+        ));
+        expect(dispatchIntents).toHaveLength(1);
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+        expect(await db.select().from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.invocationId, ambiguousRequest.invocationId), eq(managedAuditEvents.phase, "terminal_outcome"),
+        ))).toHaveLength(0);
+        const repeatedApproval = await request(app).post(`/api/tool-gateway/action-requests/${ambiguousRequest.id}/approve`)
+          .send({ companyId: company.id }).expect(200);
+        expect(repeatedApproval.body).toMatchObject({ id: ambiguousRequest.id, status: "executing" });
+        expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+      await db.delete(toolPolicies).where(and(
+        eq(toolPolicies.companyId, company.id), eq(toolPolicies.id, approvalPolicy.id),
+      ));
+      const replacement = await createIssueAndRun(db, company.id, agent.id);
+      const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: replacement.run.id, issueId: replacement.issue.id });
+      await expect(gateway.executeTool({ sessionToken: replacementSession.token, tool,
+        parameters: { key: "approval-ambiguous-key", value: "approval-ambiguous-value" },
+        idempotencyKey: "approved-ambiguous-direct-retry" })).rejects.toMatchObject({
+        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+      });
+      expect(remote.requests.filter(request => request.body?.method === "tools/call")).toHaveLength(2);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("does not apply the unresolved write fingerprint fence to read-only MCP calls", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
@@ -925,72 +1198,6 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
         await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
       }
-    } finally {
-      await remote.close();
-    }
-  });
-
-  it("preserves provider tool errors in MCP responses and failed invocation audits", async () => {
-    const company = await createCompany(db);
-    const remote = await startFakeRemoteMcpServer(({ body }) => ({
-      body: {
-        jsonrpc: "2.0",
-        id: body?.id,
-        result: { content: [{ type: "text", text: "Search denied: outside consented tag" }], isError: true },
-      },
-    }));
-    try {
-      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
-        url: remote.url, toolName: "search_memory", riskLevel: "read",
-      });
-      await db.update(toolCatalogEntries).set({
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      }).where(eq(toolCatalogEntries.id, catalogEntry.id));
-      const toolName = expectedConnectedToolName({
-        applicationKey: application.applicationKey,
-        connectionId: connection.id,
-        toolName: catalogEntry.toolName,
-      });
-      const [profile] = await db.insert(toolProfiles).values({
-        companyId: company.id, profileKey: `error-${randomUUID()}`,
-        name: "Provider error test", defaultAction: "deny",
-      }).returning();
-      await db.insert(toolProfileEntries).values({
-        companyId: company.id, profileId: profile.id,
-        selectorType: "tool_name", effect: "include", toolName,
-      });
-      const gateway = createTestToolGatewayService(db);
-      const named = await gateway.createNamedGateway({
-        companyId: company.id, body: { name: "Provider error test", profileId: profile.id },
-      });
-      const token = await gateway.createNamedGatewayToken({
-        companyId: company.id, gatewayId: named.id, body: { name: "Test", clientLabel: "Test", ownerNote: "" },
-      });
-      const response = await request(createGatewayRouteApp(db, gateway))
-        .post(named.endpointPath)
-        .set("authorization", `Bearer ${token.token}`)
-        .send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } })
-        .expect(200);
-      expect(response.body.result).toEqual({
-        content: [{ type: "text", text: "Search denied: outside consented tag" }], isError: true,
-      });
-      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id)))
-        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
-      const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.companyId, company.id));
-      expect(events).toContainEqual(expect.objectContaining({ eventType: "call_failed", outcome: "failure", reasonCode: "tool_error" }));
-      expect(events.some((event) => event.eventType === "call_completed")).toBe(false);
-      const agent = await createAgent(db, company.id);
-      await allowAllToolsForAgent(db, company.id, agent.id);
-      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
-        principalId: "test-user", status: "active", membershipRole: "member" });
-      const testCall = await gateway.executeTestCall({ companyId: company.id, connectionId: connection.id,
-        agentId: agent.id, userId: "test-user", toolName, parameters: {} });
-      expect(testCall).toMatchObject({ decision: "allowed", error: { reasonCode: "tool_error" } });
-      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.id, testCall.invocationId)))
-        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
-      const testEvents = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, testCall.invocationId));
-      expect(testEvents.some(event => event.eventType === "call_failed")).toBe(true);
-      expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);
     } finally {
       await remote.close();
     }
@@ -1062,7 +1269,76 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       expect(remote.requests).toHaveLength(1);
       expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(1);
       expect(await db.select().from(toolRateLimitCounters).where(eq(toolRateLimitCounters.companyId, company.id))).toHaveLength(1);
-      expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id))).toHaveLength(1);
+      const retryEvents = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.companyId, company.id));
+      expect(retryEvents.map(event => event.phase).sort()).toEqual([
+        "dispatch_intent", "policy_decision", "terminal_outcome",
+      ]);
+    } finally {
+      await remote.close();
+    }
+  });
+
+  it("preserves provider tool errors in MCP responses and failed invocation audits", async () => {
+    const company = await createCompany(db);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: body?.id,
+        result: { content: [{ type: "text", text: "Search denied: outside consented tag" }], isError: true },
+      },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "search_memory", riskLevel: "read",
+      });
+      await db.update(toolCatalogEntries).set({
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      }).where(eq(toolCatalogEntries.id, catalogEntry.id));
+      const toolName = expectedConnectedToolName({
+        applicationKey: application.applicationKey,
+        connectionId: connection.id,
+        toolName: catalogEntry.toolName,
+      });
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id, profileKey: `error-${randomUUID()}`,
+        name: "Provider error test", defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: company.id, profileId: profile.id,
+        selectorType: "tool_name", effect: "include", toolName,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const named = await gateway.createNamedGateway({
+        companyId: company.id, body: { name: "Provider error test", profileId: profile.id },
+      });
+      const token = await gateway.createNamedGatewayToken({
+        companyId: company.id, gatewayId: named.id, body: { name: "Test", clientLabel: "Test", ownerNote: "" },
+      });
+      const response = await request(createGatewayRouteApp(db, gateway))
+        .post(named.endpointPath)
+        .set("authorization", `Bearer ${token.token}`)
+        .send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } })
+        .expect(200);
+      expect(response.body.result).toEqual({
+        content: [{ type: "text", text: "Search denied: outside consented tag" }], isError: true,
+      });
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id)))
+        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
+      const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.companyId, company.id));
+      expect(events).toContainEqual(expect.objectContaining({ eventType: "call_failed", outcome: "failure", reasonCode: "tool_error" }));
+      expect(events.some((event) => event.eventType === "call_completed")).toBe(false);
+      const agent = await createAgent(db, company.id);
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user",
+        principalId: "test-user", status: "active", membershipRole: "member" });
+      const testCall = await gateway.executeTestCall({ companyId: company.id, connectionId: connection.id,
+        agentId: agent.id, userId: "test-user", toolName, parameters: {} });
+      expect(testCall).toMatchObject({ decision: "allowed", error: { reasonCode: "tool_error" } });
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.id, testCall.invocationId)))
+        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
+      const testEvents = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, testCall.invocationId));
+      expect(testEvents.some(event => event.eventType === "call_failed")).toBe(true);
+      expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);
     } finally {
       await remote.close();
     }
