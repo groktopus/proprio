@@ -1,10 +1,11 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { heartbeatRuns, issues, managedAuditEvents, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
+import { heartbeatRuns, issues, managedAuditEvents, managedAuditExportPageAccess, managedAuditExports, type Db, type DbTransaction } from "@groktopus/db";
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
-import { conflict, forbidden, notFound } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound } from "../errors.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { authorizationService, issueEvidenceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
 import { heartbeatRunIssueBindingDeniedSqlCondition, heartbeatRunReadSqlCondition } from "./heartbeat-run-privacy.js";
+import { isTransientLockContention, postgresErrorCode } from "./transient-lock-contention.js";
 
 const PAGE_SIZE = 200;
 // Keep the array-backed checkpoint and the all-membership visibility check
@@ -183,6 +184,7 @@ export async function readManagedAuditExportPage(
   scope: ExportScope,
   exportId: string,
   cursor?: string,
+  recordAccess = true,
 ) {
   try {
     return await db.transaction(async tx => {
@@ -240,6 +242,27 @@ export async function readManagedAuditExportPage(
           .orderBy(asc(managedAuditEvents.id))
         : [];
       const deliveredThrough = offset + events.length;
+      if (recordAccess) {
+        try {
+          // This write is part of the repeatable-read transaction and is the
+          // final operation before the successful page is released.
+          await tx.insert(managedAuditExportPageAccess).values({
+            companyId: scope.companyId,
+            exportId: snapshot.id,
+            userId,
+            pageOffset: offset,
+            itemCount: events.length,
+            createdAt: sql`clock_timestamp()`,
+          });
+        } catch (error) {
+          // Never expose driver metadata, identifiers, or SQL text from this
+          // failure. Preserve only retry-relevant SQLSTATE information.
+          const code = postgresErrorCode(error);
+          const failure = new HttpError(500, "Managed audit page access could not be recorded");
+          if (code === "57014" || isTransientLockContention(error)) throw Object.assign(failure, { code });
+          throw failure;
+        }
+      }
       return {
         ...exportReceipt(snapshot),
         events,

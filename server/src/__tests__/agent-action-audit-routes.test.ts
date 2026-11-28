@@ -23,6 +23,7 @@ import {
   issueDocuments,
   issues,
   managedAuditEvents,
+  managedAuditExportPageAccess,
   managedAuditExports,
   principalPermissionGrants,
   ensurePostgresDatabase,
@@ -68,6 +69,7 @@ describePostgres("agent action audit routes", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    await db.delete(managedAuditExportPageAccess);
     await db.delete(managedAuditExports);
     await db.delete(managedAuditEvents);
     await db.delete(caseEvents);
@@ -325,14 +327,24 @@ describePostgres("agent action audit routes", () => {
       expect(exportAudit).toHaveLength(1);
       expect(exportAudit[0]).toMatchObject({ companyId: company.id, actorType: "user", actorId: userId, entityType: "company", entityId: company.id, details: { exportId: receipt.body.exportId } });
       const exportPath = `${path}/${receipt.body.exportId}`;
+      const pageAccess = () => db.select().from(managedAuditExportPageAccess)
+        .where(eq(managedAuditExportPageAccess.exportId, receipt.body.exportId));
+      expect(await pageAccess()).toHaveLength(0);
+      expect((await anon.get(exportPath)).status).toBe(403);
+      await board.head(exportPath).expect(200);
+      expect(await pageAccess()).toHaveLength(0);
       const lateEventId = "00000000-0000-0000-0000-000000000001";
       await db.insert(managedAuditEvents).values({ ...baseEvent, id: lateEventId, invocationId: randomUUID() });
-      const first = await board.get(exportPath);
+      // `*` matches any existing representation and would have yielded 304
+      // through the old res.json freshness path; a successful GET must still
+      // record and return the full page body.
+      const first = await board.get(exportPath).set("If-None-Match", "*");
       expect(first.status, first.text).toBe(200);
       expect(first.body).toMatchObject({ deliveredThrough: 200, complete: false, nextCursor: expect.any(String) });
       expect(first.body.events[0]).not.toHaveProperty("operationFingerprint");
       expect(first.body.events[0]).not.toHaveProperty("providerRequestId");
       expect((await board.get(exportPath)).body).toEqual(first.body);
+      expect(await pageAccess()).toHaveLength(2);
       expect((await board.get(exportPath).query({ cursor: "10036." + "a".repeat(64) })).status).toBe(409);
 
       const archived = first.body.events.map((event: { id: string }) => event.id);
@@ -348,6 +360,20 @@ describePostgres("agent action audit routes", () => {
       expect(archived).not.toContain(lateEventId);
       expect(page).toMatchObject({ complete: true, deliveredThrough: expectedIds.length });
       expect(createHash("sha256").update(JSON.stringify(archived)).digest("hex")).toBe(receipt.body.watermark);
+      const allPageAccess = await pageAccess();
+      expect(allPageAccess).toHaveLength(Math.ceil(expectedIds.length / 200) + 1);
+      expect(allPageAccess).toContainEqual(expect.objectContaining({ userId, pageOffset: 10_000, itemCount: 37 }));
+
+      await db.execute(sql`alter table managed_audit_export_page_access rename to unavailable_page_access`);
+      try {
+        const auditWriteFailed = await board.get(exportPath).expect(500);
+        expect(auditWriteFailed.body).not.toHaveProperty("events");
+        expect(auditWriteFailed.text).not.toContain(company.id);
+        expect(auditWriteFailed.text).not.toContain(receipt.body.exportId);
+        expect(auditWriteFailed.body).toMatchObject({ error: "Managed audit page access could not be recorded" });
+      } finally {
+        await db.execute(sql`alter table unavailable_page_access rename to managed_audit_export_page_access`);
+      }
 
       // A rescan of the same interval discovers a transaction that committed
       // after the first membership snapshot was frozen.
@@ -368,6 +394,8 @@ describePostgres("agent action audit routes", () => {
         actor: { type: "board", source: "session", userId, companyIds: [company.id] },
       }, receipt.body.exportId)).rejects.toMatchObject({ status: 403 });
       expect((await board.get(exportPath)).status).toBe(403);
+      await db.delete(managedAuditExports).where(eq(managedAuditExports.id, receipt.body.exportId));
+      expect(await pageAccess()).toHaveLength(allPageAccess.length);
     } finally {
       vi.unstubAllEnvs();
     }

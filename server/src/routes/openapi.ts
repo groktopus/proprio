@@ -6526,10 +6526,31 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "head",
+  path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
+  tags: ["activity"],
+  summary: "Validate a managed audit export page without releasing it",
+  description: "Validates the snapshot and cursor without a response body or page-access record.",
+  request: {
+    params: managedAuditExportParamsSchema,
+    query: managedAuditExportPageQuerySchema,
+  },
+  responses: {
+    200: { description: "The managed audit page is available; no body is returned" },
+    400: { description: "Invalid cursor or identifiers" },
+    401: { description: "Unauthorized" },
+    403: { description: "Forbidden" },
+    404: { description: "Export not found" },
+    409: { description: "Export requires reconciliation" },
+  },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/audit/managed-exports/{exportId}",
   tags: ["activity"],
   summary: "Read a managed audit export page",
+  description: "Responses are no-store. Each successful GET records a page release before returning its body, even when conditional request headers are supplied. HEAD validates the page without recording a release.",
   request: {
     params: managedAuditExportParamsSchema,
     query: managedAuditExportPageQuerySchema,
@@ -6541,6 +6562,7 @@ registry.registerPath({
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     404: { description: "Export not found", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export requires reconciliation. For retention_window_expired, start a new snapshot at or after the configured retention cutoff; the old cursor cannot be resumed.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    500: { description: "Page access could not be recorded; no page is released", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
 

@@ -3592,6 +3592,13 @@
       "when": 1795833377404,
       "tag": "0514_managed_mcp_dispatch_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 515,
+      "version": "7",
+      "when": 1795858639932,
+      "tag": "0515_typical_night_nurse",
+      "breakpoints": true
     }
   ]
 }
