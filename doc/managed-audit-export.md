@@ -23,6 +23,13 @@ this boundary, or a cursor for such a window, returns
 with the old setting from export traffic before treating the new boundary as
 enforced.
 
+An export snapshot contains at most 100,000 visible event IDs. A request that
+would exceed this bound returns `snapshot_too_large`; split the time interval
+into smaller windows and reconcile each checkpoint independently. Page reads
+serialize per export and use a five-second database statement bound. A busy
+reader returns `snapshot_read_busy`; a query that reaches the bound returns
+`snapshot_read_timeout` without releasing a partial page.
+
 1. Send `POST /api/companies/:companyId/audit/managed-exports` with `from` and
    `to` ISO timestamps. The interval includes `from` and excludes `to`.
 2. Store the returned export ID, source epoch, bounds, event count and watermark.

@@ -249,7 +249,7 @@ describePostgres("agent action audit routes", () => {
   });
 
   it("exports a frozen managed audit window beyond the CSV cap and detects known missing bindings", async () => {
-    const { company, agent } = await seed();
+    const { company, agent, issue, run } = await seed();
     const userId = randomUUID();
     await db.insert(companyMemberships).values({
       companyId: company.id, principalType: "user", principalId: userId, membershipRole: "operator", status: "active",
@@ -266,7 +266,16 @@ describePostgres("agent action audit routes", () => {
       occurredAt: at, eventType: "invocation_decision_recorded", phase: "policy_decision",
       decision: "allow", status: "authorized",
     };
-    const eventRows = Array.from({ length: 10_037 }, () => ({ ...baseEvent, id: randomUUID(), invocationId: randomUUID() }));
+    // Keep the large qualification representative of production rows: most
+    // events are unbound, while task/run-scoped rows exercise both visibility
+    // predicates during the full-membership read.
+    const eventRows = Array.from({ length: 10_037 }, (_, index) => ({
+      ...baseEvent,
+      id: randomUUID(),
+      invocationId: randomUUID(),
+      ...(index % 17 === 0 ? { taskId: issue.id } : {}),
+      ...(index % 29 === 0 ? { runId: run.id } : {}),
+    }));
     for (let index = 0; index < eventRows.length; index += 1_000) {
       await db.insert(managedAuditEvents).values(eventRows.slice(index, index + 1_000));
     }

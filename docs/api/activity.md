@@ -60,6 +60,11 @@ missing or no longer visible, the API returns HTTP `409` with
 `details.reasonCode` set to `snapshot_incomplete`. The response contains no
 events, event count, or watermark.
 
+Snapshots are limited to 100,000 visible event IDs. Larger windows return
+`snapshot_too_large` and must be split. Page validation is serialized per
+export and bounded to five seconds; contention returns `snapshot_read_busy` and
+a timed-out validation returns `snapshot_read_timeout`, with no partial page.
+
 Both endpoints require an authenticated board session with audit access. Either
 endpoint can return HTTP `409` with `details.reasonCode` set to
 `retention_window_expired`. Open a new snapshot with a start at or after the
