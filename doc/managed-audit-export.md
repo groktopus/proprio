@@ -57,7 +57,11 @@ event ID; a completed snapshot is final only for its frozen membership, not
 for all events that may later commit into the interval.
 
 An export belongs to the creating operator and company. Company, audit and task
-access are checked for eligible events. Before releasing a page, the API checks
+access are checked for eligible events. Personal conversations also require
+owner access, including when the only surviving reference is a run bound to the
+conversation. For a missing task or run, snapshot creation reports an incomplete
+source unless the surviving binding proves the event is outside the operator's
+access. Before releasing a page, the API checks
 every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. Preserve the checkpoint and
