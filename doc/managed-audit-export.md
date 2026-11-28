@@ -81,12 +81,14 @@ cursor. Advance the checkpoint only after the page arrives and the collector
 persists its membership and payloads.
 
 A company can retain up to 128 active snapshots across all operators and API
-replicas. Creation returns `429 active_snapshot_limit` at the limit. Resume
-an existing snapshot or retry after an active snapshot expires. A new
-snapshot reclaims at most 128 rows that are expired or invalidated by the
-current source epoch or retention cutoff. Page access records follow their
-separate retention rules. The quota is company-wide; per-operator fairness and
-epoch/retention-aware capacity policy are follow-up work in #383.
+replicas. The quota counts only unexpired snapshots matching the current
+source epoch and retention cutoff. Creation returns `429
+active_snapshot_limit` at the limit. Resume an existing snapshot or retry
+after an active snapshot expires. A new snapshot reclaims at most 128 rows
+that are expired or invalidated by the current source epoch or retention
+cutoff. Page access records follow their separate retention rules. The quota
+is company-wide; per-operator fairness and epoch/retention-aware capacity
+policy are follow-up work in #383.
 
 During a rolling upgrade, this bound is enforced only by API instances running
 this version. Complete the API rollout before treating the company quota as a

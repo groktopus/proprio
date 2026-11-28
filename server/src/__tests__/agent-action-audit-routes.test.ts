@@ -172,26 +172,36 @@ describePostgres("agent action audit routes", () => {
         companyId: company.id, userId, sourceEpoch: epoch, from: new Date(window.from), to: new Date(window.to),
         eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: expiredAt,
       });
-      const [oldEpochSnapshot] = await db.insert(managedAuditExports).values({
-        companyId: company.id, userId, sourceEpoch: randomUUID(), from: new Date(window.from), to: new Date(window.to),
+      // Seed 129 invalid rows across expiry, source-epoch, and retention
+      // categories. One create may reclaim only 128 and must still proceed.
+      const staleEpoch = randomUUID();
+      await db.insert(managedAuditExports).values(Array.from({ length: 127 }, () => ({
+        companyId: company.id, userId, sourceEpoch: staleEpoch, from: new Date(window.from), to: new Date(window.to),
         eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: new Date(Date.now() + 60_000),
-      }).returning({ id: managedAuditExports.id });
+      })));
       const [oldRetentionSnapshot] = await db.insert(managedAuditExports).values({
         companyId: company.id, userId, sourceEpoch: epoch, from: new Date("2026-07-16T00:00:00.000Z"), to: new Date(window.from),
-        eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: new Date(Date.now() + 60_000),
+        eventIds: [], watermark: createHash("sha256").update("[]").digest("hex"), expiresAt: new Date(Date.now() + 120_000),
       }).returning({ id: managedAuditExports.id });
       vi.stubEnv("PROPRIO_MANAGED_AUDIT_RETAIN_AFTER", window.from);
       const creates = await Promise.all(Array.from({ length: 4 }, () =>
         board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window)));
       expect(creates.map(response => response.status).sort((left, right) => left - right)).toEqual([201, 429, 429, 429]);
-      expect(creates.filter(response => response.status === 201).map(response => response.body.eventCount)).toEqual([0]);
+      const firstCreate = creates.find(response => response.status === 201)!;
+      expect(firstCreate.body.eventCount).toBe(0);
+      // The first successful creation reclaimed only one bounded batch.
+      // Check this before retries can reclaim the remaining invalid row.
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.sourceEpoch, staleEpoch))).toHaveLength(0);
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.id, oldRetentionSnapshot!.id))).toHaveLength(1);
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
       for (const _response of creates.filter(response => response.status === 429)) {
         const retry = await board.post(`/api/companies/${company.id}/audit/managed-exports`).send(window).expect(201);
         expect(retry.body.eventCount).toBe(0);
       }
       expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.expiresAt, expiredAt))).toHaveLength(0);
       const remaining = await db.select({ id: managedAuditExports.id }).from(managedAuditExports);
-      expect(remaining.map(row => row.id)).not.toEqual(expect.arrayContaining([oldEpochSnapshot!.id, oldRetentionSnapshot!.id]));
+      expect(remaining.map(row => row.id)).not.toContain(oldRetentionSnapshot!.id);
+      expect(await db.select().from(managedAuditExports).where(eq(managedAuditExports.sourceEpoch, staleEpoch))).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }

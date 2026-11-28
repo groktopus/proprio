@@ -229,8 +229,14 @@ export async function createManagedAuditExport(
 
     // Only the quota boundary row is needed. Do not materialize up to 128
     // UUIDs merely to decide whether the 128th active row exists.
+    const activeSnapshot = and(
+      eq(managedAuditExports.companyId, scope.companyId),
+      gt(managedAuditExports.expiresAt, now),
+      eq(managedAuditExports.sourceEpoch, scope.sourceEpoch),
+      scope.retainAfter ? gte(managedAuditExports.from, scope.retainAfter) : sql`true`,
+    );
     const [quotaBoundary] = await tx.select({ id: managedAuditExports.id }).from(managedAuditExports)
-      .where(and(eq(managedAuditExports.companyId, scope.companyId), gt(managedAuditExports.expiresAt, now)))
+      .where(activeSnapshot)
       .offset(MAX_ACTIVE_COMPANY_SNAPSHOTS - 1)
       .limit(1);
     if (quotaBoundary) {
