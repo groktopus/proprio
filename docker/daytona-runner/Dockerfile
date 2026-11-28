@@ -70,7 +70,7 @@ RUN if ! printf '%s' "${PROPRIO_RUNNER_LOCK_SHA256}" | grep -Eqx '[0-9a-f]{64}';
 # Fleet sandbox base image. Keep this section aligned with
 # proprio/proprio-cloud/fleet-sandbox-image/Dockerfile. The only Proprio
 # runner-specific addition is /usr/local/bin/proprio-runnerd below.
-FROM daytonaio/sandbox:0.8.0@sha256:eadf88e4391072b7ad4bed27d9cadfc9fe9d8ed375d9219d34c2ccb518f213e3
+FROM daytonaio/sandbox:0.11.0@sha256:51df7e8494692c0201e6b5a68492dd2fe7fd2030782e994ec5862a9393f3be45
 
 USER root
 
