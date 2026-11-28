@@ -181,7 +181,25 @@ export async function readManagedAuditExportPage(
     const ids = snapshot.eventIds.slice(offset, offset + PAGE_SIZE);
     const visible = await visibleEvents(tx, scope);
     const events = ids.length
-      ? await tx.select().from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
+      ? await tx.select({
+          id: managedAuditEvents.id,
+          companyId: managedAuditEvents.companyId,
+          source: managedAuditEvents.source,
+          schemaVersion: managedAuditEvents.schemaVersion,
+          eventType: managedAuditEvents.eventType,
+          phase: managedAuditEvents.phase,
+          occurredAt: managedAuditEvents.occurredAt,
+          runId: managedAuditEvents.runId,
+          taskId: managedAuditEvents.taskId,
+          invocationId: managedAuditEvents.invocationId,
+          requestId: managedAuditEvents.requestId,
+          connectionId: managedAuditEvents.connectionId,
+          actorType: managedAuditEvents.actorType,
+          actorId: managedAuditEvents.actorId,
+          decision: managedAuditEvents.decision,
+          status: managedAuditEvents.status,
+          reasonCode: managedAuditEvents.reasonCode,
+        }).from(managedAuditEvents).where(and(visible, inArray(managedAuditEvents.id, ids)))
         .orderBy(asc(managedAuditEvents.id))
       : [];
     if (events.length !== ids.length) {

@@ -15,6 +15,7 @@ import {
   createDb,
   heartbeatRuns,
   issues,
+  managedAuditEvents,
   issueThreadInteractions,
   projects,
   toolInvocations,
@@ -134,9 +135,11 @@ function taskServer() {
   const requests: Recorded[] = [];
   const tasks = new Map<string, FakeTask>();
   let forgetAll = false;
+  let dropNextWriteTaskResponse = false;
+  let appliedWriteTaskCount = 0;
   /** The next N task polls fail as if the app were briefly unreachable. */
   let failingGets = 0;
-  const tool = (name: string) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } });
+  const tool = (name: string) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: !name.startsWith("write_") } });
   const ok = (id: unknown, result: Record<string, unknown>) => Response.json({ jsonrpc: "2.0", id, result: { resultType: "complete", ...result } });
   const fail = (status: number, id: unknown, code: number, message: string) => Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { status });
   const view = (taskId: string, task: FakeTask) => ({
@@ -156,16 +159,24 @@ function taskServer() {
       case "server/discover":
         return ok(body.id, { supportedVersions: [MCP_MODERN_PROTOCOL_VERSION], capabilities: { tools: {}, extensions: { [MCP_TASKS_EXTENSION_ID]: {} } } });
       case "tools/list":
-        return ok(body.id, { tools: ["build", "quick", "authorize", "ask_name", "explode", "short_lived", "garbled"].map(tool) });
+        return ok(body.id, { tools: ["build", "write_build", "quick", "authorize", "ask_name", "explode", "write_explode", "short_lived", "garbled"].map(tool) });
       case "tools/call": {
         const name = body.params.name;
+        if (name === "write_build" || name === "write_explode") {
+          appliedWriteTaskCount += 1;
+          if (dropNextWriteTaskResponse) {
+            dropNextWriteTaskResponse = false;
+            throw new Error("provider applied write, but the response was lost");
+          }
+        }
         if (name === "quick" || !declared) return ok(body.id, { content: [{ type: "text", text: `${name} done synchronously` }] });
         const taskId = `task-${randomUUID()}`;
+        const taskName = name.startsWith("write_") ? name.slice("write_".length) : name;
         const task: FakeTask = { status: "working", gets: 0, ttlMs: name === "short_lived" ? 300 : 3_600_000, createdAt: new Date().toISOString(),
           result: { content: [{ type: "text", text: `${name} finished` }], structuredContent: { name }, isError: false } };
-        if (name === "authorize") Object.assign(task, { status: "input_required", awaiting: [], inputRequests: { consent: { method: "elicitation/create", params: { mode: "url", message: "Approve access", url: "https://auth.example.com/consent?flow=7" } } } });
+        if (taskName === "authorize") Object.assign(task, { status: "input_required", awaiting: [], inputRequests: { consent: { method: "elicitation/create", params: { mode: "url", message: "Approve access", url: "https://auth.example.com/consent?flow=7" } } } });
         if (name === "ask_name") Object.assign(task, { status: "input_required", awaiting: ["who"], inputRequests: { who: { method: "elicitation/create", params: { mode: "form", message: "Who is deploying?", requestedSchema: { type: "object", required: ["name"], properties: { name: { type: "string", title: "Your name" } } } } } } });
-        if (name === "explode") Object.assign(task, { completeAfter: 1, failInstead: true });
+        if (taskName === "explode") Object.assign(task, { completeAfter: 1, failInstead: true });
         // A result Proprio cannot record, standing in for a crash before the result is saved.
         if (name === "garbled") Object.assign(task, { completeAfter: 1, result: { content: "not a content list" } });
         tasks.set(taskId, task);
@@ -212,6 +223,8 @@ function taskServer() {
     /** The running task now needs a person's answer. */
     ask: () => Object.assign(only().task, { status: "input_required", awaiting: ["who"], inputRequests: { who: { method: "elicitation/create", params: { mode: "form", message: "Who is deploying?", requestedSchema: { type: "object", properties: { name: { type: "string" } } } } } } }),
     forget: () => { forgetAll = true; },
+    dropNextWriteTaskResponse: () => { dropNextWriteTaskResponse = true; },
+    appliedWriteTaskCount: () => appliedWriteTaskCount,
     failGets: (count: number) => { failingGets = count; },
   };
 }
@@ -267,7 +280,7 @@ const support = await getEmbeddedPostgresTestSupport();
       return gateway.pollDueMcpTasks(input);
     };
     return {
-      org, agent, issue, run, session, connected, call, rows, poll,
+      org, agent, issue, run, session, connected, call, rows, poll, toolName,
       gateway: () => gateway,
       /** A new process: no in-memory state survives, only the database. */
       restart: () => { forgetMcpHttpSessions(connected.connectionId); gateway = createToolGatewayService(db, gatewayOptions); return gateway; },
@@ -315,6 +328,68 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(row!.deliveredAt).toBeInstanceOf(Date);
     // The provider's task ID is never stored in the clear.
     expect(JSON.stringify(row)).not.toContain(server.only().id);
+  });
+
+  it("keeps a managed write intent open while a task is pending, then closes it on the same-task result", async () => {
+    const server = taskServer();
+    const { call, org, rows } = await setup(server);
+    const idempotencyKey = "managed-write-task-completion";
+    await expect(call("write_build", { timeoutMs: 400, idempotencyKey })).rejects.toMatchObject({ reasonCode: "provider_task_pending" });
+    const [task] = await rows();
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, task!.invocationId));
+    expect(invocation).toMatchObject({ errorCode: "provider_task_pending" });
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "dispatch_intent"),
+    ))).toHaveLength(1);
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "terminal_outcome"),
+    ))).toHaveLength(0);
+
+    server.finish();
+    await expect(call("write_build", { timeoutMs: 2_000, idempotencyKey })).resolves.toMatchObject({
+      status: "completed", result: { content: "write_build finished" },
+    });
+    expect(server.count("tools/call")).toBe(1);
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "terminal_outcome"),
+    ))).toEqual([expect.objectContaining({ status: "succeeded", reasonCode: "tool_completed" })]);
+  });
+
+  it("fences a modern task-capable managed write whose response is lost before task creation", async () => {
+    const server = taskServer();
+    const { call, org, agent, issue, gateway, toolName, rows } = await setup(server);
+    const parameters = { ref: "release-7" };
+    server.dropNextWriteTaskResponse();
+    await expect(call("write_build", { idempotencyKey: "managed-write-task-lost-response", parameters }))
+      .rejects.toMatchObject({ status: 409, reasonCode: "managed_dispatch_outcome_unknown" });
+    expect(server.appliedWriteTaskCount()).toBe(1);
+    expect(await rows()).toHaveLength(0);
+    const [invocation] = await db.select().from(toolInvocations).where(and(
+      eq(toolInvocations.companyId, org.id), eq(toolInvocations.idempotencyKey, "managed-write-task-lost-response"),
+    ));
+    expect(invocation).toMatchObject({ status: "executing" });
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "dispatch_intent"),
+    ))).toHaveLength(1);
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "terminal_outcome"),
+    ))).toHaveLength(0);
+
+    const [replacementRun] = await db.insert(heartbeatRuns).values({ companyId: org.id, agentId: agent.id,
+      invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning();
+    const replacementSession = await gateway().createSession({ companyId: org.id, agentId: agent.id,
+      runId: replacementRun!.id, issueId: issue.id });
+    await expect(gateway().executeTool({ sessionToken: replacementSession.token, tool: toolName("write_build"),
+      parameters, idempotencyKey: "managed-write-task-lost-response-new-run" })).rejects.toMatchObject({
+      status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+    });
+    expect(server.appliedWriteTaskCount()).toBe(1);
+    expect(server.count("tools/call")).toBe(1);
   });
 
   it("leaves synchronous calls and older servers unchanged", async () => {
@@ -502,6 +577,44 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(failure.message).toContain("Build runner crashed");
     const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, org.id));
     expect(invocation).toMatchObject({ status: "failed", errorCode: "provider_task_failed" });
+    const events = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+    ));
+    expect(events.some((event) => event.phase === "dispatch_intent")).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ phase: "terminal_outcome", status: "failed", reasonCode: "provider_task_failed" }));
+  });
+
+  it("keeps a failed managed write task fenced because failure does not prove rollback", async () => {
+    const server = taskServer();
+    const { call, org, agent, issue, gateway, toolName, rows } = await setup(server);
+    await expect(call("write_explode", { idempotencyKey: "managed-write-task-failed" })).rejects.toMatchObject({
+      status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+    });
+    expect(server.appliedWriteTaskCount()).toBe(1);
+    const [task] = await rows();
+    expect(task).toMatchObject({ status: "failed" });
+    const [invocation] = await db.select().from(toolInvocations).where(and(
+      eq(toolInvocations.companyId, org.id), eq(toolInvocations.idempotencyKey, "managed-write-task-failed"),
+    ));
+    expect(invocation).toMatchObject({ status: "executing" });
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "dispatch_intent"),
+    ))).toHaveLength(1);
+    expect(await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, org.id), eq(managedAuditEvents.invocationId, invocation!.id),
+      eq(managedAuditEvents.phase, "terminal_outcome"),
+    ))).toHaveLength(0);
+
+    const [replacementRun] = await db.insert(heartbeatRuns).values({ companyId: org.id, agentId: agent.id,
+      invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning();
+    const replacementSession = await gateway().createSession({ companyId: org.id, agentId: agent.id,
+      runId: replacementRun!.id, issueId: issue.id });
+    await expect(gateway().executeTool({ sessionToken: replacementSession.token, tool: toolName("write_explode"),
+      parameters: { ref: "main" }, idempotencyKey: "managed-write-task-failed-new-run" })).rejects.toMatchObject({
+      status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+    });
+    expect(server.appliedWriteTaskCount()).toBe(1);
   });
 
   it("ends with a clear error when the app forgets the task or its TTL passes, never a hang", async () => {
