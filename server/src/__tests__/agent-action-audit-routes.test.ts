@@ -30,7 +30,6 @@ import {
   toolApplications,
   toolCatalogEntries,
   toolConnections,
-  type Db,
   type DbTransaction,
 } from "@groktopus/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
