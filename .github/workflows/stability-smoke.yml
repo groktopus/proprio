@@ -2,10 +2,10 @@ name: Stability smoke
 
 on:
   pull_request:
-    branches: [main]
+    branches: [ci/merge-queue-trial]
     types: [opened, synchronize, reopened, ready_for_review, edited]
   merge_group:
-    branches: [main]
+    branches: [ci/merge-queue-trial]
     types: [checks_requested]
 
 permissions:
@@ -92,6 +92,12 @@ jobs:
         with:
           ref: ${{ env.TESTED_SHA }}
           persist-credentials: false
+      - name: Verify disposable queue trial fixture
+        run: |
+          if [[ -f doc/.merge-queue-trial-a && -f doc/.merge-queue-trial-b ]]; then
+            echo 'The combination of the two trial changes must fail.' >&2
+            exit 1
+          fi
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
