@@ -793,41 +793,40 @@ describe("agent test-environment route", () => {
 
   // The managed-adoption verdict, all three ways. An api_key account is
   // re-verified against the provider's endpoint at adoption — the same check
-  // its save performed, catching a key revoked since — but never through the
-  // CLI-lane hello probe, which a clean machine without a provider CLI can
-  // never pass (the regression that walled off onboarding's API-key path in
-  // the nightly release smoke). A stored subscription login still needs the
-  // hello probe: only a real turn proves the runtime lane can consume it.
-  it("adopts an api_key connection on the engine's verdict plus a live key check, without a CLI hello probe", async () => {
+  // its save performed, catching a key revoked since — and the selected engine
+  // must return its own hello evidence. A stored subscription login still
+  // needs a hello probe because only a real turn proves the runtime can use it.
+  it("adopts an api_key connection with the selected engine's hello and a live key check", async () => {
     mockManagedRuntime("api_key");
-    // A sentinel in claude_local's slot: the forced CLI-lane fallback would
-    // land here, so the fix is proven by this never being consulted — not by
-    // whatever verdict the host machine's real adapter would return.
     const { registerServerAdapter, getServerAdapter, unregisterServerAdapter } = await import("../adapters/index.js");
     const previous = getServerAdapter("claude_local");
     unregisterServerAdapter("claude_local");
-    const cliProbeSpy = vi.fn(async () => ({
+    const selectedEngineProbe = vi.fn(async (_context: AdapterEnvironmentTestContext) => ({
       adapterType: "claude_local",
-      status: "fail" as const,
-      checks: [{ code: "adapter_command_missing", level: "error" as const, message: 'Command not found in PATH: "claude"' }],
+      status: "pass" as const,
+      checks: [{ code: "claude_hello_probe_passed", level: "info" as const, message: "Claude returned a hello response." }],
       testedAt: new Date(0).toISOString(),
     }));
-    registerServerAdapter({ ...externalAdapter, type: "claude_local", testEnvironment: cliProbeSpy });
+    registerServerAdapter({ ...externalAdapter, type: "claude_local", testEnvironment: selectedEngineProbe });
     try {
       const app = await createApp();
       const res = await request(app)
-        .post("/api/companies/company-1/adapters/external_test/test-environment")
+        .post("/api/companies/company-1/adapters/claude_local/test-environment")
         .send({
-          adapterConfig: { cwd: "/" },
+          adapterConfig: { cwd: "/", engine: "acp", model: "claude-sonnet-4-5" },
           aiConnection: { provider: "anthropic", method: "api_key", mode: "responsible_user" },
         });
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("pass");
       expect(JSON.stringify(res.body)).not.toContain("ai_connection_validation_incomplete");
       expect(res.body.checks.map((check: { code: string }) => check.code)).toContain("ai_connection_api_key_reverified");
+      expect(res.body.checks.map((check: { code: string }) => check.code)).toContain("claude_hello_probe_passed");
       expect(mockValidateAiApiKey).toHaveBeenCalledWith("anthropic", "sk-ant-test-key");
-      expect(testEnvironmentSpy).toHaveBeenCalledTimes(1);
-      expect(cliProbeSpy).not.toHaveBeenCalled();
+      expect(selectedEngineProbe).toHaveBeenCalledTimes(1);
+      expect(selectedEngineProbe.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+        adapterType: "claude_local",
+        config: expect.objectContaining({ engine: "acp", model: "claude-sonnet-4-5" }),
+      }));
     } finally {
       unregisterServerAdapter("claude_local");
       if (previous) registerServerAdapter(previous);

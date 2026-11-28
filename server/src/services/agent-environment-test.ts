@@ -605,19 +605,14 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     if (adapterType === "proprio_runner" && context.executionTarget?.kind === "remote"
       && context.executionTarget.transport === "sandbox" && context.executionTarget.runnerTask) return result;
     const resolvedMethod = (context.config as { managedAiConnection?: { method?: string } }).managedAiConnection?.method;
-    // An api_key account does not take the CLI hello probe below: a key
-    // travels as an env var any engine understands, and the engine's own test
-    // above judged whether this runtime can execute with it — the ACP lane
-    // deliberately runs no hello probe when a key is configured. Demanding one
-    // anyway forced the CLI lane, whose probe needs a provider CLI on PATH,
-    // and a clean install has none: that walled off onboarding's API-key path
-    // on exactly the machines the release smoke exists to guard. The account
-    // is still verified live here — the same provider-endpoint check the save
-    // performed — so a key revoked since its save fails adoption rather than
-    // producing an agent that cannot authenticate at runtime. The hello-probe
-    // requirement stays for subscriptions: a stored login is a file layout
-    // only a provider CLI reads, so proving the runtime lane can consume it
-    // takes a real hello turn.
+    // Never replace the selected adapter engine with a CLI hello fallback for
+    // an API key. ACP engines can authenticate directly from their managed
+    // provider settings; their adapter test owns any hello probe for that
+    // runtime and model. This endpoint rechecks that the saved key is still
+    // accepted. Key validity alone is not inference evidence: consumers that
+    // require a successful turn must also require the adapter's positive hello
+    // check. Subscription credentials still need a real turn because checking
+    // a stored login file alone does not prove the selected runtime can use it.
     const nativePiOpenRouter = adapterType === "proprio_runner" && context.config.provider === "acpx"
       && context.config.acpxAgent === "pi" && binding.provider === "openrouter"
       && asRecord(context.config.managedAiRouting)?.kind === "openrouter";
