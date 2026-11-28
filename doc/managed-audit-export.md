@@ -69,7 +69,18 @@ access. Before releasing a page, the API checks
 every event in the snapshot because the count and watermark describe all pages.
 If any event is unavailable, the API returns `snapshot_incomplete` without
 returning the page, count or watermark. Preserve the checkpoint and
-reconcile before opening a new export. A source epoch change or an expired
+reconcile before opening a new export. The server commits an access record
+before releasing each successful page, including a replay. The record holds the
+company, operator, export ID, page offset, item count and access time. Storage
+operators can review it by company and export ID in
+`managed_audit_export_page_access` through the authorized database operator
+role. The migration revokes Data API role grants and enables row-level
+security. The table owner retains access. Offsets and counts can disclose
+private evidence. The record survives snapshot deletion and expiry. The
+storage owner applies the deployment's audit retention policy to these records
+and any database backups that contain them.
+
+A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
 after 24 hours. Starting a new export clears expired snapshots for its company.
 
