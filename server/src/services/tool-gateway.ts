@@ -1672,6 +1672,48 @@ export function createToolGatewayService(
       throw error;
     }
   }
+  type ToolGatewayDbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+  type ManagedAuditDatabase = Pick<Db | ToolGatewayDbTransaction, "select" | "insert">;
+
+  async function managedAuditEventIdentity(database: ManagedAuditDatabase, input: {
+    companyId: string;
+    runId: string | null;
+    taskId: string | null;
+    invocationId: string;
+    connectionId: string;
+    actionRequestId?: string;
+  }) {
+    const [admission] = await database.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, input.companyId),
+      eq(managedAuditEvents.source, "tool_gateway"),
+      eq(managedAuditEvents.phase, "policy_decision"),
+      eq(managedAuditEvents.invocationId, input.invocationId),
+    )).limit(1);
+    if (!admission) return null;
+    if (admission.runId !== input.runId || admission.taskId !== input.taskId ||
+        admission.connectionId !== input.connectionId ||
+        (input.actionRequestId
+          ? admission.decision !== "require_approval" || admission.requestId !== input.actionRequestId
+          : admission.decision !== "allow")) {
+        throw new ToolGatewayHttpError(409,
+          "Managed gateway invocation context no longer matches its recorded admission",
+          "managed_audit_context_mismatch", { invocationId: input.invocationId });
+    }
+    if (input.actionRequestId) {
+      const [resolution] = await database.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, input.companyId),
+        eq(managedAuditEvents.source, "tool_gateway"),
+        eq(managedAuditEvents.phase, "approval_resolution"),
+        eq(managedAuditEvents.invocationId, input.invocationId),
+        eq(managedAuditEvents.requestId, input.actionRequestId),
+        eq(managedAuditEvents.decision, "approved"),
+      )).limit(1);
+      if (!resolution) return null;
+      return { admission, actorType: resolution.actorType, actorId: resolution.actorId, decision: "approved" };
+    }
+    return { admission, actorType: admission.actorType, actorId: admission.actorId, decision: admission.decision };
+  }
+
   async function recordManagedMcpDispatchIntent(input: {
     companyId: string;
     runId: string | null;
@@ -1684,27 +1726,68 @@ export function createToolGatewayService(
     routingHash: string;
     providerRequestId: string;
     fenceEquivalentWrites: boolean;
+    actionRequestId?: string;
+    approvalClaim?: ToolApprovalClaim;
+    allowContinuation?: boolean;
   }): Promise<boolean> {
     return db.transaction(async (tx) => {
-      const [admission] = await tx.select().from(managedAuditEvents).where(and(
-        eq(managedAuditEvents.companyId, input.companyId),
-        eq(managedAuditEvents.source, "tool_gateway"),
-        eq(managedAuditEvents.phase, "policy_decision"),
-        eq(managedAuditEvents.invocationId, input.invocationId),
-      )).limit(1);
-      if (!admission) return false;
-      if (admission.runId !== input.runId || admission.taskId !== input.taskId ||
-          admission.connectionId !== input.connectionId || admission.decision !== "allow") {
-        throw new ToolGatewayHttpError(409,
-          "Managed gateway invocation context no longer matches its recorded admission",
-          "managed_audit_context_mismatch", { invocationId: input.invocationId });
+      let invocationClaim: { status: string; errorCode: string | null } | undefined;
+      let requestClaim: { status: string; updatedAt: Date; invocationId: string; companyId: string } | undefined;
+      if (input.actionRequestId) {
+        const claim = input.approvalClaim;
+        if (!claim || claim.actionRequestId !== input.actionRequestId || claim.invocationId !== input.invocationId) {
+          throw new ToolGatewayHttpError(409, "Approved MCP dispatch has no current approval claim",
+            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+        }
+        [invocationClaim] = await tx.select({ status: toolInvocations.status, errorCode: toolInvocations.errorCode })
+          .from(toolInvocations).where(and(eq(toolInvocations.id, input.invocationId),
+            eq(toolInvocations.companyId, input.companyId))).for("update").limit(1);
+        [requestClaim] = await tx.select({ status: toolActionRequests.status, updatedAt: toolActionRequests.updatedAt,
+          invocationId: toolActionRequests.invocationId, companyId: toolActionRequests.companyId })
+          .from(toolActionRequests).where(and(eq(toolActionRequests.id, input.actionRequestId),
+            eq(toolActionRequests.companyId, input.companyId))).for("update").limit(1);
+        if (invocationClaim?.status !== "executing" || requestClaim?.status !== "executing" ||
+            requestClaim.invocationId !== input.invocationId ||
+            requestClaim.updatedAt.getTime() !== claim.claimedAt.getTime() ||
+            (input.allowContinuation && invocationClaim.errorCode !== "elicitation_required")) {
+          throw new ToolGatewayHttpError(409, "Approved MCP dispatch claim is no longer current",
+            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+        }
       }
-      // Serialize equivalent writes across idempotency keys and replacement runs.
-      // The arguments component is already a keyed digest; no raw input is persisted.
+      const identity = await managedAuditEventIdentity(tx, input);
+      if (input.actionRequestId && !identity) {
+        throw new ToolGatewayHttpError(409, "Approved MCP dispatch has no matching managed approval evidence",
+          "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+      }
+      if (!identity) return false;
+      const { admission } = identity;
       const operationFingerprint = input.fenceEquivalentWrites ? createHash("sha256").update(JSON.stringify([
         admission.companyId, admission.actorType, admission.actorId, admission.connectionId,
         input.destinationFingerprint, input.toolName, input.argumentsHash, input.routingHash,
       ])).digest("hex") : null;
+      const [existingIntent] = await tx.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+        eq(managedAuditEvents.phase, "dispatch_intent"), eq(managedAuditEvents.invocationId, input.invocationId),
+      )).limit(1);
+      if (input.allowContinuation) {
+        const [terminal] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+          eq(managedAuditEvents.phase, "terminal_outcome"), eq(managedAuditEvents.invocationId, input.invocationId),
+        )).limit(1);
+        if (!input.actionRequestId || !existingIntent || terminal ||
+            existingIntent.requestId !== input.actionRequestId || existingIntent.decision !== "approved" ||
+            existingIntent.operationFingerprint !== operationFingerprint) {
+          throw new ToolGatewayHttpError(409,
+            "The approved continuation has no matching unresolved dispatch evidence. Reconcile it before retrying.",
+            "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+        }
+        return true;
+      }
+      if (existingIntent) {
+        throw new ToolGatewayHttpError(409,
+          "This managed gateway invocation already has a dispatch intent without a terminal receipt",
+          "managed_dispatch_outcome_unknown", { invocationId: input.invocationId });
+      }
       if (operationFingerprint) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${operationFingerprint}, 0))`);
         const openIntent = await tx.execute(sql`select 1 from managed_audit_events i
@@ -1731,13 +1814,13 @@ export function createToolGatewayService(
         runId: admission.runId,
         taskId: admission.taskId,
         invocationId: admission.invocationId,
-        requestId: admission.requestId,
+        requestId: input.actionRequestId ?? admission.requestId,
         operationFingerprint,
         providerRequestId: input.providerRequestId,
         connectionId: admission.connectionId,
-        actorType: admission.actorType,
-        actorId: admission.actorId,
-        decision: admission.decision,
+        actorType: identity.actorType,
+        actorId: identity.actorId,
+        decision: identity.decision,
         status: "dispatch_intended",
         reasonCode: null,
       }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
@@ -1764,67 +1847,166 @@ export function createToolGatewayService(
     companyId: string; invocationId: string; providerType: ToolGatewayDescriptor["providerType"];
     approvedActionRequestId?: string | null;
   }) {
-    return !input.approvedActionRequestId && input.providerType === "mcp_remote_http" &&
-      await hasManagedMcpPhase(input.companyId, input.invocationId, "dispatch_intent");
+    try {
+      if (input.providerType !== "mcp_remote_http") return false;
+      const [intent] = await db.select({ requestId: managedAuditEvents.requestId, decision: managedAuditEvents.decision })
+        .from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+          eq(managedAuditEvents.phase, "dispatch_intent"), eq(managedAuditEvents.invocationId, input.invocationId),
+        )).limit(1);
+      if (input.approvedActionRequestId) {
+        if (intent && (intent.requestId !== input.approvedActionRequestId || intent.decision !== "approved")) {
+          throw new ManagedAuditCaptureError(new Error("Approved managed MCP dispatch identity does not match its request"));
+        }
+        if (!intent) {
+          const [admission] = await db.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+            eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+            eq(managedAuditEvents.phase, "policy_decision"), eq(managedAuditEvents.invocationId, input.invocationId),
+            eq(managedAuditEvents.requestId, input.approvedActionRequestId), eq(managedAuditEvents.decision, "require_approval"),
+          )).limit(1);
+          if (admission) throw new ManagedAuditCaptureError(new Error("Approved managed MCP dispatch has no intent"));
+        }
+      }
+      return Boolean(intent);
+    } catch (error) {
+      if (error instanceof ManagedAuditCaptureError) throw error;
+      // A lookup failure after provider dispatch cannot be reclassified as a
+      // provider failure by a subsequent successful retry of this query.
+      throw new ManagedAuditCaptureError(error);
+    }
   }
 
-  type ManagedMcpTerminalInvocationUpdate = {
-    status: "succeeded" | "failed" | "timed_out" | "rate_limited";
+  async function appendManagedMcpTerminalReceipt(database: ManagedAuditDatabase, input: {
+    companyId: string;
+    invocationId: string;
+    actionRequestId?: string;
     completedAt: Date;
-    updatedAt: Date;
-    resultHash?: string | null;
-    resultSummary?: typeof toolInvocations.$inferSelect.resultSummary;
-    resultSizeBytes?: number | null;
-    errorCode?: string | null;
-    errorMessage?: string | null;
-  };
+    status: "succeeded" | "failed" | "timed_out" | "rate_limited";
+    reasonCode: string | null;
+  }) {
+    const [intent] = await database.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.companyId, input.companyId),
+      eq(managedAuditEvents.source, "tool_gateway"),
+      eq(managedAuditEvents.phase, "dispatch_intent"),
+      eq(managedAuditEvents.invocationId, input.invocationId),
+    )).limit(1);
+    if (!intent) return false;
+    if (!intent.connectionId) throw new Error("Managed MCP dispatch intent has no connection binding");
+    const identity = input.actionRequestId
+      ? intent.requestId === input.actionRequestId && intent.decision === "approved"
+        ? { actorType: intent.actorType, actorId: intent.actorId, decision: "approved" as const }
+        : null
+      : intent.decision === "allow"
+        ? { actorType: intent.actorType, actorId: intent.actorId, decision: intent.decision }
+        : null;
+    if (!identity) throw new Error("Managed MCP dispatch intent does not match its approval request");
+    const [inserted] = await database.insert(managedAuditEvents).values({
+      companyId: intent.companyId,
+      source: intent.source,
+      schemaVersion: intent.schemaVersion,
+      eventType: "gateway_terminal_outcome_recorded",
+      phase: "terminal_outcome",
+      occurredAt: input.completedAt,
+      runId: intent.runId,
+      taskId: intent.taskId,
+      invocationId: intent.invocationId,
+      requestId: intent.requestId,
+      connectionId: intent.connectionId,
+      actorType: identity.actorType,
+      actorId: identity.actorId,
+      decision: identity.decision,
+      status: input.status,
+      reasonCode: input.reasonCode,
+    }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
+    if (!inserted) throw new Error("Managed MCP invocation already has a terminal receipt");
+    return true;
+  }
 
   async function writeManagedMcpTerminalOutcome(input: {
     companyId: string;
     invocationId: string;
-    invocationUpdate: ManagedMcpTerminalInvocationUpdate;
+    actionRequestId?: string;
+    approvalClaim?: ToolApprovalClaim;
+    status: "succeeded" | "failed" | "timed_out" | "rate_limited";
+    completedAt: Date;
     reasonCode: string | null;
-  }): Promise<void> {
+    resultHash?: string | null;
+    resultSummary?: typeof toolInvocations.$inferSelect.resultSummary;
+    resultSizeBytes?: number | null;
+    errorMessage?: string | null;
+  }): Promise<boolean> {
     try {
-      await db.transaction(async (tx) => {
-        const [intent] = await tx.select().from(managedAuditEvents).where(and(
-          eq(managedAuditEvents.companyId, input.companyId),
-          eq(managedAuditEvents.source, "tool_gateway"),
-          eq(managedAuditEvents.phase, "dispatch_intent"),
-          eq(managedAuditEvents.invocationId, input.invocationId),
+      return await db.transaction(async (tx) => {
+        const approvalClaim = input.actionRequestId ? input.approvalClaim : undefined;
+        if (input.actionRequestId) {
+          if (input.status !== "succeeded") {
+            throw new Error("Managed approved MCP settlement only records completed executions");
+          }
+          if (!approvalClaim || approvalClaim.actionRequestId !== input.actionRequestId
+            || approvalClaim.invocationId !== input.invocationId) {
+            throw new Error("Managed approved MCP settlement requires its successful claim");
+          }
+          const [invocationClaim] = await tx.select({ status: toolInvocations.status }).from(toolInvocations)
+            .where(and(eq(toolInvocations.id, input.invocationId), eq(toolInvocations.companyId, input.companyId)))
+            .for("update").limit(1);
+          if (invocationClaim?.status !== "executing") throw new Error("Managed approved MCP invocation claim is no longer executing");
+          const [requestClaim] = await tx.select({ status: toolActionRequests.status, updatedAt: toolActionRequests.updatedAt,
+            invocationId: toolActionRequests.invocationId, companyId: toolActionRequests.companyId })
+            .from(toolActionRequests).where(eq(toolActionRequests.id, input.actionRequestId)).for("update").limit(1);
+          if (requestClaim?.status !== "executing" || requestClaim.companyId !== input.companyId
+            || requestClaim.invocationId !== input.invocationId
+            || requestClaim.updatedAt.getTime() !== approvalClaim.claimedAt.getTime()) {
+            throw new Error("Managed approved MCP action request claim is no longer current");
+          }
+        }
+        const [intent] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+          eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+          eq(managedAuditEvents.phase, "dispatch_intent"), eq(managedAuditEvents.invocationId, input.invocationId),
         )).limit(1);
-        const [updated] = await tx.update(toolInvocations).set(input.invocationUpdate).where(and(
+        if (!intent) {
+          if (input.actionRequestId) {
+            const [admission] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+              eq(managedAuditEvents.companyId, input.companyId), eq(managedAuditEvents.source, "tool_gateway"),
+              eq(managedAuditEvents.phase, "policy_decision"), eq(managedAuditEvents.invocationId, input.invocationId),
+              eq(managedAuditEvents.requestId, input.actionRequestId), eq(managedAuditEvents.decision, "require_approval"),
+            )).limit(1);
+            if (admission) throw new Error("Approved managed MCP dispatch has no intent");
+          }
+          return false;
+        }
+        const [updated] = await tx.update(toolInvocations).set({
+          status: input.status,
+          ...(input.resultHash !== undefined ? { resultHash: input.resultHash } : {}),
+          ...(input.resultSummary !== undefined ? { resultSummary: input.resultSummary } : {}),
+          ...(input.resultSizeBytes !== undefined ? { resultSizeBytes: input.resultSizeBytes } : {}),
+          ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+          errorCode: input.status === "succeeded" ? null : input.reasonCode,
+          completedAt: input.completedAt,
+          updatedAt: input.completedAt,
+        }).where(and(
           eq(toolInvocations.id, input.invocationId),
           eq(toolInvocations.companyId, input.companyId),
+          ...(input.actionRequestId ? [eq(toolInvocations.status, "executing")] : []),
         )).returning({ id: toolInvocations.id });
         if (!updated) throw new Error("Managed MCP invocation disappeared before terminal capture");
-        if (!intent) throw new Error("Managed MCP terminal outcome has no dispatch intent");
-        const [admission] = await tx.select().from(managedAuditEvents).where(and(
-          eq(managedAuditEvents.companyId, input.companyId),
-          eq(managedAuditEvents.source, "tool_gateway"),
-          eq(managedAuditEvents.phase, "policy_decision"),
-          eq(managedAuditEvents.invocationId, input.invocationId),
-        )).limit(1);
-        if (!admission) throw new Error("Managed MCP dispatch intent has no admission record");
-        const [inserted] = await tx.insert(managedAuditEvents).values({
-          companyId: admission.companyId,
-          source: admission.source,
-          schemaVersion: admission.schemaVersion,
-          eventType: "gateway_terminal_outcome_recorded",
-          phase: "terminal_outcome",
-          occurredAt: input.invocationUpdate.completedAt,
-          runId: admission.runId,
-          taskId: admission.taskId,
-          invocationId: admission.invocationId,
-          requestId: admission.requestId,
-          connectionId: admission.connectionId,
-          actorType: admission.actorType,
-          actorId: admission.actorId,
-          decision: admission.decision,
-          status: input.invocationUpdate.status,
-          reasonCode: input.reasonCode,
-        }).onConflictDoNothing().returning({ id: managedAuditEvents.id });
-        if (!inserted) throw new Error("Managed MCP invocation already has a terminal receipt");
+        if (input.actionRequestId) {
+          if (!approvalClaim) throw new Error("Managed approved MCP settlement lost its claim");
+          await notifyToolReviewChange(tx, input.companyId);
+          const [updatedRequest] = await tx.update(toolActionRequests).set({
+            status: "executed",
+            resolvedAt: input.completedAt,
+            updatedAt: input.completedAt,
+          }).where(and(
+            eq(toolActionRequests.id, input.actionRequestId),
+            eq(toolActionRequests.companyId, input.companyId),
+            eq(toolActionRequests.status, "executing"),
+            eq(toolActionRequests.updatedAt, approvalClaim.claimedAt),
+          )).returning({ id: toolActionRequests.id });
+          if (!updatedRequest) throw new Error("Managed MCP action request was no longer executing");
+        }
+        if (!await appendManagedMcpTerminalReceipt(tx, input))
+          throw new Error("Managed MCP terminal outcome has no dispatch intent");
+        return true;
       });
     } catch (error) {
       // Do not let the caller classify a failed durable receipt as a provider
@@ -8318,8 +8500,14 @@ export function createToolGatewayService(
     useDefaultTimeout = false,
     /** `run` aborts when the run is stopped (the task is cancelled); `caller` when the caller leaves (it is kept). */
     taskSignals: { run?: AbortSignal; caller?: AbortSignal; attachToTaskRecordId?: string | null } = {},
-    captureManagedAudit = false,
+    captureManagedAudit: false | { mode: "direct" } | {
+      mode: "approved";
+      actionRequestId: string;
+      approvalClaim: ToolApprovalClaim;
+      allowContinuation: boolean;
+    } = false,
     reuseManagedDispatchIntent = false,
+    onManagedDispatchIntent?: () => void,
   ): Promise<RemoteHttpExecutionResult> {
     const { entry, connection, sourceTemplateKey } = await resolveConnectedRemoteTool(
       session,
@@ -8412,6 +8600,7 @@ export function createToolGatewayService(
     let mcpSession: { scope: string; headers: Record<string, string>; sessionId: string } | undefined;
     // Answers to an app's question that this call is carrying back, until the app has them.
     let elicitationClaim: Awaited<ReturnType<typeof collectElicitationRound>> = null;
+    let approvedLegacyElicitationClaim: Awaited<ReturnType<typeof collectElicitationRound>> = null;
     // An older app may ask several questions in turn; each answer is spent
     // only when the whole call finishes, so a later stop never loses one.
     const legacyAnswered: Array<{ row: McpElicitationRow; responses: Record<string, McpElicitationResponse> }> = [];
@@ -8454,17 +8643,32 @@ export function createToolGatewayService(
             routingHash: managedRoutingHash,
             providerRequestId: String(providerRequestId),
             fenceEquivalentWrites: tool.risk !== "read",
+            ...(captureManagedAudit && captureManagedAudit.mode === "approved" ? {
+              actionRequestId: captureManagedAudit.actionRequestId,
+              approvalClaim: captureManagedAudit.approvalClaim,
+              allowContinuation: captureManagedAudit.allowContinuation,
+            } : {}),
           });
+          if (managedDispatchIntentWritten) onManagedDispatchIntent?.();
         }
-        return options.remoteHttpRequest
-          ? options.remoteHttpRequest(target, init)
-          : guardedRemoteHttpFetch(target, init, {
-              ...remoteHttpFetchOptions(),
-              // This call site owns a caller-set budget that can exceed the
-              // transport's default response deadline, so hand it down rather than
-              // letting the tighter default cut a legitimately slow tool short.
-              responseTimeoutMs: ms,
-            });
+        try {
+          return await (options.remoteHttpRequest
+            ? options.remoteHttpRequest(target, init)
+            : guardedRemoteHttpFetch(target, init, {
+                ...remoteHttpFetchOptions(),
+                // This call site owns a caller-set budget that can exceed the
+                // transport's default response deadline, so hand it down rather than
+                // letting the tighter default cut a legitimately slow tool short.
+                responseTimeoutMs: ms,
+              }));
+        } catch (error) {
+          if (toolCall && tool.risk !== "read" && managedDispatchIntentWritten) {
+            throw new ToolGatewayHttpError(409,
+              "The managed MCP transport failed after dispatch intent was recorded. The provider outcome is unknown; reconcile before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+          throw error;
+        }
       };
       // AWS refused the minted token: drop it everywhere and rebuild this call's headers with a fresh one.
       const remintAwsCredentials = async () => {
@@ -8621,11 +8825,45 @@ export function createToolGatewayService(
         argumentsIdentity: mcpTaskArgumentsIdentity(parameters),
         appName: tool.applicationDisplayName?.trim() || connection.name.trim() || "The app",
       } : null;
+      const requiresApprovedElicitationContinuation = Boolean(captureManagedAudit && captureManagedAudit.mode === "approved"
+        && captureManagedAudit.allowContinuation === true);
+      const modernElicitation = isModernMcpProtocolVersion(mcpProtocolVersionOf(requestHeaders));
+      if (requiresApprovedElicitationContinuation && !elicitationCall) {
+        throw new ToolGatewayHttpError(409,
+          "The approved call has no task-bound elicitation continuation to resume. Reconcile the prior call before retrying.",
+          "managed_dispatch_outcome_unknown", { invocationId });
+      }
       // A question round this exact call left for a person (stateless MCP).
       // Until every card is resolved the call stops again without contacting
       // the app; then this call carries the answers and the app's exact state.
-      if (elicitationCall && isModernMcpProtocolVersion(mcpProtocolVersionOf(requestHeaders))) {
+      if (elicitationCall && modernElicitation) {
         elicitationClaim = await collectElicitationRound(elicitationCall, { invocationId, era: "modern", claimMs: ms + 60_000 });
+      }
+      const approvedContinuationMatches = (round: NonNullable<typeof elicitationClaim>) =>
+        round.row.invocationId === invocationId
+        && round.row.callIdentity === elicitationCall?.callIdentity
+        && round.row.argumentsIdentity === elicitationCall?.argumentsIdentity;
+      if (requiresApprovedElicitationContinuation && elicitationCall) {
+        if (modernElicitation) {
+          if (!elicitationClaim || !approvedContinuationMatches(elicitationClaim)) {
+            if (elicitationClaim) await releaseElicitationRound(elicitationClaim.row);
+            elicitationClaim = null;
+            throw new ToolGatewayHttpError(409,
+              "The approved call's saved elicitation continuation is unavailable or belongs to another request. Reconcile the prior call before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+        } else {
+          approvedLegacyElicitationClaim = await collectElicitationRound(elicitationCall, {
+            invocationId, era: "legacy", claimMs: ms + 60_000,
+          });
+          if (!approvedLegacyElicitationClaim || !approvedContinuationMatches(approvedLegacyElicitationClaim)) {
+            if (approvedLegacyElicitationClaim) await releaseElicitationRound(approvedLegacyElicitationClaim.row);
+            approvedLegacyElicitationClaim = null;
+            throw new ToolGatewayHttpError(409,
+              "The approved call's saved elicitation continuation is unavailable or belongs to another request. Reconcile the prior call before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+        }
       }
       /**
        * An older server asks over the open stream and waits for the reply.
@@ -8645,6 +8883,35 @@ export function createToolGatewayService(
             "elicitation_not_supported", { invocationId, tool: tool.name });
         }
         const questionHash = elicitationQuestionHash(form);
+        if (approvedLegacyElicitationClaim) {
+          const answered = approvedLegacyElicitationClaim;
+          const question = answered.row.questions.find((item) => item.questionHash === questionHash);
+          if (!question) {
+            await releaseElicitationRound(answered.row).catch(() => undefined);
+            approvedLegacyElicitationClaim = null;
+            await cancel();
+            throw new ToolGatewayHttpError(409,
+              "The app's continuation question does not match the approved answer. Reconcile the prior call before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+          const response = answered.responses[question.key];
+          if (!response) {
+            await releaseElicitationRound(answered.row).catch(() => undefined);
+            approvedLegacyElicitationClaim = null;
+            await cancel();
+            throw new ToolGatewayHttpError(409,
+              "The approved continuation answer is unavailable. Reconcile the prior call before retrying.",
+              "managed_dispatch_outcome_unknown", { invocationId });
+          }
+          approvedLegacyElicitationClaim = null;
+          legacyAnswered.push({ row: answered.row, responses: { [question.key]: response } });
+          const delivered = await respond(response);
+          if (!delivered.ok) {
+            throw new ToolGatewayHttpError(502, `${elicitationCall.appName} did not accept the answer to its question. Try the call again.`,
+              "mcp_remote_status", { status: delivered.status, connectionId: connection.id, catalogEntryId: entry.id });
+          }
+          return;
+        }
         // The app asks a question it already had an answer to in this call
         // (to have it corrected, or a second time): that answer is spent and
         // the person is asked again on a fresh card.
@@ -8733,11 +9000,22 @@ export function createToolGatewayService(
         } : null;
       };
       const taskIdentity = taskIdentityFor(requestHeaders);
+      if (taskIdentity && captureManagedAudit && captureManagedAudit.mode === "approved") {
+        try {
+          if (await hasManagedMcpPhase(session.companyId, invocationId, "dispatch_intent")) {
+            onManagedDispatchIntent?.();
+          }
+        } catch (error) {
+          throw new ManagedAuditCaptureError(error);
+        }
+      }
       // Capture intent before every modern tools/call, including calls that
       // may return a task. Task responses are persisted before waitForMcpTask
       // can return or fail, so pending results retain the same intent.
-      managedDispatchEligible = captureManagedAudit && !reuseManagedDispatchIntent && Boolean(session.runId && session.agentId) &&
-        !elicitationClaim;
+      managedDispatchEligible = Boolean(captureManagedAudit && session.runId && session.agentId) &&
+        (!reuseManagedDispatchIntent || requiresApprovedElicitationContinuation) &&
+        !taskIdentity && (!elicitationClaim || requiresApprovedElicitationContinuation) &&
+        (!approvedLegacyElicitationClaim || requiresApprovedElicitationContinuation);
       // This call's hold on a task it starts or attaches to.
       const taskOwner = `call:${invocationId}:${randomUUID()}`;
       const taskTransport = (protocolVersion: string) => mcpTaskTransport({
@@ -9001,6 +9279,11 @@ export function createToolGatewayService(
       }
       const payloadRecord = asRecord(payload);
       if (!payloadRecord) throw malformedRemoteMcpResponse();
+      if (approvedLegacyElicitationClaim) {
+        throw new ToolGatewayHttpError(409,
+          "The approved call did not receive its saved elicitation question after dispatch. Reconcile the prior call before retrying.",
+          "managed_dispatch_outcome_unknown", { invocationId });
+      }
       // The server has answered this attempt, so saved multi round-trip input is
       // spent (a new input request saves its own below). A rejected attempt,
       // such as a 401 before an OAuth refresh, keeps it for the explicit retry.
@@ -10700,6 +10983,7 @@ export function createToolGatewayService(
     invocationId: string;
     claimUpdatedAt: Date;
     expectedInvocationStatus: "awaiting_approval" | "executing";
+    managedMcpReceiptExpected?: boolean;
     error: unknown;
   }) {
     const reasonCode =
@@ -10771,6 +11055,25 @@ export function createToolGatewayService(
             eq(toolActionRequests.updatedAt, input.claimUpdatedAt),
           ),
         );
+      const [intent] = await tx.select({ id: managedAuditEvents.id }).from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.companyId, actionRequest.companyId),
+        eq(managedAuditEvents.source, "tool_gateway"),
+        eq(managedAuditEvents.phase, "dispatch_intent"),
+        eq(managedAuditEvents.invocationId, input.invocationId),
+      )).limit(1);
+      if (input.managedMcpReceiptExpected || intent) {
+        const receiptWritten = await appendManagedMcpTerminalReceipt(tx, {
+          companyId: actionRequest.companyId,
+          invocationId: input.invocationId,
+          actionRequestId: input.actionRequestId,
+          completedAt: now,
+          status: "failed",
+          reasonCode,
+        });
+        if (!receiptWritten) {
+          throw new Error("Expected managed MCP terminal receipt has no dispatch intent");
+        }
+      }
       return true;
     });
     if (!settled) return { reasonCode, message, settled: false };
@@ -11155,6 +11458,7 @@ export function createToolGatewayService(
     const { session, tool, parameters, argumentsSummary } = prepared;
 
     const startedAt = Date.now();
+    let managedMcpReceiptExpected = false;
     // Keep dispatch and outcome persistence outside the preparation retry
     // boundary. Only the still-current claim may record the provider start.
     if (!(await startToolInvocation(db, invocation.id, claim))) {
@@ -11176,6 +11480,19 @@ export function createToolGatewayService(
               parameters,
               executionTimeoutMs,
               invocation.id,
+              undefined,
+              false,
+              {},
+              tool.providerType === "mcp_remote_http"
+                ? {
+                    mode: "approved",
+                    actionRequestId: claimed.id,
+                    approvalClaim: claim,
+                    allowContinuation: invocation.errorCode === "elicitation_required",
+                  }
+                : false,
+              false,
+              () => { managedMcpReceiptExpected = true; },
             )
           : tool.providerType === "mcp_local_stdio"
             ? await executeLocalStdioTool(
@@ -11217,23 +11534,39 @@ export function createToolGatewayService(
           resultRecord.errorCode === "github_access_denied" ? "github_access_denied" : "tool_execution_failed",
         );
       const now = new Date();
-      await db
-        .update(toolInvocations)
-        .set({
-          status: "succeeded",
-          resultHash: resultValidation.summary.sha256 ?? null,
-          resultSummary: resultValidation.summary,
-          resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-          completedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(toolInvocations.id, invocation.id));
+      const capturedManagedDispatch = tool.providerType === "mcp_remote_http" && await writeManagedMcpTerminalOutcome({
+        companyId: invocation.companyId,
+        invocationId: invocation.id,
+        actionRequestId: claimed.id,
+        approvalClaim: claim,
+        status: "succeeded",
+        completedAt: now,
+        reasonCode: "approved_action_executed",
+        resultHash: resultValidation.summary.sha256 ?? null,
+        resultSummary: resultValidation.summary,
+        resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+      });
+      if (!capturedManagedDispatch) {
+        await db
+          .update(toolInvocations)
+          .set({
+            status: "succeeded",
+            resultHash: resultValidation.summary.sha256 ?? null,
+            resultSummary: resultValidation.summary,
+            resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(toolInvocations.id, invocation.id));
+      }
       await markMcpTaskDelivered(invocation.companyId, invocation.id);
       void emitConnectionInvoked(db, invocation.id);
-      await writeToolReviewChange(db, claimed.companyId, tx => tx
-        .update(toolActionRequests)
-        .set({ status: "executed", resolvedAt: now, updatedAt: now })
-        .where(eq(toolActionRequests.id, claimed.id)));
+      if (!capturedManagedDispatch) {
+        await writeToolReviewChange(db, claimed.companyId, tx => tx
+          .update(toolActionRequests)
+          .set({ status: "executed", resolvedAt: now, updatedAt: now })
+          .where(eq(toolActionRequests.id, claimed.id)));
+      }
       await reflectToolActionInteractionLifecycle({
         actionRequestId: claimed.id,
         status: "executed",
@@ -11259,6 +11592,8 @@ export function createToolGatewayService(
       });
       return resultValidation.value;
     } catch (error) {
+      if (error instanceof ManagedAuditCaptureError ||
+          (error instanceof ToolGatewayHttpError && error.reasonCode === "managed_dispatch_outcome_unknown")) throw error;
       // The provider is still working on the approved action. Keep the
       // approval: the next execution attaches to the same task instead of
       // asking the person again or starting the work twice.
@@ -11277,6 +11612,7 @@ export function createToolGatewayService(
         invocationId: invocation.id,
         claimUpdatedAt: claimed.updatedAt,
         expectedInvocationStatus: "executing",
+        managedMcpReceiptExpected,
         error,
       });
       await writeToolCallEvent({
@@ -13298,6 +13634,8 @@ export function createToolGatewayService(
       await assertGatewayTokenAction(session, "tools/call");
       let invocationId = String(randomUUID());
       const startedAt = Date.now();
+      let approvedDispatchClaim: ToolApprovalClaim | null = null;
+      let approvedElicitationContinuation = false;
 
       // A retry carries the signed originating operation, even if steering has
       // since accepted instructions from someone else in this same run.
@@ -13935,6 +14273,8 @@ export function createToolGatewayService(
           actionRequestId: claimed.id,
           status: "executing",
         });
+        approvedDispatchClaim = { actionRequestId: claimed.id, invocationId: storedInvocation.id, claimedAt: claimed.updatedAt };
+        approvedElicitationContinuation = storedInvocation.errorCode === "elicitation_required";
         invocationId = storedInvocation.id as typeof invocationId;
         effectiveParameters = storedParameters;
         effectiveArgumentsSummary = storedArgumentValidation.summary;
@@ -14184,7 +14524,12 @@ export function createToolGatewayService(
                   caller: input.signal,
                   attachToTaskRecordId: retryingMcpTaskRecordId,
                 },
-                !input.approvedActionRequestId && tool.providerType === "mcp_remote_http",
+                tool.providerType === "mcp_remote_http"
+                  ? input.approvedActionRequestId && approvedDispatchClaim
+                    ? { mode: "approved", actionRequestId: input.approvedActionRequestId,
+                        approvalClaim: approvedDispatchClaim, allowContinuation: approvedElicitationContinuation }
+                    : !input.approvedActionRequestId ? { mode: "direct" } : false
+                  : false,
                 reuseManagedDispatchIntent,
               )
             : tool.providerType === "mcp_local_stdio"
@@ -14239,33 +14584,39 @@ export function createToolGatewayService(
             { execution: connectedMcpExecution?.execution },
           );
         }
-        const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
-          invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
-        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
+        const capturedManagedDispatch = tool.providerType === "mcp_remote_http" && await writeManagedMcpTerminalOutcome({
+          companyId: session.companyId,
+          invocationId,
+          ...(input.approvedActionRequestId && approvedDispatchClaim ? {
+            actionRequestId: input.approvedActionRequestId, approvalClaim: approvedDispatchClaim,
+          } : {}),
           status: "succeeded",
+          completedAt,
+          reasonCode: "tool_completed",
           resultHash: resultValidation.summary.sha256 ?? null,
           resultSummary: resultValidation.summary,
           resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-          ...(capturedManagedDispatch ? { errorCode: null } : {}),
-          completedAt,
-          updatedAt: completedAt,
-        };
+        });
         if (capturedManagedDispatch) {
-          await writeManagedMcpTerminalOutcome({
-            companyId: session.companyId,
-            invocationId,
-            invocationUpdate,
-            reasonCode: "tool_completed",
-          });
           managedTerminalCommitted = true;
           void emitConnectionInvoked(db, invocationId);
-        } else {
-          await db.update(toolInvocations).set(invocationUpdate)
+        }
+        if (!capturedManagedDispatch) {
+          await db
+            .update(toolInvocations)
+            .set({
+              status: "succeeded",
+              resultHash: resultValidation.summary.sha256 ?? null,
+              resultSummary: resultValidation.summary,
+              resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+              completedAt,
+              updatedAt: completedAt,
+            })
             .where(eq(toolInvocations.id, invocationId));
         }
         // A provider task's result is now recorded; only now is it delivered.
         await markMcpTaskDelivered(session.companyId, invocationId);
-        if (input.approvedActionRequestId) {
+        if (input.approvedActionRequestId && !capturedManagedDispatch) {
           const actionRequestId = input.approvedActionRequestId;
           const [executedRequest] = await writeToolReviewChange(db, session.companyId, tx => tx
             .update(toolActionRequests)
@@ -14287,6 +14638,9 @@ export function createToolGatewayService(
               status: "executed",
             });
           }
+        }
+        if (input.approvedActionRequestId && capturedManagedDispatch) {
+          await reflectToolActionInteractionLifecycle({ actionRequestId: input.approvedActionRequestId, status: "executed" });
         }
         await writeToolCallEvent({
           invocationId,
@@ -14424,28 +14778,55 @@ export function createToolGatewayService(
             ? normalizedError.message
             : String(normalizedError);
         if (reasonCode === "elicitation_required") {
+          if (input.approvedActionRequestId && approvedDispatchClaim) {
+            await resumeApprovedActionForPendingTask({
+              actionRequestId: input.approvedActionRequestId,
+              invocationId,
+              claimUpdatedAt: approvedDispatchClaim.claimedAt,
+              message,
+              errorCode: "elicitation_required",
+            });
+          }
           throw normalizedError;
         }
         const completedAt = new Date();
         const terminalStatus = status === 504 ? "timed_out" as const
           : status === 429 ? "rate_limited" as const : "failed" as const;
-        const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
-          status: terminalStatus,
-          errorCode: reasonCode,
-          errorMessage: message,
-          completedAt,
-          updatedAt: completedAt,
-        };
-        if (capturedManagedDispatch && reasonCode !== "provider_task_pending") {
-          await writeManagedMcpTerminalOutcome({
-            companyId: session.companyId, invocationId, invocationUpdate, reasonCode,
+        let settledManagedDispatch = false;
+        if (capturedManagedDispatch && input.approvedActionRequestId && approvedDispatchClaim &&
+            reasonCode !== "provider_task_pending") {
+          const settlement = await markApprovedActionFailed({
+            actionRequestId: input.approvedActionRequestId,
+            invocationId,
+            claimUpdatedAt: approvedDispatchClaim.claimedAt,
+            expectedInvocationStatus: "executing",
+            managedMcpReceiptExpected: true,
+            error: normalizedError,
           });
-        } else {
-          await db.update(toolInvocations).set(invocationUpdate)
+          settledManagedDispatch = settlement.settled;
+        } else if (tool.providerType === "mcp_remote_http" && !input.approvedActionRequestId &&
+            reasonCode !== "provider_task_pending") {
+          settledManagedDispatch = await writeManagedMcpTerminalOutcome({
+            companyId: session.companyId, invocationId,
+            status: terminalStatus,
+            completedAt, reasonCode, errorMessage: message,
+          });
+        }
+        if (capturedManagedDispatch && !settledManagedDispatch) {
+          throw new ManagedAuditCaptureError(new Error("Managed MCP dispatch intent disappeared before terminal settlement"));
+        }
+        if (!settledManagedDispatch) {
+          await db.update(toolInvocations).set({
+            status: terminalStatus,
+            errorCode: reasonCode,
+            errorMessage: message,
+            completedAt,
+            updatedAt: completedAt,
+          })
             .where(eq(toolInvocations.id, invocationId));
         }
         void emitConnectionInvoked(db, invocationId);
-        if (input.approvedActionRequestId) {
+        if (input.approvedActionRequestId && !capturedManagedDispatch) {
           const actionRequestId = input.approvedActionRequestId;
           const [failedRequest] = await writeToolReviewChange(db, session.companyId, tx => tx
             .update(toolActionRequests)
