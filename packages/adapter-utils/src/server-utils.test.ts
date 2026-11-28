@@ -239,14 +239,21 @@ describe("legacy adapter skill selection", () => {
     );
   });
 
-  it("makes feedback available to existing legacy agents without opting native agents into API skills", () => {
+  it("keeps proactive commentary opt-in for legacy and native agents", () => {
     const inventory = [operationalEntry, ...PROPRIO_FEEDBACK_SKILL_KEYS.map((key) => ({ key }))];
     for (const config of [{}, { proprioSkillSync: { desiredSkills: [] } }]) {
       expect(resolveLegacyProprioDesiredSkillNames(config, inventory)).toEqual([
-        PROPRIO_OPERATIONAL_SKILL_KEY, ...PROPRIO_FEEDBACK_SKILL_KEYS,
+        PROPRIO_OPERATIONAL_SKILL_KEY,
       ]);
       expect(resolveProprioDesiredSkillNames(config, inventory)).toEqual([]);
     }
+    const optedIn = { proprioSkillSync: { desiredSkills: PROPRIO_FEEDBACK_SKILL_KEYS } };
+    expect(resolveLegacyProprioDesiredSkillNames(optedIn, inventory)).toEqual([
+      PROPRIO_OPERATIONAL_SKILL_KEY, ...PROPRIO_FEEDBACK_SKILL_KEYS,
+    ]);
+    expect(resolveLegacyProprioDesiredSkillNames(
+      { proprioSkillSync: { desiredSkills: [PROPRIO_FEEDBACK_SKILL_KEYS[0]] } }, inventory,
+    )).toEqual([PROPRIO_OPERATIONAL_SKILL_KEY, PROPRIO_FEEDBACK_SKILL_KEYS[0]]);
     expect(resolveLegacyProprioDesiredSkillNames({}, inventory.slice(1))).toEqual([]);
   });
 });

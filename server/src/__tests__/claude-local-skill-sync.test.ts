@@ -38,7 +38,7 @@ describe("claude local skill sync", () => {
 
     expect(snapshot.mode).toBe("ephemeral");
     expect(snapshot.supported).toBe(true);
-    expect(snapshot.desiredSkills).toEqual([proprioKey, "groktopus/proprio/complain", "groktopus/proprio/suggestion-box"]);
+    expect(snapshot.desiredSkills).toEqual([proprioKey]);
     expect(snapshot.entries.find((entry) => entry.key === proprioKey)?.state).toBe("configured");
     expect(snapshot.entries.find((entry) => entry.key === createAgentKey)?.state).toBe("available");
   });

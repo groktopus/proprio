@@ -6,29 +6,52 @@ Both are free-form, internally attributed records, not anonymous feedback.
 
 ## Agent entry points
 
-Skill-capable legacy adapters automatically receive `complain` and
-`suggestion-box` alongside the `proprio` operational skill, including existing
-agents with empty optional-skill selections. The shared helper lives in that
-operational skill at `scripts/submit-agent-commentary.mjs`. It reads the body
-from stdin and uses the existing `PROPRIO_API_URL`, `PROPRIO_API_KEY`,
-`PROPRIO_COMPANY_ID`, and `PROPRIO_RUN_ID`. The helper uses the existing
-Node.js runtime with no additional dependencies; custom runtimes can call HTTP
-directly. Sandboxed runs use the callback bridge.
+Proactive feedback is off by default. Operators enable it per agent by selecting
+either `groktopus/proprio/complain` or
+`groktopus/proprio/suggestion-box` in that agent's desired skills. Legacy
+adapters then mount the selected skills alongside the `proprio` operational
+skill. The shared helper lives in that operational skill at
+`scripts/submit-agent-commentary.mjs`. It reads the body from stdin and uses the
+existing `PROPRIO_API_URL`, `PROPRIO_API_KEY`, `PROPRIO_COMPANY_ID`, and
+`PROPRIO_RUN_ID`. The helper uses the existing Node.js runtime with no
+additional dependencies; custom runtimes can call HTTP directly. Sandboxed
+runs use the callback bridge. The legacy HTTP submission route accepts a new
+record only when the matching skill is selected in the saved agent config and
+was present in the run's pinned skill selection. Direct HTTP calls do not
+bypass agent opt-in or the legacy runtime skill policy. Replaying an existing
+idempotency receipt remains available after opt-in is removed. A legacy run
+without a pinned selection needs a new run to submit new feedback.
 
-Native runs receive `submit_complaint({body, idempotencyKey})` and
-`submit_suggestion({body, idempotencyKey})` in standard, ask, and planning modes.
-Specialized completion-review runs retain their restricted tool set. Native
-submission uses the bound authority without a shell or API credential.
-Submit before finishing the run.
+Earlier releases mounted both feedback skills for skill-capable legacy agents
+by default. After upgrading, operators choose which agents can submit new
+feedback. Some legacy providers share a skill home across runs, so an agent may
+still see feedback instructions from an earlier installation. The service checks
+the saved agent selection and the run's pinned skills before it accepts a new
+submission. Saved comments and suggestions remain available through the
+company-scoped inspection API and Audit → Commentary page.
+
+Native runs expose `submit_complaint({body, idempotencyKey})` in standard, ask,
+and planning modes when `complain` is selected, and expose
+`submit_suggestion({body, idempotencyKey})` when `suggestion-box` is selected.
+The saved agent selection and the pinned runtime context must both include the
+matching skill. Removing the saved selection stops new writes from an active
+run. A still-authorized run can replay an existing receipt. Task-scoped skill
+mentions leave the agent's saved selection in place. Specialized
+completion-review runs retain their restricted tool set. Native submission
+uses the bound authority without a shell or API credential. Once enabled,
+agents may submit through the same company-scoped store. Native runs using
+`homeMode: "preconfigured"` do not stage assigned skill files, so these
+skill-backed commentary tools remain unavailable in that mode.
 
 Instructions closely adapt Warp's
 [complain](https://github.com/warpdotdev/common-skills/blob/main/.agents/skills/complain/SKILL.md)
 and [suggestion-box](https://github.com/warpdotdev/common-skills/blob/main/.agents/skills/suggestion-box/SKILL.md)
 skills, with their MIT notices included. Proprio changes the transport,
-attribution, suggestion form, and size limit. Agents submit proactively when
-warranted, without routine previews or announcements, then continue working.
-Answer truthfully if a user asks about feedback or submitted content. Operators
-can exclude these legacy skills through the existing runtime skill policy.
+attribution, suggestion form, and size limit. When enabled, agents submit
+proactively when warranted, without routine previews or announcements, then
+continue working. Answer truthfully if a user asks about feedback or submitted
+content. The existing legacy runtime skill policy takes precedence over
+per-agent selection and can exclude either feedback skill.
 Brevity and at most three suggestions per run are guidance, not server quotas.
 Do not report the same incident through both paths or retry failed submissions.
 

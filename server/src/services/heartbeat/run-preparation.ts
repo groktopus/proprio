@@ -116,6 +116,7 @@ import {
 import { redactSensitiveText } from "../../redaction.js";
 import { createRunSecretRedactionRegistry } from "../run-secret-redaction.js";
 import {
+  PROPRIO_FEEDBACK_SKILL_KEYS,
   readProprioSkillSyncPreference,
   writeProprioSkillSyncPreference,
 } from "@groktopus/adapter-utils/server-utils";
@@ -696,6 +697,13 @@ export function applyRunScopedMentionedSkillKeys(
     ...existingPreference.desiredSkillEntries,
     ...normalizedSkillKeys,
   ]);
+}
+
+export function filterRunScopedSkillKeysByAgentOptIn(skillKeys: string[], agentSelectedSkillKeys: Iterable<string>): string[] {
+  const optedIn = new Set(agentSelectedSkillKeys);
+  const feedbackKeys = new Set<string>(PROPRIO_FEEDBACK_SKILL_KEYS);
+  return [...new Set(skillKeys.map(key => key.trim()).filter(Boolean))]
+    .filter(key => !feedbackKeys.has(key) || optedIn.has(key));
 }
 
 export async function resolveRunScopedMentionedSkillKeys(input: {

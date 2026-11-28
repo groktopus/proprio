@@ -194,6 +194,7 @@ export {
   resolveExecutionRunAdapterConfig,
   extractMentionedSkillIdsFromSources,
   applyRunScopedMentionedSkillKeys,
+  filterRunScopedSkillKeysByAgentOptIn,
   revokeHeartbeatRunGatewayTokens,
   buildProprioRuntimeMcpServers,
   createManagedMcpRunConfig,

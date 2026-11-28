@@ -585,21 +585,6 @@
       ]
     },
     {
-      "id": "skill:skills/proprio/SKILL.md:incidental-feedback:839",
-      "sourceKind": "skill_heading",
-      "sourceAnchor": "skills/proprio/SKILL.md:839",
-      "title": "Incidental feedback",
-      "expectedSemantics": "Skill guidance headed “Incidental feedback”.",
-      "primaryDisposition": "optional_agent_tool",
-      "requiredGrants": [],
-      "assertionClasses": [
-        "control_plane_invariant"
-      ],
-      "evidenceIds": [
-        "skill:skills/proprio/SKILL.md:839"
-      ]
-    },
-    {
       "id": "skill:skills/proprio/references/api-reference.md:proprio-api-reference:1",
       "sourceKind": "skill_heading",
       "sourceAnchor": "skills/proprio/references/api-reference.md:1",

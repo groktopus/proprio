@@ -10,7 +10,7 @@ import { eq, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db, type agents, type projects } from "@groktopus/db";
 import type { AiConnectionBinding } from "@groktopus/shared";
 import { readProprioSkillSyncPreference, resolveProprioDesiredSkillNames, resolveLegacyProprioDesiredSkillNames,
-  writeProprioSkillSyncPreference } from "@groktopus/adapter-utils/server-utils";
+  writeProprioSkillSyncPreference, PROPRIO_FEEDBACK_SKILL_KEYS, PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY } from "@groktopus/adapter-utils/server-utils";
 import { parseObject } from "../../adapters/utils.js";
 import { logger } from "../../middleware/logger.js";
 import { AI_CONNECTION_BUSY_RETRY_REASON, extractWakeCommentIds, isNonAssigneeWorkspaceBusyRetry } from "../../modules/run-dispatch/index.js";
@@ -38,7 +38,7 @@ import { createHeartbeatPreparationTiming } from "./preparation-timing.js";
 import { mcpAppViewsService, renderMcpAppRunContext } from "../mcp-app-views.js";
 import {
   ConfigurationIncompleteFailure, applyRunScopedMentionedSkillKeys, resolveExecutionRunAdapterConfig,
-  resolveRunScopedMentionedSkillKeys, type createHeartbeatRunPreparation, type resolveAcceptedPlanWakeRoutingDecision,
+  filterRunScopedSkillKeysByAgentOptIn, resolveRunScopedMentionedSkillKeys, type createHeartbeatRunPreparation, type resolveAcceptedPlanWakeRoutingDecision,
 } from "./run-preparation.js";
 import { buildExecutionWorkspaceConfigSnapshot, stripWorkspaceRuntimeFromExecutionRunConfig } from "./workspaces.js";
 import type { HeartbeatWorkspacePreparationInput } from "./workspace-preparation.js";
@@ -129,6 +129,19 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     ? { ...input.config.sourceWorkspaceConfig,
         homeMode: bindHeartbeatRunnerHomeMode({ ...parseObject(agent.adapterConfig), ...(sshRunnerHomeMode ? { homeMode: sshRunnerHomeMode } : {}) }, persistedNativeExecutionInput).homeMode }
     : input.config.sourceWorkspaceConfig;
+  const feedbackSkillKeySet = new Set<string>(PROPRIO_FEEDBACK_SKILL_KEYS);
+  const savedCommentaryOptIns = readProprioSkillSyncPreference(agent.adapterConfig ?? {}).desiredSkills
+    .filter(key => feedbackSkillKeySet.has(key));
+  const storedCommentaryOptIns = run.contextSnapshot?.[PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY];
+  const hasPinnedCommentaryOptIns = Object.hasOwn(run.contextSnapshot ?? {}, PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY);
+  const proactiveCommentarySkillKeys = hasPinnedCommentaryOptIns
+    ? Array.isArray(storedCommentaryOptIns)
+      ? storedCommentaryOptIns.filter((key): key is string => typeof key === "string" && feedbackSkillKeySet.has(key))
+      : []
+    : savedCommentaryOptIns;
+  if (!hasPinnedCommentaryOptIns) {
+    await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ [PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY]: proactiveCommentarySkillKeys })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+  }
   const preconfiguredHome = agent.adapterType === "proprio_runner" && sourceWorkspaceConfig.homeMode === "preconfigured";
   if (preconfiguredHome && pinnedSkillTest) {
     throw new ConfigurationIncompleteFailure("Skill tests require an isolated Runner home to deliver the saved version.", {
@@ -190,11 +203,12 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   if (mentionedSkills.status === "rejected") throw mentionedSkills.reason;
   if (githubIdentity.status === "rejected") throw githubIdentity.reason;
   const runScopedMentionedSkillKeys = mentionedSkills.value;
+  const eligibleMentionedSkillKeys = filterRunScopedSkillKeysByAgentOptIn(runScopedMentionedSkillKeys, proactiveCommentarySkillKeys);
   const runScopedSkillKeys =
     !pinnedSkillTest && acceptedPlanContinuationWake &&
     !acceptedPlanWakeRoutingDecision?.suppressAcceptedContinuation
-      ? [...runScopedMentionedSkillKeys, ACCEPTED_PLAN_CONVERSION_SKILL_KEY]
-      : runScopedMentionedSkillKeys;
+      ? [...eligibleMentionedSkillKeys, ACCEPTED_PLAN_CONVERSION_SKILL_KEY]
+      : eligibleMentionedSkillKeys;
   const githubSelection = githubIdentity.value.configured
     || !(await githubNativeGitService(db).hasBinding(agent.companyId, agent.id))
     ? githubIdentity.value

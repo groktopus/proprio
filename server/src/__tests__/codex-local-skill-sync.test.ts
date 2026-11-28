@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 import {
   listCodexSkills,
   syncCodexSkills,
@@ -38,6 +39,7 @@ describe("codex local skill sync", () => {
     const before = await listCodexSkills(ctx);
     expect(before.mode).toBe("ephemeral");
     expect(before.desiredSkills).toContain(proprioKey);
+    for (const feedbackKey of PROPRIO_FEEDBACK_SKILL_KEYS) expect(before.desiredSkills).not.toContain(feedbackKey);
     expect(before.entries.find((entry) => entry.key === proprioKey)?.state).toBe("configured");
     expect(before.entries.find((entry) => entry.key === proprioKey)?.detail).toContain("CODEX_HOME/skills/");
   });

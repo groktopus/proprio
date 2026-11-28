@@ -47,7 +47,7 @@ function agentFeedback(): ChatCatalogCase {
     casey = await createAuthenticatedPerson({ api: ctx.input.api, browser, secrets: ctx.input.privateSecrets, name: "Casey" });
     try {
       await enrollPrerequisitePerson(ctx, casey, "operator");
-      const worker = await fixtureWorker(ctx); const privateWorker = await fixtureWorker(ctx);
+      const worker = await fixtureWorker(ctx, { proactiveCommentary: true }); const privateWorker = await fixtureWorker(ctx, { proactiveCommentary: true });
       await ctx.input.api.patch(`/api/agents/${privateWorker.id}`, { name: "Riley" });
       const root = `/api/companies/${ctx.input.fixtures.company.id}`;
       for (const scope of [{ scopeType: "company", scopeId: ctx.input.fixtures.company.id }, ...[worker, privateWorker].map(agent => ({ scopeType: "agent", scopeId: agent.id }))])

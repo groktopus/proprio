@@ -4363,17 +4363,16 @@ export function resolveProprioDesiredSkillNames(
 /**
  * Legacy adapters call the Proprio API through the operational skill. Keep
  * that skill mounted even when an agent predates skill preferences or carries
- * an explicit empty desired set. Native runners provide the same authority
- * through their protocol and must continue to use the configurable-only
- * resolver above.
+ * an explicit empty desired set. Feedback skills are opt-in through the
+ * operator-managed desired-skill list, matching native tool availability.
  */
 export const PROPRIO_OPERATIONAL_SKILL_KEY =
   "groktopus/proprio/proprio";
 
-export const PROPRIO_FEEDBACK_SKILL_KEYS = [
-  "groktopus/proprio/complain",
-  "groktopus/proprio/suggestion-box",
-] as const;
+export const PROPRIO_COMPLAIN_SKILL_KEY = "groktopus/proprio/complain";
+export const PROPRIO_SUGGESTION_BOX_SKILL_KEY = "groktopus/proprio/suggestion-box";
+export const PROPRIO_FEEDBACK_SKILL_KEYS = [PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY] as const;
+export const PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY = "agentProactiveCommentarySkillKeys";
 
 /**
  * Native Proprio Runner sessions receive the control-plane contract through
@@ -4442,11 +4441,7 @@ export function resolveLegacyProprioDesiredSkillNames(
   );
   if (!operationalEntry) return desiredSkills;
 
-  const feedbackEntries = PROPRIO_FEEDBACK_SKILL_KEYS.flatMap((key) => {
-    const entry = availableEntries.find((candidate) => candidate.key.trim().toLowerCase() === key);
-    return entry ? [entry.key] : [];
-  });
-  return Array.from(new Set([operationalEntry.key, ...feedbackEntries, ...desiredSkills]));
+  return Array.from(new Set([operationalEntry.key, ...desiredSkills]));
 }
 
 export function writeProprioSkillSyncPreference(
