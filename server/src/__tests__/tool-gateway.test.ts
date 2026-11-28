@@ -729,6 +729,70 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("keeps a managed MCP write unresolved when the provider applies it but its response is lost", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(() => ({ body: {
+      jsonrpc: "2.0", id: "unused", result: { content: [{ type: "text", text: "unexpected request" }] },
+    } }));
+    const appliedWrites: string[] = [];
+    let dispatchCount = 0;
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "kv_set", riskLevel: "write",
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (url, init) => {
+        const body = typeof init.body === "string" ? JSON.parse(init.body) as {
+          method?: string; params?: { arguments?: { key?: string; value?: string } };
+        } : null;
+        if (body?.method === "tools/call") {
+          dispatchCount += 1;
+          // Model a provider that commits the write before the response is dropped.
+          appliedWrites.push(`${body.params?.arguments?.key}=${body.params?.arguments?.value}`);
+          throw new Error("connection closed after provider applied write");
+        }
+        return fetch(url, init);
+      } });
+      const firstSession = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id, issueId: issue.id });
+      const tool = expectedConnectedToolName({ applicationKey: application.applicationKey,
+        connectionId: connection.id, toolName: catalogEntry.toolName });
+      const parameters = { key: "ambiguous-key", value: "ambiguous-value" };
+      await expect(gateway.executeTool({ sessionToken: firstSession.token, tool, parameters,
+        idempotencyKey: "managed-mcp-lost-response-1" })).rejects.toMatchObject({
+        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+      });
+      expect(appliedWrites).toEqual(["ambiguous-key=ambiguous-value"]);
+      const [firstInvocation] = await db.select().from(toolInvocations).where(and(
+        eq(toolInvocations.companyId, company.id), eq(toolInvocations.idempotencyKey, "managed-mcp-lost-response-1"),
+      ));
+      expect(firstInvocation).toMatchObject({ status: "executing" });
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, firstInvocation.id), eq(managedAuditEvents.phase, "dispatch_intent"),
+      ))).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, firstInvocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+
+      const replacementRun = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
+        invocationSource: "assignment", status: "running", contextSnapshot: { issueId: issue.id } }).returning().then(rows => rows[0]!);
+      const replacementSession = await gateway.createSession({ companyId: company.id, agentId: agent.id,
+        runId: replacementRun.id, issueId: issue.id });
+      await expect(gateway.executeTool({ sessionToken: replacementSession.token, tool, parameters,
+        idempotencyKey: "managed-mcp-lost-response-different-run" })).rejects.toMatchObject({
+        status: 409, reasonCode: "managed_dispatch_outcome_unknown",
+      });
+      expect(dispatchCount).toBe(1);
+      expect(appliedWrites).toHaveLength(1);
+      expect(await db.select().from(managedAuditEvents).where(and(
+        eq(managedAuditEvents.invocationId, firstInvocation.id), eq(managedAuditEvents.phase, "terminal_outcome"),
+      ))).toHaveLength(0);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("does not apply the unresolved write fingerprint fence to read-only MCP calls", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);

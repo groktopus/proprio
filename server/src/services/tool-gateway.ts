@@ -580,6 +580,8 @@ type HeaderPolicySummary = {
 
 type RemoteHttpExecutionResult = {
   result: unknown;
+  /** A valid JSON-RPC tools/call result was received from the provider. */
+  providerResultConfirmed?: boolean;
   failureInstructions?: string;
   headerSummary?: HeaderPolicySummary;
   execution?: RemoteHttpExecutionAudit;
@@ -9132,7 +9134,7 @@ export function createToolGatewayService(
           "ok",
           "Remote MCP server responded to tools/call.",
         );
-        return { result, failureInstructions, headerSummary, execution };
+        return { result, providerResultConfirmed: true, failureInstructions, headerSummary, execution };
       }
     } catch (error) {
       // The app never got the answers this call carried: the next identical call sends them.
@@ -14144,6 +14146,7 @@ export function createToolGatewayService(
       });
 
       let managedTerminalCommitted = false;
+      let managedProviderResultConfirmed = false;
       try {
         await assertCurrentGatewayIssuer(session, tool, effectiveParameters, invocationId, !!input.approvedActionRequestId);
         const executionTimeoutMs = timeoutMs(input.timeoutMs, tool);
@@ -14186,6 +14189,7 @@ export function createToolGatewayService(
                   invocationId,
                 )
               : null;
+        managedProviderResultConfirmed = connectedMcpExecution?.providerResultConfirmed === true;
         const result = recoveredGitHubPublication ?? (connectedMcpExecution
           ? connectedMcpExecution.result
           : tool.providerType === "proprio_plugin_connection"
@@ -14357,6 +14361,13 @@ export function createToolGatewayService(
             (normalizedError instanceof ToolGatewayHttpError && normalizedError.reasonCode === "managed_dispatch_outcome_unknown")) {
           throw normalizedError;
         }
+        const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
+          invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
+        if (capturedManagedDispatch && !managedProviderResultConfirmed) {
+          throw new ToolGatewayHttpError(409,
+            "The managed MCP dispatch has no confirmed provider result. Reconcile it before retrying this action.",
+            "managed_dispatch_outcome_unknown", { invocationId });
+        }
         if (managedTerminalCommitted) throw normalizedError;
         const status =
           normalizedError instanceof ToolGatewayHttpError
@@ -14384,8 +14395,6 @@ export function createToolGatewayService(
         const completedAt = new Date();
         const terminalStatus = status === 504 ? "timed_out" as const
           : status === 429 ? "rate_limited" as const : "failed" as const;
-        const capturedManagedDispatch = await managedMcpReceiptRequired({ companyId: session.companyId,
-          invocationId, providerType: tool.providerType, approvedActionRequestId: input.approvedActionRequestId });
         const invocationUpdate: ManagedMcpTerminalInvocationUpdate = {
           status: terminalStatus,
           errorCode: reasonCode,
