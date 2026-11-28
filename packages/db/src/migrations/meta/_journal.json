@@ -3599,20 +3599,6 @@
       "when": 1795858639932,
       "tag": "0515_typical_night_nurse",
       "breakpoints": true
-    },
-    {
-      "idx": 516,
-      "version": "7",
-      "when": 1795785599925,
-      "tag": "0516_numerous_moondragon",
-      "breakpoints": true
-    },
-    {
-      "idx": 517,
-      "version": "7",
-      "when": 1795791586978,
-      "tag": "0517_slimy_otto_octavius",
-      "breakpoints": true
     }
   ]
 }
