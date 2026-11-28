@@ -80,9 +80,28 @@ connection budget, an interrupted lease, or database contention returns
 cursor. Advance the checkpoint only after the page arrives and the collector
 persists its membership and payloads.
 
+A company can retain up to 128 active snapshots across all operators and API
+replicas. The quota counts only unexpired snapshots matching the current
+source epoch and retention cutoff. Creation returns `429
+active_snapshot_limit` at the limit. Resume an existing snapshot or retry
+after an active snapshot expires. A new snapshot reclaims at most 128 rows
+that are expired or invalidated by the current source epoch or retention
+cutoff. Page access records follow their separate retention rules. The quota
+is company-wide; per-operator fairness and epoch/retention-aware capacity
+policy are follow-up work in #383. Permanent invalidation, rollout
+coordination, and losing-writer behavior are owned by #385.
+
+During a rolling upgrade, this bound is enforced only by API instances running
+this version. Complete the API rollout before treating the company quota as a
+deployment-wide invariant; older instances can still create snapshots without
+the bound. A source-epoch rotation or retention-cutoff advance similarly
+requires all export-serving instances to receive the new configuration before
+relying on bounded invalidation reclaim.
+
 A source epoch change or an expired
 snapshot also requires a new export after reconciliation. Snapshots expire
-after 24 hours. Starting a new export clears expired snapshots for its company.
+after 24 hours. Starting a new export clears a bounded batch of expired or
+otherwise invalidated snapshots for its company.
 
 Keep permissible evidence in the independent archive under the archive's access,
 retention and erasure policy. Company deletion can remove product-side records.

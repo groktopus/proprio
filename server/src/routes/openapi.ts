@@ -6524,7 +6524,7 @@ registry.registerPath({
     403: { description: "Forbidden", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     409: { description: "Export cannot be created for this window or source state. For retention_window_expired, start the window at or after the configured retention cutoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     413: { description: "Snapshot exceeds the 20,000-event limit. Use a narrower time window.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
-    429: { description: "Export admission is busy. Retry with backoff.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
+    429: { description: "The response details.reasonCode distinguishes recovery: export_busy means retry the request with backoff; active_snapshot_limit means resume a retained snapshot or retry after one expires.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
     503: { description: "Export connection capacity or query time limit was reached, or the database could not complete the request. Retry the request.", content: { "application/json": { schema: managedAuditExportErrorSchema } } },
   },
 });
