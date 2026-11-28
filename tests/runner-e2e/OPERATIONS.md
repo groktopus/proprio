@@ -974,18 +974,29 @@ or scheduled check; the manual launcher alone does not perform it.
 The trusted report job applies a reviewed `report-lock.patch` before its frozen
 install. `report-lock.json` pins the input lock, patch and resulting lock hashes.
 This updates existing patch identities and the already declared yaml dependency
-without registry resolution. The worker target and its lock artifact never
-control report dependencies. An already-reviewed output lock is used unchanged. An unknown committed lock fails before install;
-review the correction with dependency changes. The existing lockfile-refresh bot runs
-`prepare-report-lock.mjs --refresh` and includes the correction and hashes in its
-lockfile PR. The same commit resyncs `source-sdk-public-inputs.json`, whose
-`lockSha256` is copied from the committed `report-lock.json` output hash. The lockfile bot merges that PR without checks or code-owner review
-when every added package version is at least 3 days old on npm; otherwise the PR
-waits for a maintainer (see `doc/RELEASE-AUTOMATION-SETUP.md` §8.1). The bot
-merges only the commit the workflow generated. It refuses to bless an
-unrecognized committed lock. Paid authorization
-and report jobs still apply only the reviewed offline correction. The original
-failed run remains failed when retained evidence gets a new presentation.
+without registry resolution. The trusted report job controls report dependencies
+independently of the worker's target and lock artifact. An already-reviewed
+output lock is used unchanged. An unknown committed lock fails before install.
+
+An unrecognized committed lock needs owner-approved recovery. A maintainer
+reviews the manifest and exact lock diff, verifies the frozen install, and
+records the reviewed input, patch, and output hashes through the approved
+update path. Sync `source-sdk-public-inputs.json` from the committed
+`report-lock.json` output hash. Verify the reporting lock and SDK inputs at the
+recovery revision. Use the current trusted writer rules for the proof files.
+[Maintainer-reviewed precedent](https://github.com/groktopus/proprio/pull/204)
+[Writer rules](../../.github/scripts/lockfile-trust.mjs)
+
+If the repository owner enables the lockfile bot, its workflow can refresh a
+reviewed base or a verified Dependabot lock. Plain `--refresh` rejects an
+unrecognized committed lock. The bot applies the release-age check to the
+exact generated commit. Added versions need verifiable npm publication and
+registry resolution. The age threshold applies outside the harness package
+allowlist. Changes that fail the automatic check need maintainer review.
+See the [test infrastructure guide](../../doc/test-infrastructure.md).
+
+Paid authorization and report jobs apply the reviewed offline correction. The
+original failed run remains failed when retained evidence gets a new presentation.
 
 The trusted authorization job checks this correction and validates the frozen
 lock against current dependency manifests offline before catalog/build and paid
