@@ -95,6 +95,7 @@ function latestDate(a: Date | null, b: Date | null): Date | null {
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+type SystemSecretPurpose = "tailscale_network" | "github_native_git";
 const AGENT_ACCESS_CONFIG_PATH_PREFIX = "access.";
 // System consumer id for a durable orphan-sandbox teardown. The cleanup sweep
 // resolves the recorded connection secret under this id so the audit trail
@@ -986,6 +987,7 @@ export type RemoveSecretOptions = {
   /** Runs after the secret is marked deleted and before its row is removed. */
   beforeDelete?: (secret: typeof companySecrets.$inferSelect) => Promise<void>;
   expectedVersion?: number;
+  systemPurpose?: "github_native_git";
 };
 
 export function secretService(db: Db | DbTransaction) {
@@ -1394,7 +1396,7 @@ export function secretService(db: Db | DbTransaction) {
     options?: SecretResolutionOptions,
     readOnlyEnvironmentInspection = false,
     preloaded?: { secret: typeof companySecrets.$inferSelect; version: typeof companySecretVersions.$inferSelect | null },
-    systemPurpose?: "tailscale_network",
+    systemPurpose?: SystemSecretPurpose,
   ): Promise<RuntimeSecretResolution> {
     const bindingContext = options?.bindingContext;
     const accessContext = options?.accessContext ?? bindingContext;
@@ -2261,7 +2263,7 @@ export function secretService(db: Db | DbTransaction) {
     },
     actor?: { userId?: string | null; agentId?: string | null },
     instanceOwner?: InstanceSecretOwner,
-    systemPurpose?: "tailscale_network",
+    systemPurpose?: SystemSecretPurpose,
   ) {
     const existing = instanceOwner ? null : await getByName(companyId, input.name);
     if (existing) throw conflict(`Secret already exists: ${input.name}`);
@@ -3454,6 +3456,9 @@ export function secretService(db: Db | DbTransaction) {
   async function removeSecretInternal(secretId: string, options: RemoveSecretOptions = {}) {
     const preCheckSecret = await getById(secretId);
     if (!preCheckSecret) return null;
+    if (preCheckSecret.systemPurpose === "github_native_git" && options.systemPurpose !== preCheckSecret.systemPurpose) {
+      throw notFound("Secret not found");
+    }
     return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, async () => {
       if (options.expectedVersion !== undefined) {
         const now = new Date();
@@ -4714,11 +4719,11 @@ export function secretService(db: Db | DbTransaction) {
     getByName,
     getByKey,
     resolveSecretValue,
-    resolveSystemSecretValue: async (companyId: string, secretId: string, version: number | "latest", purpose: "tailscale_network", consumerId: string) =>
+    resolveSystemSecretValue: async (companyId: string, secretId: string, version: number | "latest", purpose: SystemSecretPurpose, consumerId: string) =>
       (await resolveSecretValueInternal(companyId, secretId, version, {
         accessContext: { consumerType: "system", consumerId, actorType: "system", actorId: null },
       }, false, undefined, purpose)).value,
-    createSystemSecret: async (companyId: string, input: Parameters<typeof createSecretUnlocked>[1], purpose: "tailscale_network",
+    createSystemSecret: async (companyId: string, input: Parameters<typeof createSecretUnlocked>[1], purpose: SystemSecretPurpose,
       actor?: { userId?: string | null; agentId?: string | null }) =>
       withAccountHomeSecretMutationLock(undefined, companyId, async () => {
         if (input.value) await assertAccountHomeCacheDirStillValid(undefined, companyId, input.value);
@@ -4793,7 +4798,7 @@ export function secretService(db: Db | DbTransaction) {
       actor?: { userId?: string | null; agentId?: string | null },
     ) => {
       const preCheckSecret = await getById(secretId);
-      if (!preCheckSecret) throw notFound("Secret not found");
+      if (!preCheckSecret || preCheckSecret.systemPurpose === "github_native_git") throw notFound("Secret not found");
       return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, async () => {
         // Same reasoning as `create:` above: check the new value's directory
         // inside the same lock the write commits under, so a rotate queued
@@ -4831,7 +4836,7 @@ export function secretService(db: Db | DbTransaction) {
       },
     ) => {
       const preCheckSecret = await getById(secretId);
-      if (!preCheckSecret) throw notFound("Secret not found");
+      if (!preCheckSecret || preCheckSecret.systemPurpose === "github_native_git") throw notFound("Secret not found");
       return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, () =>
         updateUnlocked(secretId, patch),
       );

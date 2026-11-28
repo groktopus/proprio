@@ -38,6 +38,7 @@ import { executeAgentInstructionTool } from "./agent-instruction-tools.js";
 import { createReadStream } from "node:fs";
 import { publicChatTaskUrl } from "../chat-task-url.js";
 import { agentCommentaryToolInputSchema } from "@groktopus/shared";
+import { PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY } from "@groktopus/adapter-utils/server-utils";
 import { submitAgentCommentary } from "../agent-commentary.js";
 import { sendAgentChatMessage } from "../agent-chat-messages.js";
 import type { createAssignedMcpTools } from "./assigned-mcp-tools.js";
@@ -151,6 +152,10 @@ import { logger } from "../../middleware/logger.js";
 // Stay well inside the provider MCP client's five-minute request cutoff.
 const ARTIFACT_STORAGE_READ_TIMEOUT_MS = 60_000;
 const EXTERNAL_WORKSPACE_OPERATIONS = new Set(["get_workspace", "list_workspaces", "select_workspace", "prepare_repository", "register_deliverable"]);
+const PROACTIVE_COMMENTARY_SKILL_FOR_TOOL = {
+  submit_complaint: PROPRIO_COMPLAIN_SKILL_KEY,
+  submit_suggestion: PROPRIO_SUGGESTION_BOX_SKILL_KEY,
+} as const;
 const IMPLEMENTED_OPERATIONS = new Set([
   "send_chat_message",
   "submit_complaint", "submit_suggestion",
@@ -254,6 +259,8 @@ type Binding = {
   /** Operator-approved Dot attachment access, pinned when the turn opens. */
   taskAttachmentRead?: boolean;
   runtimeContext?: NativeRuntimeContextSnapshot;
+  /** Agent-level feedback opt-in captured before task-scoped skills are merged. */
+  proactiveCommentarySkillKeys?: string[];
   assertBridgeAuthority?: (database?: Db) => Promise<void>;
   executionTargetKind?: "local" | "remote";
   readRemoteWorkspaceFile?: RemoteWorkspaceFileReader;
@@ -423,6 +430,10 @@ export class ProprioRunnerToolAuthority {
       CAPABILITY_SEMANTIC_TOOL_CATALOG.filter(
         (descriptor) =>
           IMPLEMENTED_OPERATIONS.has(descriptor.operationId) &&
+          (!(descriptor.operationId in PROACTIVE_COMMENTARY_SKILL_FOR_TOOL) ||
+            (this.binding.proactiveCommentarySkillKeys?.includes(PROACTIVE_COMMENTARY_SKILL_FOR_TOOL[descriptor.operationId as keyof typeof PROACTIVE_COMMENTARY_SKILL_FOR_TOOL]) === true
+              && this.binding.runtimeContext?.skills.some(skill =>
+                skill.key === PROACTIVE_COMMENTARY_SKILL_FOR_TOOL[descriptor.operationId as keyof typeof PROACTIVE_COMMENTARY_SKILL_FOR_TOOL]) === true)) &&
           (!(descriptor.operationId === "handoff_case" || NATIVE_CASE_OPERATIONS.has(descriptor.operationId)) || this.binding.casesEnabled === true) &&
           (!isResponsibilityTool(descriptor.operationId) || this.binding.responsibilitiesEnabled === true) &&
           (!this.binding.firstPartyOnly || !EXTERNAL_WORKSPACE_OPERATIONS.has(descriptor.operationId)) &&
@@ -554,6 +565,8 @@ export class ProprioRunnerToolAuthority {
     let recovered: unknown;
     if (call.tool === "set_task_title") recovered = await this.#setTaskTitle(input, true);
     else if (call.tool === "send_chat_message") recovered = await this.#sendChatMessage(input, this.#privacyActor(run), true);
+    // Commentary recovery is receipt-only under the run's pinned skill
+    // selection; a later operator change cannot strand its acknowledgement.
     else if (call.tool === "submit_complaint" || call.tool === "submit_suggestion") recovered = await this.#submitCommentary(call.tool, input, true);
     else if (call.tool === "create_task") recovered = await this.#createTask(input, null, true);
     else if (call.tool === "request_human_input") recovered = await this.#requestHumanInput(input, null, true);
@@ -718,6 +731,9 @@ export class ProprioRunnerToolAuthority {
       });
     }
     await this.#assertToolScope(call.tool);
+    if (call.tool in PROACTIVE_COMMENTARY_SKILL_FOR_TOOL && !this.definitions().some(definition => definition.name === call.tool)) {
+      throw new Error("proprio_runner_tool_not_advertised");
+    }
     if (this.binding.nativeReview && call.tool === "resolve_review") return this.#resolveReview(call.arguments);
     if (Object.hasOwn(TASK_ATTACHMENT_SCHEMAS, call.tool)) {
       const authorize = async () => {
@@ -822,8 +838,8 @@ export class ProprioRunnerToolAuthority {
         return connections.search(claims, input.query, { retryProviderChoice: input.retryProviderChoice });
       }
       const input = connectionRequestInputSchema.parse(call.arguments);
-      const result = await connections.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames });
-      if (result.state === "ready" && this.binding.pinnedMcpDigest && this.binding.enqueueWakeup) {
+      const result = await connections.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService, connectionId: input.connectionId, toolNames: input.toolNames, ...(input.githubGit ? { githubGit: input.githubGit } : {}) });
+      if (!input.githubGit && result.state === "ready" && this.binding.pinnedMcpDigest && this.binding.enqueueWakeup) {
         const current = await resolveNativeRuntimeMcpSnapshot({ db: this.db, agent: { id: this.binding.agentId, companyId: this.binding.companyId }, runId: this.binding.runId });
         if (current.digest !== this.binding.pinnedMcpDigest) {
           const idempotencyKey = `connection-intent:tools:${this.binding.runId}:${current.digest}`;

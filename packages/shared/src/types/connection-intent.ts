@@ -82,6 +82,7 @@ export interface ConnectionRequestResult {
 export type ConnectionIntentSetupConnection = Pick<ToolConnection, "id" | "applicationId" | "name" | "status" | "enabled">;
 
 export interface ConnectionIntentSetupOptions {
+  githubGit?: import("../github-native-git.js").GitHubNativeEligibility;
   chatSetup?: { path: string; endpointId: string; connectionId: string };
   /** Resume this request's saved AgentMail account after a partial setup. */
   emailSetup?: { credentialConnectionId: string | null; readyConnectionId: string | null };
@@ -101,9 +102,7 @@ export interface ConnectionIntentSetupOptions {
   requestedAgentId: string;
 }
 
-export interface CompleteConnectionIntentInput {
-  connectionId: string;
-}
+export type CompleteConnectionIntentInput = import("../validators/connection-intent.js").CompleteConnectionIntent;
 
 export interface DeclineConnectionIntentInput {
   reason?: string;

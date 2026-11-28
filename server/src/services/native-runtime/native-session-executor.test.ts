@@ -269,6 +269,7 @@ const state = vi.hoisted(() => ({
   toolAuthorityDefinitions: vi.fn(
     async (_binding: Record<string, unknown>) => [],
   ),
+  toolAuthorityBindings: vi.fn(),
   toolAuthorityExecute: vi.fn(),
   persistActivity: vi.fn(async (_db: unknown, input: { action: string }) => ({
     activity: {
@@ -360,6 +361,7 @@ vi.mock("./proprio-runner-tool-authority.js", () => ({
 
     constructor(_db: unknown, binding: Record<string, unknown>) {
       this.binding = binding;
+      state.toolAuthorityBindings(binding);
     }
 
     async definitions() {
@@ -527,6 +529,7 @@ import {
   remoteProviderStateNeverOpened,
 } from "./native-session-executor.js";
 import { onNativeRunnerEvidence } from "./native-runner-evidence-signal.js";
+import { PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY, PROPRIO_FEEDBACK_SKILL_KEYS } from "@groktopus/adapter-utils/server-utils";
 
 beforeEach(() => {
   state.localRuntimeApiUrl.mockReset().mockReturnValue("http://127.0.0.1:43219");
@@ -8201,6 +8204,7 @@ function leaseDb(
   runnerProfileJson: Record<string, unknown> = {},
   runStatus = "running",
   priorAccountingEvents: PrpEvent[] = [],
+  contextSnapshot: Record<string, unknown> = {},
 ): Db {
   const coordinator: LeaseCoordinator = {
     runId: boundExecution.binding.runId,
@@ -8250,6 +8254,7 @@ function leaseDb(
                   runnerProfileJson,
                   runtimeMode: "native",
                   status: runStatus,
+                  contextSnapshot,
                 },
               ]
             : table === issues
@@ -16712,6 +16717,31 @@ describe("native session bounded recovery", () => {
 });
 
 describe("native process ownership", () => {
+  it("binds the persisted commentary opt-in to native-session tools on resume", async () => {
+    const optedInSkill = PROPRIO_FEEDBACK_SKILL_KEYS[0];
+    const savedSnapshot = { [PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY]: [optedInSkill] };
+    const current: NativeExecutionInputV1 = { ...execution,
+      binding: { ...execution.binding, runId: "resume-commentary-opt-in" } };
+    state.execute.mockReset().mockResolvedValue({
+      result: { summary: "resumed" }, terminal: { runTerminalState: "succeeded" }, turnId: "turn-resumed",
+      normalizedSessionId: current.session.normalizedSessionId, providerSessionId: null, driverKind: "test", driverVersion: "1",
+      nativeEventCount: 1, highestContiguousSourceSeq: 1, usage: null,
+    });
+    state.toolAuthorityBindings.mockClear();
+
+    await executeProprioNativeSession({
+      db: leaseDb(current, {}, {}, [], {}, "running", [], savedSnapshot),
+      execution: current,
+      runnerInstanceId: "resume-commentary-opt-in",
+      useRunnerd: true,
+    });
+
+    expect(state.toolAuthorityBindings).toHaveBeenCalledWith(expect.objectContaining({
+      runId: current.binding.runId,
+      proactiveCommentarySkillKeys: [optedInSkill],
+    }));
+  });
+
   it("checks the complete wake-comment receipt before finalizing a successful provider turn", async () => {
     const expectedBinding = {
       schema: "proprio.current-wake-comments-binding.v1",

@@ -523,6 +523,54 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0].body).toBe(comment.body);
   });
 
+  it("promotes a deferred wake with host reads on the one-connection issue transaction", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, status: "blocked", assigneeAgentId: agentId });
+    const runId = await seedRun({ companyId, agentId, status: "succeeded", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    const wakeId = await seedDeferredWake({ companyId, agentId, issueId, requestedByActorId: "responsible-user" });
+    const singleConnectionDb = createDb(external ?? tempDb!.connectionString, { maxConnections: 1 });
+    const deps: WakeQueuePostgresAdapterDeps = {
+      resolveResponsibleUserId: async (_input, reader: Pick<Db, "select"> = singleConnectionDb) => {
+        await reader.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId));
+        return "responsible-user";
+      },
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async (_input, reader: Pick<Db, "select"> = singleConnectionDb) => {
+        await reader.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+        return null;
+      },
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const release = createReleaseIssueExecution({
+        issueLock: createPostgresWakeQueueAdapter(singleConnectionDb, deps),
+        recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+      });
+      const input = { companyId, runId, now: new Date(), suppressImmediateRecovery: true, resumeStrandedQueue: true };
+      const promoted = await Promise.race([
+        release(input),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Deferred wake promotion stalled on one database connection")), 5_000);
+        }),
+      ]);
+      expect(promoted.outcome.kind).toBe("promoted");
+      const [promotedWake] = await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+      expect(promotedWake).toMatchObject({ status: "queued", runId: expect.any(String) });
+      const promotedRuns = await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      expect(promotedRuns).toHaveLength(2);
+
+      await release(input);
+      expect(await singleConnectionDb.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(2);
+      expect((await singleConnectionDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0])
+        .toMatchObject({ status: "queued", runId: promotedWake!.runId });
+    } finally {
+      clearTimeout(timer);
+      await singleConnectionDb.$client.end({ timeout: 0 });
+    }
+  }, 30_000);
+
   it.each(["queued", "running", "scheduled_retry", "cancelled"])("preserves a stranded queue when another agent has a newer %s turn", async status => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
@@ -801,7 +849,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     const otherRunId = await seedRun({ companyId, agentId: leadId, status: "succeeded", contextSnapshot: { issueId } });
     await seedIssue({
       companyId: scenario === "foreign_child" ? otherCompanyId : companyId,
-      identifier: "QA-2", parentId: scenario === "unrelated_child" ? otherIssueId : issueId,
+      identifier: "QA-2",
+      parentId: scenario === "foreign_child" ? foreignIssueId : scenario === "unrelated_child" ? otherIssueId : issueId,
       assigneeAgentId: scenario === "foreign_child" ? foreignAgentId : scenario === "other_child_assignee" ? leadId : workerId,
       status: scenario === "child_open" ? "in_progress" : scenario === "child_cancelled" ? "cancelled" : "done",
     });
@@ -835,8 +884,13 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       }).returning();
       commentIds.push(second.id);
     }
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const recorded = drizzle(db.$client, {
+      schema: db._.fullSchema,
+      logger: { logQuery: (sql, params) => queries.push({ sql, params }) },
+    }) as unknown as Db;
     let checked = false;
-    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    const adapter = createPostgresWakeQueueAdapter(recorded, stubDeps);
     await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async (_locked, ports) => {
       checked = true;
       const completed = await ports.transaction.isCompletedDelegationMention({
@@ -847,6 +901,12 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       return { outcome: { kind: "released" as const }, postCommitEffects: [] };
     });
     expect(checked).toBe(true);
+    if (scenario === "foreign_child") {
+      const childLookup = queries.find(({ sql }) => sql.startsWith('select "identifier", "status" from "issues"'));
+      const companyParameter = /"company_id" = \$(\d+)/.exec(childLookup?.sql ?? "");
+      expect(companyParameter, "The delegation child lookup must be company-scoped").not.toBeNull();
+      expect(childLookup?.params[Number(companyParameter?.[1]) - 1]).toBe(companyId);
+    }
   });
 
   it("skips malformed queued comment ids instead of failing the whole liveness batch", async () => {

@@ -8,7 +8,9 @@ import type {
 } from "@groktopus/adapter-utils";
 import {
   buildPersistentSkillSnapshot,
+  buildRuntimeMountedSkillSnapshot,
   ensureProprioSkillSymlink,
+  hasExplicitProprioRuntimeSkillInventory,
   readProprioRuntimeSkillEntries,
   readInstalledSkillTargets,
   resolveLegacyProprioDesiredSkillNames,
@@ -33,6 +35,14 @@ export function resolveOpenCodeSkillsHome(config: Record<string, unknown>) {
 async function buildOpenCodeSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
   const availableEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
   const desiredSkills = resolveLegacyProprioDesiredSkillNames(config, availableEntries);
+  if (hasExplicitProprioRuntimeSkillInventory(config)) {
+    return buildRuntimeMountedSkillSnapshot({
+      adapterType: "opencode_local",
+      availableEntries,
+      desiredSkills,
+      configuredDetail: "Will be staged for OpenCode when the agent runs.",
+    });
+  }
   const skillsHome = resolveOpenCodeSkillsHome(config);
   const installed = await readInstalledSkillTargets(skillsHome);
   return buildPersistentSkillSnapshot({
@@ -60,6 +70,9 @@ export async function syncOpenCodeSkills(
   ctx: AdapterSkillContext,
   desiredSkills: string[],
 ): Promise<AdapterSkillSnapshot> {
+  if (hasExplicitProprioRuntimeSkillInventory(ctx.config)) {
+    return buildOpenCodeSkillSnapshot(ctx.config);
+  }
   const availableEntries = await readProprioRuntimeSkillEntries(ctx.config, __moduleDir);
   const desiredSet = new Set([
     ...resolveLegacyProprioDesiredSkillNames({}, availableEntries),

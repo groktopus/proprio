@@ -17,6 +17,7 @@ import { createLocalDiskStorageProvider } from "../../storage/local-disk-provide
 import { createStorageService } from "../../storage/service.js";
 import { setupRunnerPrpWebSocketServer, runnerPrpWebSocketInternals } from "../../realtime/runner-prp-ws.js";
 import { ProprioRunnerToolAuthority } from "../../services/native-runtime/proprio-runner-tool-authority.js";
+import { PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY } from "@groktopus/adapter-utils/server-utils";
 
 export type RunnerConnectionScenario = "fresh" | "pending" | "declined" | "custom" | "foreign" | "stale_owner" | "ready";
 const CONNECTION_SCENARIOS: readonly RunnerConnectionScenario[] = ["fresh", "pending", "declined", "custom", "foreign", "stale_owner", "ready"];
@@ -77,7 +78,7 @@ export async function startRunnerApiTestServer(options: {
       humanCookies.set(userId, cookie);
       return cookie;
     },
-    async fixture(options: { mode?: "standard" | "ask" | "planning"; apiToolsEnabled?: boolean; reset?: boolean; conversation?: boolean; connectionScenario?: RunnerConnectionScenario; contextSnapshot?: Record<string, unknown>; disableWakeOnDemand?: boolean } = {}) {
+    async fixture(options: { mode?: "standard" | "ask" | "planning"; apiToolsEnabled?: boolean; reset?: boolean; conversation?: boolean; connectionScenario?: RunnerConnectionScenario; contextSnapshot?: Record<string, unknown>; disableWakeOnDemand?: boolean; proactiveCommentarySkills?: string[] } = {}) {
       if (options.connectionScenario !== undefined && !CONNECTION_SCENARIOS.includes(options.connectionScenario)) throw new Error(`Unknown connection eval scenario: ${String(options.connectionScenario)}`);
       // This DB is created inside this helper, never supplied by a caller. Paid
       // paired runs reset it between attempts so modeled IDs and data match.
@@ -120,7 +121,10 @@ export async function startRunnerApiTestServer(options: {
         await db.insert(authUsers).values({ id: responsibleUserId, name: "Eval responsible user", email: `${responsibleUserId}@fixture.invalid`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
         await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: responsibleUserId, status: "active", membershipRole: "member" });
       }
-      await db.insert(agents).values({ id: agentId, companyId, name: "API eval agent", adapterType: "proprio_runner", adapterConfig: { provider: "codex", cwd: workspace }, runtimeConfig: { heartbeat: { enabled: false, ...(options.disableWakeOnDemand ? { wakeOnDemand: false } : {}) } }, status: "active" });
+      await db.insert(agents).values({ id: agentId, companyId, name: "API eval agent", adapterType: "proprio_runner", adapterConfig: {
+        provider: "codex", cwd: workspace,
+        ...(options.proactiveCommentarySkills ? { proprioSkillSync: { desiredSkills: options.proactiveCommentarySkills } } : {}),
+      }, runtimeConfig: { heartbeat: { enabled: false, ...(options.disableWakeOnDemand ? { wakeOnDemand: false } : {}) } }, status: "active" });
       await db.insert(projects).values([
         { id: projectId, companyId, name: "Aurora", description: "The project verification code is violet-otter.", status: "in_progress" },
         { id: foreignProjectId, companyId: foreignCompanyId, name: "Private project", description: "foreign-data-must-not-leak" },
@@ -132,7 +136,12 @@ export async function startRunnerApiTestServer(options: {
         await db.insert(assets).values({ id, companyId, ...saved, createdByAgentId: agentId });
       }
       await db.insert(issues).values({ id: issueId, companyId, projectId, projectWorkspaceId, issueNumber: 1, identifier: "E" + companyId.replaceAll("-", "").slice(0, 8) + "-1", ...(options.conversation ? { conversationAgentId: agentId, conversationUserId: responsibleUserId, conversationState: "active" as const } : {}), title: "Verify runner API tools", description: "Fixture marker: amber-fox.", status: "in_progress", workMode: options.mode ?? "standard", assigneeAgentId: agentId });
-      await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", responsibleUserId, runtimeMode: "native", nativeIssueId: issueId, invocationSource: "assignment", triggerDetail: "system", contextSnapshot: { issueId, ...(options.conversation ? { conversationSessionGeneration: 0 } : {}), ...options.contextSnapshot } });
+      await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", responsibleUserId, runtimeMode: "native", nativeIssueId: issueId, invocationSource: "assignment", triggerDetail: "system", contextSnapshot: {
+        issueId,
+        ...(options.conversation ? { conversationSessionGeneration: 0 } : {}),
+        ...(options.proactiveCommentarySkills ? { [PROPRIO_AGENT_COMMENTARY_OPT_IN_SNAPSHOT_KEY]: options.proactiveCommentarySkills } : {}),
+        ...options.contextSnapshot,
+      } });
       await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
       if (responsibleUserId) await initializeRunIdentity(db, { companyId, runId, issueId, responsibleUserId, cause: "instruction" });
       await db.insert(issues).values({ id: blockerId, companyId, projectId, issueNumber: 2, identifier: "E" + companyId.replaceAll("-", "").slice(0, 8) + "-2", title: "Dependency gate", description: "Complete before shipping.", status: "todo", assigneeAgentId: agentId });
@@ -179,7 +188,13 @@ export async function startRunnerApiTestServer(options: {
         await db.insert(agents).values({ id: replacementAgentId, companyId, name: "New task owner", adapterType: "proprio_runner", adapterConfig: { provider: "codex" }, runtimeConfig: { heartbeat: { enabled: false } }, status: "active" });
         await db.update(issues).set({ assigneeAgentId: replacementAgentId }).where(eq(issues.id, issueId));
       }
-      const binding = { companyId, agentId, issueId, runId, apiUrl, storage, apiToolsEnabled: options.apiToolsEnabled ?? true };
+      const binding = {
+        companyId, agentId, issueId, runId, apiUrl, storage, apiToolsEnabled: options.apiToolsEnabled ?? true,
+        ...(options.proactiveCommentarySkills ? {
+          proactiveCommentarySkillKeys: options.proactiveCommentarySkills,
+          runtimeContext: { skills: options.proactiveCommentarySkills.map(key => ({ key })) } as never,
+        } : {}),
+      };
       return {
         ...binding, projectId, projectWorkspaceId, artifactId, binaryArtifactId, goalId, blockerId, approvalId, foreignCompanyId, foreignProjectId, workspace,
         conversation: options.conversation ?? false,

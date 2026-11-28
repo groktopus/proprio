@@ -117,6 +117,7 @@ vi.mock("@/lib/browserNavigation", () => ({
 }));
 
 vi.mock("@/lib/router", () => ({
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
   useNavigate: () => mockNavigate,
   useParams: () => mockParams,
   useSearchParams: () => [new URLSearchParams(mockSearch.value), vi.fn()],

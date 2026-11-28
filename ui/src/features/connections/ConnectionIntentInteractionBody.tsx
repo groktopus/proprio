@@ -1,3 +1,4 @@
+import { Link } from "@/lib/router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -79,6 +80,7 @@ export function ConnectionIntentInteractionBody({
   );
   const isPending = interaction.status === "pending";
   const isAi = interaction.payload.purpose === "ai";
+  const nativeGitRequest = interaction.payload.githubGit;
   const isChatHandoff = Boolean(interaction.payload.savedSetup);
   const provider = isAi ? aiProviderSchema.safeParse(interaction.payload.serviceSlug).data : undefined;
   const serviceName = provider ? AI_CONNECTION_CAPABILITIES[provider].name : interaction.payload.serviceName;
@@ -160,8 +162,12 @@ export function ConnectionIntentInteractionBody({
   }, [setupQuery.data?.interaction, isPending]);
 
   const completeMutation = useMutation({
-    mutationFn: (connectionId: string) =>
-      connectionIntentsApi.complete(interaction.id, connectionId),
+    mutationFn: (connectionId: string) => {
+      const git = setupQuery.data?.githubGit;
+      return git?.status === "available"
+        ? connectionIntentsApi.complete(interaction.id, connectionId, git.grant.verifiedAt)
+        : connectionIntentsApi.complete(interaction.id, connectionId);
+    },
     onSuccess: async (updatedInteraction) => {
       await invalidateTask(updatedInteraction);
       setOpen(false);
@@ -361,6 +367,42 @@ export function ConnectionIntentInteractionBody({
 
   const needsRetry = interaction.payload.phase === "needs_retry";
   const authorizing = interaction.payload.phase === "authorizing";
+
+  if (nativeGitRequest) {
+    const eligibility = setupQuery.data?.githubGit;
+    const availableGrant = eligibility?.status === "available" ? eligibility.grant : undefined;
+    const operation = { read: "Read or check out", push: "Push a branch", create_pull_request: "Open a pull request" }[nativeGitRequest.operation];
+    const busy = completeMutation.isPending || declineMutation.isPending;
+    return <div id={focusTargetId} ref={focusTargetRef} tabIndex={-1} data-testid="connection-intent-focus-target">
+      <div className={cn("flex flex-col gap-3", ANALYTICS_MASK_CLASS)}>
+        <NeedsYouPanel>
+          {artifactRow}
+          <NeedsYouPanelRow icon={serviceLogo} title="GitHub terminal access" meta={nativeGitRequest.repository} />
+          <NeedsYouPanelNote>{operation} for {interaction.payload.requestingAgentName}.</NeedsYouPanelNote>
+          {availableGrant && <NeedsYouPanelNote>Use {availableGrant.appSlug}[bot].</NeedsYouPanelNote>}
+          {eligibility?.status === "unavailable" && <NeedsYouPanelNote>{eligibility.reason}</NeedsYouPanelNote>}
+        </NeedsYouPanel>
+        {setupView.kind === "error" && <QueryErrorState error={setupQuery.error} onRetry={setupView.retry} />}
+        {setupQuery.isLoading && <output className="text-sm">Checking GitHub App access…</output>}
+        {(completeMutation.error || declineMutation.error) &&
+          <p role="alert" className="text-sm text-destructive">{describeError(completeMutation.error ?? declineMutation.error).body}</p>}
+        <DecisionCardFooter leading={footerSlot}>
+          <Button variant="ghost" disabled={busy} onClick={() => declineMutation.mutate()}>Not now</Button>
+          {availableGrant ? <Button disabled={busy || setupQuery.isFetching} onClick={() => completeMutation.mutate(availableGrant.id, {
+            onError: () => { void setupQuery.refetch(); },
+          })}>Use GitHub App</Button> : <>
+            {eligibility?.status === "unavailable" && setupQuery.data?.canGrantAccess
+              && ["no_identity", "repository_denied", "action_denied", "revoked"].includes(eligibility.code)
+              && <Button asChild variant="outline"><Link to="/apps/connect?source=github&nativeGit=1" target="_blank" rel="noopener noreferrer">Open GitHub setup</Link></Button>}
+            {eligibility?.status === "unavailable" && setupQuery.data?.canGrantAccess
+              && ["ambiguous", "managed_identity", "managed_repository_denied"].includes(eligibility.code)
+              && <Button asChild variant="outline"><Link to="/apps" target="_blank" rel="noopener noreferrer">Review GitHub identities</Link></Button>}
+            <Button variant="outline" disabled={busy || setupQuery.isFetching} onClick={() => void setupQuery.refetch()}>Recheck access</Button>
+          </>}
+        </DecisionCardFooter>
+      </div>
+    </div>;
+  }
 
   if (accessRequest && compact) {
     const busy = completeMutation.isPending || declineMutation.isPending;

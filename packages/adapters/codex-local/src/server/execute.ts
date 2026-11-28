@@ -55,6 +55,7 @@ import {
   isProprioSkillSourceMissing,
   readProprioRuntimeSkillEntries,
   readProprioIssueWorkModeFromContext,
+  removeUnselectedProprioSkillSymlinks,
   renderTemplate,
   hydrateFreshSessionHandoff,
   selectInitialCommunicationGuidance,
@@ -286,7 +287,10 @@ function resolveCodexSkillsDir(codexHome: string): string {
 type EnsureCodexSkillsInjectedOptions = {
   skillsHome?: string;
   skillsEntries?: Array<{ key: string; runtimeName: string; source: string }>;
+  managedSkillEntries?: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames?: string[];
+  /** Run stale-link cleanup only in the server-owned, selection-digested Codex home. */
+  reconcileUnselected?: boolean;
   linkSkill?: (source: string, target: string) => Promise<void>;
 };
 
@@ -524,8 +528,7 @@ export async function ensureCodexSkillsInjected(
     options.desiredSkillNames ?? allSkillsEntries.map((entry) => entry.key);
   const desiredSet = new Set(desiredSkillNames);
   const skillsEntries = allSkillsEntries.filter((entry) => desiredSet.has(entry.key));
-  if (skillsEntries.length === 0) return;
-
+  const managedSkillEntries = options.managedSkillEntries ?? allSkillsEntries;
   const skillsHome = options.skillsHome ?? resolveCodexSkillsDir(resolveSharedCodexHomeDir());
   await fs.mkdir(skillsHome, { recursive: true });
   const linkSkill = options.linkSkill;
@@ -541,9 +544,12 @@ export async function ensureCodexSkillsInjected(
           : null;
         if (
           resolvedLinkedPath &&
-          resolvedLinkedPath !== entry.source &&
-          (await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))
+          resolvedLinkedPath !== path.resolve(entry.source)
         ) {
+          const ownsLiveLink = options.reconcileUnselected && managedSkillEntries.some(candidate =>
+            candidate.runtimeName === entry.runtimeName && path.resolve(candidate.source) === resolvedLinkedPath);
+          if (!ownsLiveLink && await pathExists(resolvedLinkedPath)) continue;
+          if (!ownsLiveLink && !(await isLikelyProprioRuntimeSkillPath(resolvedLinkedPath, entry.runtimeName))) continue;
           await fs.unlink(target);
           if (linkSkill) {
             await linkSkill(entry.source, target);
@@ -573,6 +579,13 @@ export async function ensureCodexSkillsInjected(
     }
   }
 
+  if (options.reconcileUnselected) {
+    await removeUnselectedProprioSkillSymlinks(
+      skillsHome,
+      managedSkillEntries,
+      skillsEntries.map(entry => entry.runtimeName),
+    );
+  }
   await pruneBrokenUnavailableProprioSkillSymlinks(
     skillsHome,
     skillsEntries.map((entry) => entry.runtimeName),
@@ -859,7 +872,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       {
         skillsHome: codexSkillsDir,
         skillsEntries: codexSkillEntries,
+        managedSkillEntries: runtimeSkillDigest && configuredHomeIsManaged && Array.isArray(config.proprioRuntimeSkills)
+          ? [...codexSkillEntries, ...await readProprioRuntimeSkillEntries({}, __moduleDir)]
+          : undefined,
         desiredSkillNames,
+        reconcileUnselected: Boolean(runtimeSkillDigest && configuredHomeIsManaged),
       },
     );
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(

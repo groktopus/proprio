@@ -3439,6 +3439,7 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
           resolveGitAuth: createGitRemoteAuthProvider(db, agent.companyId, {
             issueId: input.issueId, heartbeatRunId: input.runId, agentId: agent.id,
             responsibleUserId: input.responsibleUserId,
+            projectCheckoutSourceId: workspace.projectWorkspaceId,
           }),
         });
         return original.cwd;
@@ -3474,14 +3475,14 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
   ): Promise<ResolvedAnchorWorkspaceForRun> {
     const issueId =
       readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
-    const resolveGitAuth = createGitRemoteAuthProvider(db, agent.companyId, {
+    const gitAuthContext = {
       issueId,
       heartbeatRunId: readNonEmptyString(context.executionIdentityRunId),
       responsibleUserId:
         readNonEmptyString(context.responsibleUserId) ??
         readNonEmptyString(context.responsible_user_id),
       agentId: agent.id,
-    });
+    };
     const contextProjectId = readNonEmptyString(context.projectId);
     const contextProjectWorkspaceId = readNonEmptyString(
       context.projectWorkspaceId,
@@ -3590,7 +3591,9 @@ export function createHeartbeatWorkspaceResolver(db: Db) {
               workspaceProjectId ?? resolvedProjectId ?? workspace.projectId,
             cwd: workspace.cwd,
             repoUrl: workspace.repoUrl,
-            resolveGitAuth,
+            resolveGitAuth: createGitRemoteAuthProvider(db, agent.companyId, {
+              ...gitAuthContext, projectCheckoutSourceId: workspace.id,
+            }),
             prepareLocalSource: managedLocalSourceGuard(agent, issueId, readNonEmptyString(context.executionIdentityRunId)),
           });
           projectCwd = resolvedCwd.cwd;

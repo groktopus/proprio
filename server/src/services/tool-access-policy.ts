@@ -1987,7 +1987,24 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
             requestedByUserId: ctx.actorType === "user" ? ctx.actorId : null,
           }).returning();
         }
+        // Preserve the run's privacy scope in the same transaction as its
+        // audit event. The key-share lock lets agent deletion proceed only
+        // after this provenance is committed; a missing or legacy binding
+        // remains unknown instead of being reconstructed from event IDs.
         try {
+          // Keep provenance reads inside the same failure accounting boundary
+          // as capture writes: a failed read also prevents durable capture.
+          const [runProvenance] = ctx.heartbeatRunId
+            ? await tx.select({
+              scopeKind: heartbeatRuns.scopeKind,
+              // Only the durable canonical run binding proves the privacy scope.
+              // Legacy taskId fallbacks are authorization context, not provenance.
+              issueId: heartbeatRuns.issueId,
+            }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.id, ctx.heartbeatRunId),
+              eq(heartbeatRuns.companyId, ctx.companyId),
+            )).for("key share")
+            : [];
           await tx.insert(managedAuditEvents).values({
             companyId: ctx.companyId,
             source: "tool_gateway",
@@ -1996,6 +2013,8 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
             phase: "policy_decision",
             occurredAt: invocation.createdAt,
             runId: ctx.heartbeatRunId,
+            runScopeKind: runProvenance?.scopeKind ?? null,
+            runIssueId: runProvenance?.scopeKind === "issue" ? runProvenance.issueId : null,
             taskId: ctx.issueId,
             invocationId: invocation.id,
             requestId: actionRequest?.id ?? null,

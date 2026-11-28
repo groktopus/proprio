@@ -90,7 +90,7 @@ describePostgres("agent action audit routes", () => {
       name: "Audit Company",
       issuePrefix: `AU${randomUUID().slice(0, 6).toUpperCase()}`,
     }).returning().then((rows) => rows[0]!);
-    const [agent, otherAgent] = await db.insert(agents).values([1, 2].map((index) => ({
+    const [agent, otherAgent] = await targetDb.insert(agents).values([1, 2].map((index) => ({
       companyId: company.id,
       name: `Audit Agent ${index}`,
       role: "engineer",
@@ -99,39 +99,39 @@ describePostgres("agent action audit routes", () => {
       adapterConfig: {},
       runtimeConfig: {},
     }))).returning();
-    const issue = await db.insert(issues).values({
+    const issue = await targetDb.insert(issues).values({
       companyId: company.id,
       identifier: `${company.issuePrefix}-1`,
       title: "Audit target",
       status: "todo",
       priority: "medium",
     }).returning().then((rows) => rows[0]!);
-    const comment = await db.insert(issueComments).values({
+    const comment = await targetDb.insert(issueComments).values({
       companyId: company.id,
       issueId: issue.id,
       authorAgentId: agent.id,
       body: "A useful comment excerpt for the audit feed.",
     }).returning().then((rows) => rows[0]!);
-    const document = await db.insert(documents).values({
+    const document = await targetDb.insert(documents).values({
       companyId: company.id,
       title: "Plan",
       latestBody: "Plan body",
       createdByAgentId: agent.id,
       updatedByAgentId: agent.id,
     }).returning().then((rows) => rows[0]!);
-    const issueDocument = await db.insert(issueDocuments).values({
+    const issueDocument = await targetDb.insert(issueDocuments).values({
       companyId: company.id,
       issueId: issue.id,
       documentId: document.id,
       key: "plan",
     }).returning().then((rows) => rows[0]!);
-    const run = await db.insert(heartbeatRuns).values({
+    const run = await targetDb.insert(heartbeatRuns).values({
       companyId: company.id,
       agentId: agent.id,
       responsibleUserId: "legacy-user",
     }).returning().then((rows) => rows[0]!);
     const base = new Date("2026-07-17T00:00:00.000Z");
-    await db.insert(activityLog).values([
+    await targetDb.insert(activityLog).values([
       { companyId: company.id, actorType: "agent", actorId: agent.id, action: "issue.comment.created", entityType: "issue_comment", entityId: comment.id, agentId: agent.id, runId: run.id, responsibleUserId: null, createdAt: new Date(base.getTime() + 3000) },
       { companyId: company.id, actorType: "system", actorId: "system", action: "issue.document.updated", entityType: "issue_document", entityId: issueDocument.id, agentId: agent.id, runId: run.id, responsibleUserId: "direct-user", createdAt: new Date(base.getTime() + 2000) },
       { companyId: company.id, actorType: "agent", actorId: otherAgent.id, action: "issue.updated", entityType: "issue", entityId: issue.id, agentId: otherAgent.id, responsibleUserId: "other-user", createdAt: new Date(base.getTime() + 1000) },
@@ -1342,5 +1342,22 @@ describePostgres("agent action audit routes", () => {
     })).get(`/api/companies/${company.id}/audit/agent-actions`);
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect(response.body.items).toHaveLength(3);
+  });
+});
+
+describe("managed audit export bounded failure mapping", () => {
+  it("maps a cancelled validation query to a fail-closed conflict", async () => {
+    const timeoutDb = {
+      transaction: async () => {
+        throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+      },
+    } as unknown as Db;
+    await expect(readManagedAuditExportPage(timeoutDb, {
+      companyId: randomUUID(), sourceEpoch: randomUUID(),
+      actor: { type: "board", source: "session", userId: randomUUID(), companyIds: [] },
+    }, randomUUID())).rejects.toMatchObject({
+      status: 409,
+      details: { reasonCode: "snapshot_read_timeout" },
+    });
   });
 });

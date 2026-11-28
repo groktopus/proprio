@@ -145,6 +145,10 @@ qualification; do not claim that generating Proprio's configuration covers it.
 
 ## Read/write defaults and credential ownership
 
+GitHub's Organization PAT connection supplies hosted MCP tool access. The tool
+gateway checks the connection's audience and the agent's action permissions.
+Terminal Git and `gh` use a separate runtime identity check.
+
 New tool connections request the provider-documented permissions needed for their
 supported read **and write** actions. Prefer an available write/draft capability
 before a managed read-only method. Read-only capability choices and provider
@@ -2976,3 +2980,13 @@ Executor reads its [MCP integration inventory](https://github.com/UsefulSoftware
 Apps groups native and imported accounts under canonical app cards, preserving all upstream account identities. Native onboarding wins over aggregator connect offers. Imported account menus only open their upstream provider; deletion and per-app authorization stay upstream. Parent gateway menus own refresh and optional discovery setup. Proprio policies continue to govern invocation through the gateway.
 
 Acceptance fixtures: `server/src/__tests__/aggregator-app-discovery.test.ts`, `server/src/__tests__/aggregator-app-sync.test.ts`, `ui/src/pages/apps/Browse.test.tsx`, and the production-page/full-stack test drive at `tests/aggregator-accounts/test-drive.ts`. The expected stories and evidence are recorded in `doc/plans/2026-10-05-managed-aggregator-account-user-stories.md`. Fixture runs do not replace live provider proof when working credentials are available.
+
+## GitHub App for terminal Git
+
+In **Connectors → GitHub**, open **Configure a GitHub App for terminal Git**. Install a GitHub App on the task repository and supply its App ID and PEM key. Select a Proprio Runner agent and the repository in `owner/repo` form. Configure the same repository as the task's workspace source.
+
+Checkout and read require Contents read. Push requires Contents write, and opening pull requests requires Pull requests write. Select only the operations the agent needs. Setup verifies the App installation, repository, and selected permissions with GitHub. A separate authorized run demonstrates that the workspace and runner can use them. The Organization PAT setup supplies GitHub MCP tools.
+
+The runtime asks GitHub for a short-lived installation token for the verified repository ID and permissions. Branch protections and repository rules still apply. Keep the App out of any ruleset bypass list. **Revoke** prevents subsequent issuance for the agent and repository. GitHub controls the expiry of any installation token issued to an operation already in progress. Remove the App installation at GitHub to also revoke provider-side access.
+
+A task request for terminal Git names the workspace repository and operation. The card shows a saved App grant only when it covers both. A healthy MCP connection does not satisfy a terminal request. If the agent needs another permission, a connection manager can edit the grant in Connectors. Recheck access on the card after making the change.

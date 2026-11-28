@@ -9,6 +9,7 @@ import {
   type IssueAdmissionTarget,
   type IssueWakeContinuationInput,
   type IssueWakeContinuationResult,
+  type WakeQueuePostgresAdapterDeps,
 } from "./adapters/postgres.js";
 import { createQueuedCommentIssueLockWriter } from "./adapters/queued-comment-postgres.js";
 import { createQueuedCommentSteeringAdapter, lockBoardQueuedComments, readBoardQueuedComments } from "./adapters/queued-comment-board-postgres.js";
@@ -29,7 +30,6 @@ import type {
   RecoveryEscalationPort,
   RunSnapshot,
   WakeAdmissionHeartbeatHelpers,
-  WakeQueueHost,
 } from "./application/ports.js";
 
 export type {
@@ -71,13 +71,7 @@ export type {
 } from "./application/queued-comment-ports.js";
 export type { QueuedCommentQueuePostgresAdapterDeps } from "./adapters/queued-comment-postgres.js";
 
-export type WakeQueueDeps = {
-  /** Stays in `heartbeat.ts`; resolves the responsible user for a promoted or recovery run seed. */
-  resolveResponsibleUserId: WakeQueueHost["resolveResponsibleUserId"];
-  /** Stays in `heartbeat.ts`; reads the routine environment context for an execution issue. */
-  getRoutineEnv: WakeQueueHost["getRoutineEnv"];
-  /** Stays in `heartbeat.ts`; resolves the session-before display id for a wakeup. */
-  resolveSessionBeforeForWakeup: WakeQueueHost["resolveSessionBeforeForWakeup"];
+export type WakeQueueDeps = WakeQueuePostgresAdapterDeps & {
   /**
    * The four wake-admission decision helpers stay in `heartbeat.ts` today;
    * the module receives them here so it never imports the service it is
@@ -100,11 +94,7 @@ type LockedIssueAdmission = {
 
 /** Composes the issue admission and release workflows with their Postgres locks. */
 export function createWakeQueue(db: Db, deps: WakeQueueDeps) {
-  const issueLock = createPostgresWakeQueueAdapter(db, {
-    resolveResponsibleUserId: deps.resolveResponsibleUserId,
-    getRoutineEnv: deps.getRoutineEnv,
-    resolveSessionBeforeForWakeup: deps.resolveSessionBeforeForWakeup,
-  });
+  const issueLock = createPostgresWakeQueueAdapter(db, deps);
   const withIssueAdmission = createPostgresIssueWakeAdmission(db);
   const preflight = createIssueWakePreflight(createIssueWakePreflightReader(db));
 

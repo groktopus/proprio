@@ -102,8 +102,8 @@ function userSecretDefinitionActivityActor(req: Parameters<typeof assertBoard>[0
   return { actorType: "system" as const, actorId: req.actor.source ?? "board" };
 }
 
-function isCompanyScopedSecret(secret: { scope?: string | null }) {
-  return (secret.scope ?? "company") === "company";
+function isCompanyScopedSecret(secret: { scope?: string | null; systemPurpose?: string | null }) {
+  return (secret.scope ?? "company") === "company" && secret.systemPurpose !== "github_native_git";
 }
 
 export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {

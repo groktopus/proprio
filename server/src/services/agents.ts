@@ -3,6 +3,7 @@ import { notifyAttentionRetentionWork } from "./retention-work-notifications.js"
 import { type BudgetServiceHooks } from "./budgets.js";
 
 import { and, desc, eq, inArray } from "drizzle-orm";
+import { withAccountHomeSecretMutationLock } from "@groktopus/adapter-codex-local/server";
 import type { Db } from "@groktopus/db";
 import { agents, agentConfigRevisions, agentApiKeys, heartbeatRuns } from "@groktopus/db";
 import { isUuidLike, normalizeAgentApiKeyScope, normalizeAgentUrlKey, type AgentApiKeyScope } from "@groktopus/shared";
@@ -289,7 +290,12 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       return { agent: null, ambiguous: false } as const;
     },
     update: updateAgent,
-    remove: (id: string) => createAgentLifecycle(db, budgetHooks).purgeAgent(id),
+    remove: async (id: string) => {
+      const agent = await getById(id);
+      if (!agent) return null;
+      return withAccountHomeSecretMutationLock(undefined, agent.companyId,
+        () => createAgentLifecycle(db, budgetHooks).purgeAgent(id));
+    },
     clearError: (id: string) => createAgentLifecycle(db, budgetHooks).clearError(id),
   };
 }

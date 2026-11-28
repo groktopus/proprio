@@ -226,8 +226,30 @@ services:
   "${quick_restore[@]}" run --rm --no-deps -T --entrypoint sh proprio \
     -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
     < "$backup_dir/proprio.tar.gz"
-  "${quick_restore[@]}" up -d --wait
 )
+```
+
+Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
+before starting `proprio` if deletions followed the recovery point. Use an
+image that contains the reconciliation script and the PostgreSQL version
+that created the restored cluster. The one-off command starts embedded
+PostgreSQL on loopback using the restored configuration, applies the
+manifest, and stops PostgreSQL. A missing cluster fails the command. Set
+`restore_manifest` to the manifest's absolute path.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml \
+  run --rm --no-deps -T -v "$restore_manifest:/run/deletions.json:ro" proprio \
+  node --import ./server/node_modules/tsx/dist/loader.mjs \
+  server/scripts/reconcile-run-evidence-deletions.ts --embedded /run/deletions.json
+```
+
+Start the application after reconciliation and verification succeed.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.quickstart.yml -f docker/restore-only.yml up -d --wait
 ```
 
 #### Separate PostgreSQL full stack
@@ -272,8 +294,28 @@ described above. Keep the signing values and master key from the backup.
   "${full_restore[@]}" run --rm --no-deps -T --entrypoint sh server \
     -ec 'test -z "$(ls -A /proprio)" && exec tar --numeric-owner -C /proprio -xzf -' \
     < "$backup_dir/proprio.tar.gz"
-  "${full_restore[@]}" up -d --wait
 )
+```
+
+Apply the [run-evidence deletion gate](run-evidence-storage.md#restoring-across-a-trace-deletion)
+before starting `server` if deletions followed the recovery point. Use
+an image that contains the reconciliation script and a one-off `server`
+container so it inherits the restored `/proprio`
+volume, Compose network and database URL. Mount the retained manifest
+read-only and run the reconciliation command with the app entrypoint
+and the CLI command shown below. Only start the service after verification.
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.yml -f docker/restore-only.yml \
+  run --rm --no-deps -T -v "$restore_manifest:/run/deletions.json:ro" server \
+  node --import ./server/node_modules/tsx/dist/loader.mjs \
+  server/scripts/reconcile-run-evidence-deletions.ts /run/deletions.json
+```
+
+```bash
+docker compose -p proprio-restore --env-file docker/restore.env \
+  -f docker/docker-compose.yml -f docker/restore-only.yml up -d --wait
 ```
 
 If a restore fails, use a fresh target for the next attempt. After either
@@ -325,10 +367,9 @@ For authenticated deployments, set one canonical public URL and let Proprio deri
 
 ```yaml
 services:
-  proprio:
+  server:
     environment:
       PROPRIO_DEPLOYMENT_MODE: authenticated
-      PROPRIO_DEPLOYMENT_EXPOSURE: private
       PROPRIO_PUBLIC_URL: https://desk.koker.net
 ```
 
@@ -342,12 +383,31 @@ services:
 For fresh `authenticated/private` Docker or appliance-style installs, the first
 admin can now be claimed entirely from the browser after sign-in. Open the
 Proprio URL, sign in or create an account, then choose `Claim this instance`
-on the setup screen. This browser claim is disabled for `authenticated/public`;
-public deployments should run the high-entropy CLI invite fallback instead:
+on the setup screen. This browser claim is disabled for `authenticated/public`.
+For public deployments, set `PROPRIO_PUBLIC_URL` to the HTTPS origin and add
+the checked-in `docker/docker-compose.public.yml` override. It changes the
+`server` service exposure while keeping the default host port loopback-bound
+for a TLS reverse proxy. In `docker/.env`, set
+`PROPRIO_PUBLIC_URL=https://desk.koker.net` to the HTTPS address served by
+that proxy:
 
 ```sh
-pnpm proprio auth bootstrap-ceo
+docker compose -p proprio --env-file docker/.env \
+  -f docker/docker-compose.yml -f docker/docker-compose.public.yml up --build -d --wait
+docker compose -p proprio --env-file docker/.env \
+  -f docker/docker-compose.yml -f docker/docker-compose.public.yml exec server \
+  pnpm proprio auth bootstrap-ceo
 ```
+
+Run these commands from the repository root. Keep the same Compose project
+name and override files for startup and `exec`; otherwise Compose can select
+different volumes or the private exposure defaults. The CLI reads the
+deployment mode, exposure, database URL and public URL from the running
+container environment, so a fresh Compose volume does not need a CLI config
+file or a separate onboarding run. Public invite links require HTTPS; private
+local bootstrap can continue to use HTTP. The CLI refuses configless bootstrap
+when `PROPRIO_DEPLOYMENT_MODE` or the database URL is missing, and it keeps
+saved config mode conflict checks when a valid mode override is supplied.
 
 Granular overrides remain available if needed (`PROPRIO_AUTH_PUBLIC_BASE_URL`, `BETTER_AUTH_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `PROPRIO_ALLOWED_HOSTNAMES`).
 

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LOW_TRUST_REVIEW_PRESET, buildSkillMentionHref } from "@groktopus/shared";
 import {
   applyRunScopedMentionedSkillKeys,
+  filterRunScopedSkillKeysByAgentOptIn,
   buildReferencedProjectRunObservability,
   buildRunWorkspaceHints,
   extractMentionedSkillIdsFromSources,
@@ -861,6 +862,14 @@ describe("extractMentionedSkillIdsFromSources", () => {
 });
 
 describe("applyRunScopedMentionedSkillKeys", () => {
+  it("does not let task-scoped mentions opt an agent into proactive feedback", () => {
+    expect(filterRunScopedSkillKeysByAgentOptIn([
+      "groktopus/proprio/complain", "company/company-1/release-changelog", "groktopus/proprio/suggestion-box",
+    ], ["groktopus/proprio/complain"])).toEqual([
+      "groktopus/proprio/complain", "company/company-1/release-changelog",
+    ]);
+  });
+
   it("adds mentioned skills without mutating the original config", () => {
     const originalConfig = {
       command: "codex",

@@ -8,9 +8,9 @@ The skill/reference inventory and eval cases are the only normative behavior sou
 
 ## Baseline Counts
 
-- Skill/reference headings: 176
+- Skill/reference headings: 175
 - Eval cases: 106 across 16 groups
-- Total normative rows: 282
+- Total normative rows: 281
 - Legacy MCP aliases folded into normative rows: 42
 
 | Eval group | Cases |
@@ -79,7 +79,6 @@ The skill/reference inventory and eval cases are the only normative behavior sou
 | skill:skills/proprio/SKILL.md:searching-issues:808 | optional_agent_tool | skills/proprio/SKILL.md:808 |
 | skill:skills/proprio/SKILL.md:full-reference:818 | optional_agent_tool | skills/proprio/SKILL.md:818 |
 | skill:skills/proprio/SKILL.md:conversational-confirmation-answers:822 | always_agent_tool | skills/proprio/SKILL.md:822 |
-| skill:skills/proprio/SKILL.md:incidental-feedback:839 | optional_agent_tool | skills/proprio/SKILL.md:839 |
 | skill:skills/proprio/references/api-reference.md:proprio-api-reference:1 | optional_agent_tool | skills/proprio/references/api-reference.md:1 |
 | skill:skills/proprio/references/api-reference.md:response-schemas:9 | optional_agent_tool | skills/proprio/references/api-reference.md:9 |
 | skill:skills/proprio/references/api-reference.md:agent-record-get-api-agents-me-or-get-api-agents-agentid:11 | optional_agent_tool | skills/proprio/references/api-reference.md:11 |

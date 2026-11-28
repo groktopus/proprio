@@ -1,3 +1,4 @@
+import { githubNativeSetupSchema } from "@groktopus/shared";
 import { BUDGET_POLICY_EXISTS_ERROR_CODE, nativeCompletionHistorySchema } from "@groktopus/shared";
 import { catalogTeamInstallSchema, catalogTeamPreviewSchema, updateWorkspacePreferenceSchema, issueDocumentBatchQuerySchema } from "@groktopus/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@groktopus/shared";
@@ -336,6 +337,7 @@ import {
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
   completeConnectionIntentSchema,
+  adoptAiConnectionIntentSchema,
   connectionIntentPayloadSchema,
   connectionRequestInputSchema,
   connectionsSearchInputSchema,
@@ -1477,6 +1479,10 @@ const mcpSkillsBoardOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/github-native-git",
+  "GET /api/companies/{companyId}/github-native-git/eligible-agents",
+  "POST /api/companies/{companyId}/github-native-git",
+  "DELETE /api/companies/{companyId}/github-native-git/{grantId}",
   // Workload identity status and key rotation are board-only (assertBoard in routes/workload-identity.ts).
   "GET /api/companies/{companyId}/workload-identity",
   "POST /api/companies/{companyId}/workload-identity/rotation",
@@ -12068,6 +12074,23 @@ for (const route of [
   });
 }
 
+const githubNativeGrantSummarySchema = z.object({
+  id: z.string().guid(), agentId: z.string().guid(), repository: z.string(), appSlug: z.string(),
+  push: z.boolean(), pullRequests: z.boolean(), verifiedAt: z.iso.datetime(), revokedAt: z.iso.datetime().nullable(),
+});
+for (const { response, ...operation } of [
+  { method: "get", path: "/api/companies/{companyId}/github-native-git", summary: "List terminal GitHub App grants", response: z.array(githubNativeGrantSummarySchema) },
+  { method: "get", path: "/api/companies/{companyId}/github-native-git/eligible-agents", summary: "List agent IDs eligible for a terminal GitHub App grant", response: z.array(z.string().guid()) },
+  { method: "post", path: "/api/companies/{companyId}/github-native-git", summary: "Verify and save a terminal GitHub App grant", body: githubNativeSetupSchema, response: githubNativeGrantSummarySchema },
+  { method: "delete", path: "/api/companies/{companyId}/github-native-git/{grantId}", summary: "Revoke a terminal GitHub App grant", response: githubNativeGrantSummarySchema },
+] as const) {
+  registerCurrentRoute({ ...operation, tags: ["connection-intents"],
+    responses: { 200: r.ok(response), 401: r.unauthorized, 403: r.forbidden,
+      ...(operation.method === "delete" ? { 404: r.notFound } : {}),
+      ...(operation.method === "post" ? { 400: r.badRequest, 409: r.conflict, 422: r.unprocessable } : {}),
+    } });
+}
+
 // --- Connection intents ------------------------------------------------------
 
 registerCurrentRoute({
@@ -12176,8 +12199,9 @@ registerCurrentRoute({
   path: "/api/connection-intents/{interactionId}/complete",
   tags: ["connection-intents"],
   summary: "Complete an addressed connection request",
-  description: ADDRESSED_CONNECTION_REQUEST,
+  description: `${ADDRESSED_CONNECTION_REQUEST} For terminal Git, submit the grant ID and exact verifiedAt from setup-options. A change to the grant requires a fresh selection.`,
   body: completeConnectionIntentSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registerCurrentRoute({
@@ -12185,7 +12209,7 @@ registerCurrentRoute({
   path: "/api/agents/{id}/connection-intents/{interactionId}/adopt",
   tags: ["connection-intents", "agents"],
   summary: "Validate and atomically adopt an AI connection for a legacy agent",
-  body: completeConnectionIntentSchema,
+  body: adoptAiConnectionIntentSchema,
   responses: {
     200: r.ok(),
     400: r.badRequest,
@@ -13408,6 +13432,7 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/tools/runs/{runId}/decisions",
   tags: ["tool-access"],
   summary: "Get governed tool decisions for a run transcript",
+  description: "Requires connection audit authority and visibility of the run's task. An unreadable run returns the same 404 as a missing run. Decisions linked to unreadable tasks are excluded.",
 });
 
 registerCurrentRoute({

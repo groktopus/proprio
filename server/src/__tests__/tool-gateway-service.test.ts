@@ -42,6 +42,7 @@ import {
   toolCatalogEntries,
   toolConnections,
   toolAccessAuditEvents,
+  managedAuditEvents,
   toolActionRequests,
   toolCallEvents,
   toolGatewaySessions,
@@ -249,6 +250,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await db.delete(toolGatewaySessions);
     await db.delete(toolCallEvents);
     await db.delete(toolAccessAuditEvents);
+    await db.delete(managedAuditEvents);
     await db.delete(toolActionRequests);
     await db.delete(toolInvocations);
     await db.delete(issueApprovals);
@@ -1804,6 +1806,63 @@ describeEmbeddedPostgres("tool gateway service", () => {
       expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, pending.id)))[0].status).toBe(decision);
     });
 
+    it("rolls back a covered gateway decline on capture failure and redacts the review note", async () => {
+      const { connection, catalogEntry } = await createRemoteMcpToolFixture(db, fixture.company.id);
+      await db.update(toolCatalogEntries).set({ isReadOnly: false, riskLevel: "write" })
+        .where(eq(toolCatalogEntries.id, catalogEntry.id));
+      await db.insert(toolPolicies).values({ companyId: fixture.company.id, name: "Review connected writes",
+        policyType: "require_approval", selectors: { connectionId: connection.id } });
+      const session = await gateway.createSession(runSessionInput(fixture.company, fixture.agent, fixture.run));
+      const tool = (await gateway.listToolsForSession(session.token)).find(entry => entry.connectionId === connection.id)!;
+      await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { note: "Review me" } }))
+        .rejects.toMatchObject({ reasonCode: "approval_required" });
+      const [pending] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.company.id));
+      const [admission] = await db.select().from(managedAuditEvents).where(
+        eq(managedAuditEvents.invocationId, pending.invocationId),
+      );
+      expect(admission).toMatchObject({
+        source: "tool_gateway", phase: "policy_decision", requestId: pending.id, connectionId: connection.id,
+      });
+      const decline = { companyId: fixture.company.id, actionRequestId: pending.id,
+        actor: { userId: "reviewer" }, reason: "private free-form note" };
+      const suffix = randomUUID().replaceAll("-", "");
+      const functionName = `managed_approval_capture_failure_${suffix}`;
+      const triggerName = `managed_approval_capture_failure_${suffix}`;
+      await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'managed approval capture fault'; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON managed_audit_events
+        FOR EACH ROW WHEN (NEW.phase = 'approval_resolution') EXECUTE FUNCTION ${functionName}()`));
+      try {
+        await expect(gateway.declineActionRequest(decline)).rejects.toMatchObject({
+          status: 503, message: "Tool review could not be saved. Retry the decision.",
+        });
+        expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, pending.id)))[0].status).toBe("pending");
+        expect((await db.select().from(toolInvocations).where(eq(toolInvocations.id, pending.invocationId)))[0].approvalState).toBe("pending");
+        expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, pending.interactionId!)))[0].status).toBe("pending");
+        expect(await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, pending.invocationId))).toHaveLength(1);
+      } finally {
+        await db.execute(sql.raw(`DROP TRIGGER ${triggerName} ON managed_audit_events`));
+        await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+      }
+
+      const resolved = await gateway.declineActionRequest(decline);
+      await gateway.declineActionRequest(decline);
+      const [interaction] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, pending.interactionId!));
+      expect(interaction).toMatchObject({ status: "rejected", result: { reason: decline.reason } });
+      const events = await db.select().from(managedAuditEvents).where(eq(managedAuditEvents.invocationId, pending.invocationId));
+      expect(events).toHaveLength(2);
+      expect(events.find(event => event.phase === "approval_resolution")).toMatchObject({
+        source: "tool_gateway", schemaVersion: admission.schemaVersion,
+        eventType: "approval_resolution_recorded", phase: "approval_resolution",
+        occurredAt: resolved.decidedAt,
+        runId: admission.runId, taskId: admission.taskId,
+        invocationId: pending.invocationId, requestId: pending.id,
+        connectionId: connection.id, actorType: "user", actorId: resolved.decidedByUserId,
+        decision: "rejected", status: "rejected", reasonCode: null,
+      });
+      expect(JSON.stringify(events)).not.toContain(decline.reason);
+    });
+
     it.each([false, true])("observes outer transaction settlement (rollback %s)", async rollback => {
       await start(); await quiet();
       let release!: () => void, staged!: () => void;
@@ -2013,10 +2072,14 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await expect(gateway.executeTool({
       sessionToken: session.token,
       tool: "mcp-remote-fixture:update_note",
-      parameters: { noteId: "n1", body: "reviewed body" },
+      parameters: { noteId: "n1", body: "private free-form note" },
     })).rejects.toMatchObject({ reasonCode: "approval_required" });
 
     const [actionRequest] = await db.select().from(toolActionRequests);
+    const [admission] = await db.select().from(managedAuditEvents).where(and(
+      eq(managedAuditEvents.invocationId, actionRequest.invocationId),
+      eq(managedAuditEvents.phase, "policy_decision"),
+    ));
     const approved = await gateway.approveActionRequest({
       companyId: company.id,
       actionRequestId: actionRequest.id,
@@ -2027,6 +2090,20 @@ describeEmbeddedPostgres("tool gateway service", () => {
       resolvedByUserId: "board-user",
       resultSummary: expect.stringContaining("bodyLength"),
     });
+    const approvalEvents = await db.select().from(managedAuditEvents).where(
+      eq(managedAuditEvents.invocationId, actionRequest.invocationId),
+    );
+    expect(approvalEvents).toHaveLength(2);
+    expect(approvalEvents.find(event => event.phase === "approval_resolution")).toMatchObject({
+      source: "tool_gateway", schemaVersion: admission.schemaVersion,
+      eventType: "approval_resolution_recorded", phase: "approval_resolution",
+      occurredAt: approved.decidedAt,
+      runId: admission.runId, taskId: admission.taskId,
+      invocationId: actionRequest.invocationId, requestId: actionRequest.id,
+      connectionId: admission.connectionId, actorType: "user", actorId: "board-user",
+      decision: "approved", status: "approved", reasonCode: null,
+    });
+    expect(JSON.stringify(approvalEvents)).not.toContain("private free-form note");
 
     // The server carries out the approved call itself with no interactive
     // caller left to raise timeoutMs, so it must get the full 60s headroom
@@ -2040,10 +2117,10 @@ describeEmbeddedPostgres("tool gateway service", () => {
     const result = await gateway.executeTool({
       sessionToken: session.token,
       tool: "mcp-remote-fixture:update_note",
-      parameters: { noteId: "n1", body: "reviewed body" },
+      parameters: { noteId: "n1", body: "private free-form note" },
     });
     expect(result.status).toBe("replayed");
-    expect((result.result as { data?: { bodyLength?: number } }).data?.bodyLength).toBe("reviewed body".length);
+    expect((result.result as { data?: { bodyLength?: number } }).data?.bodyLength).toBe("private free-form note".length);
 
     const [invocation] = await db.select().from(toolInvocations);
     expect(invocation).toMatchObject({

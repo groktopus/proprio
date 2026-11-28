@@ -4,6 +4,13 @@ import { and, eq, exists, inArray, not, or, sql, type SQL, type SQLWrapper } fro
 import { canActorReadExecutionWorkspace, issueEvidenceReadSqlCondition, type AuthorizationActor, type AuthorizationDecision, type authorizationService } from "./authorization.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 
+export const heartbeatRunReadAccessColumns = {
+  id: heartbeatRuns.id,
+  companyId: heartbeatRuns.companyId,
+  scopeKind: heartbeatRuns.scopeKind,
+  issueId: heartbeatRuns.issueId,
+} as const;
+
 type RunIssueBinding = {
   companyId: string;
   scopeKind?: "company" | "issue" | null;

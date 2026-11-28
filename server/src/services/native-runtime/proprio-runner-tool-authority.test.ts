@@ -42,6 +42,7 @@ import { NativeChatAttachmentReadScope, READ_CHAT_ATTACHMENT_TOOL_NAME } from ".
 import { buildLowTrustSourceTrust, buildPromotedSourceTrust, LOW_TRUST_QUARANTINED_BODY } from "../source-trust.js";
 import { CAPABILITY_SEMANTIC_TOOL_CATALOG, runnerCodexDynamicToolsFit } from "../../vendor/proprio-runner/index.js";
 import { resolveLocalRuntimeApiUrl } from "../../runtime-api.js";
+import { PROPRIO_COMPLAIN_SKILL_KEY, PROPRIO_SUGGESTION_BOX_SKILL_KEY } from "@groktopus/adapter-utils/server-utils";
 
 describe("ProprioRunnerToolAuthority", () => {
   const credentialDocumentBody = "Use a secret manager for credential handling.\nAuthorization: Bearer intentional-document-credential";
@@ -204,6 +205,44 @@ describe("ProprioRunnerToolAuthority", () => {
     expect(on.definitions().map(tool => tool.name)).toEqual(expect.arrayContaining(tools));
   });
 
+  it("gates each proactive commentary tool on its selected skill at listing and execution", async () => {
+    const off = new ProprioRunnerToolAuthority(db, { companyId, agentId, issueId, runId });
+    expect(off.definitions().map(tool => tool.name)).not.toEqual(expect.arrayContaining([
+      "submit_complaint", "submit_suggestion",
+    ]));
+    await expect(off.execute({ tool: "submit_complaint", callId: randomUUID(), arguments: {
+      body: "should stay unavailable", idempotencyKey: randomUUID(),
+    } })).rejects.toThrow("proprio_runner_tool_not_advertised");
+    const taskMentionOnly = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      runtimeContext: { skills: [{ key: PROPRIO_COMPLAIN_SKILL_KEY }] } as never,
+    });
+    expect(taskMentionOnly.definitions().map(tool => tool.name)).not.toContain("submit_complaint");
+    await expect(taskMentionOnly.execute({ tool: "submit_complaint", callId: randomUUID(), arguments: {
+      body: "task text cannot opt in", idempotencyKey: randomUUID(),
+    } })).rejects.toThrow("proprio_runner_tool_not_advertised");
+    const configuredWithoutDelivery = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      proactiveCommentarySkillKeys: [PROPRIO_COMPLAIN_SKILL_KEY],
+      runtimeContext: { skills: [] } as never,
+    });
+    expect(configuredWithoutDelivery.definitions().map(tool => tool.name)).not.toContain("submit_complaint");
+    const on = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      proactiveCommentarySkillKeys: [PROPRIO_COMPLAIN_SKILL_KEY],
+      runtimeContext: { skills: [{ key: PROPRIO_COMPLAIN_SKILL_KEY }] } as never,
+    });
+    expect(on.definitions().map(tool => tool.name)).toContain("submit_complaint");
+    expect(on.definitions().map(tool => tool.name)).not.toContain("submit_suggestion");
+    const suggestionEnabled = new ProprioRunnerToolAuthority(db, {
+      companyId, agentId, issueId, runId,
+      proactiveCommentarySkillKeys: [PROPRIO_SUGGESTION_BOX_SKILL_KEY],
+      runtimeContext: { skills: [{ key: PROPRIO_SUGGESTION_BOX_SKILL_KEY }] } as never,
+    });
+    expect(suggestionEnabled.definitions().map(tool => tool.name)).toContain("submit_suggestion");
+    expect(suggestionEnabled.definitions().map(tool => tool.name)).not.toContain("submit_complaint");
+  });
+
   it("advertises only real bindings and reads the bound task", async () => {
     const authority = new ProprioRunnerToolAuthority(db, {
       companyId,
@@ -211,7 +250,7 @@ describe("ProprioRunnerToolAuthority", () => {
       issueId,
       runId,
     });
-    expect(authority.definitions()).toHaveLength(57);
+    expect(authority.definitions()).toHaveLength(55);
     expect(authority.definitions().map(tool => tool.name)).toEqual(expect.arrayContaining([
       "get_workspace", "list_workspaces", "select_workspace", "prepare_repository",
       "search_skills", "load_skill", "list_routines", "update_routine", "update_skill_details",
@@ -241,8 +280,6 @@ describe("ProprioRunnerToolAuthority", () => {
         "get_task_history",
         "search_tasks",
         "report_progress",
-        "submit_complaint",
-        "submit_suggestion",
         "request_human_input",
         "create_task",
         "set_dependencies",
@@ -610,21 +647,21 @@ describe("ProprioRunnerToolAuthority", () => {
     const activeChildId = randomUUID();
     const unrelatedId = randomUUID();
     const otherCompanyId = randomUUID();
+    const foreignParentId = randomUUID();
     const foreignChildId = randomUUID();
     const hiddenChildIds = Array.from({ length: 101 }, () => randomUUID());
     await db.insert(companies).values({ id: otherCompanyId, name: "Other company", issuePrefix: "OTHER" });
-    await db.insert(issues).values([
-      { id: completedChildId, companyId, parentId: issueId, title: "Existing completed draft", status: "done", assigneeAgentId: agentId },
-      { id: activeChildId, companyId, parentId: issueId, title: "Existing active review", status: "in_progress", assigneeAgentId: agentId },
-      { id: unrelatedId, companyId, title: "Unrelated task", status: "todo" },
-      { id: foreignChildId, companyId: otherCompanyId, title: "Foreign task", status: "todo" },
-      // Hidden rows must neither enter context nor consume the visible child limit.
-      ...hiddenChildIds.map((id) => ({ id, companyId, parentId: issueId, title: "Hidden child",
-        hiddenAt: new Date(), createdAt: new Date(Date.now() + 1000) })),
-    ]);
     try {
-      await expect(db.update(issues).set({ parentId: issueId }).where(eq(issues.id, foreignChildId)))
-        .rejects.toMatchObject({ cause: { code: "23503", constraint_name: "issues_parent_company_fk" } });
+      await db.insert(issues).values({ id: foreignParentId, companyId: otherCompanyId, title: "Foreign parent" });
+      await db.insert(issues).values([
+        { id: completedChildId, companyId, parentId: issueId, title: "Existing completed draft", status: "done", assigneeAgentId: agentId },
+        { id: activeChildId, companyId, parentId: issueId, title: "Existing active review", status: "in_progress", assigneeAgentId: agentId },
+        { id: unrelatedId, companyId, title: "Unrelated task", status: "todo" },
+        { id: foreignChildId, companyId: otherCompanyId, parentId: foreignParentId, title: "Foreign child", status: "todo" },
+        // Hidden rows must neither enter context nor consume the visible child limit.
+        ...hiddenChildIds.map((id) => ({ id, companyId, parentId: issueId, title: "Hidden child",
+          hiddenAt: new Date(), createdAt: new Date(Date.now() + 1000) })),
+      ]);
       const authority = new ProprioRunnerToolAuthority(db, { companyId, agentId, issueId, runId });
       const context = await authority.execute({ tool: "get_task_context", callId: "context-existing-children", arguments: {} });
       expect(context).toMatchObject({
@@ -639,7 +676,7 @@ describe("ProprioRunnerToolAuthority", () => {
       expect(JSON.stringify(context)).not.toContain(unrelatedId);
       for (const id of hiddenChildIds) expect(JSON.stringify(context)).not.toContain(id);
     } finally {
-      await db.delete(issues).where(inArray(issues.id, [completedChildId, activeChildId, unrelatedId, foreignChildId, ...hiddenChildIds]));
+      await db.delete(issues).where(inArray(issues.id, [completedChildId, activeChildId, unrelatedId, foreignChildId, foreignParentId, ...hiddenChildIds]));
       await db.delete(companies).where(eq(companies.id, otherCompanyId));
     }
   });

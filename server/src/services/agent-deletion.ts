@@ -10,13 +10,19 @@ import { notifyInstructionCommit } from "./instruction-commit-notifications.js";
 import { notifyScheduledRetryCancellation } from "./scheduled-retry-cancellation-notifications.js";
 import { and, eq, or, sql } from "drizzle-orm";
 import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeupRequests, activityLog,
-  budgetReservations, costEvents, financeEvents, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments,
-  caseHandoffs, principalPermissionGrants, type Db } from "@groktopus/db";
+  budgetReservations, costEvents, financeEvents, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments, type Db,
+  caseHandoffs, principalPermissionGrants, type DbTransaction } from "@groktopus/db";
 import { conflict } from "../errors.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
+import { removeAgentNativeGitBindings } from "./github-native-git.js";
 
-export async function deleteAgentDependencies(tx: Db, companyId: string, id: string) {
+function assertAgentDeletionTransaction(tx: Db | DbTransaction): asserts tx is DbTransaction {
+  if (!("nestedIndex" in tx)) throw new Error("Agent dependency deletion requires a database transaction");
+}
+
+export async function deleteAgentDependencies(tx: Db | DbTransaction, companyId: string, id: string) {
+  assertAgentDeletionTransaction(tx);
   // Lifecycle callers use READ COMMITTED. Fence admissions before inspecting
   // holds, so the next statement sees any admission that committed while waiting.
   await tx.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, id))).for("update");
@@ -93,6 +99,7 @@ export async function deleteAgentDependencies(tx: Db, companyId: string, id: str
   await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));
   await tx.delete(agentApiKeys).where(eq(agentApiKeys.agentId, id));
   await tx.delete(agentRuntimeState).where(eq(agentRuntimeState.agentId, id));
+  await removeAgentNativeGitBindings(tx, companyId, id);
   await tx.delete(principalPermissionGrants).where(and(
     eq(principalPermissionGrants.companyId, companyId),
     eq(principalPermissionGrants.principalType, "agent"),

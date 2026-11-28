@@ -1,3 +1,4 @@
+import { githubNativeGitRoutes } from "./routes/github-native-git.js";
 import { authorizationReadScope } from "./services/authorization-read-scope.js";
 import type { IdleDeadlineOwners } from "./services/idle-deadline-types.js";
 import { startMcpClientMirrorSync } from "./services/public-mcp/client-mirror-sync.js";
@@ -1010,6 +1011,7 @@ export async function createApp(
     }),
   );
   api.use(connectionIntentBoardRoutes(db, connectionIntentHeartbeat));
+  api.use(githubNativeGitRoutes(db));
   api.use(
     smokeLabRoutes(db, {
       deploymentMode: opts.deploymentMode,

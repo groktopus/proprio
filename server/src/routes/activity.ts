@@ -8,7 +8,7 @@ import { activityService, normalizeActivityLimit } from "../services/activity.js
 import { assertAuthenticated, assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { accessService, heartbeatService, issueService } from "../services/index.js";
 import { sanitizeRecord } from "../redaction.js";
-import { badRequest, forbidden } from "../errors.js";
+import { badRequest, conflict, forbidden } from "../errors.js";
 import { agentActionAuditService } from "../services/agent-action-audit.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueContextUsage } from "../services/issue-context-usage.js";

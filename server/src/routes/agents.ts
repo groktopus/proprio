@@ -29,7 +29,7 @@ import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { dotRunnerBroker } from "../services/dot-runner-broker.js";
 import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
-import { completeConnectionIntentSchema } from "@groktopus/shared";
+import { adoptAiConnectionIntentSchema } from "@groktopus/shared";
 import { DEPENDENCY_DIAGNOSIS_WAKE_KEY_PREFIX, HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@groktopus/shared";
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { pipeline } from "node:stream/promises";
@@ -5540,7 +5540,7 @@ export function agentRoutes(
     res.json(result.bundle);
   });
 
-  router.post("/agents/:id/connection-intents/:interactionId/adopt", validate(completeConnectionIntentSchema), async (req, res) => {
+  router.post("/agents/:id/connection-intents/:interactionId/adopt", validate(adoptAiConnectionIntentSchema), async (req, res) => {
     assertBoard(req);
     const agent = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
     if (!agent) return;

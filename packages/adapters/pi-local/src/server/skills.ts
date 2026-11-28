@@ -8,8 +8,10 @@ import type {
 } from "@groktopus/adapter-utils";
 import {
   buildPersistentSkillSnapshot,
+  buildRuntimeMountedSkillSnapshot,
   ensureProprioSkillSymlink,
   readProprioRuntimeSkillEntries,
+  readProprioRuntimeSkillInventory,
   readInstalledSkillTargets,
   resolveLegacyProprioDesiredSkillNames,
 } from "@groktopus/adapter-utils/server-utils";
@@ -31,8 +33,17 @@ function resolvePiSkillsHome(config: Record<string, unknown>) {
 }
 
 async function buildPiSkillSnapshot(config: Record<string, unknown>): Promise<AdapterSkillSnapshot> {
-  const availableEntries = await readProprioRuntimeSkillEntries(config, __moduleDir);
+  const inventory = await readProprioRuntimeSkillInventory(config, __moduleDir);
+  const availableEntries = inventory.entries;
   const desiredSkills = resolveLegacyProprioDesiredSkillNames(config, availableEntries);
+  if (inventory.explicit) {
+    return buildRuntimeMountedSkillSnapshot({
+      adapterType: "pi_local",
+      availableEntries,
+      desiredSkills,
+      configuredDetail: "Mounted into a fresh Pi skill directory for each run.",
+    });
+  }
   const skillsHome = resolvePiSkillsHome(config);
   const installed = await readInstalledSkillTargets(skillsHome);
   return buildPersistentSkillSnapshot({

@@ -17,6 +17,10 @@ import {
 } from "@/fixtures/issueThreadInteractionFixtures";
 import { ConnectionIntentInteractionBody } from "./ConnectionIntentInteractionBody";
 
+vi.mock("@/lib/router", () => ({
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
+}));
+
 const emailConnectMock = vi.hoisted(() => vi.fn());
 const emailSetupMock = vi.hoisted(() => vi.fn());
 const emailListMock = vi.hoisted(() => vi.fn());
@@ -200,6 +204,34 @@ function button(label: string) {
     (candidate) => candidate.textContent?.trim() === label || (label === "Connect / Use existing" && candidate.textContent?.trim() === "Connect"),
   ) as HTMLButtonElement | undefined;
 }
+
+it("offers only the eligible App and sends the reviewed grant version for terminal Git", async () => {
+  const interaction: ConnectionIntentInteraction = {
+    ...pendingConnectionIntentInteraction,
+    payload: { ...pendingConnectionIntentInteraction.payload, serviceSlug: "github", serviceName: "GitHub terminal access",
+      githubGit: { repository: "acme/fixture", operation: "push" } },
+  };
+  const version = "2026-08-26T12:00:00.000Z";
+  setupOptionsMock.mockResolvedValue({ existingConnections: [{ id: "mcp", name: "Organization PAT" }],
+    githubGit: { status: "unavailable", code: "action_denied", reason: "The GitHub App grant does not allow this action." } });
+  renderBody(interaction);
+  await waitForAssertion(() => expect(document.body.textContent).toContain("does not allow this action"));
+  expect(button("Use GitHub App")).toBeUndefined();
+  expect(document.body.textContent).not.toContain("Organization PAT");
+
+  setupOptionsMock.mockResolvedValue({ existingConnections: [], githubGit: { status: "available",
+    grant: { id: "app-grant", appSlug: "engineer-app", verifiedAt: version } } });
+  await act(async () => button("Recheck access")?.click());
+  await waitForAssertion(() => expect(button("Use GitHub App")).toBeDefined());
+  completeMock.mockRejectedValueOnce(new ApiError("The selected GitHub App grant changed.", 409, null));
+  setupOptionsMock.mockResolvedValue({ existingConnections: [], githubGit: {
+    status: "unavailable", code: "revoked", reason: "The GitHub App grant was revoked.",
+  } });
+  await act(async () => button("Use GitHub App")?.click());
+  expect(completeMock).toHaveBeenCalledWith(interaction.id, "app-grant", version);
+  await waitForAssertion(() => expect(document.body.textContent).toContain("The GitHub App grant was revoked."));
+  expect(button("Use GitHub App")).toBeUndefined();
+});
 
 it("explains all-agent defaults consistently on compact connector cards", () => {
   renderNode(<ConnectionIntentInteractionBody interaction={pendingConnectionIntentInteraction} currentUserId={issueThreadInteractionFixtureMeta.currentUserId} addresseeLabel="Carol" compact />);
