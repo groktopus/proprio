@@ -41,7 +41,7 @@ export const QUALIFIED_ACPX_PROFILE_DATA = {
     "agentServerVersion": "0.0.33",
     "agentRuntimePackage": "@earendil-works/pi-coding-agent",
     "agentRuntimeVersion": "1.0.0",
-    "commandDigest": "sha256:d22aeb0b796f6af2a72d8856bad15f26752e77162a015012b498050686ae15ec",
+    "commandDigest": "sha256:e799aaf706fc971c4a7e3d6ab27185e74d17cfc95ab5f243a3566294d7c539a6",
     "permissionPolicy": "interactive"
   },
   "cursor": {

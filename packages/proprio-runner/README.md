@@ -143,6 +143,11 @@ The runner writes that configuration to the private Pi agent directory and binds
 its digest to recovery. API-key and header environment references are forwarded
 only from the explicit run environment; command-based credential resolution is
 unsupported. Select the provider/model ID explicitly in the agent configuration.
+Pi sessions are bound to the exact qualified profile digest. When an upgrade
+changes that digest, an older saved session is refused with the permanent
+`provider_state_incompatible` classification; the runner preserves its session
+state for operator inspection and does not attach it to the new profile. Start a
+new run after upgrading rather than retrying the incompatible saved session.
 The bundled ACPX package tests exercise unlisted model selection, rejection,
 exact acknowledgement, and replay on a loaded connection. Catalog membership
 and Cursor model-alias expansion do not determine the selected model.

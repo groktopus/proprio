@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { stripTypeScriptTypes } from "node:module";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -48,6 +49,19 @@ test("distribution lock closes exact wrapper, SDK and upstream Pi graph with int
   assert.ok(piDistributionInstallCommand().includes("--ignore-scripts"));
   assert.ok(piDistributionInstallCommand().includes("--include=optional"));
   assert.equal(piDistributionInstallCommand()[0], "ci");
+});
+
+test("Pi wrapper helper patch matches its generated source and reviewed digest", async () => {
+  const patch = await readFile(new URL("../../../patches/pi-acp@0.0.33.patch", import.meta.url), "utf8");
+  const helperPatch = patch.match(/^--- a\/dist\/proprio-runtime\.js\n\+\+\+ b\/dist\/proprio-runtime\.js\n@@ -0,0 \+1,\d+ @@\n((?:\+.*\n)*)/m);
+  assert.ok(helperPatch, "Pi patch must contain the new runtime helper");
+  const patchedHelper = helperPatch[1].split("\n").slice(0, -1).map(line => line.slice(1)).join("\n") + "\n";
+  const helperSource = await readFile(new URL("../src/drivers/acpx/pi-acp-runtime.ts", import.meta.url), "utf8");
+  const generatedHelper = stripTypeScriptTypes(helperSource).split("\n").map(line => line.trimEnd()).join("\n");
+  const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+
+  assert.equal(digest(patchedHelper), PI_DISTRIBUTION_PINS.helperSha256);
+  assert.equal(patchedHelper, generatedHelper);
 });
 
 test("only the exact brace-expansion security correction may differ from Pi's shrinkwrap", async (t) => {

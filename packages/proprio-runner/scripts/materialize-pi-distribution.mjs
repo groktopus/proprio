@@ -22,8 +22,8 @@ export const PI_BRACE_SECURITY_PATCH_SHA256 = "5273a195b952f233336122842faaf6501
 const supportedTargets = new Set(["darwin-arm64", "darwin-x64", "linux-x64"]);
 export const PI_DISTRIBUTION_PINS = Object.freeze({
   wrapper: "0.0.33", runtime: "1.0.0", sdk: "0.26.0", zod: "3.25.76", nodeVersion: PI_NODE_VERSION, undici: "8.10.2", nodeBundledUndici: "7.29.1",
-  wrapperSha256: "9d129b3d38772e93e97080aa6c4e574ac5df4e47ce5bc331a484a9fbf8188b36",
-  helperSha256: "41e0490b617da0d60e0c8ec58ef311236f945129d99f816cff6897f78da7f91d",
+  wrapperSha256: "70b4f88ffc8bfecac7a14af846e295a8210bf3f65dd7f68e7011bb804d942620",
+  helperSha256: "bce821bfd436f1c3ab60b72d3c7a0a07544b2a0e681e0f688f1bf2535aeddaf9",
 });
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
