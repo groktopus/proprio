@@ -1,5 +1,6 @@
 import { buildRemotePidLockAcquireScript, buildRemotePidLockCleanupScript } from "./remote-pid-lock.js";
 import { syncRemoteTextFile, syncRemoteTextFiles, type RemoteTextFileSyncInput, type RemoteTextFileBatchInput } from "./remote-text-file-sync.js";
+import { withPromiseTimeout } from "./promise-timeout.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { promises as fs } from "node:fs";
 import http2 from "node:http2";
@@ -341,17 +342,7 @@ function normalizeTimeoutMs(value: number | null | undefined, fallback: number):
  * the reject.
  */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
-    }, timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  });
+  return withPromiseTimeout(promise, timeoutMs, () => new Error(`${label} timed out after ${timeoutMs}ms.`));
 }
 
 function toBuffer(bytes: Buffer | Uint8Array | ArrayBuffer): Buffer {

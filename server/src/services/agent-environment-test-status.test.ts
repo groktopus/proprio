@@ -111,10 +111,18 @@ describe("managed Runner connection test status", () => {
   });
   it("passes a managed API-key connection only after provider re-verification", async () => {
     vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "managed-fixture"); verifiedClaude();
+    runtimeProbe.mockResolvedValue({ ...readiness(), checks: [...readiness().checks, { code: "claude_hello_probe_passed", level: "info", message: "Claude hello probe succeeded." }] });
     const result = await testConnection({ config: { ...context.config, env: { ANTHROPIC_API_KEY: "fixture-key" }, managedAiConnection: { method: "api_key" } } });
     expect(result.status).toBe("pass");
     expect(verifyKey).toHaveBeenCalledExactlyOnceWith("anthropic", "fixture-key");
     expect(claudeProbe).not.toHaveBeenCalled();
+  });
+  it("does not let API-key re-verification substitute for a Claude ACP hello turn", async () => {
+    vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "managed-fixture"); verifiedClaude();
+    const result = await testConnection({ config: { ...context.config, env: { ANTHROPIC_API_KEY: "fixture-key" }, managedAiConnection: { method: "api_key" } } });
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "ai_connection_validation_incomplete", level: "error" }));
+    expect(verifyKey).not.toHaveBeenCalled();
   });
   it("keeps a rejected API key failed", async () => {
     vi.stubEnv("PROPRIO_CLOUD_TENANT_SERVER_TOKEN", "managed-fixture"); verifiedClaude();

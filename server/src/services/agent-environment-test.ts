@@ -605,23 +605,22 @@ export function agentEnvironmentTestService(db: Db, pluginWorkerManager?: Plugin
     if (adapterType === "proprio_runner" && context.executionTarget?.kind === "remote"
       && context.executionTarget.transport === "sandbox" && context.executionTarget.runnerTask) return result;
     const resolvedMethod = (context.config as { managedAiConnection?: { method?: string } }).managedAiConnection?.method;
-    // An api_key account does not take the CLI hello probe below: a key
-    // travels as an env var any engine understands, and the engine's own test
-    // above judged whether this runtime can execute with it — the ACP lane
-    // deliberately runs no hello probe when a key is configured. Demanding one
-    // anyway forced the CLI lane, whose probe needs a provider CLI on PATH,
-    // and a clean install has none: that walled off onboarding's API-key path
-    // on exactly the machines the release smoke exists to guard. The account
-    // is still verified live here — the same provider-endpoint check the save
-    // performed — so a key revoked since its save fails adoption rather than
-    // producing an agent that cannot authenticate at runtime. The hello-probe
-    // requirement stays for subscriptions: a stored login is a file layout
-    // only a provider CLI reads, so proving the runtime lane can consume it
-    // takes a real hello turn.
+    // An api_key account normally uses provider endpoint validation. Managed
+    // Claude ACP is the exception: the adapter's selected-ACP hello is needed
+    // to prove the configured bridge and model can perform inference. The key
+    // check supplements that proof; it cannot replace it.
     const nativePiOpenRouter = adapterType === "proprio_runner" && context.config.provider === "acpx"
       && context.config.acpxAgent === "pi" && binding.provider === "openrouter"
       && asRecord(context.config.managedAiRouting)?.kind === "openrouter";
     if (resolvedMethod === "api_key" && (!context.config.managedAiRouting || nativePiOpenRouter)) {
+      const managedClaudeAcp = adapterType === "proprio_runner" && context.config.provider === "acpx"
+        && context.config.acpxAgent === "claude";
+      if (managedClaudeAcp && !result.checks.some(check => check.level === "info" && check.code === "claude_hello_probe_passed")) {
+        result.status = "fail";
+        result.checks.push({ code: "ai_connection_validation_incomplete", level: "error",
+          message: "The selected Claude ACP account has not completed a hello turn. Retry before adopting it." });
+        return finishManagedConnectionTest(adapterType, context, result);
+      }
       const envKey = AI_CONNECTION_CAPABILITIES[binding.provider].methods.api_key?.envKey;
       const key = envKey ? parseObject(context.config.env)[envKey] : undefined;
       try {
